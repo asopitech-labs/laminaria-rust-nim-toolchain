@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0a0d0e" />
+    <meta name="description" content="GUDGEONはNimプログラミング言語のための観測可能な仮想マシン。ネイティブコンパイル、ソースレベルデバッグ、トレース、FFIに対応します。" />
+    <title>GUDGEON — Nimのための観測可能なVM</title>
+    <link rel="canonical" href="https://asopitech-labs.github.io/laminaria-rust-nim-toolchain/ja/" />
+    <link rel="alternate" hreflang="en" href="https://asopitech-labs.github.io/laminaria-rust-nim-toolchain/" />
+    <link rel="alternate" hreflang="ja" href="https://asopitech-labs.github.io/laminaria-rust-nim-toolchain/ja/" />
+    <link rel="alternate" hreflang="x-default" href="https://asopitech-labs.github.io/laminaria-rust-nim-toolchain/" />
+    <link rel="stylesheet" href="../style.css" />
+    <script src="../script.js" defer></script>
+  </head>
+  <body>
+    <div class="noise" aria-hidden="true"></div>
+    <header class="site-header">
+      <a class="wordmark" href="#top" aria-label="GUDGEON ホーム"><span class="mark">G</span><span>GUDGEON</span></a>
+      <nav aria-label="メインナビゲーション">
+        <a href="#model">モデル</a>
+        <a href="#engines">エンジン</a>
+        <a href="#research">比較</a>
+        <a href="#goals">目標</a>
+      </nav>
+      <div class="header-actions">
+        <div class="language-switch" aria-label="言語">
+          <a href="../" lang="en" hreflang="en">EN</a>
+          <span aria-hidden="true">/</span>
+          <a class="active" href="./" lang="ja" aria-current="page">日本語</a>
+        </div>
+        <a class="header-cta" href="#goals">概要を読む <span>↗</span></a>
+      </div>
+    </header>
+
+    <main id="top">
+      <section class="hero section-pad">
+        <div class="hero-copy reveal">
+          <div class="eyebrow"><span class="pulse"></span> VIRTUAL MACHINE / NIM</div>
+          <h1>観測できるVM。<br /><em>Nimのために。</em></h1>
+          <p class="hero-lede">GUDGEONは、Nimプログラミング言語のための仮想マシン兼実行プラットフォームです。lowered Nim IRをすぐに実行し、ソースレベルのデバッグと計測を可能にし、同じプログラムモデルのままネイティブコードへの道を開きます。</p>
+          <div class="hero-actions">
+            <a class="button button-primary" href="#model">アーキテクチャを見る <span>↓</span></a>
+            <a class="text-link" href="#goals">技術目標 <span>↗</span></a>
+          </div>
+        </div>
+        <div class="hero-visual reveal delay-1" aria-label="GUDGEONの実行グラフ">
+          <div class="visual-topline"><span>LIVE EXECUTION GRAPH</span><span class="status"><i></i> OBSERVABLE</span></div>
+          <div class="graph">
+            <div class="graph-node source"><small>INPUT</small><strong>NIF / Final IR</strong><span>typed · lowered · mapped</span></div>
+            <div class="graph-line vertical"></div>
+            <div class="graph-split">
+              <div class="graph-branch"><div class="graph-line horizontal"></div><div class="graph-node engine vm"><small>ENGINE 01</small><strong>VM</strong><span>interpret / debug</span></div></div>
+              <div class="graph-branch"><div class="graph-line horizontal"></div><div class="graph-node engine native"><small>ENGINE 02</small><strong>Native</strong><span>AOT / ABI / FFI</span></div></div>
+            </div>
+            <div class="graph-line vertical short"></div>
+            <div class="graph-observe"><span>◉</span> shared source metadata <span>·</span> DAP / trace / profile</div>
+          </div>
+          <div class="visual-footer"><span>frame 0042</span><span>source: app.nim:18</span><span>heap: 2.4mb</span></div>
+        </div>
+        <div class="scroll-cue"><span>SCROLL TO TRACE THE LAYER</span><b></b></div>
+      </section>
+
+      <section class="manifesto section-pad reveal" id="model">
+        <div class="section-kicker">01 / THE MODEL</div>
+        <div class="manifesto-grid">
+          <h2>Nimコンパイラの出力を、<br /><span>観測できるランタイム</span>へ。</h2>
+          <div class="manifesto-body"><p>Nimonyは解析・型検査・lowering・IR生成を担います。GUDGEONはその先で、Nimプログラムを動かし、止め、測り、別の実行エンジンへ渡します。</p><p>GUDGEONは第一に、<strong>NimのためのVM</strong>です。最初の入力はNIFですが、実行境界をtyped, lowered program IRに置くことで、単一のフロントエンドを超えて進化できる設計にします。</p></div>
+        </div>
+        <div class="pipeline" aria-label="NimソースからNimonyとGUDGEONを通る処理パイプライン">
+          <div class="pipe-step"><span>01</span><b>Source</b><small>Nim program</small></div><div class="pipe-arrow">→</div>
+          <div class="pipe-step"><span>02</span><b>Nimony</b><small>semantic + lower</small></div><div class="pipe-arrow">→</div>
+          <div class="pipe-step active"><span>03</span><b>GUDGEON</b><small>execution boundary</small></div><div class="pipe-arrow">→</div>
+          <div class="pipe-step"><span>04</span><b>Observe</b><small>debug · trace · profile</small></div>
+        </div>
+      </section>
+
+      <section class="split-section section-pad" id="engines">
+        <div class="section-kicker">02 / ONE PROGRAM, TWO ENGINES</div>
+        <div class="split-heading"><h2>解釈とコンパイルを、<br /><em>同じ地図</em>から。</h2><p>NIF / Final IRをVM専用bytecodeとして閉じ込めず、解釈とコンパイルの共通境界として扱います。どちらの実行方式でも、Nimのソース位置・型・フレーム情報を保ちます。</p></div>
+        <div class="engine-grid">
+          <article class="engine-card vm-card"><div class="card-top"><span class="card-index">A</span><span class="card-label">IMMEDIATE PATH</span></div><h3>Nim VM</h3><p>Nimプログラムをすぐに実行し、命令・フレーム・値をその場で観測します。デバッグ可能性は後付けのアダプターではなく、実行モデルそのものに組み込みます。</p><div class="card-code"><code>gudgeon run app.nif</code><button data-copy="gudgeon run app.nif" aria-label="VMコマンドをコピー">copy</button></div><div class="card-tags"><span>step / pause</span><span>locals</span><span>evaluate</span></div></article>
+          <article class="engine-card native-card"><div class="card-top"><span class="card-index">B</span><span class="card-label">PERFORMANCE PATH</span></div><h3>Native</h3><p>同じNim IRをAhead-of-Timeでコンパイルします。C/NIFC、LLVM、直接codegenのいずれにも接続でき、プロジェクトをひとつの性能バックエンドに固定しません。</p><div class="card-code"><code>gudgeon build app.nif</code><button data-copy="gudgeon build app.nif" aria-label="ネイティブビルドコマンドをコピー">copy</button></div><div class="card-tags"><span>AOT</span><span>ABI</span><span>FFI</span></div></article>
+        </div>
+      </section>
+
+      <section class="debugger section-pad">
+        <div class="debugger-copy reveal"><div class="section-kicker">03 / DEBUG AT THE RIGHT LEVEL</div><h2>Nimで止めて、<br /><span>Nimを見る。</span></h2><p>生成Cのポインタをpretty-printするのではなく、VM自身のフレームとNimの型メタデータをデバッガへ返します。停止したプログラムは、作者が書いた抽象度のままです。</p><div class="api-list"><div><span>run()</span><span>pause()</span><span>continue()</span></div><div><span>stepInto()</span><span>stepOver()</span><span>stepOut()</span></div><div><span>stackTrace()</span><span>locals()</span><span>evaluate()</span></div></div></div>
+        <div class="debugger-panel reveal delay-1"><div class="panel-bar"><span><i class="dot red"></i><i class="dot yellow"></i><i class="dot green"></i></span><span>gudgeon debugger</span><span>● connected</span></div><div class="panel-content"><div class="stack"><span class="muted">CALL STACK</span><b>▾ foo (app.nim:18)</b><span>  ▾ module (app.nim:27)</span><span>    main (app.nim:32)</span></div><div class="locals"><span class="muted">LOCALS / FRAME 0</span><div><b>user</b><span class="type">User</span><span>{ id: 7, active: true }</span></div><div><b>names</b><span class="type">seq[string]</span><span>["Ada", "Grace"]</span></div><div><b>retryCount</b><span class="type">int</span><span class="num">3</span></div></div></div><div class="panel-source"><span class="line-no">16</span><span>let user = users[index]</span><span class="line-no">17</span><span>let names = user.names</span><span class="line-no active-line">18</span><span class="active-code">echo names[0]</span><span class="cursor">▌</span></div></div>
+      </section>
+
+      <section class="reference section-pad" id="research">
+        <div class="section-kicker">04 / REFERENCE POINTS</div><div class="reference-head"><h2>GraalVMと.NETから、<br /><em>境界の設計</em>を学ぶ。</h2><p>目指すのは模倣ではなく、言語ランタイムを長く使えるものにする分離を取り入れることです。</p></div>
+        <div class="reference-table" role="table" aria-label="GUDGEONと他の実行プラットフォームの比較"><div class="table-row table-header" role="row"><span role="columnheader">観点</span><span role="columnheader">GraalVM</span><span role="columnheader">.NET</span><span role="columnheader">GUDGEONの方向性</span></div><div class="table-row" role="row"><span>共通境界</span><span>Truffle AST / interop</span><span>IL / CLR</span><strong>typed, lowered IRを実行契約にする</strong></div><div class="table-row" role="row"><span>Native</span><span>Native Image / Substrate VM</span><span>NativeAOT</span><strong>VMとAOTで型とメタデータを共有する</strong></div><div class="table-row" role="row"><span>観測</span><span>Instrumentation / SourceSection</span><span>diagnostics / debugger</span><strong>ソースマップをランタイムの中心に置く</strong></div><div class="table-row" role="row"><span>FFI</span><span>polyglot interop / downcall</span><span>P/Invoke / function pointer</span><strong>downcallとupcallを明示的な境界にする</strong></div></div>
+        <div class="insight-row"><span class="insight-symbol">↳</span><p><strong>設計原則：</strong> ネイティブバックエンドを先に決めない。まずVMが持つValue、Frame、Heap、Type Metadata、Source Locationを、すべての実行エンジンが共有する契約として整える。</p></div>
+      </section>
+
+      <section class="ffi section-pad"><div class="section-kicker">05 / FOREIGN FUNCTION INTERFACE</div><div class="ffi-grid"><div><h2>外へ出る道も、<br /><span>戻る道も。</span></h2><p>FFIはC関数を呼べるだけではありません。GUDGEONはdowncall、Nim VMへのcallback、ガベージコレクション、所有権、例外、型変換を、ランタイムが理解できる境界として定義します。</p></div><div class="ffi-diagram"><div class="ffi-node left"><small>GUDGEON VM</small><b>downcall</b><span>typed value → ABI</span></div><div class="ffi-wire"><i></i><i></i><i></i><span>FFI boundary</span></div><div class="ffi-node right"><small>NATIVE WORLD</small><b>upcall</b><span>callback → frame</span></div><div class="ffi-notes"><span>● stable ABI handle</span><span>● explicit ownership</span><span>● source-aware error</span></div></div></div></section>
+
+      <section class="goals section-pad" id="goals"><div class="goals-layout"><div><div class="section-kicker">06 / TECHNICAL GOALS</div><h2>ひとつのNimプログラム、<br /><em>ひとつの実行面。</em></h2><p class="goal-intro">GUDGEONはNimを別の方法で走らせるだけではありません。コンパイラとランタイムの境界を更新し、実行・デバッグ・プロファイリング・ネイティブコンパイルで同じモデルを共有します。</p></div><div class="goal-list"><div class="goal-item"><span>01</span><div><h3>Final IR Loader</h3><p>lowered NIF / Final IRを読み込み、安定した内部Execution IRへ正規化する。</p></div></div><div class="goal-item"><span>02</span><div><h3>Debug Runtime API</h3><p>breakpoint、step、stack、locals、evaluateをVMの第一級APIとして扱う。</p></div></div><div class="goal-item"><span>03</span><div><h3>Dual Engine Contract</h3><p>VM executorとネイティブバックエンドが、Nimの型・ソースマップ・FFIメタデータを共有する。</p></div></div><div class="goal-item"><span>04</span><div><h3>Portable Instrumentation</h3><p>デバッグ・プロファイリング・トレースの観測点を実行エンジン横断で公開する。</p></div></div></div></div></section>
+
+      <section class="closing section-pad"><div class="closing-mark">G</div><p>GUDGEON — Gudgeon Unified Debuggable Guest Execution Orchestrator for NIF</p><a class="button button-primary" href="#top">ページ上部へ <span>↑</span></a></section>
+    </main>
+    <footer><span>GUDGEON / NIM VIRTUAL MACHINE</span><span>Nim · NIF · VM · Native · Debugger</span></footer>
+  </body>
+</html>

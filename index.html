@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0a0d0e" />
+    <meta name="description" content="GUDGEON is an observable virtual machine for the Nim programming language, with native compilation, source-level debugging, tracing, and FFI." />
+    <title>GUDGEON — the observable VM for Nim</title>
+    <link rel="canonical" href="https://asopitech-labs.github.io/laminaria-rust-nim-toolchain/" />
+    <link rel="alternate" hreflang="en" href="https://asopitech-labs.github.io/laminaria-rust-nim-toolchain/" />
+    <link rel="alternate" hreflang="ja" href="https://asopitech-labs.github.io/laminaria-rust-nim-toolchain/ja/" />
+    <link rel="alternate" hreflang="x-default" href="https://asopitech-labs.github.io/laminaria-rust-nim-toolchain/" />
+    <link rel="stylesheet" href="./style.css" />
+    <script src="./script.js" defer></script>
+  </head>
+  <body>
+    <div class="noise" aria-hidden="true"></div>
+    <header class="site-header">
+      <a class="wordmark" href="#top" aria-label="GUDGEON home"><span class="mark">G</span><span>GUDGEON</span></a>
+      <nav aria-label="Primary navigation">
+        <a href="#model">Model</a>
+        <a href="#engines">Engines</a>
+        <a href="#research">Reference</a>
+        <a href="#goals">Goals</a>
+      </nav>
+      <div class="header-actions">
+        <div class="language-switch" aria-label="Language">
+          <a class="active" href="./" lang="en" aria-current="page">EN</a>
+          <span aria-hidden="true">/</span>
+          <a href="./ja/" lang="ja" hreflang="ja">日本語</a>
+        </div>
+        <a class="header-cta" href="#goals">Read the brief <span>↗</span></a>
+      </div>
+    </header>
+
+    <main id="top">
+      <section class="hero section-pad">
+        <div class="hero-copy reveal">
+          <div class="eyebrow"><span class="pulse"></span> VIRTUAL MACHINE / NIM</div>
+          <h1>The observable VM<br /><em>for Nim.</em></h1>
+          <p class="hero-lede">GUDGEON is a virtual machine and execution platform for the Nim programming language. It runs lowered Nim IR immediately, exposes source-level debugging and instrumentation, and provides a path to native code without changing the program model.</p>
+          <div class="hero-actions">
+            <a class="button button-primary" href="#model">Explore the architecture <span>↓</span></a>
+            <a class="text-link" href="#goals">Technical goals <span>↗</span></a>
+          </div>
+        </div>
+        <div class="hero-visual reveal delay-1" aria-label="GUDGEON execution graph">
+          <div class="visual-topline"><span>LIVE EXECUTION GRAPH</span><span class="status"><i></i> OBSERVABLE</span></div>
+          <div class="graph">
+            <div class="graph-node source"><small>INPUT</small><strong>NIF / Final IR</strong><span>typed · lowered · mapped</span></div>
+            <div class="graph-line vertical"></div>
+            <div class="graph-split">
+              <div class="graph-branch"><div class="graph-line horizontal"></div><div class="graph-node engine vm"><small>ENGINE 01</small><strong>VM</strong><span>interpret / debug</span></div></div>
+              <div class="graph-branch"><div class="graph-line horizontal"></div><div class="graph-node engine native"><small>ENGINE 02</small><strong>Native</strong><span>AOT / ABI / FFI</span></div></div>
+            </div>
+            <div class="graph-line vertical short"></div>
+            <div class="graph-observe"><span>◉</span> shared source metadata <span>·</span> DAP / trace / profile</div>
+          </div>
+          <div class="visual-footer"><span>frame 0042</span><span>source: app.nim:18</span><span>heap: 2.4mb</span></div>
+        </div>
+        <div class="scroll-cue"><span>SCROLL TO TRACE THE LAYER</span><b></b></div>
+      </section>
+
+      <section class="manifesto section-pad reveal" id="model">
+        <div class="section-kicker">01 / THE MODEL</div>
+        <div class="manifesto-grid">
+          <h2>From Nim compiler output<br />to an <span>observable runtime.</span></h2>
+          <div class="manifesto-body"><p>Nimony handles parsing, type checking, lowering, and IR generation. GUDGEON takes the next step: it executes Nim programs, pauses them, measures them, and hands them to another execution engine.</p><p>GUDGEON is first and foremost a <strong>VM for Nim</strong>. Its initial input is NIF, while its execution boundary remains a typed, lowered program IR so the runtime can evolve beyond a single frontend.</p></div>
+        </div>
+        <div class="pipeline" aria-label="Pipeline from Nim source through Nimony and GUDGEON">
+          <div class="pipe-step"><span>01</span><b>Source</b><small>Nim program</small></div><div class="pipe-arrow">→</div>
+          <div class="pipe-step"><span>02</span><b>Nimony</b><small>semantic + lower</small></div><div class="pipe-arrow">→</div>
+          <div class="pipe-step active"><span>03</span><b>GUDGEON</b><small>execution boundary</small></div><div class="pipe-arrow">→</div>
+          <div class="pipe-step"><span>04</span><b>Observe</b><small>debug · trace · profile</small></div>
+        </div>
+      </section>
+
+      <section class="split-section section-pad" id="engines">
+        <div class="section-kicker">02 / ONE PROGRAM, TWO ENGINES</div>
+        <div class="split-heading"><h2>Interpret and compile<br />from the <em>same map.</em></h2><p>NIF / Final IR is not trapped as VM-only bytecode. It is the shared boundary for interpretation and compilation, preserving Nim source locations, types, and frame information across both execution modes.</p></div>
+        <div class="engine-grid">
+          <article class="engine-card vm-card"><div class="card-top"><span class="card-index">A</span><span class="card-label">IMMEDIATE PATH</span></div><h3>Nim VM</h3><p>Run a Nim program immediately and inspect its instructions, frames, and values in place. Debuggability is part of the execution model, not an adapter added later.</p><div class="card-code"><code>gudgeon run app.nif</code><button data-copy="gudgeon run app.nif" aria-label="Copy VM command">copy</button></div><div class="card-tags"><span>step / pause</span><span>locals</span><span>evaluate</span></div></article>
+          <article class="engine-card native-card"><div class="card-top"><span class="card-index">B</span><span class="card-label">PERFORMANCE PATH</span></div><h3>Native</h3><p>Compile the same Nim IR ahead of time. GUDGEON can target C/NIFC, LLVM, or direct code generation without locking the project to one performance backend.</p><div class="card-code"><code>gudgeon build app.nif</code><button data-copy="gudgeon build app.nif" aria-label="Copy native build command">copy</button></div><div class="card-tags"><span>AOT</span><span>ABI</span><span>FFI</span></div></article>
+        </div>
+      </section>
+
+      <section class="debugger section-pad">
+        <div class="debugger-copy reveal"><div class="section-kicker">03 / DEBUG AT THE RIGHT LEVEL</div><h2>Stop in Nim,<br /><span>see Nim.</span></h2><p>Instead of pretty-printing pointers from generated C, the VM returns its own frames and Nim type metadata to the debugger. A paused program stays at the level of abstraction its author wrote.</p><div class="api-list"><div><span>run()</span><span>pause()</span><span>continue()</span></div><div><span>stepInto()</span><span>stepOver()</span><span>stepOut()</span></div><div><span>stackTrace()</span><span>locals()</span><span>evaluate()</span></div></div></div>
+        <div class="debugger-panel reveal delay-1"><div class="panel-bar"><span><i class="dot red"></i><i class="dot yellow"></i><i class="dot green"></i></span><span>gudgeon debugger</span><span>● connected</span></div><div class="panel-content"><div class="stack"><span class="muted">CALL STACK</span><b>▾ foo (app.nim:18)</b><span>  ▾ module (app.nim:27)</span><span>    main (app.nim:32)</span></div><div class="locals"><span class="muted">LOCALS / FRAME 0</span><div><b>user</b><span class="type">User</span><span>{ id: 7, active: true }</span></div><div><b>names</b><span class="type">seq[string]</span><span>["Ada", "Grace"]</span></div><div><b>retryCount</b><span class="type">int</span><span class="num">3</span></div></div></div><div class="panel-source"><span class="line-no">16</span><span>let user = users[index]</span><span class="line-no">17</span><span>let names = user.names</span><span class="line-no active-line">18</span><span class="active-code">echo names[0]</span><span class="cursor">▌</span></div></div>
+      </section>
+
+      <section class="reference section-pad" id="research">
+        <div class="section-kicker">04 / REFERENCE POINTS</div><div class="reference-head"><h2>Learning boundary design<br />from <em>GraalVM and .NET.</em></h2><p>The goal is not imitation. It is to adopt the separations that let a language runtime remain useful over time.</p></div>
+        <div class="reference-table" role="table" aria-label="Comparison of GUDGEON with other execution platforms"><div class="table-row table-header" role="row"><span role="columnheader">Concern</span><span role="columnheader">GraalVM</span><span role="columnheader">.NET</span><span role="columnheader">Direction for GUDGEON</span></div><div class="table-row" role="row"><span>Shared boundary</span><span>Truffle AST / interop</span><span>IL / CLR</span><strong>Typed, lowered IR as the execution contract</strong></div><div class="table-row" role="row"><span>Native</span><span>Native Image / Substrate VM</span><span>NativeAOT</span><strong>VM and AOT share types and metadata</strong></div><div class="table-row" role="row"><span>Observability</span><span>Instrumentation / SourceSection</span><span>diagnostics / debugger</span><strong>Source maps at the center of the runtime</strong></div><div class="table-row" role="row"><span>FFI</span><span>polyglot interop / downcall</span><span>P/Invoke / function pointer</span><strong>Explicit downcall and upcall boundaries</strong></div></div>
+        <div class="insight-row"><span class="insight-symbol">↳</span><p><strong>Design principle:</strong> Do not choose the native backend first. Start with the VM's Value, Frame, Heap, Type Metadata, and Source Location as a contract shared by every execution engine.</p></div>
+      </section>
+
+      <section class="ffi section-pad"><div class="section-kicker">05 / FOREIGN FUNCTION INTERFACE</div><div class="ffi-grid"><div><h2>A path out,<br /><span>and a path back.</span></h2><p>FFI is more than calling a C function. GUDGEON defines downcalls, callbacks into the Nim VM, garbage collection, ownership, exceptions, and type conversion as boundaries the runtime can understand.</p></div><div class="ffi-diagram"><div class="ffi-node left"><small>GUDGEON VM</small><b>downcall</b><span>typed value → ABI</span></div><div class="ffi-wire"><i></i><i></i><i></i><span>FFI boundary</span></div><div class="ffi-node right"><small>NATIVE WORLD</small><b>upcall</b><span>callback → frame</span></div><div class="ffi-notes"><span>● stable ABI handle</span><span>● explicit ownership</span><span>● source-aware error</span></div></div></div></section>
+
+      <section class="goals section-pad" id="goals"><div class="goals-layout"><div><div class="section-kicker">06 / TECHNICAL GOALS</div><h2>One Nim program,<br /><em>one execution surface.</em></h2><p class="goal-intro">GUDGEON is more than another way to run Nim. It reshapes the compiler–runtime boundary so execution, debugging, profiling, and native compilation share the same model.</p></div><div class="goal-list"><div class="goal-item"><span>01</span><div><h3>Final IR Loader</h3><p>Load lowered NIF / Final IR and normalize it into a stable internal Execution IR.</p></div></div><div class="goal-item"><span>02</span><div><h3>Debug Runtime API</h3><p>Treat breakpoints, stepping, stacks, locals, and evaluation as first-class VM APIs.</p></div></div><div class="goal-item"><span>03</span><div><h3>Dual Engine Contract</h3><p>Share Nim types, source maps, and FFI metadata between the VM executor and native backend.</p></div></div><div class="goal-item"><span>04</span><div><h3>Portable Instrumentation</h3><p>Expose observation points for debugging, profiling, and tracing across execution engines.</p></div></div></div></div></section>
+
+      <section class="closing section-pad"><div class="closing-mark">G</div><p>GUDGEON — Gudgeon Unified Debuggable Guest Execution Orchestrator for NIF</p><a class="button button-primary" href="#top">Back to the top <span>↑</span></a></section>
+    </main>
+    <footer><span>GUDGEON / NIM VIRTUAL MACHINE</span><span>Nim · NIF · VM · Native · Debugger</span></footer>
+  </body>
+</html>
