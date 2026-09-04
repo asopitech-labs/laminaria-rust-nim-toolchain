@@ -2,97 +2,97 @@
 
 ## Rust Nim Unified Toolchain
 
-### RustとNimのcompiler pipeline、依存関係、生成物、実行計画を単一の計算グラフとして扱う統合ツールチェーンの研究開発
+### Research and development of a unified toolchain that treats the compiler pipelines, dependencies, artifacts, and execution plans of Rust and Nim as a single computational graph
 
 ---
 
-## 1. プロジェクト概要
+## 1. Project Overview
 
-LAMINARIAは、RustとNimによるソフトウェア開発を、言語ごとに分離されたbuild systemの集合ではなく、一つの統合された計算システムとして扱うための研究開発プロジェクトである。
+LAMINARIA is a research and development project that treats software development in Rust and Nim not as a collection of build systems separated by language, but as a single, unified computational system.
 
-研究対象はpackage managementやbuild commandの統合だけではない。RustとNimのcompiler pipelineそのものを分解し、次の計算過程をdependency、artifact、constraint、actionによって構成される共通グラフとして扱う。
+The scope of research is not limited to unifying package management or build commands. It decomposes the compiler pipelines of Rust and Nim themselves, and treats the following computational process as a common graph composed of dependencies, artifacts, constraints, and actions.
 
 ```text
 Source
-  ↓
+↓
 Semantic Analysis
-  ↓
+↓
 Language IR
-  ↓
+↓
 Specialization / Transformation
-  ↓
+↓
 Code Generation
-  ↓
+↓
 Backend
-  ↓
+↓
 Machine Artifact
-  ↓
+↓
 Archive / Link
 ```
 
-LAMINARIAは、**Package Graph → Program Graph → Variant Graph → Artifact Graph → Action Graph** という複数レベルのモデルを構築し、その上で依存解決、組合せ探索、incremental computation、cache identity、critical path解析、resource-aware schedulingを行う。
+LAMINARIA builds a multi-level model — **Package Graph → Program Graph → Variant Graph → Artifact Graph → Action Graph** — and performs dependency resolution, combinatorial search, incremental computation, cache identity, critical-path analysis, and resource-aware scheduling on top of it.
 
-LAMINARIA自身もRustとNimで実装する。RustはCLI、application logic、OS interaction、process execution、cache、storage、runtime schedulingを担当し、Nimはgraph resolution、constraint propagation、variant exploration、graph transformation、critical-path analysis、組合せ最適化などのplanning kernelを担当する。LAMINARIA自身を、研究対象となるRust+Nim統合compiler/build architectureのreference implementationとする。
+LAMINARIA itself is implemented in Rust and Nim. Rust is responsible for the CLI, application logic, OS interaction, process execution, caching, storage, and runtime scheduling, while Nim is responsible for the planning kernel: graph resolution, constraint propagation, variant exploration, graph transformation, critical-path analysis, and combinatorial optimization. LAMINARIA itself serves as the reference implementation of the Rust+Nim unified compiler/build architecture that is the subject of this research.
 
-## 2. 背景
+## 2. Background
 
-RustとNimを同一プロジェクトで利用する場合、実際には複数の独立した計算系が存在する。
+When Rust and Nim are used together in the same project, multiple independent computational systems actually exist.
 
 ```text
-Cargo dependency resolution       Nimble dependency resolution
-Rust compiler pipeline            Nim compiler pipeline
-Rust codegen backend              Nim backend generation
-C / C++ compiler and linker       FFI and binding generation
-compiler cache / build cache      CI scheduler
+Cargo dependency resolution Nimble dependency resolution
+Rust compiler pipeline Nim compiler pipeline
+Rust codegen backend Nim backend generation
+C / C++ compiler and linker FFI and binding generation
+compiler cache / build cache CI scheduler
 ```
 
-一般的なbuild orchestrationは、これらを `cargo build`、`nimble build`、`nim c`、`clang`、`link` のようなopaqueなcommandとして接続する。しかし各command内部には、さらに依存関係と並列性がある。
+Typical build orchestration connects these as opaque commands such as `cargo build`, `nimble build`, `nim c`, `clang`, and `link`. However, inside each command there is further dependency structure and parallelism.
 
-Rustには概念的に、Parsing / expansion、HIR、type analysis、MIR、MIR analysis / optimization、monomorphization、codegen units、codegen backend、object files、archive / linkというpipelineがある。Nimにも、semantic processing、backend generation、C / C++ / Objective-C / JavaScript、native compilation、object files、archive / linkという変換系がある。
+Conceptually, Rust has a pipeline of parsing / expansion, HIR, type analysis, MIR, MIR analysis / optimization, monomorphization, codegen units, codegen backend, object files, and archive / link. Nim also has a transformation chain of semantic processing, backend generation, C / C++ / Objective-C / JavaScript, native compilation, object files, and archive / link.
 
-言語ごとのbuild commandを実行単位とすると、この内部並列性とcross-language dependencyをLAMINARIA側から利用できない。LAMINARIAではcompiler自体が持つ内部境界まで含めて統合対象とする。
+If a per-language build command is treated as the unit of execution, LAMINARIA cannot make use of this internal parallelism and cross-language dependency structure. LAMINARIA extends the scope of unification to include the internal boundaries within the compilers themselves.
 
-## 3. 中心問題
+## 3. Central Problem
 
-LAMINARIAの中心的な問いは、RustとNimがそれぞれ独立して持つdependency semantics、compiler pipeline、backend、artifact generationを、意味情報を失わず一つの計算グラフへ再構成できるか、である。
+The central question of LAMINARIA is whether the dependency semantics, compiler pipeline, backend, and artifact generation that Rust and Nim each independently possess can be reconstructed, without losing semantic information, into a single computational graph.
 
-さらに、そのグラフを十分に細粒度化することで、言語境界やcompiler境界を越えたincremental computation、caching、schedulingを成立させられるかを検証する。`cargo build` と `nim c` は最終的な計算単位ではなく、より細かいgraphを発見するための入口となる。
+Furthermore, it examines whether making that graph sufficiently fine-grained can enable incremental computation, caching, and scheduling that cross language boundaries and compiler boundaries. `cargo build` and `nim c` are not treated as the final unit of computation, but as an entry point for discovering a finer-grained graph.
 
-## 4. 研究ゴール
+## 4. Research Goals
 
 ### 4.1 Unified Program Graph
 
-package dependencyだけでなく、compilerが認識するprogram structureを共通グラフへ統合する。対象にはpackage、crate、Nim module、target、feature、generic instance、generated source、codegen unit、FFI artifact、metadata、object、archiveを含む。RustとNimの内部表現を直接同一化するのではなく、各compilerからLAMINARIAの共通semantic modelへ写像する。
+Integrates not just package dependencies but the program structure recognized by the compiler into a common graph. This covers packages, crates, Nim modules, targets, features, generic instances, generated sources, codegen units, FFI artifacts, metadata, objects, and archives. Rather than directly unifying the internal representations of Rust and Nim, each compiler's representation is mapped onto LAMINARIA's common semantic model.
 
 ### 4.2 Compiler Pipeline Decomposition
 
-compiler invocationを一つのActionとして扱うのではなく、その内部pipelineを複数の計算段階としてモデル化する。
+Rather than treating a single compiler invocation as one Action, its internal pipeline is modeled as multiple computational stages.
 
 ```text
 Rust: Frontend → HIR / semantic representation → MIR → MIR transformation
-      → monomorphization collection → codegen units → backend lowering
-      → backend optimization → object generation → link
+→ monomorphization collection → codegen units → backend lowering
+→ backend optimization → object generation → link
 
-Nim:  Frontend → semantic representation → backend transformation
-      → generated C / C++ / Objective-C / JavaScript → native compiler
-      → object generation → link
+Nim: Frontend → semantic representation → backend transformation
+→ generated C / C++ / Objective-C / JavaScript → native compiler
+→ object generation → link
 ```
 
-両者を共通Action Graph上へ展開する。
+Both are expanded onto a common Action Graph.
 
 ### 4.3 Backend-Agnostic Compilation Model
 
-LLVMをRust専用の固定backendとは扱わず、backendを独立したgraph primitiveとしてモデル化する。
+Rather than treating LLVM as a fixed, Rust-only backend, the backend itself is modeled as an independent graph primitive.
 
 ```text
 Language IR → Backend Action → Backend IR / Machine Artifact
 ```
 
-RustではMIR / monomorphized programからLLVM、Cranelift、GCC backendを、Nimではsemantic programからC、C++、Objective-C、JavaScriptのbackend familyを扱う。backend selectionをvariant resolutionの対象とし、`language × target × optimization × backend × native compiler × linker` を共通のconstraint problemとして扱う。
+For Rust, this covers the LLVM, Cranelift, and GCC backends operating on the MIR / monomorphized program; for Nim, it covers the C, C++, Objective-C, and JavaScript backend family operating on the semantic program. Backend selection becomes a subject of variant resolution, treating `language × target × optimization × backend × native compiler × linker` as a unified constraint problem.
 
 ### 4.4 Unified Action Graph
 
-共通Actionには次を表現できる。
+The common Action can express the following:
 
 ```text
 RustFrontend / RustAnalysis / RustMIR / RustMonomorphization / RustCodegenUnit
@@ -102,11 +102,11 @@ CCompile / CppCompile / ObjectGeneration
 BindingGeneration / Archive / Link / Test / CodeGeneration
 ```
 
-言語名はscheduler queueを分割する属性ではなく、そのActionの意味を説明するmetadataとなる。
+The language name is not an attribute that partitions the scheduler queue, but metadata that describes the meaning of that Action.
 
 ### 4.5 Codegen Unit Scheduling
 
-Rust compiler内部のcodegen unitと、Nimが生成したnative source compilationを同じscheduling problemとして扱えるかを研究する。
+This studies whether codegen units internal to the Rust compiler and native-source compilation generated by Nim can be treated as the same scheduling problem.
 
 ```text
 Rust CGU A ─── LLVM ─────→ A.o
@@ -115,166 +115,166 @@ Nim C unit C ─ clang ────→ C.o
 Nim C unit D ─ clang ────→ D.o
 ```
 
-目的は別々の並列性を最大化することではなく、最終artifactまでのcritical pathを最小化する並列実行である。
+The goal is not to maximize separate parallelism, but parallel execution that minimizes the critical path to the final artifact.
 
 ### 4.6 Combinatorial Graph Resolution
 
-`Package × Target × Profile × Feature × Generic Instance × Host/Target × Backend × Native Compiler × Artifact Type × FFI Configuration` という状態空間を扱う。全状態をデカルト積として生成せず、lazy expansion、constraint propagation、canonicalization、memoization、equivalent-state merging、dominance pruning、SCC condensation、demand-driven artifact resolution、incremental recomputationによって必要なgraphだけを生成する。このplanning kernelをNimで実装する。
+This addresses the state space `Package × Target × Profile × Feature × Generic Instance × Host/Target × Backend × Native Compiler × Artifact Type × FFI Configuration`. Rather than generating the full Cartesian product of states, only the necessary graph is generated through lazy expansion, constraint propagation, canonicalization, memoization, equivalent-state merging, dominance pruning, SCC condensation, demand-driven artifact resolution, and incremental recomputation. This planning kernel is implemented in Nim.
 
 ### 4.7 Artifact-Oriented Dependency Model
 
-dependencyをpackage同士のedgeだけでなく、次の形で扱う。
+Dependencies are treated not only as edges between packages, but in the following form:
 
 ```text
 Producer Action → Artifact → Consumer Action
 ```
 
-ArtifactにはRust metadata、MIR-related compiler metadata、object file、LLVM bitcode、generated C / C++、C header、static archive、dynamic library、executableなどがある。dependencyを理解するために必要なartifactと、machine codeを生成するために必要なartifactを区別する。
+Artifacts include Rust metadata, MIR-related compiler metadata, object files, LLVM bitcode, generated C / C++, C headers, static archives, dynamic libraries, and executables. A distinction is drawn between the artifacts needed to understand dependencies and the artifacts needed to generate machine code.
 
 ### 4.8 Semantic Build / Check Separation
 
-compiler pipelineを分解し、semantic correctnessとmachine artifact generationを分離する。`check`系operationではdependency resolution、semantic analysis、type checking、FFI compatibility analysisまでを計算し、machine code generationを要求しないexecution graphを構成する。build / check / testは別々のcommand implementationではなく、異なるartifact demandとして表現する。
+The compiler pipeline is decomposed to separate semantic correctness from machine artifact generation. `check`-style operations compute dependency resolution, semantic analysis, type checking, and FFI compatibility analysis, constructing an execution graph that does not require machine code generation. Build / check / test are expressed not as separate command implementations, but as different artifact demands.
 
 ### 4.9 FFI as a Graph Primitive
 
-Rust/Nim間のFFIを外部build scriptの副作用ではなく、Artifact Graph上の第一級の関係として扱う。
+FFI between Rust and Nim is treated not as a side effect of an external build script, but as a first-class relationship on the Artifact Graph.
 
 ```text
 Rust semantic representation → C ABI surface → header / binding representation → Nim consumer
 Nim exported representation → C ABI surface → header / binding representation → Rust consumer
 ```
 
-ABI invalidation、binding regeneration、rebuild propagation、compatibility check、cache invalidationを通常のgraph operationへ統合する。
+ABI invalidation, binding regeneration, rebuild propagation, compatibility checking, and cache invalidation are integrated into ordinary graph operations.
 
 ### 4.10 Cross-Language Critical Path Scheduling
 
-schedulerの目的を最大CPU利用率ではなく、**requested artifactが完成するまでのwall-clock time最小化**とする。graph dependency、estimated action duration、CPU / memory requirement、IO characteristics、backend cost、cache hit probability、critical path、artifact availabilityをplanningに利用する。Nim planning kernelがglobal graphを解析し、Rust runtime schedulerがmachine上の実際のresource状態を用いてexecutionを行う。
+The scheduler's objective is not maximum CPU utilization, but **minimizing the wall-clock time until the requested artifact is complete**. Planning draws on graph dependencies, estimated action duration, CPU / memory requirements, IO characteristics, backend cost, cache-hit probability, critical path, and artifact availability. The Nim planning kernel analyzes the global graph, and the Rust runtime scheduler carries out execution using the machine's actual resource state.
 
 ### 4.11 Incremental Compiler Graph
 
-file変更時にpackage全体をinvalidateするのではなく、次の伝播を追跡できるモデルを研究する。
+Rather than invalidating an entire package on a file change, this studies a model that can track the following propagation:
 
 ```text
 Changed source → Affected semantic node → Affected specialization
 → Affected codegen unit → Affected backend action → Affected object → Affected final artifact
 ```
 
-incrementalityをworkspace incrementality、compiler incrementality、artifact incrementalityの三層として扱う。
+Incrementality is treated as three layers: workspace incrementality, compiler incrementality, and artifact incrementality.
 
 ### 4.12 Unified Cache Identity
 
-Action単位だけでなくcompiler pipelineの各stageにcontent identityを与える。
+Content identity is assigned not just per Action, but to each stage of the compiler pipeline.
 
 ```text
 Identity = operation + semantic inputs + relevant configuration
-         + toolchain identity + dependency artifacts
++ toolchain identity + dependency artifacts
 ```
 
-物理的なworkspace pathやworktree pathとは独立したidentityにより、repository、branch、worktree、CI checkout、machineを越えたartifact reuseを研究する。
+Using identity that is independent of the physical workspace path or worktree path, this studies artifact reuse across repositories, branches, worktrees, CI checkouts, and machines.
 
 ### 4.13 Agent-Oriented Compiler Toolchain
 
-AI coding agentがcompiler/build system内部の状態を直接問い合わせられることを研究対象とする。
+This studies whether AI coding agents can directly query the internal state of the compiler/build system.
 
 ```text
-laminaria dependency-graph       laminaria program-graph
-laminaria action-graph           laminaria compiler-pipeline
-laminaria codegen-units          laminaria critical-path
-laminaria explain-dependency     laminaria explain-rebuild
-laminaria explain-codegen        laminaria explain-backend-selection
+laminaria dependency-graph laminaria program-graph
+laminaria action-graph laminaria compiler-pipeline
+laminaria codegen-units laminaria critical-path
+laminaria explain-dependency laminaria explain-rebuild
+laminaria explain-codegen laminaria explain-backend-selection
 laminaria explain-cache-miss
 ```
 
-agentがcompiler outputを推測するのではなく、compiler/build graphそのものを観測可能にする。
+Rather than having the agent infer compiler output, the compiler/build graph itself is made observable.
 
-## 5. RustとNimの役割
+## 5. The Roles of Rust and Nim
 
 ### Nim Planning Kernel
 
-graph construction、normalization、variant resolution、constraint solving、artifact demand propagation、SCC decomposition、lazy expansion、state merging、pruning、critical-path computation、planning optimizationを担当する。Nim関連処理に閉じず、Rust compiler graphを含めたLAMINARIA全体の計算問題を扱う。
+Responsible for graph construction, normalization, variant resolution, constraint solving, artifact demand propagation, SCC decomposition, lazy expansion, state merging, pruning, critical-path computation, and planning optimization. This is not confined to Nim-related processing; it handles the overall LAMINARIA computation problem, including the Rust compiler graph.
 
 ### Rust Runtime
 
-CLI、application logic、compiler/tool discovery、filesystem、process lifecycle、async execution、resource accounting、cache / CAS、daemon、IPC、sandbox execution、native process scheduling、diagnostics transportを担当する。Rust関連処理に閉じず、Nim compilerやLLVM等を含めたexecution infrastructureを管理する。
+Responsible for the CLI, application logic, compiler/tool discovery, filesystem, process lifecycle, async execution, resource accounting, cache / CAS, daemon, IPC, sandboxed execution, native process scheduling, and diagnostics transport. This is not confined to Rust-related processing; it manages the execution infrastructure, including the Nim compiler and LLVM.
 
 ## 6. LAMINARIA Compiler Topology
 
 ```text
 Source Graph
- ├─ Rust Frontend → Rust Semantic IR → MIR / Specialization ┐
- └─ Nim Frontend  → Nim Semantic IR  → Transformation       ├→ Backend Graph
-                                                            │   ├─ LLVM
-                                                            │   ├─ Cranelift
-                                                            │   ├─ GCC
-                                                            │   ├─ C / C++
-                                                            │   └─ JS
-                                                            ↓
-                                                       Artifact Graph
-                                                            ↓
-                                                Objects / Metadata / Archive / Link
-                                                            ↓
-                                                      Final Artifact
+├─ Rust Frontend → Rust Semantic IR → MIR / Specialization ┐
+└─ Nim Frontend → Nim Semantic IR → Transformation ├→ Backend Graph
+│ ├─ LLVM
+│ ├─ Cranelift
+│ ├─ GCC
+│ ├─ C / C++
+│ └─ JS
+↓
+Artifact Graph
+↓
+Objects / Metadata / Archive / Link
+↓
+Final Artifact
 ```
 
-このgraph全体を一つのplannerとschedulerから扱う。
+This entire graph is handled by a single planner and scheduler.
 
-## 7. 比較対象
+## 7. Points of Comparison
 
-| 対象 | 比較する観点 |
+| Subject | Points of Comparison |
 | --- | --- |
-| Bun | unified developer interface、package/build/test/runのtoolchain ownership |
-| Cargo / rustc | dependency semantics、feature/target resolution、unit graph、query model、MIR、monomorphization、codegen units、backend abstraction、metadata / rlib |
-| `rustc_codegen_ssa` / LLVM / Cranelift / GCC | backend abstraction、MIR lowering、codegen interface、backend-specific optimization、machine artifact generation |
-| Nim compiler | semantic pipeline、C/C++/Objective-C/JavaScript backend、generated source、native compiler integration、nimcache、compile/link boundary |
-| Buck2 | Action Graph、critical path、action digest、CAS、local/remote execution、incremental daemon architecture |
-| Bazel | explicit action semantics、hermetic execution、remote execution、content-addressed artifacts |
-| Pants | dependency inference、fine-grained invalidation、source-level graph |
-| Nx | project graph、task graph、affected analysis |
-| sccache | compiler invocation cache、Rust/C/C++ reuse |
+| Bun | unified developer interface, toolchain ownership of package/build/test/run |
+| Cargo / rustc | dependency semantics, feature/target resolution, unit graph, query model, MIR, monomorphization, codegen units, backend abstraction, metadata / rlib |
+| `rustc_codegen_ssa` / LLVM / Cranelift / GCC | backend abstraction, MIR lowering, codegen interface, backend-specific optimization, machine artifact generation |
+| Nim compiler | semantic pipeline, C/C++/Objective-C/JavaScript backend, generated source, native compiler integration, nimcache, compile/link boundary |
+| Buck2 | Action Graph, critical path, action digest, CAS, local/remote execution, incremental daemon architecture |
+| Bazel | explicit action semantics, hermetic execution, remote execution, content-addressed artifacts |
+| Pants | dependency inference, fine-grained invalidation, source-level graph |
+| Nx | project graph, task graph, affected analysis |
+| sccache | compiler invocation cache, Rust/C/C++ reuse |
 
-LAMINARIAの特徴は、build systemの上位からcompilerを操作するだけでなく、compiler内部のsemantic/codegen boundaryをbuild graph側へ引き上げることにある。
+What distinguishes LAMINARIA is not merely operating the compiler from above the build system, but pulling the compiler's internal semantic/codegen boundary up into the build graph itself.
 
-## 8. 研究仮説
+## 8. Research Hypotheses
 
-- **仮説A:** package/task graphだけではcross-language optimizationには粗すぎ、compiler pipeline内部をAction Graphへ露出することで新しい並列性とcache reuseが得られる。
-- **仮説B:** LLVMをRust専用backendとして固定せず、backend selectionをgraph上のvariantとして扱うことでcompiler/toolchain architectureを一般化できる。
-- **仮説C:** Rust codegen unitとNim generated-native-source compileを同じschedulerへ載せることで、nested parallelismより短いglobal critical pathを実現できる。
-- **仮説D:** semantic artifactとmachine artifactを分離することで、check、build、test等を異なるartifact demandとして統一できる。
-- **仮説E:** FFIをgraph primitiveとして扱うことで、言語境界のincremental invalidationを通常のdependency propagationへ統合できる。
-- **仮説F:** compiler stage単位のcontent identityにより、crate/package単位より細かいartifact reuseが成立する。
-- **仮説G:** 組合せ状態を事前生成せずdemand-drivenに探索することで、variant explosionを制御できる。
-- **仮説H:** compiler graphをstructured interfaceとして公開することで、AI agentがbuild failure、cache miss、backend selection、critical pathを直接分析できる。
+- **Hypothesis A:** A package/task graph alone is too coarse for cross-language optimization; exposing the internal compiler pipeline as an Action Graph yields new parallelism and cache reuse.
+- **Hypothesis B:** Rather than fixing LLVM as a Rust-only backend, treating backend selection as a variant on the graph generalizes the compiler/toolchain architecture.
+- **Hypothesis C:** Placing Rust codegen units and Nim generated-native-source compilation on the same scheduler achieves a shorter global critical path than nested parallelism.
+- **Hypothesis D:** Separating semantic artifacts from machine artifacts unifies check, build, test, and other operations as different artifact demands.
+- **Hypothesis E:** Treating FFI as a graph primitive integrates incremental invalidation across language boundaries into ordinary dependency propagation.
+- **Hypothesis F:** Content identity at the granularity of compiler stages enables artifact reuse finer-grained than at the crate/package level.
+- **Hypothesis G:** Exploring the combinatorial state space demand-driven, rather than pre-generating it, controls variant explosion.
+- **Hypothesis H:** Exposing the compiler graph as a structured interface lets AI agents directly analyze build failures, cache misses, backend selection, and the critical path.
 
-## 9. 評価ワークロード
+## 9. Evaluation Workloads
 
-- **Rust-heavy Compiler Graph:** 多数crate、generic specialization、複数codegen unitを持つ構成。
-- **Nim-heavy Backend Graph:** 多数Nim moduleと大量のgenerated C/C++を持つ構成。
-- **Mixed Codegen Graph:** Rust codegen unitとNim-generated native compilationが同時に存在する構成。
-- **Backend Variant Workload:** LLVM / Cranelift等のbackend差異を含む構成。
-- **FFI-heavy Graph:** Rust/Nim間に複数のABI boundaryを持つ構成。
-- **Deep Critical Path / Wide Compiler Graph:** 長いartifact chainまたは多数の独立codegen actionを持つ構成。
-- **Variant-heavy Graph:** feature、target、backend、artifact type等の組合せが多い構成。
-- **Incremental Semantic Change:** 最終machine artifactへ影響しないsemantic変更を含む構成。
-- **Git Worktree Workload:** 同一source historyを共有する複数worktreeでのbuild。
+- **Rust-heavy Compiler Graph:** a configuration with many crates, generic specialization, and multiple codegen units.
+- **Nim-heavy Backend Graph:** a configuration with many Nim modules and a large volume of generated C/C++.
+- **Mixed Codegen Graph:** a configuration where Rust codegen units and Nim-generated native compilation coexist.
+- **Backend Variant Workload:** a configuration involving backend differences such as LLVM / Cranelift.
+- **FFI-heavy Graph:** a configuration with multiple ABI boundaries between Rust and Nim.
+- **Deep Critical Path / Wide Compiler Graph:** a configuration with a long artifact chain or many independent codegen actions.
+- **Variant-heavy Graph:** a configuration with many combinations of feature, target, backend, artifact type, and so on.
+- **Incremental Semantic Change:** a configuration involving semantic changes that do not affect the final machine artifact.
+- **Git Worktree Workload:** builds across multiple worktrees sharing the same source history.
 
-## 10. 評価指標
+## 10. Evaluation Metrics
 
-- graph construction cost、graph node / edge growth、variant exploration count
-- incremental invalidation range、semantic / codegen / object cache reuse
-- critical-path duration、CPU utilization、peak memory、backend switching cost
-- FFI invalidation precision、worktree cache reuse、explanation completeness
+- graph construction cost, graph node / edge growth, variant exploration count
+- incremental invalidation range, semantic / codegen / object cache reuse
+- critical-path duration, CPU utilization, peak memory, backend switching cost
+- FFI invalidation precision, worktree cache reuse, explanation completeness
 
-単純なfull-build benchmarkだけではなく、**どの計算を省略できたか**を主要指標とする。
+Rather than a simple full-build benchmark alone, the primary metric is **how much computation could be skipped**.
 
-## 11. 研究上の位置付け
+## 11. Positioning within the Research Landscape
 
-LAMINARIAは、Bunのunified toolchain、Cargo / rustcのlanguage-aware compiler semantics、Nimのexplicit multi-backend compilation pipeline、Buck2のAction Graph / execution、Bazelのartifact/action identity、Pantsのdependency inference、Nxのaffected graph analysis、sccacheのcompiler cacheを、Rust + Nim compiler pipelineという具体的な対象に接続する。
+LAMINARIA connects Bun's unified toolchain, Cargo / rustc's language-aware compiler semantics, Nim's explicit multi-backend compilation pipeline, Buck2's Action Graph / execution, Bazel's artifact/action identity, Pants' dependency inference, Nx's affected-graph analysis, and sccache's compiler cache to the concrete subject of a Rust + Nim compiler pipeline.
 
-## 12. 最終研究目標
+## 12. Ultimate Research Goal
 
-LAMINARIAが目指すのは、Rust build、Nim build、C compilation、LLVM codegen、linking、FFI generationという独立した工程の集合ではない。これらを **Input → Transformation → Artifact → Dependency** の組み合わせとして一つのgraphへ落とす。
+What LAMINARIA aims for is not a collection of independent processes — Rust build, Nim build, C compilation, LLVM codegen, linking, and FFI generation. It reduces these to a single graph as combinations of **Input → Transformation → Artifact → Dependency**.
 
-最終的にLAMINARIAが、何を計算すべきか、何が既に存在するか、どの意味情報が変化したか、どのspecializationが影響を受けるか、どのbackend workが必要か、何を並行実行できるか、要求artifactを何が阻んでいるか、なぜActionが実行されたかを、一つの計算モデルから回答できる状態を研究する。
+Ultimately, LAMINARIA studies a state in which it can answer, from a single computational model: what needs to be computed, what already exists, which semantic information has changed, which specializations are affected, what backend work is required, what can be executed in parallel, what is blocking the requested artifact, and why an Action was executed.
 
 ## Project Statement
 
