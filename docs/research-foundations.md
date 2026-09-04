@@ -476,3 +476,85 @@ The next research decisions should focus on interfaces rather than implementatio
 
 The highest-priority deliverable is the planning contract between the Nim kernel and Rust runtime. Once that contract is stable, graph resolution, scheduling, caching, diagnostics, and future executor implementations can evolve independently around it.
 
+
+
+## 18. Prior scheduling evidence and reference benchmark
+
+### 18.1 Cargo scheduler reconstruction
+
+The August 31, 2026 study [*Could Cargo's scheduler be better?*](https://spirali.github.io/blog/cargo-scheduler/) reconstructs executable Rust build graphs from system-call traces of Cargo and its child processes. The study covers 17 Rust projects using debug builds and compares replayed Cargo schedules with alternative schedulers at parallelism levels of 4 and 16. Its author explicitly does not claim to describe Cargo's internal scheduling algorithm; the observed and replayed Cargo schedule is the baseline.
+
+The most relevant observation for LAMINARIA is that one `rustc` invocation is not treated as one indivisible graph node. A dependent crate can begin once Rust metadata (`.rmeta`) is available, before the dependency's code generation and linking finish. The reconstructed graph therefore models:
+
+```text
+crate frontend
+    → .rmeta available
+    ├────────────→ dependent crate frontend
+    → remaining compilation / code generation / link
+```
+
+The frontend and remaining compilation are a forced continuation of the same operating-system process, so the scheduler cannot place work between them on that worker. Nevertheless, the `.rmeta` production boundary exposes a real dependency edge earlier than whole-invocation completion.
+
+This is concrete prior evidence for LAMINARIA's distinction between semantic artifacts and machine artifacts. It motivates studying metadata production, semantic analysis, specialization, codegen units, backend execution, object generation, and linking as producer-artifact-consumer relationships. It does not by itself establish that these boundaries are stable public compiler APIs; adapter feasibility remains a separate research question.
+
+### 18.2 Critical-path-aware b-level scheduling
+
+For each task `t`, the study computes a bottom level:
+
+```text
+b-level(t) = duration(t) + max(b-level(child))
+```
+
+When a worker becomes free, the ready task with the greatest b-level is selected. This greedy rule prioritizes work on or near the longest remaining dependency path instead of maximizing the number of immediately runnable tasks.
+
+Across the 17 projects, b-level scheduling improved on the replayed Cargo baseline in 15 of 17 cases at 4 CPUs, with a median wall-clock reduction of about 8% and a best case of about 16%. At 16 CPUs it improved 14 of 17 cases, with a median reduction of about 2% and a best case of about 15%. Against the best schedule found by all evaluated heuristics and randomized searches—the study's pseudo-optimum—b-level was a median 1.3% slower at 4 CPUs, while Cargo was 9.6% slower. At 16 CPUs the corresponding medians were 0.4% and 2.3%.
+
+These results support LAMINARIA's scheduler hypothesis: under constrained resources, shortening the global critical path can be more important than maximizing local parallelism.
+
+### 18.3 Scheduling with imperfect cost information
+
+The study also tests whether b-level requires precise execution-time prediction. With per-task duration estimates perturbed by Gaussian noise up to 60%, median schedules remained close to those produced with exact durations, although individual tail outcomes could degrade substantially.
+
+A one-bit model—classifying tasks only as short or long—retained most of the benefit. It finished a median 1.5% above the pseudo-optimum at 4 CPUs and 0.5% above it at 16 CPUs, versus 1.3% and 0.4% for exact-duration b-level. A timing-blind graph-depth variant still beat the Cargo baseline on 16 of 17 projects at 4 CPUs and 12 of 17 at 16 CPUs, but showed materially worse tail cases. The one-bit signal therefore appears especially valuable as protection against pathological schedules rather than as a large median improvement.
+
+LAMINARIA should evaluate scheduler sophistication incrementally:
+
+1. graph-depth scheduling with uniform action cost;
+2. binary-cost b-level scheduling;
+3. historical-cost b-level scheduling;
+4. resource-aware b-level scheduling; and
+5. cross-language critical-path scheduling.
+
+This sequence avoids making precise telemetry a prerequisite for an initially useful scheduler. Historical duration, cache-hit probability, memory demand, I/O behavior, backend characteristics, and executor constraints can be added as separately measurable refinements.
+
+### 18.4 Cross-language extension
+
+The published study concerns an externally reconstructed Rust/Cargo task graph. LAMINARIA extends the research question across compiler and language boundaries by placing the following work in one Action Graph:
+
+- Rust metadata production and dependent frontends;
+- Rust codegen units;
+- LLVM, Cranelift, and GCC-family backend actions;
+- Nim semantic processing and backend generation;
+- Nim-generated C, C++, Objective-C, or JavaScript artifacts;
+- native C and C++ compilation;
+- FFI header and binding generation;
+- archive creation and linking; and
+- cache materialization and artifact availability.
+
+The central question is whether the benefit of critical-path-aware scheduling observed inside Rust builds persists—or increases—when semantic stages, backend work, native compilation, FFI generation, and linking from Rust and Nim share one resource budget. Forced continuations must remain explicit constraints rather than being modeled as freely preemptible actions.
+
+### 18.5 Reference benchmark protocol
+
+LAMINARIA should first reproduce the published experiment on the same 17 projects, or a documented representative subset, before claiming a cross-language scheduling improvement. The comparison should hold the reconstructed graph and recorded task durations constant while varying only the scheduling policy:
+
+```text
+replayed Cargo baseline
+    → LAMINARIA graph-depth
+    → LAMINARIA binary-cost b-level
+    → LAMINARIA historical-cost b-level
+    → LAMINARIA resource-aware b-level
+```
+
+The initial reproduction should measure 4-CPU and 16-CPU configurations, median and tail behavior, distance from the best schedule found, and sensitivity to missing or noisy cost estimates. A second stage should apply the same protocol to Rust/Nim mixed workspaces and add peak memory, I/O pressure, cache availability, backend selection, and forced-continuation constraints.
+
+This creates a falsifiable progression from a public Cargo scheduling baseline to LAMINARIA's cross-language scheduler. The project should report not only whether a schedule is faster, but which critical-path decisions changed, which estimates were used, and whether any gain came from graph decomposition, priority policy, resource admission, or cache availability.
