@@ -40,7 +40,9 @@ The boundary is **computation and planning vs. execution and side effects**, not
 
 ## Documentation
 
-- [Project proposal (Japanese)](docs/project-proposal.md)
+- [Research foundations and architecture direction (English)](docs/research-foundations.md)
+- [Project proposal (English)](docs/project-proposal.md)
+- [Project proposal (Japanese)](docs/project-proposal_ja.md)
 
 ## License
 
