@@ -14,9 +14,11 @@ Compiler version is a first-class graph dimension rather than an ambient machine
 
 The internal variant space may be broad, but ordinary users should not need to solve exact Rust/Nim/backend/linker combinations manually. LAMINARIA exposes evidence-backed **Validated Toolchain Profiles** such as `recommended`, `latest-validated`, `long-term`, and `preview`, then progressively exposes intent presets, advanced overrides, and expert graph constraints. Profile aliases always resolve to immutable exact bundle revisions before execution; overrides re-evaluate qualification rather than inheriting a validation badge blindly.
 
+**Tool UX is itself a project objective.** LAMINARIA must not turn its combinatorial flexibility into a requirement for humans or coding agents to repeatedly edit configuration, run a build, parse a failure, and try another compiler/backend combination. The normal path is constraint resolution and pruning first, then a small ranked set of evidence-backed viable plans, then execution. Known incompatibilities and qualification failures are preserved as structured negative knowledge so equivalent failures do not need to be rediscovered across runs or agent sessions. Broad brute-force exploration remains available explicitly for research, not as the default UX.
+
 LLVM is neither excluded nor treated as the fixed foundation. LLVM, Cranelift, GCC, and other code-generation routes are selectable backend engines, and selected routes may expand into observable nested backend pipelines. WebAssembly is modeled as a target pipeline that can include code generation, `wasm-ld`, post-link optimization, WIT/adapters, and componentization rather than as a peer backend value to LLVM.
 
-Before LAMINARIA optimizes these paths, it establishes a permanent measurement spine that fingerprints the real environment/toolchains and records end-to-end process/resource traces, compiler-native telemetry, artifact deltas, scenario/cache state, and measurement overhead. The same evidence model is then reused by compiler, backend, scheduler, cache, profile qualification, and WASM research.
+Before LAMINARIA optimizes these paths, it establishes a permanent measurement spine that fingerprints the real environment/toolchains and records end-to-end process/resource traces, compiler-native telemetry, artifact deltas, scenario/cache state, and measurement overhead. The same evidence model is then reused by compiler, backend, scheduler, cache, profile qualification, agent-oriented UX, and WASM research.
 
 LAMINARIA is itself implemented in Rust and Nim:
 
@@ -33,6 +35,7 @@ The boundary is **computation and planning vs. execution and side effects**, not
 - Compiler Pipeline Decomposition
 - Multi-version Rust / Nim Toolchain Variants
 - Validated Toolchain Profiles / Progressive Configuration
+- Agent-Oriented Toolchain UX / Bounded Explainable Planning
 - Backend Route Selection
 - Backend Pipeline White-boxing
 - Artifact Graph
@@ -52,6 +55,8 @@ The boundary is **computation and planning vs. execution and side effects**, not
 
 ## Documentation
 
+- [Agent-oriented toolchain UX and bounded planning (English)](docs/agent-oriented-toolchain-ux.md)
+- [エージェント指向ツールチェーンUX・探索抑制方針 (日本語)](docs/agent-oriented-toolchain-ux_ja.md)
 - [Validated toolchain profiles and progressive configuration (English)](docs/validated-toolchain-profiles.md)
 - [検証済みツールチェーンプロファイルと段階設定 (日本語)](docs/validated-toolchain-profiles_ja.md)
 - [Multi-version Rust/Nim toolchain policy (English)](docs/multi-version-toolchains.md)
