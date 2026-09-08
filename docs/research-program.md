@@ -10,9 +10,22 @@ This document defines the research program used to turn that project direction i
 
 LAMINARIA does not count an implementation as successful merely because it builds or passes a functional test. Every research track must record the execution path actually used, the artifacts actually produced, and the resource behavior observed.
 
-For performance-sensitive work, evidence must include wall time together with relevant CPU, memory, I/O, cache, artifact, and critical-path measurements. A fast result produced through an unintended fallback path is not evidence for the intended design. A correct result produced by a stub, bypass, hidden delegation to an opaque outer tool, or test-specific path is likewise not completion.
+Functional correctness and execution correctness are separate requirements. A correct final artifact produced by rebuilding too much work, using the wrong backend/scheduler path, or silently delegating to an opaque outer tool does not prove an incremental, scheduling, native-linking or work-elimination claim.
 
-Reference projects are used as measurement baselines and design evidence, not as slogans. If an implementation is materially slower, more resource-hungry, or structurally further from the intended computation model than the selected reference, the implementation itself must be reconsidered.
+For performance-sensitive work, evidence must include wall time together with relevant CPU, memory, I/O, cache, artifact, critical-path and executed/skipped-action measurements. A fast result produced through an unintended fallback path is not evidence for the intended design.
+
+Reference projects are used as measurement baselines and design evidence, not as slogans. If an implementation is materially slower, more resource-hungry, performs materially more work, or is structurally further from the intended computation model than the selected reference, the implementation itself must be reconsidered.
+
+LAMINARIA prefers optimization in this order:
+
+1. eliminate unnecessary actions or compiler stages;
+2. reuse already-valid artifacts;
+3. reduce invalidation scope;
+4. expose useful parallelism;
+5. schedule globally under resource constraints;
+6. optimize individual actions.
+
+Parallelizing work that should not have executed is not equivalent to eliminating it.
 
 ## Track A — Compiler pipeline decomposition
 
@@ -70,6 +83,7 @@ Can Rust codegen work, Nim-generated native compilation, binding/shim generation
 
 - explicit ready/running/blocked action state;
 - CPU, peak memory and I/O accounting per action class;
+- per-action queue wait, dependency/resource wait and execution time;
 - critical-path calculation before and after scheduling decisions;
 - proof that the selected actions actually ran through the unified scheduler;
 - comparison with nested Cargo + Nim build execution on the same workload.
@@ -86,7 +100,8 @@ Can semantic, generated-source, backend, object and final-artifact identities be
 - exclude physical checkout paths from identity where not semantically relevant;
 - measure invalidation after source, feature, backend, compiler and linker changes;
 - record cache hits together with the exact identity explanation;
-- reject cache reuse when toolchain or configuration compatibility is not provable.
+- reject cache reuse when toolchain or configuration compatibility is not provable;
+- distinguish artifact reuse from work elimination/no-op behavior.
 
 ## Track F — Variant-space control
 
@@ -118,9 +133,33 @@ Every important graph decision must have a structured explanation. At minimum LA
 - why a dependency or variant was selected;
 - why an action rebuilt;
 - why an artifact was reused or rejected from cache;
+- why an action was eliminated or skipped;
 - why a backend/linker combination was accepted or rejected;
-- which action is on the critical path;
+- which actions are on the critical path;
+- whether critical-path delay came from queueing, dependencies/resources or execution;
 - which compiler stage was opaque and therefore executed coarsely.
+
+## Track I — Work elimination and no-op invariants
+
+### Question
+
+Can LAMINARIA reduce development latency by proving which compiler/build actions do not need to run, rather than only caching or parallelizing them?
+
+### Work
+
+- model work elimination separately from cache reuse;
+- define demand-driven execution at compiler-stage granularity;
+- identify intermediate stages that can be bypassed through direct artifact handoff where semantics permit;
+- define a true no-op invariant for unchanged builds;
+- measure the overhead of proving no work is needed, including metadata checks, hashing, reads and process startup;
+- use controlled edits with explicit expected executed and non-executed action sets;
+- compare elimination, reuse, parallelization and individual-action optimization on equivalent workloads.
+
+### No-op invariant
+
+When source content, relevant configuration, toolchain identity and compatible environment inputs are unchanged, compiler/codegen/link execution actions should be zero unless an explicitly documented environment-sensitive action requires otherwise.
+
+A 100% cache-hit statistic is insufficient if the no-op path still performs substantial hashing, I/O, graph traversal or process startup.
 
 ## Evaluation workloads
 
@@ -136,8 +175,10 @@ The research suite must contain workloads that isolate different graph propertie
 8. deep critical-path graph;
 9. FFI/boundary-heavy graph;
 10. incremental semantic edit workload;
-11. worktree reuse workload;
-12. WASM mixed-language workload.
+11. unchanged/no-op workload;
+12. worktree reuse workload;
+13. compiler-work-elimination fixture;
+14. WASM mixed-language workload.
 
 ## Required metrics
 
@@ -148,11 +189,14 @@ The exact metrics vary by track, but the evaluation framework must be able to ca
 - explored/pruned/merged variant states;
 - requested-artifact critical-path duration;
 - action wall time;
+- per-action queue wait, dependency/resource wait and execution time;
 - CPU time/utilization;
 - peak and time-weighted memory;
 - relevant I/O volume and wait;
 - generated source/object/archive/module sizes;
 - semantic/codegen/object/final-artifact reuse;
+- executed/skipped action counts by compiler stage;
+- no-op metadata/hash/read/process-launch overhead;
 - cache-hit and cache-miss reasons;
 - invalidation set size;
 - linker inputs and selected symbols;
@@ -161,6 +205,8 @@ The exact metrics vary by track, but the evaluation framework must be able to ca
 
 ## Completion rule
 
-A research issue is complete only when its claim can be reproduced from committed code, commands, fixtures and evidence. Passing tests alone is insufficient where the issue is about architecture, scheduling, performance, resource use, compiler boundaries, linking, or cache behavior.
+A research issue is complete only when its claim can be reproduced from committed code, commands, fixtures and evidence. Passing tests alone is insufficient where the issue is about architecture, scheduling, performance, resource use, compiler boundaries, linking, cache behavior, incremental execution or work elimination.
+
+Controlled incremental tests should validate the expected execution set as well as the final artifact. Rebuilding everything and producing a correct binary is not evidence of correct incremental behavior.
 
 Unexpected results are valid research outcomes. If a hypothesis fails, record why it failed and adjust the architecture or research direction instead of preserving the original claim through a weaker benchmark or a hidden fallback.
