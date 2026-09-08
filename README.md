@@ -32,6 +32,7 @@ The boundary is **computation and planning vs. execution and side effects**, not
 - Codegen Unit Scheduling
 - Incremental Compiler Graph
 - FFI as a Graph Primitive
+- Rust–Nim Native Linking
 - Unified Cache Identity
 - Nim Planning Kernel
 - Rust Runtime Scheduler
@@ -41,6 +42,8 @@ The boundary is **computation and planning vs. execution and side effects**, not
 ## Documentation
 
 - [Research foundations and architecture direction (English)](docs/research-foundations.md)
+- [Research program and evidence policy (English)](docs/research-program.md)
+- [Rust–Nim native linking research plan (English)](docs/rust-nim-native-linking.md)
 - [Project proposal (English)](docs/project-proposal.md)
 - [Project proposal (Japanese)](docs/project-proposal_ja.md)
 
