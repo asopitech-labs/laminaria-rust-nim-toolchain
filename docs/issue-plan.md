@@ -13,5 +13,19 @@ This file maps the initial GitHub issue set to the research program. The GitHub 
 7. WASM mixed-language integration
 8. Agent-oriented explainability and evidence schema
 9. Reference workload and metrics harness
+10. Work elimination, execution correctness and no-op build invariants
 
-Each issue must provide reproducible evidence. Passing functional tests alone is not sufficient for architecture, performance, scheduling, cache, compiler-boundary or linking claims.
+## Optimization order
+
+LAMINARIA should prefer:
+
+1. eliminating unnecessary actions/compiler stages;
+2. reusing valid artifacts;
+3. reducing invalidation scope;
+4. exposing parallelism;
+5. globally scheduling the remaining work;
+6. optimizing individual actions.
+
+The research program must distinguish these effects in evidence. Parallelizing work that should not have executed is not equivalent to eliminating it.
+
+Each issue must provide reproducible evidence. Passing functional tests alone is not sufficient for architecture, performance, scheduling, cache, compiler-boundary, reduced-work or linking claims. Controlled incremental tests should validate the expected execution set as well as the final artifact.
