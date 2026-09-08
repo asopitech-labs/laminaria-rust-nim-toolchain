@@ -4,21 +4,21 @@
 
 LAMINARIAは、RustとNimのコンパイル、依存解決、コード生成、成果物、リンク、キャッシュ、実行を一つの計算システムとして扱う研究開発プロジェクトである。
 
-この文書は、その方向性を再現可能で検証可能な研究課題へ落とし込むための実行方針を定義する。`research-foundations.md` がアーキテクチャ仮説を扱うのに対し、本書は研究トラック、必要な証拠、完了条件を定義する。
+この文書は、その方向性を再現可能で検証可能な研究課題へ落とし込むための実行方針を定義する。`research-foundations.md` がアーキテクチャ仮説を扱うのに対し、本書は研究トラック、必要な証拠、完了条件を定義する。backend内部のwhite-boxingについては `backend-pipeline-whiteboxing_ja.md` を詳細設計とする。
 
 ## 研究ポリシー
 
 LAMINARIAでは、単にビルドが通る、テストが通る、期待値が返るだけでは研究課題の完了とみなさない。
 
-機能的正しさと実行経路の正しさは別の要件である。正しい最終成果物が得られても、不要な処理をすべて再実行していた、誤ったbackend/scheduler経路を通った、opaqueな外部buildへ黙って委譲した、といった場合はincremental、scheduling、native linking、work eliminationの成立を証明しない。
+機能的正しさと実行経路の正しさは別の要件である。正しい最終成果物が得られても、不要な処理をすべて再実行していた、誤ったbackend/scheduler経路を通った、opaqueな外部buildやbackendへ黙って委譲した、といった場合はincremental、scheduling、native linking、backend white-boxing、work eliminationの成立を証明しない。
 
-アーキテクチャ、スケジューリング、性能、キャッシュ、コンパイラ境界、リンク方式を扱う課題では、実際にどの実行経路が選択されたか、どの成果物が生成されたか、CPU・メモリ・I/Oを含む資源挙動がどうだったか、どのActionが実行され、どのActionが正しく省略されたかを証拠として残す。
+アーキテクチャ、スケジューリング、性能、キャッシュ、コンパイラ境界、backend pipeline、リンク方式を扱う課題では、実際にどの実行経路が選択されたか、どの成果物が生成されたか、CPU・メモリ・I/Oを含む資源挙動がどうだったか、どのActionが実行され、どのActionが正しく省略されたかを証拠として残す。
 
 参考プロジェクトは単なる目標文言ではなく、実測比較と設計検証の基準として扱う。参考実装から性能・資源消費・実行構造・実行仕事量が大きく乖離した場合は、ベンチマーク条件を弱めるのではなく実装そのものを再検討する。
 
 LAMINARIAでは最適化を原則として次の順で優先する。
 
-1. 不要なActionまたはcompiler stageを除去する
+1. 不要なActionまたはcompiler/backend stageを除去する
 2. 既に有効なartifactを再利用する
 3. invalidation範囲を狭める
 4. 有効なparallelismを露出する
@@ -31,9 +31,9 @@ LAMINARIAでは最適化を原則として次の順で優先する。
 
 RustとNimのcompiler pipelineのどこまでを、安定した入力・出力・invalidation関係を持つgraph nodeとして外部から扱えるかを調査する。
 
-Rustではfrontend、HIR、type analysis、MIR、monomorphization、codegen unit、backend、object、archive、linkを対象とする。
+Rustではfrontend、HIR、type analysis、MIR、monomorphization、codegen unit、backend handoff、object、archive、linkを対象とする。
 
-Nimではfrontend、semantic processing、backend generation、generated C/C++等、native compile、object、archive、linkを対象とする。
+Nimではfrontend、semantic processing、backend generation、generated C/C++等、native compile、backend handoff、object、archive、linkを対象とする。
 
 各境界を次のいずれかに分類する。
 
@@ -52,43 +52,108 @@ RustとNimの生成物を、一度C ABI surfaceへ落とすことを必須とせ
 
 詳細は `rust-nim-native-linking.md` に定義する。
 
-## 研究トラックC — Backend Graph
+## 研究トラックC — Backend Route / Backend Pipeline Graph
 
-LLVM、Cranelift、GCC系Rust backend、およびNimのC/C++/Objective-C/JavaScript backendを固定前提ではなくgraph variantとして扱えるかを検証する。
+backendを一つの抽象概念で済ませず、次の二段階を分離する。
 
-backendだけでなくtarget、optimization、debug info、ABI、native compiler、linker、artifact kindの互換性をconstraintとして扱う。
+```text
+Backend Route Selection
+  ↓
+Backend Pipeline Expansion
+```
+
+### C1 — Backend Route Selection
+
+LLVM、Cranelift、GCC系Rust backend、およびNimのC/C++/Objective-C/JavaScript等を固定前提ではなくgraph variantとして扱う。
+
+backendだけでなくtarget、optimization、debug info、ABI、native compiler、LTO mode、linker、artifact kindの互換性をconstraintとして扱う。
+
+### C2 — Backend Pipeline White-boxing
+
+選択されたbackendを再びopaqueな単一Actionへ畳み込まない。lowering、optimization、LTO、target codegen、link、post-link等をbackend固有のnested graphとしてLAMINARIAへ投影する。
+
+ただしwhite-boxingを「全passを独立processにすること」と同一視しない。境界を以下に分類する。
+
+1. Logical Stage
+2. Observation Boundary
+3. Checkpoint / Artifact Boundary
+4. Execution Boundary
+5. Dynamic Graph Expansion Point
+
+LLVM New Pass Managerのように、pass groupingがcache localityやoptimization qualityへ影響する実装では、内部を観測可能にしながら実行分割は限定する。
+
+checkpointの採否は次の利益とコストを実測して決定する。
+
+```text
+benefit = work elimination + reuse + invalidation reduction + scheduling/distribution gain
+cost = serialization + reload + hashing/I/O + process/IPC + lost analysis/locality + optimization risk
+```
+
+詳細は `backend-pipeline-whiteboxing_ja.md`、実行Issueは #13、#14、#15を参照する。
 
 ## 研究トラックD — Unified Action Graph / Scheduler
 
-Rust codegen work、Nim generated C/C++ compilation、binding/shim generation、object generation、archive、linkを同一schedulerへ載せる。
+Rust codegen work、Nim generated C/C++ compilation、backend jobs、binding/shim generation、object generation、archive、link、post-linkを同一schedulerへ載せる。
 
-CargoとNimがそれぞれ独立にCPUを使い切るnested parallelismではなく、LAMINARIAが全体のCPU、memory、I/O budgetとcritical pathを見て実行順序を決める。
+Cargo、Nim、LLVM/LTO等がそれぞれ独立にCPUを使い切るnested parallelismではなく、LAMINARIAが全体のCPU、memory、I/O budgetとcritical pathを見て実行順序を決める。
 
 critical pathの分析では、Actionごとに少なくともqueue wait、dependency/resource wait、execution timeを分離し、「処理自体が遅い」のか「開始が遅れた」のかを区別する。
 
+DTLTO等、上流Actionの実行後にchild backend jobsが判明する場合は、hidden nested schedulerではなくDynamic Graph Expansionとして扱えるかを研究する。
+
 ## 研究トラックE — Artifact Identity / Incremental / CAS
 
-semantic artifact、generated source、backend artifact、object、final artifactに対して、物理checkout pathへ不必要に依存しないidentityを定義する。
+semantic artifact、generated source、backend IR/bitcode、LTO index、backend output、object、Core Wasm、optimized Wasm、component等に対して、物理checkout pathへ不必要に依存しないidentityを定義する。
 
 worktree、CI checkout、互換machine間で同一計算を再利用できるかを検証する。
 
 cache hitだけでなく、なぜ再利用できたか／できなかったかを説明可能にする。また、artifact reuseとwork elimination/no-opは別の効果として測定する。
 
+backend checkpoint identityでは、入力artifactだけでなくtoolchain version、target/data layout/features、optimization/pass pipeline、LTO、profile input、debug、plugin等のsemantically relevantな設定を含める。
+
 ## 研究トラックF — Variant Explosion Control
 
 以下の直積をeagerに生成しない。
 
-`target × profile × features × host/target role × backend × compiler × linker × artifact kind × cross-language boundary`
+`target × profile × features × host/target role × backend route × backend pipeline mode × compiler × linker × post-link optimizer × composition model × artifact kind × cross-language boundary`
 
 constraint propagation、canonicalization、memoization、equivalent-state merging、SCC、demand propagation、pruningで必要な状態だけを展開する。
 
-## 研究トラックG — WASM
+## 研究トラックG — WebAssembly Target Pipeline
 
-RustとNimを単に別moduleとして動かすだけでなく、compiler/backend/link graphとして統合した場合に何が可能になるかを評価する。
+WebAssemblyをLLVM/Cranelift等と同列のbackend familyとして扱わない。
+
+少なくとも次のdimensionを分離する。
+
+```text
+Backend Engine
+× Target ISA / Object Model
+× Link Model
+× Post-link Optimizer
+× Composition Model
+```
+
+代表的なLLVM routeでは、以下を独立stage/artifact候補として扱う。
+
+```text
+LLVM IR
+→ LLVM optimization
+→ WebAssembly target codegen
+→ relocatable Wasm object
+→ wasm-ld
+→ Core Wasm module
+→ Binaryen / wasm-opt
+→ optimized Core Wasm module
+→ WIT metadata / adapters
+→ componentization
+→ WebAssembly Component
+```
 
 single module、multi-module/component、adapter generation、runtime duplication、code size、boundary cost、cache/invalidationの違いを実測する。
 
-「WASM向けcompile flagが存在する」だけでは対応とはみなさず、実際にartifactを生成・実行して検証する。
+`wasm-ld`、Binaryen、WIT embedding、adapter、componentizationを一つの`WASM backend`へ隠さない。Binaryenについてもpass-level observationとprocess/checkpoint分割を分離する。
+
+「WASM向けcompile flagが存在する」だけでは対応とはみなさず、実際にartifactを生成・実行して検証する。詳細は #9、#16を参照する。
 
 ## 研究トラックH — Explainability
 
@@ -97,11 +162,14 @@ LAMINARIAは少なくとも以下を構造化して説明できる必要があ�
 - なぜそのdependency/variantを選んだか
 - なぜrebuildしたか
 - なぜcacheをhit/missしたか
-- なぜActionをskip/eliminateできたか
-- なぜbackend/linker combinationを採用・拒否したか
+- なぜAction/backend stageをskip/eliminateできたか
+- なぜbackend/linker/post-link combinationを採用・拒否したか
+- どのbackend routeがどのnested pipelineへ展開されたか
+- どの境界がlogical/observable/checkpoint/executionなのか
+- dynamic graph expansionで何のchild Actionが生成されたか
 - critical pathは何か
 - critical path上の遅延がqueue/dependency/resource/executionのどれによるか
-- どのcompiler stageがopaqueでcoarse-grained executionになったか
+- どのcompiler/backend stageがopaqueでcoarse-grained executionになったか
 
 ## 研究トラックI — Work Elimination / No-op Invariant
 
@@ -109,19 +177,38 @@ LAMINARIAは、既存の計算をcacheしたり並列化したりする前に、
 
 主な対象は次の通り。
 
-- compiler-stage単位のdemand-driven execution
+- compiler/backend-stage単位のdemand-driven execution
 - cache reuseとは別のwork eliminationモデル
 - 中間stageを通さずartifactを直接consumerへ渡せる経路
 - unchanged buildでのtrue no-op invariant
 - no-op判定そのものに必要なmetadata check、hash、read、process launchのコスト
 - controlled editに対するexpected executed/non-executed Action setの検証
+- LLVM/ThinLTO/backend checkpointの再利用・省略
+- wasm-ld/Binaryen/componentizationの部分的省略
 - elimination、reuse、parallelization、individual action optimizationの効果分離
 
 ### No-op invariant
 
-source content、関連config、toolchain identity、互換environment inputが不変なら、明示的にenvironment-sensitiveと定義されたActionを除き、compiler/codegen/link execution Actionは0であることを目標とする。
+source content、関連config、toolchain identity、互換environment inputが不変なら、明示的にenvironment-sensitiveと定義されたActionを除き、compiler/codegen/backend/link/post-link execution Actionは0であることを目標とする。
 
 `cache hit = 100%`だけでは十分ではない。no-op判定のために大量のhash計算、I/O、graph traversal、process startupを行っている場合は、そのコストを別途測定する。
+
+## 研究トラックJ — Cross-language LLVM / LTO Convergence
+
+Rust、Nim 2、Nim 3/NimonyのLLVM系経路を「Nim/Rust→LLVM」と一括りにせず、frontend/backend由来ごとに互換性を検証する。
+
+候補:
+
+```text
+Rust → rustc LLVM bitcode
+Nim 2 → nlvm → LLVM IR
+Nim 2 → generated C → Clang → LLVM IR/bitcode
+Nim 3/Nimony → Leng/lengc → LLVM IR
+```
+
+同一LTO/ThinLTO planへ参加できるかを、target triple、data layout、symbol visibility、calling convention、runtime initialization、allocator、panic/exception、TLS、ownership等と分離して検証する。
+
+LLVM artifactがlink可能であることと、language-level ABI互換やcross-language inliningが成立することを同一視しない。詳細は #17を参照する。
 
 ## 評価ワークロード
 
@@ -132,20 +219,27 @@ source content、関連config、toolchain identity、互換environment inputが�
 3. mixed Rust/Nim native executable
 4. direct native-link workload
 5. conventional C ABI baseline
-6. backend-variant workload
-7. wide parallel graph
-8. deep critical-path graph
-9. boundary-heavy graph
-10. incremental semantic edit
-11. unchanged/no-op workload
-12. worktree reuse
-13. compiler-work-elimination fixture
-14. mixed-language WASM
+6. backend-route variant workload
+7. backend checkpoint economics workload
+8. LLVM pass/pipeline observation workload
+9. ThinLTO/DTLTO dynamic backend-job workload
+10. wide parallel graph
+11. deep critical-path graph
+12. boundary-heavy graph
+13. incremental semantic edit
+14. unchanged/no-op workload
+15. worktree reuse
+16. compiler/backend-work-elimination fixture
+17. mixed-language WebAssembly
+18. Wasm link/post-link/component invalidation workload
+19. Rust/Nim 2/Nimony shared LLVM/LTO compatibility workload
 
 ## 必須メトリクス
 
 - graph construction time
 - node/edge count
+- logical/observation/checkpoint/execution boundary count
+- dynamic graph expansion time and child-action count
 - explored/pruned/merged variants
 - critical-path duration
 - action wall time
@@ -153,20 +247,28 @@ source content、関連config、toolchain identity、互換environment inputが�
 - CPU time/utilization
 - peak/time-weighted memory
 - I/O volume/wait
-- generated source/object/archive/module size
-- semantic/codegen/object/final artifact reuse
-- compiler stage別のexecuted/skipped action count
+- serialized/deserialized/hashed/read/written bytes
+- generated source/IR/bitcode/object/archive/module/component size
+- semantic/codegen/backend/object/final artifact reuse
+- compiler/backend stage別のexecuted/skipped action count
+- LLVM pass group timing and optimization remarks where available
+- ThinLTO backend job count / index / invalidation set
+- linker inputs/symbols
+- Binaryen pass timing/module metrics where available
+- WIT/adaptation/componentization artifact and timing
 - no-op時のmetadata/hash/read/process-launch overhead
 - cache hit/miss reason
 - invalidation set size
-- linker inputs/symbols
 - fallback/delegation path usage
 - reference baseline ratio
+- checkpoint benefit versus checkpoint cost
 
 ## 完了条件
 
 研究Issueは、committed code、commands、fixtures、measurement evidenceから第三者が主張を再現できる場合にのみ完了とする。
 
 controlled incremental testでは最終成果物だけでなくexpected execution setも検証する。すべてをrebuildして正しいbinaryを得ただけではincremental executionの正しさを証明しない。
+
+backend white-boxingでは、内部stageを表示できただけでは完了としない。少なくとも一つのcheckpointでwork elimination/reuseの利益を実測し、同時に一つ以上の過剰な細粒度化が不利益になるケースも測定し、実行境界の選択へ反映する。
 
 仮説が外れた場合は、その失敗理由を記録して設計を更新する。元の主張を守るためにbenchmark条件を弱めたり、fallback経路を隠したりしない。
