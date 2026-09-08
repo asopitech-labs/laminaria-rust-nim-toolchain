@@ -10,6 +10,8 @@ It does not treat Cargo, `rustc`, Nimble, Nim, LLVM, LTO, linkers, or WebAssembl
 
 Rust compiler stages—including HIR, MIR, monomorphization, codegen units, `rustc_codegen_ssa`, LLVM, Cranelift, GCC backends, LTO, object generation, and linking—are studied alongside Nim frontend and semantic processing, backend generation, generated native source, native compilation, object generation, and linking.
 
+Compiler version is a first-class graph dimension rather than an ambient machine setting. LAMINARIA is designed to support multiple exact Rust toolchains as well as Nim 2 and Nim 3/Nimony, resolving package/workspace constraints into a selected toolchain while preserving the producing compiler/toolchain identity in Run, Action, Artifact, cache, and compatibility decisions. Cross-version compiler-semantic artifacts are not assumed compatible without explicit evidence.
+
 LLVM is neither excluded nor treated as the fixed foundation. LLVM, Cranelift, GCC, and other code-generation routes are selectable backend engines, and selected routes may expand into observable nested backend pipelines. WebAssembly is modeled as a target pipeline that can include code generation, `wasm-ld`, post-link optimization, WIT/adapters, and componentization rather than as a peer backend value to LLVM.
 
 Before LAMINARIA optimizes these paths, it establishes a permanent measurement spine that fingerprints the real environment/toolchains and records end-to-end process/resource traces, compiler-native telemetry, artifact deltas, scenario/cache state, and measurement overhead. The same evidence model is then reused by compiler, backend, scheduler, cache, and WASM research.
@@ -27,6 +29,7 @@ The boundary is **computation and planning vs. execution and side effects**, not
 
 - Unified Program Graph
 - Compiler Pipeline Decomposition
+- Multi-version Rust / Nim Toolchain Variants
 - Backend Route Selection
 - Backend Pipeline White-boxing
 - Artifact Graph
@@ -46,6 +49,8 @@ The boundary is **computation and planning vs. execution and side effects**, not
 
 ## Documentation
 
+- [Multi-version Rust/Nim toolchain policy (English)](docs/multi-version-toolchains.md)
+- [Rust/Nim複数コンパイラバージョン対応方針 (日本語)](docs/multi-version-toolchains_ja.md)
 - [Measurement foundation and environment/trace strategy (English)](docs/measurement-foundation.md)
 - [計測基盤・環境・処理フロー観測方針 (日本語)](docs/measurement-foundation_ja.md)
 - [Backend pipeline white-boxing research direction (English)](docs/backend-pipeline-whiteboxing.md)
