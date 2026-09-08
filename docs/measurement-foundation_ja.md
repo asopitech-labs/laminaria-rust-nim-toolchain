@@ -28,6 +28,8 @@ LAMINARIAがcompiler pipeline、backend、LTO、linker、WebAssembly target pipe
 
 LLVM/ThinLTO/WASM white-boxing (#13–#17)は、この基盤が出す共通Run/Trace/Artifact schemaへデータを追加する形にする。
 
+複数compiler versionの扱いは `multi-version-toolchains_ja.md` をcanonical policyとし、#18/#22で実装・検証する。
+
 ## 2. Reproducibility と Performance Isolation を分離する
 
 再現可能な環境と、性能を正しく測る環境は同じ問題ではない。
@@ -44,9 +46,9 @@ WSLはLinux nativeと同一baselineにまとめず、WSL/kernel/filesystem/virtu
 
 異なるEnvironmentFingerprintのRunはdefaultでは直接performance regression比較しない。
 
-## 3. Toolchain Lock
+## 3. Multi-version Toolchain Lock
 
-tool manager固有のlockだけをsource of truthにせず、repository-ownedなtoolchain manifestを定義する。
+tool manager固有のlockだけをsource of truthにせず、repository-ownedなmulti-toolchain manifestを定義する。
 
 候補:
 
@@ -54,11 +56,14 @@ tool manager固有のlockだけをsource of truthにせず、repository-ownedな
 toolchains.lock.toml
 ```
 
+このmanifestは単一のRust stable + nightlyを表すのではなく、複数のnamed compiler/toolchain setを同時に記述できる必要がある。
+
 最低限記録する対象:
 
-- Rust stable/nightly channelまたはexact version/date;
-- rustc/cargo/rustup component set;
-- Nim 2 compiler + Nimble;
+- 複数のRust exact stable/beta/nightly/source revision + required components;
+- rustc/Cargo/sysroot/standard-library identity;
+- Rust toolchainにbundled/selectedされたLLVM/codegen backend identity;
+- Nim 2 exact compiler version/revision + Nimble;
 - Nimony/Nim 3 source revision/build identity;
 - nlvm revision where experiments require it;
 - LLVM/Clang/LLD/opt/llc versions/build identity;
@@ -67,21 +72,30 @@ toolchains.lock.toml
 - `wasm-tools`;
 - target sysroot/SDK/WASI SDK identity where applicable.
 
-Rustについては`rust-toolchain.toml`等、ecosystem-native manifestを併用してよい。ただしmeasurement recordは最終的に**実際に解決されたexecutable**を記録する。
+Rustについては`rust-toolchain.toml`等、ecosystem-native manifestを併用してよい。ただしそれはproject/user selectorであり、measurement recordは最終的に**実際に解決されたexact executable/toolchain**を記録する。
 
-各toolは可能な範囲で以下をfingerprintする。
+`stable`、`nightly`等のmoving selectorを受け付けてもよいが、artifact/cache/Run identityにはそのRunでresolvedされたexact version/revision/buildを使う。`latest`をmeasurement identityとして使用しない。
+
+各toolchainは可能な範囲で以下をfingerprintする。
 
 ```text
-logical tool name
+logical toolchain name / requested selector
+compiler family
+exact resolved compiler version/revision/build
 absolute executable path
-reported version
-source/release revision
 binary digest
+Cargo/Nimble identity
+component set
+sysroot / standard-library identity
+bundled or selected LLVM/backend identity
 host/target information
-relevant plugin/component identities
+telemetry capability set
+LAMINARIA adapter identity
 ```
 
-`latest`をmeasurement identityとして使用しない。
+RustではCargo `rust-version`、Rust edition、selected rustc、Cargo resolver behavior、stable/nightly capabilityを別constraintとして保持し、一つの`rust_version`へ潰さない。
+
+詳細は `multi-version-toolchains_ja.md` を参照する。
 
 ## 4. EnvironmentFingerprint
 
@@ -101,7 +115,7 @@ filesystem type for source/build/cache paths
 virtualization/container/WSL status
 relevant process/resource limits
 source repository commit + dirty state
-toolchain fingerprints
+selected/resolved toolchain fingerprints
 target triple / target features
 relevant sysroot/SDK identities
 measurement harness version
@@ -125,7 +139,8 @@ Run
   scenario_id
   requested_artifact
   environment_fingerprint
-  toolchain_fingerprint
+  requested_toolchain_selector
+  resolved_toolchain_fingerprint
   preparation_record
   cache_state
   root_command
@@ -188,11 +203,15 @@ privileged profilerをbaseline実行の必須条件にしない。
 
 process traceだけではcompiler内部を説明できないため、各toolが提供するnative telemetryを同じRun clockへ正規化する。
 
+telemetry supportは言語全体の固定属性ではなく、**resolved compiler/toolchainごとのcapability**として扱う。exact toolchain、adapter version、native event schema、coverage、unsupported/opaque regionを記録する。
+
 ### Rust / Cargo
 
-- Cargo `--timings`はcrate concurrencyのhuman-readable evidenceとして補助利用する。ただし現在のstable Cargoのtiming reportはhuman consumption向けでmachine-readable source of truthにはしない。
-- rustc nightlyの`-Z self-profile` / measuremeをcompiler query/stage observationの候補とする。
+- Cargo `--timings`はcrate concurrencyのhuman-readable evidenceとして補助利用する。ただしstable Cargoのtiming reportをmachine-readable source of truthにはしない。
 - Cargo JSON messageはartifact/process relationshipの補助に使う。
+- rustc `-Z self-profile` / measuremeは、選択されたexact toolchainが対応する場合のみcompiler query/stage observationに利用する。
+- nightly/internal telemetryが存在しないRust versionでも共通Run schemaは成立させ、内部はopaque/coarse-grainedとして明示する。
+- rustc version間でquery/stage名、telemetry schema、LLVM backendが異なる場合、その差を正規化で消さない。
 
 ### LLVM
 
@@ -202,9 +221,11 @@ process traceだけではcompiler内部を説明できないため、各toolが�
 - IR/bitcode/codegen stage markers;
 - ThinLTO/DTLTO job manifest (#14/#15)。
 
+LLVM telemetryには、そのLLVMがstandalone toolchainなのか、特定rustc/nlvm/Nimony routeにbundled/selectedされたものなのかを含むexact backend identityを付与する。
+
 ### Nim / Nimony
 
-compilerが直接提供するstage timing/artifact diagnosticsを調査し、足りない境界はinstrumented buildまたはwrapperで補う。Nim 2とNimonyは同じadapterと仮定しない。
+compilerが直接提供するstage timing/artifact diagnosticsをexact Nim 2/Nimony revisionごとに調査し、足りない境界はinstrumented buildまたはwrapperで補う。Nim 2とNimonyは同じadapter/capabilityと仮定しない。
 
 ### WebAssembly
 
@@ -236,9 +257,11 @@ adapter
 WebAssembly Component
 ```
 
-artifact recordにはlogical path、type、size、content digest、producer identity where proven、creation/change/delete stateを含める。
+artifact recordにはlogical path、type、size、content digest、exact producing ToolchainFingerprint、producer identity where proven、creation/change/delete stateを含める。
 
 全fileを無条件に再hashしてno-op測定を破壊しない。metadata scan、changed-candidate detection、content hashのコスト自体を測定し、より安い判定方式へ改善できるようにする。
+
+compiler-semantic artifactのcross-version reuseはdefaultで禁止し、artifact-kind-specific compatibility evidenceを要求する。詳細は #7/#22を参照する。
 
 ## 9. Scenario State Machine
 
@@ -255,6 +278,7 @@ Nim implementation-only edit
 backend/config-only change
 link-only change
 worktree relocation with identical content
+compiler/toolchain version-only change
 ```
 
 後続:
@@ -267,7 +291,7 @@ Binaryen option-only change
 WIT/adapter/component-only change
 ```
 
-Scenario preparationはtimed commandから分離するが、何をdelete/modify/seedしたかはRunに記録する。
+Scenario preparationはtimed commandから分離するが、何をdelete/modify/seed/selectしたかはRunに記録する。
 
 ## 10. Cache State を明示する
 
@@ -278,6 +302,7 @@ Scenario preparationはtimed commandから分離するが、何をdelete/modify/
 - Cargo target/build cache state;
 - incremental compiler state;
 - sccache等のcompiler cache state when used;
+- selected compiler/toolchain identity;
 - LAMINARIA CAS/action cache state when introduced;
 - ThinLTO cache state;
 - filesystem/page-cache policy where controlled;
@@ -290,6 +315,8 @@ cacheをclearした操作もRun preparationへ記録する。
 単発wall-clock値をarchitecture判断へ使わない。
 
 すべてのraw sampleを保持し、同一EnvironmentFingerprint内でrepeat可能にする。
+
+compiler-version比較ではEnvironmentFingerprint、scenario、cache stateを原則固定し、selected ToolchainFingerprintだけを意図した変数として変更する。
 
 reportは少なくとも以下を出せるようにする。
 
@@ -348,14 +375,15 @@ timelineではprocess、compiler stage、artifact production、wait、resource u
 
 ```text
 bootstrap / doctor
-resolve and fingerprint tools
+resolve named toolchain selector
+fingerprint exact resolved tools
 execute scenario
 own root process lifecycle
 collect process/resource data
-normalize telemetry
+normalize version-aware telemetry
 record artifact deltas
 write versioned Run result
-compare runs
+compare runs/toolchain versions
 ```
 
 toolchain自体のplanning/scheduler実装前でも、ordinary Cargo/rustc/Nim/LLVMをこのwrapper経由で実行してbaselineを蓄積できる。
@@ -364,22 +392,26 @@ toolchain自体のplanning/scheduler実装前でも、ordinary Cargo/rustc/Nim/L
 
 足場が成立したと言えるのは、少なくとも次を満たした時である。
 
-1. fresh machine/environmentでpinned toolchainを再現できる;
+1. fresh machine/environmentで複数のexact Rust toolchainとNim 2/Nim 3系toolchainを再現できる;
 2. `doctor`相当の出力からenvironment/toolchain差を説明できる;
-3.一つのRust workloadと一つのNim workloadをRun schemaで計測できる;
-4. process tree、wall/CPU/memory/I/Oの主要値を関連付けられる;
-5. generated artifactの前後差を記録できる;
-6. cold / warm / no-opを明確に異なるscenarioとして再現できる;
-7. raw samplesとcomparison reportを再生成できる;
-8. tracing/hashing自身のoverheadを測定できる;
-9.異なるEnvironmentFingerprintを誤って同一baselineとして比較しない;
-10. #14–#17がこのschemaへ追加telemetryを接続できる。
+3.同一Rust workloadを複数exact Rust toolchainでRun schemaにより計測できる;
+4.一つのNim 2 workloadとNimony/Nim 3 workloadを共通schemaへ接続できる;
+5. process tree、wall/CPU/memory/I/Oの主要値を関連付けられる;
+6. generated artifactの前後差とproducing ToolchainFingerprintを記録できる;
+7. cold / warm / no-op / toolchain-version-only changeを明確に異なるscenarioとして再現できる;
+8. raw samplesとcomparison reportを再生成できる;
+9. tracing/hashing自身のoverheadを測定できる;
+10.異なるEnvironmentFingerprintを誤って同一baselineとして比較しない;
+11. cross-version compiler-semantic artifact reuseをcompatibility evidenceなしに行わない;
+12. #14–#17/#22がこのschemaへ追加telemetry/compatibility evidenceを接続できる。
 
 ## 16. 参考プロジェクト
 
 - `rust-lang/rustc-perf` — compiler performance collector、benchmark corpus、継続比較
 - Rust Compiler Development Guide — `-Z self-profile`、`perf`、Cargo timings等のprofiling入口
+- Cargo `rust-version` — package MSRVとtoolchain selection constraint
+- rustc metadata (`rmeta`) — compiler version/metadata compatibilityの参考
 - LLVM test-suite / LNT — reproducible compile/runtime metrics、JSON output、comparison
 - LLVM ThinLTO / DTLTO — dynamic backend job manifestを伴う後続integration対象
 
-この基盤の目的はbenchmark dashboardを先に作ることではない。**LAMINARIAが改善しようとしている計算を、改善前から正しく観測し続けられること**である。
+この基盤の目的はbenchmark dashboardを先に作ることではない。**LAMINARIAが改善しようとしている計算を、複数compiler versionを含めて改善前から正しく観測し続けられること**である。
