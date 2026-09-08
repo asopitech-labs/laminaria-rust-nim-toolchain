@@ -12,9 +12,11 @@ Rust compiler stages—including HIR, MIR, monomorphization, codegen units, `rus
 
 Compiler version is a first-class graph dimension rather than an ambient machine setting. LAMINARIA is designed to support multiple exact Rust toolchains as well as Nim 2 and Nim 3/Nimony, resolving package/workspace constraints into a selected toolchain while preserving the producing compiler/toolchain identity in Run, Action, Artifact, cache, and compatibility decisions. Cross-version compiler-semantic artifacts are not assumed compatible without explicit evidence.
 
+The internal variant space may be broad, but ordinary users should not need to solve exact Rust/Nim/backend/linker combinations manually. LAMINARIA exposes evidence-backed **Validated Toolchain Profiles** such as `recommended`, `latest-validated`, `long-term`, and `preview`, then progressively exposes intent presets, advanced overrides, and expert graph constraints. Profile aliases always resolve to immutable exact bundle revisions before execution; overrides re-evaluate qualification rather than inheriting a validation badge blindly.
+
 LLVM is neither excluded nor treated as the fixed foundation. LLVM, Cranelift, GCC, and other code-generation routes are selectable backend engines, and selected routes may expand into observable nested backend pipelines. WebAssembly is modeled as a target pipeline that can include code generation, `wasm-ld`, post-link optimization, WIT/adapters, and componentization rather than as a peer backend value to LLVM.
 
-Before LAMINARIA optimizes these paths, it establishes a permanent measurement spine that fingerprints the real environment/toolchains and records end-to-end process/resource traces, compiler-native telemetry, artifact deltas, scenario/cache state, and measurement overhead. The same evidence model is then reused by compiler, backend, scheduler, cache, and WASM research.
+Before LAMINARIA optimizes these paths, it establishes a permanent measurement spine that fingerprints the real environment/toolchains and records end-to-end process/resource traces, compiler-native telemetry, artifact deltas, scenario/cache state, and measurement overhead. The same evidence model is then reused by compiler, backend, scheduler, cache, profile qualification, and WASM research.
 
 LAMINARIA is itself implemented in Rust and Nim:
 
@@ -30,6 +32,7 @@ The boundary is **computation and planning vs. execution and side effects**, not
 - Unified Program Graph
 - Compiler Pipeline Decomposition
 - Multi-version Rust / Nim Toolchain Variants
+- Validated Toolchain Profiles / Progressive Configuration
 - Backend Route Selection
 - Backend Pipeline White-boxing
 - Artifact Graph
@@ -49,6 +52,8 @@ The boundary is **computation and planning vs. execution and side effects**, not
 
 ## Documentation
 
+- [Validated toolchain profiles and progressive configuration (English)](docs/validated-toolchain-profiles.md)
+- [検証済みツールチェーンプロファイルと段階設定 (日本語)](docs/validated-toolchain-profiles_ja.md)
 - [Multi-version Rust/Nim toolchain policy (English)](docs/multi-version-toolchains.md)
 - [Rust/Nim複数コンパイラバージョン対応方針 (日本語)](docs/multi-version-toolchains_ja.md)
 - [Measurement foundation and environment/trace strategy (English)](docs/measurement-foundation.md)
