@@ -7,7 +7,7 @@ This file maps the GitHub issue set to the research program. The GitHub issues a
 LAMINARIA must measure the ordinary toolchain path before replacing or optimizing it. The permanent measurement spine is therefore an architectural dependency of the later compiler/backend/scheduler experiments.
 
 1. Measurement spine, reference workloads and metrics harness — #11
-   - pinned native measurement environments and toolchain fingerprints — #18
+   - multi-version native measurement environments and exact toolchain fingerprints — #18
    - versioned end-to-end Run envelope and process/resource tracer — #19
    - artifact deltas and compiler-native telemetry — #20
    - baseline scenarios, repetition/noise policy and regression comparison — #21
@@ -15,25 +15,28 @@ LAMINARIA must measure the ordinary toolchain path before replacing or optimizin
 Recommended order:
 
 ```text
-#18 Environment / Toolchain Identity
+#18 Environment / Multi-version Toolchain Identity
+  ├→ #22 Toolchain Version Variant / Compatibility Model
   ↓
 #19 Run + Process/Resource Trace
   ↓
-#20 Artifact + Compiler Telemetry
+#20 Artifact + Version-aware Compiler Telemetry
   ↓
 #21 Scenario + Comparison Discipline
   ↓
-#13–#17 and scheduler/cache research consume the same evidence spine
+#3/#7/#13–#17 and scheduler/cache research consume the same evidence spine
 ```
 
-The detailed design is documented in:
+The detailed designs are documented in:
 
 - `measurement-foundation.md`
 - `measurement-foundation_ja.md`
+- `multi-version-toolchains.md`
+- `multi-version-toolchains_ja.md`
 
 ## Core tracks
 
-2. Compiler pipeline decomposition — #3
+2. Compiler pipeline decomposition across supported toolchain versions — #3
 3. Rust–Nim native linking without mandatory C ABI boundary — #4
 4. Backend route selection and capability constraints — #5
 5. Unified Action Graph and resource-aware scheduling — #6
@@ -42,14 +45,15 @@ The detailed design is documented in:
 8. WASM mixed-language integration/topology — #9
 9. Agent-oriented explainability and evidence schema — #10
 10. Work elimination, execution correctness and no-op build invariants — #12
+11. Multi-version Rust/Nim toolchain selection and artifact compatibility — #22
 
 ## Backend pipeline white-boxing expansion
 
-11. Expand backend routes into nested observable/checkpoint/execution graphs and define checkpoint economics — #13
-12. White-box LLVM pass/codegen/LTO pipeline boundaries without pass-per-process decomposition — #14
-13. Map ThinLTO/DTLTO dynamic backend jobs into the LAMINARIA scheduler and cache graph — #15
-14. Decompose the WebAssembly target pipeline through `wasm-ld`, Binaryen, WIT and componentization — #16
-15. Evaluate shared LLVM IR/LTO convergence across Rust, Nim 2 and Nimony routes — #17
+12. Expand backend routes into nested observable/checkpoint/execution graphs and define checkpoint economics — #13
+13. White-box LLVM pass/codegen/LTO pipeline boundaries without pass-per-process decomposition — #14
+14. Map ThinLTO/DTLTO dynamic backend jobs into the LAMINARIA scheduler and cache graph — #15
+15. Decompose the WebAssembly target pipeline through `wasm-ld`, Binaryen, WIT and componentization — #16
+16. Evaluate shared LLVM IR/LTO convergence across Rust, Nim 2 and Nimony routes — #17
 
 The detailed architecture is documented in:
 
@@ -57,6 +61,14 @@ The detailed architecture is documented in:
 - `backend-pipeline-whiteboxing_ja.md`
 
 ## Responsibility boundaries
+
+### #18 versus #22
+
+#18 owns installation/discovery, named toolchain sets, exact resolution and ToolchainFingerprint generation. #22 owns how compiler/toolchain version participates in Variant Graph resolution, capability constraints, artifact compatibility, and cross-version reuse policy.
+
+### #22 versus #3/#7/#20
+
+#22 defines the common multi-version model. #3 maps actual compiler-pipeline boundaries per toolchain capability, #7 applies the exact toolchain identity to cache/artifact compatibility, and #20 adapts version-specific native telemetry into the common Run schema.
 
 ### #11/#18–#21 versus later research
 
@@ -79,6 +91,17 @@ Later research may extend these schemas with backend-specific data, but must not
 ### #6/#7/#12 versus #15
 
 #15 is not a separate scheduler/cache architecture. It is the ThinLTO/DTLTO stress case that must use #6 scheduling, #7 identity/CAS and #12 work-elimination semantics. DTLTO's externally described backend jobs are used to test dynamic graph expansion rather than adding a hidden nested scheduler.
+
+## Multi-version toolchain rule
+
+Compiler version is a graph dimension, not an ambient machine setting.
+
+- Rust and Nim toolchains are resolved from selectors to exact ToolchainFingerprint values;
+- Cargo `rust-version`, Rust edition, selected rustc, Cargo resolver behavior and nightly capability are separate constraints;
+- one connected normal Cargo/Rust crate graph normally resolves to one Rust toolchain;
+- cross-version `rmeta`/`rlib`/internal compiler artifacts are not assumed compatible;
+- lower-level object/archive/Wasm/native boundaries may be studied separately with explicit compatibility evidence;
+- Nim 2/Nim 3 and multiple Rust versions use the same high-level toolchain-version abstraction while preserving language-specific metadata.
 
 ## Environment rule
 
