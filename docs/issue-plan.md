@@ -26,6 +26,8 @@ Recommended order:
   ↓
 #23 Validated Profiles / Progressive Configuration
   ↓
+#24 Agent-oriented Bounded Planning / UX
+  ↓
 #3/#7/#13–#17 and scheduler/cache research consume the same evidence spine
 ```
 
@@ -37,6 +39,8 @@ The detailed designs are documented in:
 - `multi-version-toolchains_ja.md`
 - `validated-toolchain-profiles.md`
 - `validated-toolchain-profiles_ja.md`
+- `agent-oriented-toolchain-ux.md`
+- `agent-oriented-toolchain-ux_ja.md`
 
 ## Core tracks
 
@@ -51,14 +55,15 @@ The detailed designs are documented in:
 10. Work elimination, execution correctness and no-op build invariants — #12
 11. Multi-version Rust/Nim toolchain selection and artifact compatibility — #22
 12. Validated toolchain profiles and progressive configuration — #23
+13. Agent-oriented bounded/explainable toolchain planning and UX — #24
 
 ## Backend pipeline white-boxing expansion
 
-13. Expand backend routes into nested observable/checkpoint/execution graphs and define checkpoint economics — #13
-14. White-box LLVM pass/codegen/LTO pipeline boundaries without pass-per-process decomposition — #14
-15. Map ThinLTO/DTLTO dynamic backend jobs into the LAMINARIA scheduler and cache graph — #15
-16. Decompose the WebAssembly target pipeline through `wasm-ld`, Binaryen, WIT and componentization — #16
-17. Evaluate shared LLVM IR/LTO convergence across Rust, Nim 2 and Nimony routes — #17
+14. Expand backend routes into nested observable/checkpoint/execution graphs and define checkpoint economics — #13
+15. White-box LLVM pass/codegen/LTO pipeline boundaries without pass-per-process decomposition — #14
+16. Map ThinLTO/DTLTO dynamic backend jobs into the LAMINARIA scheduler and cache graph — #15
+17. Decompose the WebAssembly target pipeline through `wasm-ld`, Binaryen, WIT and componentization — #16
+18. Evaluate shared LLVM IR/LTO convergence across Rust, Nim 2 and Nimony routes — #17
 
 The detailed architecture is documented in:
 
@@ -76,6 +81,16 @@ The detailed architecture is documented in:
 #22 owns the broad internal version/compatibility search space. #23 owns the narrower user-facing qualification layer: `recommended`, `latest-validated`, `long-term`, `preview`, progressive presets and advanced overrides.
 
 A combination accepted by #22 is only a candidate for #23. Static compatibility does not imply recommendation.
+
+### #23 versus #24
+
+#23 defines evidence-backed profiles and progressive configuration surfaces. #24 defines the coding-agent and human interaction policy that consumes those profiles: cost-ordered resolution, reusable negative knowledge, ranked viable plans, bounded exploration, and UX metrics.
+
+#24 must not build a separate constraint solver. It uses #8's variant-space machinery, #22 compatibility facts, #23 qualification evidence, and #10 structured explanations.
+
+### #24 versus #8/#10
+
+#8 owns how candidate states are represented, merged, pruned and bounded in the Nim Planning Kernel. #10 owns the machine-readable explanation schema. #24 owns the UX-level success condition: those capabilities must prevent coding agents from externalizing combinatorial search as repeated failing compiler/build attempts.
 
 ### #23 versus #11/#18–#21
 
@@ -106,6 +121,29 @@ Later research may extend these schemas with backend-specific data, but must not
 ### #6/#7/#12 versus #15
 
 #15 is not a separate scheduler/cache architecture. It is the ThinLTO/DTLTO stress case that must use #6 scheduling, #7 identity/CAS and #12 work-elimination semantics. DTLTO's externally described backend jobs are used to test dynamic graph expansion rather than adding a hidden nested scheduler.
+
+## Tool UX rule
+
+Tool UX is a first-class project objective, not only CLI cosmetics.
+
+LAMINARIA intentionally accepts a broad internal combination space, but normal human/coding-agent usage should follow:
+
+```text
+requirements + intent
+  -> profiles / compatibility / negative knowledge
+  -> constraint resolution and pruning
+  -> small ranked viable-plan set
+  -> structured explanation
+  -> execution
+```
+
+Execution must not be the default combinatorial search mechanism.
+
+The normal agent path should be bounded. Known-incompatible variants are not executed; equivalent rejected states are pruned/merged; validated candidates are preferred; unresolved cases return validation gaps and ranked next actions instead of continuing retries indefinitely.
+
+Broad brute-force exploration remains available explicitly for research mode.
+
+UX evaluation includes external build attempts avoided, failed toolchain attempts, time-to-first-viable-plan, explored/pruned/merged states, negative-knowledge reuse, fallback count, and agent log/context volume.
 
 ## Toolchain profile rule
 
@@ -180,8 +218,10 @@ A compiler pass may be visible and measured without being separately serialized 
 
 ## Evidence rule
 
-Each issue must provide reproducible evidence. Passing functional tests alone is not sufficient for architecture, performance, scheduling, cache, compiler/backend-boundary, reduced-work or linking claims. Controlled incremental tests should validate the expected execution set as well as the final artifact.
+Each issue must provide reproducible evidence. Passing functional tests alone is not sufficient for architecture, performance, scheduling, cache, compiler/backend-boundary, reduced-work, linking, profile qualification, or tool UX claims. Controlled incremental tests should validate the expected execution set as well as the final artifact.
 
 Single wall-clock samples are insufficient for architecture decisions. The measurement spine stores raw samples, characterizes environment noise, records explicit cold/warm/no-op/cache state, and measures observer overhead.
 
 Backend checkpoint work must measure both benefit and cost. At least one overly fine checkpoint candidate must be allowed to fail the economics test; increasing graph granularity is not itself a success criterion.
+
+Tool UX work likewise must measure whether planning actually avoids unnecessary external build attempts; a sophisticated resolver that still makes an agent try dozens of compiler combinations is not a successful UX result.
