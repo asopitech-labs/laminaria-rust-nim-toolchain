@@ -10,15 +10,26 @@ LAMINARIAは、RustとNimのコンパイル、依存解決、コード生成、�
 
 LAMINARIAでは、単にビルドが通る、テストが通る、期待値が返るだけでは研究課題の完了とみなさない。
 
-アーキテクチャ、スケジューリング、性能、キャッシュ、コンパイラ境界、リンク方式を扱う課題では、実際にどの実行経路が選択されたか、どの成果物が生成されたか、CPU・メモリ・I/Oを含む資源挙動がどうだったかを証拠として残す。
+機能的正しさと実行経路の正しさは別の要件である。正しい最終成果物が得られても、不要な処理をすべて再実行していた、誤ったbackend/scheduler経路を通った、opaqueな外部buildへ黙って委譲した、といった場合はincremental、scheduling、native linking、work eliminationの成立を証明しない。
 
-高速に見えても意図した経路を通っていないfallback実装、stub、test専用経路、外側から既存ツールへ処理を丸投げするだけの実装は、研究対象の成立を証明しない。
+アーキテクチャ、スケジューリング、性能、キャッシュ、コンパイラ境界、リンク方式を扱う課題では、実際にどの実行経路が選択されたか、どの成果物が生成されたか、CPU・メモリ・I/Oを含む資源挙動がどうだったか、どのActionが実行され、どのActionが正しく省略されたかを証拠として残す。
 
-参考プロジェクトは単なる目標文言ではなく、実測比較と設計検証の基準として扱う。参考実装から性能・資源消費・実行構造が大きく乖離した場合は、ベンチマーク条件を弱めるのではなく実装そのものを再検討する。
+参考プロジェクトは単なる目標文言ではなく、実測比較と設計検証の基準として扱う。参考実装から性能・資源消費・実行構造・実行仕事量が大きく乖離した場合は、ベンチマーク条件を弱めるのではなく実装そのものを再検討する。
+
+LAMINARIAでは最適化を原則として次の順で優先する。
+
+1. 不要なActionまたはcompiler stageを除去する
+2. 既に有効なartifactを再利用する
+3. invalidation範囲を狭める
+4. 有効なparallelismを露出する
+5. 全体resource制約の下でglobal schedulingする
+6. 個々のAction自体を高速化する
+
+本来実行不要な処理を並列化して高速化しても、work eliminationの代替とはみなさない。
 
 ## 研究トラックA — Compiler Pipeline Decomposition
 
-RustとNimのcompiler pipelineのどこまでを、安定した入力・出力・invalidaton関係を持つgraph nodeとして外部から扱えるかを調査する。
+RustとNimのcompiler pipelineのどこまでを、安定した入力・出力・invalidation関係を持つgraph nodeとして外部から扱えるかを調査する。
 
 Rustではfrontend、HIR、type analysis、MIR、monomorphization、codegen unit、backend、object、archive、linkを対象とする。
 
@@ -53,13 +64,15 @@ Rust codegen work、Nim generated C/C++ compilation、binding/shim generation、
 
 CargoとNimがそれぞれ独立にCPUを使い切るnested parallelismではなく、LAMINARIAが全体のCPU、memory、I/O budgetとcritical pathを見て実行順序を決める。
 
+critical pathの分析では、Actionごとに少なくともqueue wait、dependency/resource wait、execution timeを分離し、「処理自体が遅い」のか「開始が遅れた」のかを区別する。
+
 ## 研究トラックE — Artifact Identity / Incremental / CAS
 
 semantic artifact、generated source、backend artifact、object、final artifactに対して、物理checkout pathへ不必要に依存しないidentityを定義する。
 
 worktree、CI checkout、互換machine間で同一計算を再利用できるかを検証する。
 
-cache hitだけでなく、なぜ再利用できたか／できなかったかを説明可能にする。
+cache hitだけでなく、なぜ再利用できたか／できなかったかを説明可能にする。また、artifact reuseとwork elimination/no-opは別の効果として測定する。
 
 ## 研究トラックF — Variant Explosion Control
 
@@ -84,9 +97,31 @@ LAMINARIAは少なくとも以下を構造化して説明できる必要があ�
 - なぜそのdependency/variantを選んだか
 - なぜrebuildしたか
 - なぜcacheをhit/missしたか
+- なぜActionをskip/eliminateできたか
 - なぜbackend/linker combinationを採用・拒否したか
 - critical pathは何か
+- critical path上の遅延がqueue/dependency/resource/executionのどれによるか
 - どのcompiler stageがopaqueでcoarse-grained executionになったか
+
+## 研究トラックI — Work Elimination / No-op Invariant
+
+LAMINARIAは、既存の計算をcacheしたり並列化したりする前に、requested artifactの生成に本当に必要な計算だけを実行できるかを研究する。
+
+主な対象は次の通り。
+
+- compiler-stage単位のdemand-driven execution
+- cache reuseとは別のwork eliminationモデル
+- 中間stageを通さずartifactを直接consumerへ渡せる経路
+- unchanged buildでのtrue no-op invariant
+- no-op判定そのものに必要なmetadata check、hash、read、process launchのコスト
+- controlled editに対するexpected executed/non-executed Action setの検証
+- elimination、reuse、parallelization、individual action optimizationの効果分離
+
+### No-op invariant
+
+source content、関連config、toolchain identity、互換environment inputが不変なら、明示的にenvironment-sensitiveと定義されたActionを除き、compiler/codegen/link execution Actionは0であることを目標とする。
+
+`cache hit = 100%`だけでは十分ではない。no-op判定のために大量のhash計算、I/O、graph traversal、process startupを行っている場合は、そのコストを別途測定する。
 
 ## 評価ワークロード
 
@@ -102,8 +137,10 @@ LAMINARIAは少なくとも以下を構造化して説明できる必要があ�
 8. deep critical-path graph
 9. boundary-heavy graph
 10. incremental semantic edit
-11. worktree reuse
-12. mixed-language WASM
+11. unchanged/no-op workload
+12. worktree reuse
+13. compiler-work-elimination fixture
+14. mixed-language WASM
 
 ## 必須メトリクス
 
@@ -112,11 +149,14 @@ LAMINARIAは少なくとも以下を構造化して説明できる必要があ�
 - explored/pruned/merged variants
 - critical-path duration
 - action wall time
+- per-action queue wait / dependency-resource wait / execution time
 - CPU time/utilization
 - peak/time-weighted memory
 - I/O volume/wait
 - generated source/object/archive/module size
 - semantic/codegen/object/final artifact reuse
+- compiler stage別のexecuted/skipped action count
+- no-op時のmetadata/hash/read/process-launch overhead
 - cache hit/miss reason
 - invalidation set size
 - linker inputs/symbols
@@ -126,5 +166,7 @@ LAMINARIAは少なくとも以下を構造化して説明できる必要があ�
 ## 完了条件
 
 研究Issueは、committed code、commands、fixtures、measurement evidenceから第三者が主張を再現できる場合にのみ完了とする。
+
+controlled incremental testでは最終成果物だけでなくexpected execution setも検証する。すべてをrebuildして正しいbinaryを得ただけではincremental executionの正しさを証明しない。
 
 仮説が外れた場合は、その失敗理由を記録して設計を更新する。元の主張を守るためにbenchmark条件を弱めたり、fallback経路を隠したりしない。
