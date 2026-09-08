@@ -43,7 +43,9 @@ The boundary is **computation and planning vs. execution and side effects**, not
 
 - [Research foundations and architecture direction (English)](docs/research-foundations.md)
 - [Research program and evidence policy (English)](docs/research-program.md)
+- [研究プログラムと証拠ポリシー (日本語)](docs/research-program_ja.md)
 - [Rust–Nim native linking research plan (English)](docs/rust-nim-native-linking.md)
+- [Rust–Nim Native Linking 研究計画 (日本語)](docs/rust-nim-native-linking_ja.md)
 - [Project proposal (English)](docs/project-proposal.md)
 - [Project proposal (Japanese)](docs/project-proposal_ja.md)
 
