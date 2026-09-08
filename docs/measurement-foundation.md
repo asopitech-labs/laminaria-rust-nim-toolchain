@@ -28,6 +28,8 @@ Stabilize first:
 
 LLVM/ThinLTO/WASM white-boxing (#13–#17) should extend the common Run/Trace/Artifact schema rather than invent separate evidence formats.
 
+Multiple compiler versions follow the canonical policy in `multi-version-toolchains.md` and are implemented/validated through #18/#22.
+
 ## 2. Separate reproducibility from performance isolation
 
 A reproducible environment and a representative performance environment are not the same problem.
@@ -36,18 +38,22 @@ Containers, Nix, or equivalent mechanisms may be used for bootstrap and correctn
 
 WSL is a distinct environment class, not interchangeable with native Linux. Runs with different EnvironmentFingerprint values are not directly comparable for performance by default.
 
-## 3. Repository-owned toolchain lock
+## 3. Repository-owned multi-version toolchain lock
 
-Define a repository-owned toolchain manifest such as:
+Define a repository-owned multi-toolchain manifest such as:
 
 ```text
 toolchains.lock.toml
 ```
 
+It must describe multiple named compiler/toolchain sets rather than one global Rust stable/nightly pair.
+
 It should pin or identify:
 
-- Rust stable/nightly and required components;
-- Nim 2 and Nimble;
+- multiple exact Rust stable/beta/nightly/source revisions and required components;
+- rustc/Cargo/sysroot/standard-library identity;
+- bundled or selected LLVM/codegen-backend identity for each Rust toolchain;
+- exact Nim 2 compiler versions/revisions and Nimble;
 - Nimony/Nim 3 source revision/build identity;
 - nlvm revision where required;
 - LLVM/Clang/LLD/opt/llc;
@@ -56,9 +62,30 @@ It should pin or identify:
 - `wasm-tools`;
 - target sysroot/SDK/WASI SDK identities.
 
-Ecosystem-native manifests such as `rust-toolchain.toml` may coexist, but measurement records must fingerprint the executable that actually ran: path, reported version, source/release revision, binary digest where practical, and host/target information.
+Ecosystem-native manifests such as `rust-toolchain.toml` may coexist, but they are project/user selectors. Measurement records fingerprint the exact executable/toolchain that actually ran.
 
-Do not use `latest` as measurement identity.
+Moving selectors such as `stable` or `nightly` may be accepted as input, but Run/artifact/cache identity uses the exact resolved version/revision/build. Do not use `latest` as measurement identity.
+
+Each toolchain should capture where practical:
+
+```text
+logical toolchain name / requested selector
+compiler family
+exact resolved compiler version/revision/build
+absolute executable path
+binary digest
+Cargo/Nimble identity
+component set
+sysroot / standard-library identity
+bundled or selected LLVM/backend identity
+host/target information
+telemetry capability set
+LAMINARIA adapter identity
+```
+
+For Rust, keep Cargo `rust-version`, Rust edition, selected rustc, Cargo resolver behavior, and stable/nightly capability as separate constraints rather than collapsing them into one `rust_version` field.
+
+See `multi-version-toolchains.md`.
 
 ## 4. EnvironmentFingerprint
 
@@ -75,7 +102,7 @@ filesystem type for source/build/cache paths
 virtualization/container/WSL status
 relevant process/resource limits
 repository commit and dirty state
-toolchain fingerprints
+selected/resolved toolchain fingerprints
 target triple/features
 sysroot/SDK identities
 measurement harness version
@@ -97,7 +124,8 @@ Run
   scenario_id
   requested_artifact
   environment_fingerprint
-  toolchain_fingerprint
+  requested_toolchain_selector
+  resolved_toolchain_fingerprint
   preparation_record
   cache_state
   root_command
@@ -158,23 +186,29 @@ Privileged profiling is not a baseline requirement.
 
 Process traces cannot explain compiler internals, so normalize tool-native telemetry onto the same Run clock.
 
+Telemetry support is a capability of a **resolved compiler/toolchain**, not a universal language property. Record the exact toolchain, adapter version, native event schema, coverage, and unsupported/opaque regions.
+
 ### Rust / Cargo
 
 - Cargo `--timings` may be retained as supplementary human evidence; its stable timing report is not the canonical machine-readable source.
-- rustc nightly `-Z self-profile` / measureme is a candidate for compiler-query and stage observation.
 - Cargo JSON messages may assist artifact/process relationships.
+- rustc `-Z self-profile` / measureme is used only where the selected exact toolchain supports it.
+- Rust versions without the required nightly/internal telemetry still produce valid common Run records with explicit opaque/coarse-grained compiler regions.
+- Query/stage names, telemetry schemas, and bundled LLVM/backend differences across rustc versions remain visible rather than being normalized away.
 
 ### LLVM
 
 Capture pass timing, optimization remarks, time trace/statistics where applicable, selected IR/bitcode/codegen markers, and ThinLTO/DTLTO manifests (#14/#15).
 
+LLVM telemetry includes exact backend identity and whether LLVM is standalone or bundled/selected through a specific rustc/nlvm/Nimony route.
+
 ### Nim / Nimony
 
-Investigate stage timing/artifact diagnostics separately for Nim 2 and Nimony. Use instrumented compiler builds or wrappers when native telemetry is insufficient.
+Investigate stage timing/artifact diagnostics per exact Nim 2 and Nimony revision. Use instrumented compiler builds or wrappers when native telemetry is insufficient. Do not assume Nim 2 and Nimony expose the same adapter/capability set.
 
 ### WebAssembly
 
-Integrate `wasm-ld`, Binaryen post-link data, and WIT/embed/adapter/componentization evidence (#16).
+Integrate `wasm-ld`, Binaryen post-link data, and WIT/embed/adapter/componentization evidence (#16) with exact tool versions.
 
 If native telemetry is unavailable, mark the stage opaque instead of assigning the outer process time to an invented internal stage.
 
@@ -184,9 +218,11 @@ Record artifact changes before and after the Run for declared observation roots.
 
 Examples include Rust metadata/rlib, emitted MIR/LLVM IR/bitcode, Nim-generated C/C++, objects, archives, ThinLTO indexes, native outputs, relocatable Wasm objects, Core Wasm modules, optimized Wasm modules, WIT/component metadata, adapters, and final Components.
 
-Artifact records include logical path, type, size, content digest, producer identity when proven, and create/change/delete state.
+Artifact records include logical path, type, size, content digest, exact producing ToolchainFingerprint, producer identity when proven, and create/change/delete state.
 
 Do not blindly rehash every file on every no-op measurement. Measure metadata-scan, changed-candidate detection, hashing, and I/O cost so artifact detection itself can be optimized.
+
+Cross-version reuse of compiler-semantic artifacts is denied by default and requires artifact-specific compatibility evidence. See #7/#22.
 
 ## 9. Scenario state machine
 
@@ -203,15 +239,16 @@ Nim implementation-only edit
 backend/config-only change
 link-only change
 worktree relocation with identical content
+compiler/toolchain version-only change
 ```
 
 Later scenarios include ThinLTO partial edits, Wasm link/post-link changes, and WIT/adapter/component-only changes.
 
-Preparation is excluded from the timed command but is recorded explicitly.
+Preparation is excluded from the timed command but is recorded explicitly, including toolchain selection changes.
 
 ## 10. Explicit cache state
 
-Do not use `warm` as the only cache description. Record Cargo/target state, compiler incremental state, sccache-like state where present, future LAMINARIA CAS/action cache, ThinLTO cache, page-cache policy where controlled, and artifact-directory preparation.
+Do not use `warm` as the only cache description. Record Cargo/target state, compiler incremental state, sccache-like state where present, selected compiler/toolchain identity, future LAMINARIA CAS/action cache, ThinLTO cache, page-cache policy where controlled, and artifact-directory preparation.
 
 Cache-clear operations are part of Run preparation evidence.
 
@@ -219,7 +256,11 @@ Cache-clear operations are part of Run preparation evidence.
 
 Architecture decisions must not depend on one wall-clock sample.
 
-Store every raw sample and repeat within one EnvironmentFingerprint. Reports should be able to expose sample count, min, median/p50, p90 where meaningful, mean, variance/standard deviation, and relative difference.
+Store every raw sample and repeat within one EnvironmentFingerprint.
+
+Compiler-version comparisons normally hold EnvironmentFingerprint, scenario, and cache state fixed while changing only the selected ToolchainFingerprint intentionally.
+
+Reports should be able to expose sample count, min, median/p50, p90 where meaningful, mean, variance/standard deviation, and relative difference.
 
 Use more stable counters such as CPU time, instructions, or cycles where available rather than replacing wall time with them.
 
@@ -259,14 +300,15 @@ Responsibilities:
 
 ```text
 bootstrap / doctor
-resolve and fingerprint tools
+resolve named toolchain selector
+fingerprint exact resolved tools
 execute scenario
 own root process lifecycle
 collect process/resource data
-normalize telemetry
+normalize version-aware telemetry
 record artifact deltas
 write versioned Run results
-compare runs
+compare runs/toolchain versions
 ```
 
 Ordinary Cargo/rustc/Nim/LLVM execution can be wrapped and measured before LAMINARIA replaces any scheduling responsibility.
@@ -275,22 +317,26 @@ Ordinary Cargo/rustc/Nim/LLVM execution can be wrapped and measured before LAMIN
 
 The foundation is established when at least:
 
-1. a fresh environment can reproduce the pinned toolchains;
+1. a fresh environment can reproduce multiple exact Rust toolchains and Nim 2/Nim 3-family toolchains;
 2. doctor output explains environment/toolchain differences;
-3. one Rust and one Nim workload can be captured in the Run schema;
-4. process tree and major wall/CPU/memory/I/O metrics are correlated;
-5. artifact deltas are recorded;
-6. cold/warm/no-op are reproducible distinct scenarios;
-7. raw samples can regenerate comparison reports;
-8. tracing/hashing overhead is measured;
-9. different EnvironmentFingerprint values are not silently compared as the same baseline;
-10. #14–#17 can attach additional telemetry to the same schema.
+3. the same Rust workload can be captured under multiple exact Rust toolchains in the common Run schema;
+4. one Nim 2 and one Nimony/Nim 3 workload can attach to the common schema;
+5. process tree and major wall/CPU/memory/I/O metrics are correlated;
+6. artifact deltas include the producing ToolchainFingerprint;
+7. cold/warm/no-op/toolchain-version-only changes are reproducible distinct scenarios;
+8. raw samples can regenerate comparison reports;
+9. tracing/hashing overhead is measured;
+10. different EnvironmentFingerprint values are not silently compared as the same baseline;
+11. cross-version compiler-semantic artifact reuse does not occur without compatibility evidence;
+12. #14–#17/#22 can attach additional telemetry/compatibility evidence to the same schema.
 
 ## 16. Reference projects
 
 - `rust-lang/rustc-perf` — compiler performance collector, corpus, continuous comparison;
 - Rust Compiler Development Guide — `-Z self-profile`, `perf`, Cargo timing entry points;
+- Cargo `rust-version` — package MSRV and toolchain-selection constraint;
+- rustc metadata (`rmeta`) — compiler-version/metadata-compatibility reference;
 - LLVM test-suite / LNT — machine-readable compile/runtime metrics and comparisons;
 - LLVM ThinLTO / DTLTO — later dynamic backend-job integration.
 
-The first goal is not a dashboard. It is to ensure that the computation LAMINARIA intends to improve is already observable before LAMINARIA starts changing it.
+The first goal is not a dashboard. It is to ensure that the computation LAMINARIA intends to improve, including multiple compiler versions, is already observable before LAMINARIA starts changing it.
