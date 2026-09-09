@@ -25,6 +25,7 @@ type Point {.bycopy.} = object
   x, y: cint
 
 proc rust_point_translate(p: Point, dx, dy: cint): Point {.importc: "rust_point_translate", cdecl.}
+proc rust_point_translate_via_pointer(p: Point, dx, dy: cint, outP: ptr Point) {.importc: "rust_point_translate_via_pointer", cdecl.}
 proc rust_point_scale_in_place(p: ptr Point, factor: cint) {.importc: "rust_point_scale_in_place", cdecl.}
 proc rust_point_layout_probe(outSize, outAlign, outOffsetX, outOffsetY: ptr cint) {.importc: "rust_point_layout_probe", cdecl.}
 
@@ -58,6 +59,19 @@ block byValueRoundTrip:
   let p = Point(x: 3, y: 4)
   let translated = rust_point_translate(p, 10, -1)
   echo "translate: ", translated.x, ",", translated.y, " (expected 13,3 -- nlvm's small-struct-return ABI is a known-incomplete TODO)"
+
+block byValueInputPointerOutputWorkaround:
+  ## The practical mitigation for the known-broken block above: keep
+  ## `p` passed in by value (only the *return* ABI is the known-broken
+  ## half), and take the result through an output pointer instead of a
+  ## return value. Isolates whether by-value struct *input* is actually
+  ## fine on nlvm, independent of the broken by-value *return* path.
+  let p = Point(x: 3, y: 4)
+  var translated: Point
+  rust_point_translate_via_pointer(p, 10, -1, addr translated)
+  echo "translate_via_pointer: ", translated.x, ",", translated.y
+  doAssert translated.x == 13 and translated.y == 3,
+    "by-value-input/pointer-output Point translate drifted from the committed reference value"
 
 block pointerMutateInPlace:
   var p = Point(x: 3, y: 4)

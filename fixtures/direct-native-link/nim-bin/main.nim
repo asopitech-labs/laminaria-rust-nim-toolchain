@@ -33,6 +33,7 @@ type Point {.bycopy.} = object
   x, y: cint
 
 proc rust_point_translate(p: Point, dx, dy: cint): Point {.importc: "rust_point_translate", cdecl.}
+proc rust_point_translate_via_pointer(p: Point, dx, dy: cint, outP: ptr Point) {.importc: "rust_point_translate_via_pointer", cdecl.}
 proc rust_point_scale_in_place(p: ptr Point, factor: cint) {.importc: "rust_point_scale_in_place", cdecl.}
 proc rust_point_layout_probe(outSize, outAlign, outOffsetX, outOffsetY: ptr cint) {.importc: "rust_point_layout_probe", cdecl.}
 
@@ -61,6 +62,20 @@ block byValueRoundTrip:
   echo "translate: ", translated.x, ",", translated.y
   doAssert translated.x == 13 and translated.y == 3,
     "by-value Point round-trip drifted from the committed reference value"
+
+block byValueInputPointerOutputWorkaround:
+  ## Same call, output via pointer instead of return value -- see
+  ## ../nlvm-experiment/main.nim for why this variant exists: nlvm's
+  ## small-struct-return ABI is a known-incomplete TODO there, so this
+  ## input-by-value/output-by-pointer split is the practical
+  ## workaround. Included here on the nim c route too, for direct
+  ## comparison -- expected to pass here exactly like the block above.
+  let p = Point(x: 3, y: 4)
+  var translated: Point
+  rust_point_translate_via_pointer(p, 10, -1, addr translated)
+  echo "translate_via_pointer: ", translated.x, ",", translated.y
+  doAssert translated.x == 13 and translated.y == 3,
+    "by-value-input/pointer-output Point translate drifted from the committed reference value"
 
 block pointerMutateInPlace:
   var p = Point(x: 3, y: 4)

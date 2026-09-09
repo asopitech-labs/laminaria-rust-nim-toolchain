@@ -54,6 +54,30 @@ pub extern "C" fn rust_point_translate(p: Point, dx: i32, dy: i32) -> Point {
     }
 }
 
+/// Same computation as `rust_point_translate`, but writes the result
+/// through an output pointer instead of returning it by value. Exists
+/// to isolate which half of a by-value round trip an ABI implementation
+/// gets wrong: the *input* argument (`p` is still passed by value here)
+/// or the *return* value (nlvm's own compiler warns its small-struct
+/// *return* ABI is an incomplete TODO — see `../NOTES.md` — this
+/// function's input-by-value/output-by-pointer split is the practical
+/// workaround: avoid returning an aggregate by value, keep passing one
+/// in by value).
+///
+/// # Safety
+///
+/// `out` must point to a valid, aligned, writable `Point`.
+#[no_mangle]
+pub unsafe extern "C" fn rust_point_translate_via_pointer(
+    p: Point,
+    dx: i32,
+    dy: i32,
+    out: *mut Point,
+) {
+    (*out).x = p.x + dx;
+    (*out).y = p.y + dy;
+}
+
 /// Mutates a Nim-allocated `Point` in place through a raw pointer.
 ///
 /// # Safety
@@ -191,6 +215,14 @@ mod tests {
     fn point_translate_known_value() {
         let p = Point { x: 3, y: 4 };
         assert_eq!(rust_point_translate(p, 10, -1), Point { x: 13, y: 3 });
+    }
+
+    #[test]
+    fn point_translate_via_pointer_known_value() {
+        let p = Point { x: 3, y: 4 };
+        let mut out = Point { x: 0, y: 0 };
+        unsafe { rust_point_translate_via_pointer(p, 10, -1, &mut out) };
+        assert_eq!(out, Point { x: 13, y: 3 });
     }
 
     #[test]
