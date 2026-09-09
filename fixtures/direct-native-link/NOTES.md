@@ -622,17 +622,39 @@ $ nm main | grep -E 'rust_transform|rust_point'
 And the no-C-generated claim holds for this experiment too — same
 single-`.o`-file cache contents as the `hello.nim` smoke test above.
 
+### The seq/Vec/GC_ref findings port cleanly to the nlvm route — verified, not assumed
+
+The hypothesis above ("expected to work, since they never pass a struct
+by value") was checked directly rather than left as a plausible guess.
+Every `seq`/`Vec` pointer-resolution, growth-observation, deallocation-
+danger, and `GC_ref` block from `nim-bin/main.nim` was ported verbatim
+into `nlvm-experiment/main.nim` and run for real (CI `34322068161`):
+
+```
+nim seq -> rust sum: 150
+nim seq after rust double_in_place: @[20, 40, 60, 80, 100]
+nim seq buffer address before growth=140506370580552 after growth=140506370588744 changed=true
+rust vec buffer address before growth=112616112 after growth=112616112 len_after=1010 changed=false
+freed seq buffer address=140506370580552 new seq buffer address=140506370580552 reused=true
+GC_ref-pinned SeqBox.data buffer address=140506370580616 new seq buffer address=140506370580584 reused=false
+data read back through the GC_ref-pinned pointer, after its variable's scope ended: 111,222,333,444,555
+```
+
+Every value matches the `nim c` route exactly: correct sum, correct
+in-place mutation, correct post-`GC_ref` data readback, and the same
+platform-dependent (not route-dependent) growth/reuse-address variance
+already established above. **This confirms the general rule cleanly**:
+nlvm's ABI gap is specific to by-value aggregate passing; anything
+expressed as scalars and pointers — including `GC_ref`'s `ref object`
+pinning mechanism itself — carries over identically to the C-free route
+with no adaptation needed.
+
 ### Not yet attempted
 
-Whether `GC_ref`/`GC_unref` behave identically under `nlvm` (its own
-bundled Nim frontend may not be byte-identical to this project's pinned
-Nim 2.2.10); the `seq`/`Vec` pointer-resolution and growth/deallocation
-experiments (§ above) ported to the `nlvm` route — expected to work,
-per the pattern above, since they never pass a struct by value, but not
-yet verified; and the `nlvm`-via-Docker path on this dev machine's own
-architecture (arm64 macOS), set aside in favor of CI's already-working
-Linux path rather than fixing this machine's broken local Colima/Lima
-install (a known, separate, pre-existing environment issue — see
-`toolchains.lock.toml` history). Reporting this finding upstream to
-`nlvm`'s own issue tracker is a reasonable next step but was not done
-in this session — a decision for whoever owns that relationship.
+The `nlvm`-via-Docker path on this dev machine's own architecture (arm64
+macOS), set aside in favor of CI's already-working Linux path rather
+than fixing this machine's broken local Colima/Lima install (a known,
+separate, pre-existing environment issue — see `toolchains.lock.toml`
+history). Reporting the by-value-struct ABI finding upstream to `nlvm`'s
+own issue tracker is a reasonable next step but was not done in this
+session — a decision for whoever owns that relationship.
