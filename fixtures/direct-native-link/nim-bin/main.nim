@@ -69,13 +69,16 @@ block pointerMutateInPlace:
   doAssert p.x == 15 and p.y == 20,
     "pointer-to-Point mutation drifted from the committed reference value"
 
-# --- Issue #4 focal question: pointer resolution into *GC-managed*
-# memory, both directions. Every earlier fixture in this repo that
-# crosses array data (`mixed-rust-nim-executable`) has Rust own a
-# plain `Vec` and merely lend Nim a pointer into it — never the harder
-# direction of a pointer into memory a GC actually manages and can move.
-# See ../NOTES.md for the full discussion of both directions and their
-# results.
+# --- Issue #4 focal question: pointer resolution into a growable,
+# reference-counted buffer, both directions. Every earlier fixture in
+# this repo that crosses array data (`mixed-rust-nim-executable`) has
+# Rust own a plain `Vec` and merely lend Nim a pointer into it — never
+# the harder direction of a pointer into memory Nim's own ORC reference
+# counting owns and can grow or free. (Not "a GC can move" — ORC never
+# relocates seq/string buffers; growth and last-reference-drop
+# deallocation are the two things that actually change an address, and
+# this file tests both separately below.) See ../NOTES.md for the full
+# discussion of both directions and their results.
 
 proc rust_sum_via_pointer(data: ptr cint, len: cint): clong {.importc: "rust_sum_via_pointer", cdecl.}
 proc rust_double_in_place(data: ptr cint, len: cint) {.importc: "rust_double_in_place", cdecl.}
@@ -143,3 +146,40 @@ block rustVecGrowthAddressObservation:
   echo "rust vec buffer address before growth=", addrBefore, " after growth=", addrAfter,
     " len_after=", lenAfter, " changed=", addrBefore != addrAfter, " (allocator-dependent; both outcomes are valid)"
   doAssert lenAfter == 1010, "rust_vec_growth_probe's reported post-growth length drifted"
+
+# --- The question the two blocks above sidestep entirely: neither one
+# ever let the Nim seq's *last reference* actually go away while a
+# pointer into its buffer was conceptually "held" by the other side.
+# Growth-triggered reallocation is an allocator phenomenon, unrelated to
+# Nim's ORC reference counting. ORC's actual GC-ness -- deciding *when*
+# to free a buffer -- was never exercised until this block. Unlike a
+# tracing/stop-the-world collector, ORC frees deterministically at the
+# point the last reference's scope ends (same mental model as Rust's own
+# `Drop`), so this is fully reproducible, not a rare GC-pause race.
+
+block nimSeqLastReferenceDropDanger:
+  ## Deliberately safe demonstration of the real danger: capture a
+  ## `seq` buffer's address, let its one and only reference go out of
+  ## scope (ORC's injected destructor frees the buffer synchronously,
+  ## right here, not "eventually"), then allocate a fresh seq and check
+  ## whether the new allocation reused that exact address. This never
+  ## dereferences the freed address -- only compares it as a plain
+  ## integer -- so address reuse is observed without committing the
+  ## use-after-free it's evidence for.
+  var freedAddr: int
+  block innerScope:
+    var doomed: seq[cint] = @[1.cint, 2, 3, 4, 5]
+    freedAddr = cast[int](addr doomed[0])
+    # `doomed` goes out of scope here. It has exactly one reference
+    # (never copied/aliased), so ORC's refcount hits zero and its
+    # `=destroy` runs synchronously at this point -- deterministic,
+    # like Rust dropping a `Vec` at end of scope, not a GC pause that
+    # might happen at some later, unpredictable time.
+
+  var fresh: seq[cint] = @[9.cint, 9, 9, 9, 9]
+  let freshAddr = cast[int](addr fresh[0])
+  echo "freed seq buffer address=", freedAddr, " new seq buffer address=", freshAddr,
+    " reused=", freedAddr == freshAddr, " (suggestive of reuse-after-free risk; never dereferenced)"
+  echo "if Rust had captured and kept using a pointer from the freed seq past its scope, " &
+    "this would be a real use-after-free -- distinct from, and more dangerous than, the " &
+    "growth-reallocation caveat above, and not exercised by any earlier block in this file"

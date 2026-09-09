@@ -149,7 +149,7 @@ and not claimed working — passing an array via pointer (as
 `mixed-rust-nim-executable` already does) remains the recommended
 pattern until a dedicated experiment does that comparison properly.
 
-## Focal question: does a pointer into GC-managed memory resolve, both directions?
+## Focal question: does a pointer into a growable/reference-counted buffer resolve, both directions?
 
 Raised explicitly as the priority question after the struct-by-value
 results above: by-value passing of scalars and fixed-layout structs is
@@ -157,15 +157,30 @@ now treated as settled for this fixture's scope. The sharper, more
 consequential question is narrower and different in kind — **not**
 "can a `seq`/`Vec` itself cross the boundary as a value" (still no —
 see below), but "if one side hands the other a raw pointer *into* its
-own GC-managed/growable buffer, does that pointer resolve and work
-correctly, in both directions, and what exactly can go wrong?"
+own growable buffer, does that pointer resolve and work correctly, in
+both directions, and what exactly can go wrong?"
 
-This matters because it's the realistic pattern: neither side needs to
-understand the other's container type (`seq`'s ORC header, `Vec`'s
-capacity/allocator state) — only a plain pointer + length, which is
-exactly Layer 1/2's proven vocabulary. The question is purely whether
-handing out a pointer into memory a *garbage collector or allocator can
-move* is safe, and under what constraint.
+**Correction on "GC-managed" wording**: earlier drafts of this section
+called this "a pointer into memory a garbage collector can move." That
+framing is imprecise and worth correcting explicitly, not quietly.
+Nim's `mm:orc` (confirmed active for every build in this fixture — see
+the `Hint: mm: orc` line in the evidence below) is **not** a
+tracing/stop-the-world/relocating collector for `seq`/`string` payload
+buffers at all — Nim has never had one; pointer stability into
+seq/string data has always been a language design goal. ORC is
+deterministic reference counting, the same mental model as Rust's own
+ownership/`Drop`: a buffer's address changes only for two distinct,
+unrelated reasons, and this fixture now tests both separately:
+
+1. **Explicit growth** (`setLen`/`add`/`Vec::extend`/`reserve`) is a
+   plain allocator reallocation, nothing to do with reference counting
+   or collection — tested in the growth-observation blocks below, and
+   identical in kind to what `Vec`'s allocator does.
+2. **Last-reference-drop deallocation** — ORC's actual "GC-ness":
+   freeing a buffer synchronously the moment its reference count hits
+   zero (scope exit, in the common case, exactly like Rust dropping a
+   `Vec`). This is the one none of the experiments above exercised, and
+   is the sharper, more dangerous question — see below.
 
 ### Direction A: Nim owns the `seq`, Rust gets a pointer into it
 
@@ -235,17 +250,63 @@ just theoretically could") was itself an overclaim corrected by this
 run — left here, struck through in spirit, as its own small case study
 in verifying evidence rather than trusting a single platform's run.
 
-**Conclusion for this focal question**: pointer resolution into
-GC-managed/growable memory works, symmetrically, in both directions, for
-the duration of one FFI call — but nothing about *whether the address
-visibly changes* on any given reallocation is part of the contract a
-caller can build on. A future direct-native-link design that wants to
-hold such a pointer across multiple calls — rather than re-deriving it
-fresh each time, as every experiment here does — needs an explicit
-contract for that (e.g. pinning the buffer, or the growable side
-notifying the other of reallocation) that does not yet exist and was not
-attempted; it cannot lean on "we didn't observe the address move" as
-evidence of safety.
+**Conclusion for the growth caveat**: pointer resolution into growable
+memory works, symmetrically, in both directions, for the duration of one
+FFI call — but nothing about *whether the address visibly changes* on
+any given reallocation is part of the contract a caller can build on.
+
+### The sharper question: last-reference-drop deallocation (ORC's actual GC-ness)
+
+Both blocks above share a property that understates the real risk:
+neither ever let the Nim `seq`'s one and only reference actually go
+away while a pointer into its buffer was conceptually "held" elsewhere.
+Growth is an allocator phenomenon; **freeing a buffer because its last
+reference's scope ended is ORC's actual job**, and it was never
+exercised until this block:
+
+```
+$ ./build.sh
+...
+freed seq buffer address=4374057032 new seq buffer address=4374057032 reused=true (suggestive of reuse-after-free risk; never dereferenced)
+if Rust had captured and kept using a pointer from the freed seq past its scope, this would be a real use-after-free -- distinct from, and more dangerous than, the growth-reallocation caveat above, and not exercised by any earlier block in this file
+```
+
+`nimSeqLastReferenceDropDanger`: allocate a `seq` inside an inner
+`block`, capture `addr doomed[0]` as a plain integer, let `doomed` go
+out of scope (its single reference drops to zero, so ORC's injected
+`=destroy` frees the buffer **synchronously, right there** — not at
+some unpredictable later GC pause, since ORC is deterministic reference
+counting, not a tracing collector), then allocate a fresh, unrelated
+`seq` immediately after and compare its address to the freed one. Never
+dereferences the freed address — only compares it as a plain integer —
+so the finding is observed without committing the use-after-free it's
+evidence for.
+
+**Result: the freed address was reused by the very next allocation, on
+every one of several repeated runs on this platform (macOS/arm64,
+`aarch64-apple-darwin`).** This is a stark, concrete way to see the real
+danger: if Rust had captured a pointer from that `seq` and kept using it
+past the point where Nim's last reference dropped, it would not merely
+risk crashing — it would silently read and write into what is now a
+**completely different, unrelated Nim object's live memory**. That's a
+worse failure mode than a crash: silent data corruption in an object
+that has nothing to do with the one the pointer was originally taken
+from.
+
+**This is the real headline finding for this focal question**, sharper
+than the growth caveat: pointer resolution into Nim-owned memory is only
+safe for as long as the Nim side guarantees the owning reference stays
+alive. Nothing in any experiment in this fixture establishes such a
+guarantee across an FFI call boundary — every access here re-derives its
+pointer immediately before use, inside the same scope that owns the
+`seq`, and never holds one past a call where the other side could run
+code. A future direct-native-link design that wants to hand out a
+pointer whose validity outlives one call needs an explicit ownership/
+lifetime contract (e.g. Nim promising not to drop the reference, or an
+explicit "pin" operation, or the boundary requiring reference-counted
+ownership on both sides) — none of which exists yet, and this
+experiment is exactly why it can't be skipped: the danger is not
+hypothetical, it's directly observable with a two-line reproduction.
 
 ## Explicitly not attempted, and why (Layer 3/4 scope)
 
@@ -291,16 +352,19 @@ assumed away.
 
 Per `docs/rust-nim-native-linking.md`'s non-goals: this fixture does not
 claim arbitrary Rust/Nim value layouts are compatible, does not invent a
-new ABI, and does not test runtime/failure semantics beyond the single
-growth-invalidation caveat above (Nim's ARC/ORC GC is exercised only as
-the owner of a buffer a pointer is taken from — nothing here triggers
-Nim's cycle collector, exception handling, or any GC-managed value
-actually crossing into Rust as a value). What's proven is Layer 1
-(scalar), a first slice of Layer 3 (one fixed-layout struct, by value
-and by pointer, cross-checked for layout agreement), and a first slice
-of the Layer 3/4 boundary (pointer resolution into GC-managed memory,
-both directions, plus its reallocation caveat) — not the full
-compatibility matrix, and not the rest of Layer 4-6. Issue #4's own
-research is expected to extend this with more type classes and the
-remaining runtime/failure/optimization layers
-`docs/rust-nim-native-linking.md` describes.
+new ABI, and does not test runtime/failure semantics beyond the two
+pointer-validity caveats above (growth-triggered reallocation, and
+last-reference-drop deallocation — ORC's reference counting is
+exercised as the owner of a buffer a pointer is taken from and freed
+from, but nothing here triggers Nim's cycle collector — a `seq[cint]` of
+scalars can never form a reference cycle — Nim exception handling, or
+any `seq`/`string`/closure *value itself* crossing into Rust). What's
+proven is Layer 1 (scalar), a first slice of Layer 3 (one fixed-layout
+struct, by value and by pointer, cross-checked for layout agreement),
+and a first slice of the Layer 3/4 boundary (pointer resolution into a
+growable, reference-counted buffer, both directions, plus its two
+validity caveats — reallocation and deallocation) — not the full
+compatibility matrix, and not the rest of Layer 4-6 (thread/TLS
+obligations, exceptions, WASM). Issue #4's own research is expected to
+extend this with more type classes and the remaining runtime/failure/
+optimization layers `docs/rust-nim-native-linking.md` describes.

@@ -86,12 +86,14 @@ pub unsafe extern "C" fn rust_point_layout_probe(
 }
 
 // --- Issue #4 Layer 3/4 focal question: can Rust resolve a pointer
-// obtained from *Nim-owned, GC-managed* memory (a `seq`'s buffer), not
-// only from Rust-owned memory Nim was merely lent a pointer into
-// (`mixed-rust-nim-executable`'s pattern)? See `NOTES.md` for the full
-// discussion — this is the harder direction, and where a validity
-// caveat (pointer stability across Nim-side reallocation) actually
-// matters.
+// obtained from *Nim-owned* memory (a `seq`'s buffer, reference-counted
+// by ORC), not only from Rust-owned memory Nim was merely lent a
+// pointer into (`mixed-rust-nim-executable`'s pattern)? See `NOTES.md`
+// for the full discussion — this is the harder direction, and where two
+// distinct validity caveats actually matter: reallocation on growth,
+// and deallocation when Nim's last reference to the buffer goes away
+// (ORC's actual GC-ness; it never relocates a live seq's buffer on its
+// own).
 
 /// Reads through a pointer into memory Rust does not own (may be a
 /// Nim `seq`'s buffer) and sums it. Read-only: proves resolution alone,
