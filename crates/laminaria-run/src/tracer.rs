@@ -370,6 +370,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn traces_a_successful_command_with_resource_usage() {
         let clock = RunClock::start();
         let (stdout_path, stderr_path) = tmp_paths("success");
@@ -418,6 +419,34 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(unix))]
+    fn non_unix_trace_root_command_falls_back_to_portable_lifecycle_tracing() {
+        // The counterpart to traces_a_successful_command_with_resource_usage
+        // (that test's #[cfg(unix)] twin): on this platform, the Level 1
+        // entry point (trace_root_command) must not fail outright, and must
+        // not fabricate resource usage it can't actually measure -- it
+        // should look exactly like a Level 0 record, with the fallback-
+        // specific coverage_note distinguishing it from a deliberate Level 0
+        // Run (see NON_UNIX_LEVEL1_FALLBACK_NOTE's own doc comment).
+        let clock = RunClock::start();
+        let (stdout_path, stderr_path) = tmp_paths("non-unix-fallback");
+        let root = RootCommand {
+            program: "sh".to_string(),
+            args: vec!["-c".to_string(), "echo hi; exit 0".to_string()],
+            cwd: None,
+            env_overrides: BTreeMap::new(),
+        };
+        let record = trace_root_command(&clock, &root, &stdout_path, &stderr_path).unwrap();
+
+        assert_eq!(record.probe_level, ProbeLevel::Level0Lifecycle);
+        assert_eq!(record.coverage_note, NON_UNIX_LEVEL1_FALLBACK_NOTE);
+        let status = record.exit_status.as_ref().unwrap();
+        assert!(status.success);
+        assert!(record.resource_usage.user_cpu_seconds.is_none());
+        assert!(!record.resource_usage.unsupported_fields.is_empty());
+    }
+
+    #[test]
     fn level0_traces_a_failing_command_without_losing_evidence() {
         let clock = RunClock::start();
         let (stdout_path, stderr_path) = tmp_paths("level0-failure");
@@ -439,6 +468,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn traces_a_failing_command_without_losing_evidence() {
         let clock = RunClock::start();
         let (stdout_path, stderr_path) = tmp_paths("failure");
@@ -484,6 +514,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn resource_usage_aggregates_a_grandchild_process_cumulatively() {
         // Same claim this module's doc comment makes, exercised through
         // the real trace_root_command path rather than the standalone C
