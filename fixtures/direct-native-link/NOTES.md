@@ -859,6 +859,43 @@ specific to multi-field aggregates, not to "by-value" as such. A bare
 discriminant enum, passed and returned by value, is route-independent —
 no pointer-wrapping workaround needed for this type class.
 
+### Opaque handles: the pattern real FFI code actually uses — round-trips correctly on both routes
+
+Every by-value `Point` finding above raises a fair question: is the fix
+here really "wait for tooling to auto-wrap by-value aggregates," or is
+there already a working pattern for non-trivial cross-language types
+today, by hand? There is: the opaque-handle pattern real hand-written FFI
+code uses for anything beyond a plain scalar. `Counter` (`rust-lib`)
+deliberately contains a heap-owning `String` field alongside a plain
+`i64`, specifically so this isn't just "a `Point` Nim can't see inside
+of" — Nim structurally cannot construct, copy, or corrupt this type even
+by accident, because it never receives anything but an opaque `pointer`
+from `rust_counter_new`, passed back unmodified to
+`rust_counter_increment`/`rust_counter_get`/`rust_counter_label_len`/
+`rust_counter_free`.
+
+Checked directly, full lifecycle (create → read value and heap-owned
+label length → mutate twice, including a negative delta → free), on both
+routes:
+
+- `nim c` (local `./build.sh`): `counter_new(10) -> value=10 label_len=10`,
+  `after increment(5) -> value=15`, `after increment(-20) -> value=-5`,
+  `counter handle freed` — correct throughout.
+- `nlvm` (CI `34332274719`, job `nlvm-experiment`): identical output —
+  `counter_new(10) -> value=10 label_len=10`, `after increment(5) ->
+  value=15`, `after increment(-20) -> value=-5`, `counter handle freed`.
+
+**Route-independent, same as the enum finding above, and for the same
+underlying reason**: nothing here crosses the boundary as an aggregate by
+value — only a scalar (`clong`/`cint`) and an opaque `pointer` ever cross,
+and `nlvm`'s ABI gap is specific to by-value aggregates, not to pointers
+or scalars regardless of what they point at. This is the concrete answer
+to "is there a working pattern today": yes — for anything beyond a plain
+scalar or a pointer into caller-owned memory, expose an opaque handle
+with an explicit create/use/free lifecycle, exactly as this experiment
+does, rather than waiting on the tooling-level auto-wrapping idea
+mentioned above.
+
 ### Not yet attempted
 
 The `nlvm`-via-Docker path on this dev machine's own architecture (arm64
