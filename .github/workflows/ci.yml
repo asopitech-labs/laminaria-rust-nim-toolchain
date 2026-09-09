@@ -222,6 +222,7 @@ jobs:
           echo "LLVM_LINK_BIN=$(command -v llvm-link-22)" >> "$GITHUB_ENV"
           echo "OPT_BIN=$(command -v opt-22)" >> "$GITHUB_ENV"
           echo "LLVM_DIS_BIN=$(command -v llvm-dis-22)" >> "$GITHUB_ENV"
+          echo "LLC_BIN=$(command -v llc-22)" >> "$GITHUB_ENV"
 
       - name: Build rust-nim-llvm-lto-compatibility fixture
         run: |

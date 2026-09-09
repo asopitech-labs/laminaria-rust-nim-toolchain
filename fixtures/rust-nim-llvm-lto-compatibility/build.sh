@@ -16,8 +16,9 @@ cd "$(dirname "$0")"
 : "${LLVM_LINK_BIN:?LLVM_LINK_BIN must point at a matching-version llvm-link}"
 : "${OPT_BIN:?OPT_BIN must point at a matching-version opt}"
 : "${LLVM_DIS_BIN:?LLVM_DIS_BIN must point at a matching-version llvm-dis}"
+: "${LLC_BIN:?LLC_BIN must point at a matching-version llc}"
 
-rm -f rust-src/rust.ll nim-src/main.ll merged.bc merged-opt.bc merged-opt.ll
+rm -f rust-src/rust.ll nim-src/main.ll merged.bc merged-opt.bc merged-opt.ll merged-opt.o merged-native
 
 echo "--- rustc: emit LLVM IR (no native codegen) ---"
 rustc --crate-type=staticlib --emit=llvm-ir -O -o rust-src/rust.ll rust-src/lib.rs
@@ -43,3 +44,12 @@ echo "--- opt: run LLVM's own optimizer on the merged module ---"
 echo "--- llvm-dis: inspect the result ---"
 "$LLVM_DIS_BIN" merged-opt.bc -o merged-opt.ll
 cat merged-opt.ll
+
+echo "--- llc: compile the merged+optimized module to a native object ---"
+"$LLC_BIN" -filetype=obj merged-opt.bc -o merged-opt.o
+
+echo "--- cc: link the native object into an executable (system driver, standard crt/libs) ---"
+cc merged-opt.o -o merged-native -lpthread
+
+echo "--- run the fully-merged, natively-compiled binary ---"
+./merged-native
