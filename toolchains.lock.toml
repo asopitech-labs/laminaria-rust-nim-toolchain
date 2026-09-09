@@ -27,11 +27,20 @@ components = ["rustc", "cargo", "rust-std"]
 
 # --- Nim ----------------------------------------------------------------
 #
-# Nim 2 and Nimony/Nim 3 are meant to share this same named-toolchain
-# abstraction. Only one Nim install can currently be resolved (there is no
-# `rustup`-equivalent multi-Nim switcher wired into `doctor` yet), so for now
-# this names whatever `nim`/`nimble` are active on PATH; `doctor` flags a
-# selector/resolved-version mismatch explicitly rather than hiding it.
+# Nim 2 and Nimony/Nim 3 share this same named-toolchain abstraction. Set
+# `bin_dir` to the directory holding that toolchain's `nim`/`nimble`
+# executables (e.g. a `choosenim` toolchain dir, or a manually extracted
+# Nim/Nimony build) to pin and independently resolve an exact toolchain —
+# this is what lets multiple Nim toolchains coexist, the same job `rustup`
+# does for Rust:
+#
+#   [nim.toolchains.nimony_a]
+#   selector = "<exact source revision>"
+#   bin_dir = "/opt/nimony/<revision>/bin"
+#
+# Without `bin_dir`, the entry names whatever `nim`/`nimble` are active on
+# PATH; `doctor` flags a selector/resolved-version mismatch explicitly
+# rather than hiding it.
 
 [nim.toolchains.system_nim2]
 selector = "2.2"

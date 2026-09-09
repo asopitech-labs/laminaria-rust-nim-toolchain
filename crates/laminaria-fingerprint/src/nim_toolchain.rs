@@ -1,10 +1,14 @@
 //! Resolves each named Nim toolchain in `toolchains.lock.toml` to an exact
-//! `NimToolchainFingerprint`. Nim 2 and Nimony/Nim 3 are meant to share this
-//! same abstraction (`docs/multi-version-toolchains.md` section 2), but this
-//! first pass only resolves whatever `nim`/`nimble` are active on PATH —
-//! there is no `rustup`-equivalent multi-Nim switcher wired in yet, so a
-//! mismatch between the requested selector and the resolved version is
-//! surfaced as a note rather than silently ignored.
+//! `NimToolchainFingerprint`. Nim 2 and Nimony/Nim 3 share this same
+//! abstraction (`docs/multi-version-toolchains.md` section 2): when a lock
+//! entry sets `bin_dir`, that toolchain is resolved from an explicit
+//! directory rather than from `PATH`, which is what lets multiple exact Nim
+//! installs coexist and be independently selected — the same job `rustup`
+//! does for Rust. Without `bin_dir`, this falls back to whatever
+//! `nim`/`nimble` are active on `PATH`, and a selector/resolved-version
+//! mismatch is surfaced as a note rather than silently ignored.
+
+use std::path::{Path, PathBuf};
 
 use crate::exec::{extract_version_like, first_line, run, sha256_file, which};
 use crate::lock::NimToolchainSelector;
@@ -15,13 +19,27 @@ pub const ADAPTER_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub fn resolve(logical_name: &str, selector: &NimToolchainSelector) -> NimToolchainFingerprint {
     let mut notes = Vec::new();
 
-    let nim_path = which("nim");
-    let nimble_path = which("nimble");
-    let version_output = run("nim", &["--version"]);
-    let nimble_version_output = run("nimble", &["--version"]);
+    let (nim_path, nimble_path) = match &selector.bin_dir {
+        Some(dir) => resolve_from_bin_dir(dir, &mut notes),
+        None => (which("nim"), which("nimble")),
+    };
+
+    let version_output = nim_path
+        .as_deref()
+        .and_then(|p| run_path(p, &["--version"]));
+    let nimble_version_output = nimble_path
+        .as_deref()
+        .and_then(|p| run_path(p, &["--version"]));
 
     if nim_path.is_none() {
-        notes.push("nim not found on PATH".to_string());
+        notes.push(format!(
+            "nim not found ({})",
+            selector
+                .bin_dir
+                .as_ref()
+                .map(|d| format!("looked in {}", d.display()))
+                .unwrap_or_else(|| "not on PATH".to_string())
+        ));
     }
 
     let (resolved_version, target_os, target_cpu) = version_output
@@ -29,15 +47,18 @@ pub fn resolve(logical_name: &str, selector: &NimToolchainSelector) -> NimToolch
         .map(parse_nim_version_line)
         .unwrap_or((None, None, None));
 
-    if let Some(resolved) = &resolved_version {
-        if !selector.selector.is_empty()
-            && !resolved.starts_with(selector_prefix(&selector.selector))
-        {
-            notes.push(format!(
-                "requested selector '{}' does not match resolved active Nim version '{}'; \
-                 this crate does not yet manage multiple side-by-side Nim installs",
-                selector.selector, resolved
-            ));
+    if selector.bin_dir.is_none() {
+        if let Some(resolved) = &resolved_version {
+            if !selector.selector.is_empty()
+                && !resolved.starts_with(selector_prefix(&selector.selector))
+            {
+                notes.push(format!(
+                    "requested selector '{}' does not match resolved active Nim version '{}'; \
+                     set bin_dir on this lock entry to pin an exact, independently-resolved \
+                     toolchain instead of relying on PATH",
+                    selector.selector, resolved
+                ));
+            }
         }
     }
 
@@ -67,6 +88,26 @@ pub fn resolve(logical_name: &str, selector: &NimToolchainSelector) -> NimToolch
         adapter_version: ADAPTER_VERSION,
         resolution_notes: notes,
     }
+}
+
+fn resolve_from_bin_dir(dir: &Path, notes: &mut Vec<String>) -> (Option<PathBuf>, Option<PathBuf>) {
+    let nim = dir.join("nim");
+    let nimble = dir.join("nimble");
+    let nim = if nim.is_file() {
+        Some(nim)
+    } else {
+        notes.push(format!("expected nim executable at {}", nim.display()));
+        None
+    };
+    let nimble = if nimble.is_file() { Some(nimble) } else { None };
+    (nim, nimble)
+}
+
+/// Like `exec::run`, but takes an already-resolved executable path instead
+/// of a `PATH`-searched command name, so a `bin_dir`-pinned toolchain is
+/// actually invoked rather than whatever happens to be on `PATH`.
+fn run_path(path: &Path, args: &[&str]) -> Option<String> {
+    run(&path.to_string_lossy(), args)
 }
 
 /// `stable`/`latest`-style selectors have no numeric prefix to compare
@@ -115,5 +156,17 @@ mod tests {
     fn non_numeric_selector_never_triggers_a_mismatch_note() {
         assert_eq!(selector_prefix("stable"), "");
         assert_eq!(selector_prefix("latest"), "");
+    }
+
+    #[test]
+    fn resolve_from_bin_dir_reports_a_note_when_nim_is_absent() {
+        let dir = std::env::temp_dir().join("laminaria-nim-toolchain-test-empty-dir");
+        let _ = std::fs::create_dir_all(&dir);
+        let mut notes = Vec::new();
+        let (nim, nimble) = resolve_from_bin_dir(&dir, &mut notes);
+        assert!(nim.is_none());
+        assert!(nimble.is_none());
+        assert_eq!(notes.len(), 1);
+        let _ = std::fs::remove_dir(&dir);
     }
 }

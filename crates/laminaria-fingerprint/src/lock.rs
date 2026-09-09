@@ -3,7 +3,7 @@
 //! *requested selectors*; doctor resolves each one to an exact fingerprint.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -40,6 +40,16 @@ pub struct NimLockSection {
 #[derive(Debug, Clone, Deserialize)]
 pub struct NimToolchainSelector {
     pub selector: String,
+    /// Optional explicit directory holding this toolchain's `nim`/`nimble`
+    /// executables (e.g. a `choosenim` toolchain dir, or a manually
+    /// extracted Nim/Nimony build). When set, doctor resolves this named
+    /// toolchain from that directory instead of whatever is active on
+    /// `PATH`, which is what lets multiple exact Nim toolchains coexist
+    /// and be independently selected rather than only ever reporting the
+    /// one Nim install that happens to be on `PATH`
+    /// (`docs/multi-version-toolchains.md` section 2).
+    #[serde(default)]
+    pub bin_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
