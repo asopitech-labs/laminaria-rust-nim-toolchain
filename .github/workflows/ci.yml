@@ -291,6 +291,16 @@ jobs:
           ./main
 
       # Cross-route confirmation of the callback-boundary experiment.
+      # Route-DIVERGENT, verified directly rather than assumed to match
+      # nim c: nlvm implements Nim's exceptions with real LLVM-level
+      # stack unwinding (a `personality` function on generated
+      # functions -- visible in rust-nim-llvm-lto-compatibility's own
+      # merged IR), unlike nim c's default --exceptions:goto, which
+      # never unwinds at all. A Nim exception crossing back through the
+      # Rust extern "C" stack frame therefore hits nlvm's real unwinder,
+      # which hits the same "cannot unwind past extern C" protection
+      # that made rust_panics abort earlier -- so nlvm reports SIGABRT
+      # (134) here where nim c cleanly exits 1. See NOTES.md.
       - name: Build and run the callback-boundary experiment via nlvm
         run: |
           rm -rf ~/.cache/nim/main_d
@@ -300,10 +310,10 @@ jobs:
           ./main
           STATUS=$?
           set -e
-          if [ "$STATUS" -eq 1 ]; then
-            echo "main exited with status 1 on the nlvm route too -- matches the nim c route"
+          if [ "$STATUS" -eq 134 ]; then
+            echo "main aborted via SIGABRT (134) on the nlvm route -- diverges from nim c's clean exit(1), a real route-dependent finding, not a bug (see NOTES.md)"
           else
-            echo "main exited with unexpected status $STATUS on the nlvm route -- expected 1, investigate"
+            echo "main exited with unexpected status $STATUS on the nlvm route -- expected SIGABRT (134), investigate"
             exit 1
           fi
 

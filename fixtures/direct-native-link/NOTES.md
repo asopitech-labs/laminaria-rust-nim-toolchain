@@ -570,15 +570,15 @@ if..."`) never runs — confirmed reliably across repeated runs, not a
 one-off — and the traceback correctly attributes the exception to
 `nim_raises` at the exact line it was raised.
 
-**Result: this is safe, in the same spirit as the panic finding above**
-— not silent corruption, a clean, deterministic, correctly-attributed
-failure report, on both the `nim c` and `nlvm` routes. The Rust stack
+**Result on `nim c`: safe, in the same spirit as the panic finding
+above** — not silent corruption, a clean, deterministic,
+correctly-attributed failure report (exit code `1`). The Rust stack
 frame in between doesn't need to know anything about Nim's exception
-convention because Nim's goto-based mechanism was never relying on
-stack unwinding through it in the first place; the compiler-inserted
-check simply fires at the next point in *Nim-generated* code that looks
-at the call's result, which in this fixture is immediately after the
-call (assigning `afterRaise`), not delayed.
+convention because `--exceptions:goto` was never relying on stack
+unwinding through it in the first place; the compiler-inserted check
+simply fires at the next point in *Nim-generated* code that looks at
+the call's result, which in this fixture is immediately after the call
+(assigning `afterRaise`), not delayed.
 
 One earlier version of this experiment used `discard
 rust_calls_callback(nim_raises, 21)` instead of capturing the result,
@@ -586,11 +586,57 @@ and that version's post-call `echo` line *did* execute once before the
 error surfaced — the check still fired correctly and the process still
 exited cleanly, but *where* in the following code it fires is
 sensitive to what the generated code around the call site looks like,
-not a single fixed offset from the call itself. Practical implication:
-don't reason about "how many statements after a possibly-raising
-callback call it's safe to assume normal control flow" — the safe
-assumption is that any statement after such a call may not execute
-before the exception is reported, not that a specific one won't.
+not a single fixed offset from the call itself. Practical implication
+for the `nim c` route: don't reason about "how many statements after a
+possibly-raising callback call it's safe to assume normal control
+flow" — the safe assumption is that any statement after such a call may
+not execute before the exception is reported, not that a specific one
+won't.
+
+### `nlvm` diverges here: SIGABRT, not a clean exit — verified, not assumed to match
+
+CI caught this directly (`34330338229`) rather than it being assumed
+identical because the `nim c` route was safe. Same source, same
+scenario, `nlvm` route:
+
+```
+rust_calls_callback(nim_double, 21)=42
+normal callback case completed
+about to call rust_calls_callback(nim_raises, 21) -- observing what happens ...
+Error: unhandled exception: deliberate Nim exception inside a Rust-invoked callback [ValueError]
+No stack traceback available
+SIGABRT: Abnormal termination.
+```
+
+The exception is still correctly recognized and its message correctly
+reported (unlike the growth/deallocation findings elsewhere in this
+document, there's no ambiguity about *what* happened) — but the process
+**aborts** (exit `134`) instead of cleanly exiting `1`, and no
+traceback is available.
+
+**Why, plausibly**: `rust-nim-llvm-lto-compatibility/NOTES.md`'s merged
+IR showed `nlvm`-generated functions carrying
+`personality ptr @nlvmEHPersonality` — `nlvm` implements Nim's
+exceptions with **real LLVM-level stack unwinding** (landing pads, a
+personality routine), unlike `nim c`'s default `--exceptions:goto`,
+which never unwinds the stack at all. An exception trying to actually
+*unwind* back through the Rust `extern "C"` stack frame hits the exact
+same "cannot unwind past a frame the ABI marked non-unwinding"
+protection that made `rust_panics` abort in the panic-boundary
+experiment above — because on this route, it genuinely is an unwind
+attempting to cross that frame, not a deferred flag-check that happens
+to run later in Nim-generated code once safely back on the Nim side.
+
+**This is a real, route-dependent divergence in a safety property, not
+a bug in this fixture** — the two Nim-side routes give different safety
+guarantees for the identical source and identical scenario, precisely
+the kind of thing `docs/multi-version-toolchains.md` and this project's
+own frontend/route identity tracking exist to make visible rather than
+average over. Practical implication: a Nim callback that might raise,
+invoked through a raw Rust function pointer, is a *route-dependent*
+hazard — safe-if-unhandled on `nim c`, an abort on `nlvm` — not
+something that can be reasoned about once and assumed to hold
+regardless of which Nim compiler produced the calling code.
 
 ## Explicitly not attempted, and why (Layer 3/4 scope)
 
@@ -621,14 +667,19 @@ container's own representation never crosses the boundary.
   round-trip results.
 - **Nim exceptions crossing into Rust**: no longer entirely untested —
   see the dedicated Layer 3/4 "reverse direction" section above for the
-  specific case of a Nim callback raising while called from Rust
-  (clean, safe: exit code 1, correctly-attributed traceback). Not
-  covered by that experiment: a Nim exception raised while Rust code
-  deeper on the stack has itself allocated resources needing cleanup
-  (Rust has no Drop-running mechanism triggered by Nim's non-unwinding
-  exception check, so any Rust-side resource acquired before the
-  callback call and only released after it returns normally would leak
-  if the exception causes Nim to never return control past that point).
+  specific case of a Nim callback raising while called from Rust.
+  **Route-dependent**, verified: clean and safe (exit code 1,
+  correctly-attributed message) on `nim c`; a `SIGABRT` abort on
+  `nlvm`, because `nlvm` implements Nim exceptions with real LLVM stack
+  unwinding, which hits the same non-unwindable-`extern "C"`-frame
+  protection Rust's own panics do. Not covered by either experiment: a
+  Nim exception raised while Rust code deeper on the stack has itself
+  allocated resources needing cleanup (Rust has no Drop-running
+  mechanism triggered by Nim's exception check on the `nim c` route,
+  and on the `nlvm` route the abort itself means no cleanup of any
+  kind runs — so any Rust-side resource acquired before the callback
+  call and only released after it returns normally would leak on
+  `nim c`, or simply not matter since the process is ending on `nlvm`).
 - **Holding a resolved pointer across multiple FFI calls**: every
   pointer-resolution experiment above re-derives its pointer immediately
   before use and never holds one across a call boundary where the other
