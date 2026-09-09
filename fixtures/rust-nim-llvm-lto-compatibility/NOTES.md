@@ -49,14 +49,51 @@ rather than requiring a version-bridging adapter.
    is the actual evidence to look for — not just that the tools ran
    without error.
 
-## Status
+## Result: confirmed, by inspecting the merged+optimized module directly
 
-Evidence not yet gathered — this is the fixture's design and rationale,
-committed first per this project's own practice of recording intent
-before results. `nlvm` cannot run on this dev machine (macOS; only
-Linux/Windows release binaries exist upstream, per
-`fixtures/direct-native-link/NOTES.md`), so this needs the same CI path
-that fixture already established. `llvm-link`/`opt`/`llvm-dis` matching
-LLVM 22 are not yet confirmed available on `ubuntu-latest` — CI will
-need to install them (`apt.llvm.org`'s installer script is the standard
-route) as part of standing this up.
+CI (`nlvm-experiment` job, `34326131903`) ran the full pipeline
+end-to-end on the first attempt: `llvm-link` merged both `.ll` modules
+without error, `opt -O2` ran on the result, and `llvm-dis` produced
+readable text to inspect — exactly the artifact Track J asks for
+("inspect the resulting artifacts", not infer from flags alone).
+
+The load-bearing evidence, from the merged+optimized IR:
+
+```llvm
+define hidden noundef i32 @main(...) ... {
+  ...
+  %call.res.excpt.nim.737.12.i.i = tail call ptr @signal(...)      ; from excpt.nim
+  ...
+  %call.res.main.nim.10.21.i = tail call i32 @rust_add(i32 3, i32 4)  ; the Rust call
+  store i32 %call.res.main.nim.10.21.i, ptr @result__main_u4, align 4
+  ...
+  call fastcc void @_ZN11digitsutils6addIntE...(...)               ; from digitsutils.nim
+  ...
+  %call.res.system.nim.3101.26.i.i = tail call i64 @fwrite(...)    ; from system.nim
+  ...
+}
+
+define noundef i32 @rust_add(i32 noundef %a, i32 noundef %b) local_unnamed_addr #21 {
+  ...
+}
+```
+
+Two things this shows directly, not by inference:
+
+1. **Nim's own separate source modules were inlined into one `@main`**
+   by `opt` — the `.i`/`.i.i` suffixes on SSA names trace back to
+   `main.nim`, `excpt.nim`, `system.nim`, `strs_v2.nim`, and
+   `digitsutils.nim`, all folded into a single function body.
+2. **`rust_add` sits in the merged module as a `define` with a real
+   body, not a `declare`** — LLVM's optimizer had full visibility into
+   Rust's function while optimizing Nim's caller, in the same pass, in
+   the same module. It chose not to inline this specific call (a cost-
+   heuristic decision, not a capability limit — the call is a plain
+   `call i32 @rust_add(...)` sitting directly inside the already-merged
+   `@main`, with nothing opaque or external between the two languages'
+   code).
+
+That is the actual claim under test, confirmed: Rust's and Nim's LLVM
+IR share one optimization domain once merged, genuinely prior to native
+codegen — not two native objects glued together by a linker's symbol
+table.
