@@ -62,24 +62,46 @@ pub fn append_event(path: &Path, record: &ProcessRecord) -> std::io::Result<()> 
     file.write_all(line.as_bytes())
 }
 
+/// The result of reading back a wrapper-invocation events file: every
+/// `ProcessRecord` that parsed successfully, plus a count of lines that
+/// didn't (a corrupted partial write, e.g. from a killed process, must not
+/// discard the well-formed lines that parsed fine -- the raw file itself is
+/// left on disk by the caller either way, so a corrupted line is still
+/// recoverable by hand from `unparsed_line_count`'s presence).
+#[derive(Debug, Default)]
+pub struct EventsReadResult {
+    pub records: Vec<ProcessRecord>,
+    pub unparsed_line_count: usize,
+}
+
 /// Reads back every `ProcessRecord` appended to `path` by wrapper
 /// invocations. Missing file (no wrapper ever ran -- e.g. the traced
 /// command wasn't Cargo, or ran no compilation units) is treated as "zero
-/// events", not an error.
-pub fn read_events(path: &Path) -> std::io::Result<Vec<ProcessRecord>> {
+/// events", not an error. A line that fails to parse (partial write, process
+/// killed mid-`write_all`, ...) is counted in `unparsed_line_count` and
+/// skipped -- it does not fail the whole read or discard the other,
+/// well-formed lines.
+pub fn read_events(path: &Path) -> std::io::Result<EventsReadResult> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(EventsReadResult::default())
+        }
         Err(e) => return Err(e),
     };
 
-    text.lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| {
-            serde_json::from_str(line)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
-        })
-        .collect()
+    let mut result = EventsReadResult::default();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        match serde_json::from_str(line) {
+            Ok(record) => result.records.push(record),
+            Err(_) => result.unparsed_line_count += 1,
+        }
+    }
+    Ok(result)
 }
 
 /// Resolves the path to the `laminaria-rustc-wrapper` binary this crate
@@ -136,11 +158,12 @@ mod tests {
         append_event(&path, &sample_record(200)).unwrap();
         append_event(&path, &sample_record(300)).unwrap();
 
-        let events = read_events(&path).unwrap();
-        assert_eq!(events.len(), 3);
-        assert_eq!(events[0].pid, Some(100));
-        assert_eq!(events[1].pid, Some(200));
-        assert_eq!(events[2].pid, Some(300));
+        let result = read_events(&path).unwrap();
+        assert_eq!(result.records.len(), 3);
+        assert_eq!(result.unparsed_line_count, 0);
+        assert_eq!(result.records[0].pid, Some(100));
+        assert_eq!(result.records[1].pid, Some(200));
+        assert_eq!(result.records[2].pid, Some(300));
     }
 
     #[test]
@@ -151,8 +174,40 @@ mod tests {
         ));
         let _ = std::fs::remove_file(&path);
 
-        let events = read_events(&path).unwrap();
-        assert!(events.is_empty());
+        let result = read_events(&path).unwrap();
+        assert!(result.records.is_empty());
+        assert_eq!(result.unparsed_line_count, 0);
+    }
+
+    #[test]
+    fn read_events_keeps_well_formed_lines_when_one_line_is_corrupted() {
+        // A partial write (process killed mid-write_all, filesystem fault)
+        // must not discard evidence that parsed fine -- see lib.rs's
+        // `run_and_record`, which no longer deletes this raw file either.
+        let path = std::env::temp_dir().join(format!(
+            "laminaria-run-cargo-wrapper-test-corrupted-{}.jsonl",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        append_event(&path, &sample_record(100)).unwrap();
+        {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            // A truncated/corrupted JSON line, as a partial write would leave.
+            file.write_all(b"{\"pid\": 200, \"argv\": [\"rustc\"\n")
+                .unwrap();
+        }
+        append_event(&path, &sample_record(300)).unwrap();
+
+        let result = read_events(&path).unwrap();
+        assert_eq!(result.unparsed_line_count, 1);
+        assert_eq!(result.records.len(), 2);
+        assert_eq!(result.records[0].pid, Some(100));
+        assert_eq!(result.records[1].pid, Some(300));
     }
 
     #[test]
@@ -186,11 +241,12 @@ mod tests {
             child.join().unwrap();
         }
 
-        let events = read_events(&path).unwrap();
+        let result = read_events(&path).unwrap();
         assert_eq!(
-            events.len(),
+            result.records.len(),
             n as usize,
             "expected exactly {n} well-formed lines with no interleaving corruption"
         );
+        assert_eq!(result.unparsed_line_count, 0);
     }
 }

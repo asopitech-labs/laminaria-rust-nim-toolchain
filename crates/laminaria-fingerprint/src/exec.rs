@@ -9,7 +9,7 @@ use std::process::Command;
 /// just because an optional tool is absent.
 pub fn run(cmd: &str, args: &[&str]) -> Option<String> {
     let output = Command::new(cmd).args(args).output().ok()?;
-    if !output.status.success() && output.stdout.is_empty() {
+    if !output.status.success() {
         return None;
     }
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -141,6 +141,23 @@ mod tests {
     #[test]
     fn returns_none_for_text_without_digits() {
         assert_eq!(extract_version_like("no version here"), None);
+    }
+
+    #[test]
+    fn run_returns_none_when_the_command_exits_non_zero_even_with_stdout() {
+        // A version-detection command that fails but still writes something
+        // to stdout (e.g. a usage banner before erroring) must not be
+        // treated as a successful version read -- this contradicts this
+        // function's own doc comment ("None if ... exits non-zero"), which
+        // an earlier implementation violated.
+        let result = run("sh", &["-c", "echo not-a-real-version; exit 1"]);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn run_returns_stdout_on_success() {
+        let result = run("sh", &["-c", "echo real-version"]);
+        assert_eq!(result, Some("real-version".to_string()));
     }
 
     #[test]

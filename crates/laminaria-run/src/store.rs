@@ -13,11 +13,42 @@ pub fn run_dir(runs_root: &Path, run_id: &str) -> PathBuf {
     runs_root.join(run_id)
 }
 
+/// Rejects a `run_id` that isn't safe to join onto `runs_root` as a single
+/// path component -- called at every entry point that accepts a `run_id`
+/// from outside this crate (the CLI's `regenerate-summary <run_id>` and any
+/// other caller of `read_run`/`regenerate_summary_from_disk`), since an
+/// unvalidated `run_id` like `../../etc/passwd` or an absolute path would
+/// let `runs_root.join(run_id)` escape `runs_root` entirely (`Path::join`
+/// with an absolute second argument replaces the base outright, and `..`
+/// components walk back up). `write_run`'s own `run_id`s come from this
+/// crate's own `generate_run_id` (always `<unix-ns>-<pid>`, already safe),
+/// but this is called there too, for defense in depth against a future
+/// caller that doesn't go through `generate_run_id`.
+fn validate_run_id(run_id: &str) -> io::Result<()> {
+    let is_single_safe_component = !run_id.is_empty()
+        && run_id != "."
+        && run_id != ".."
+        && !run_id.contains('/')
+        && !run_id.contains('\\');
+    if is_single_safe_component {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "invalid run_id {run_id:?}: must be a single path component, not empty, `.`, \
+                 `..`, or containing `/`/`\\`"
+            ),
+        ))
+    }
+}
+
 /// Writes the full `runs/<run-id>/` layout for `run`. `stdout`/`stderr`
 /// have already been written by the tracer directly to their target paths
 /// (see `crate::tracer::trace_root_command`), so this only writes the
 /// JSON/JSONL evidence files plus a freshly regenerated `summary.json`.
 pub fn write_run(runs_root: &Path, run: &Run) -> io::Result<PathBuf> {
+    validate_run_id(&run.run_id)?;
     let dir = run_dir(runs_root, &run.run_id);
     fs::create_dir_all(&dir)?;
 
@@ -39,6 +70,7 @@ pub fn write_run(runs_root: &Path, run: &Run) -> io::Result<PathBuf> {
 
 /// Reads back a previously written `run.json`.
 pub fn read_run(runs_root: &Path, run_id: &str) -> io::Result<Run> {
+    validate_run_id(run_id)?;
     let path = run_dir(runs_root, run_id).join("run.json");
     let text = fs::read_to_string(path)?;
     serde_json::from_str(&text).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
@@ -261,6 +293,34 @@ mod tests {
         )
         .unwrap();
         assert_eq!(reloaded, from_disk);
+    }
+
+    #[test]
+    fn read_run_rejects_a_path_traversal_run_id() {
+        let tmp = std::env::temp_dir().join(format!(
+            "laminaria-run-store-test-traversal-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        for malicious in ["../outside", "..", "a/../../outside", "/etc/passwd"] {
+            let err = read_run(&tmp, malicious).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "for {malicious:?}");
+        }
+    }
+
+    #[test]
+    fn regenerate_summary_from_disk_rejects_a_path_traversal_run_id() {
+        let tmp = std::env::temp_dir().join(format!(
+            "laminaria-run-store-test-traversal-regen-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+
+        let err = regenerate_summary_from_disk(&tmp, "../outside").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[test]

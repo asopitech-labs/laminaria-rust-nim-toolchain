@@ -94,19 +94,121 @@ fn is_nim_c_command(root: &RootCommand) -> bool {
         )
 }
 
+/// Resolves the real `rustc` Cargo-wrapper substitution should ultimately
+/// invoke for `root`, respecting whatever toolchain-selection mechanism
+/// `root` itself already expresses, instead of always substituting PATH's
+/// default `rustc`. That blind substitution was a real correctness bug:
+/// Cargo uses an explicit `RUSTC` env var as the literal compiler to
+/// invoke, bypassing rustup toolchain selection entirely -- so overwriting
+/// it unconditionally would silently discard a `cargo +nightly build`
+/// request (or a `RUSTC`/`RUSTUP_TOOLCHAIN` the caller had already set) and
+/// measure the wrong compiler instead, without any indication to the
+/// caller that happened.
+///
+/// Checked in priority order:
+/// 1. An explicit `RUSTC` already on `root.env_overrides` -- never overwrite
+///    a caller's own choice.
+/// 2. A leading `+toolchain` arg (`cargo +nightly build`), resolved via
+///    `rustup which rustc --toolchain <toolchain>`.
+/// 3. `RUSTUP_TOOLCHAIN` on `root.env_overrides`, resolved the same way.
+/// 4. PATH's default `rustc` (this crate's original behavior, still correct
+///    when none of the above apply).
+///
+/// A `rust-toolchain`/`rust-toolchain.toml` file in the invoked directory is
+/// a real, separate selection mechanism this does not check -- a named,
+/// open gap, not silently treated as equivalent to "no override".
+fn resolve_real_rustc(root: &RootCommand) -> Result<PathBuf, String> {
+    if let Some(rustc) = root.env_overrides.get("RUSTC") {
+        return Ok(PathBuf::from(rustc));
+    }
+    if let Some(plus_arg) = root.args.first().filter(|a| a.starts_with('+')) {
+        let toolchain = &plus_arg[1..];
+        return resolve_rustc_via_rustup(toolchain).ok_or_else(|| {
+            format!(
+                "root command requests toolchain `{plus_arg}` but the real rustc for it could \
+                 not be resolved via `rustup which rustc --toolchain {toolchain}`; refusing to \
+                 silently substitute PATH's default rustc instead, which would measure the wrong \
+                 compiler"
+            )
+        });
+    }
+    if let Some(toolchain) = root.env_overrides.get("RUSTUP_TOOLCHAIN") {
+        return resolve_rustc_via_rustup(toolchain).ok_or_else(|| {
+            format!(
+                "root command sets RUSTUP_TOOLCHAIN={toolchain} but the real rustc for it could \
+                 not be resolved via `rustup which rustc --toolchain {toolchain}`; refusing to \
+                 silently substitute PATH's default rustc instead"
+            )
+        });
+    }
+    laminaria_fingerprint::exec::which("rustc")
+        .ok_or_else(|| "could not resolve a `rustc` on PATH".to_string())
+}
+
+fn resolve_rustc_via_rustup(toolchain: &str) -> Option<PathBuf> {
+    let rustup = laminaria_fingerprint::exec::which("rustup")?;
+    let output = std::process::Command::new(rustup)
+        .args(["which", "rustc", "--toolchain", toolchain])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!stdout.is_empty()).then(|| PathBuf::from(stdout))
+}
+
+/// Same reasoning as `resolve_real_rustc`, for the CC-wrapper side: never
+/// overwrite a `CC` the caller already set on `root.env_overrides`. Nim
+/// has no `+toolchain`-style selector syntax for its C backend, so unlike
+/// the Rust side there is no equivalent second case to check.
+fn resolve_real_cc(root: &RootCommand) -> Result<PathBuf, String> {
+    if let Some(cc) = root.env_overrides.get("CC") {
+        return Ok(PathBuf::from(cc));
+    }
+    laminaria_fingerprint::exec::which("cc")
+        .ok_or_else(|| "could not resolve a `cc` on PATH".to_string())
+}
+
+/// Best-effort, human-readable description of which toolchain-selection
+/// mechanism `root` itself expresses -- not a resolved compiler path, just
+/// enough for a later reader comparing Runs across machines to tell "this
+/// Run asked for nightly" from "this Run asked for whatever's default"
+/// instead of always seeing `None` regardless of what was actually
+/// requested. Checked in the same priority order `resolve_real_rustc`/
+/// `resolve_real_cc` reason about. A `rust-toolchain(.toml)` file is a
+/// real, separate mechanism this does not detect -- named as a gap, not
+/// silently treated as "no selector was requested".
+fn detect_requested_toolchain_selector(root: &RootCommand) -> Option<String> {
+    if let Some(rustc) = root.env_overrides.get("RUSTC") {
+        return Some(format!("RUSTC={rustc}"));
+    }
+    if let Some(plus_arg) = root.args.first().filter(|a| a.starts_with('+')) {
+        return Some(format!("cargo {plus_arg}"));
+    }
+    if let Some(toolchain) = root.env_overrides.get("RUSTUP_TOOLCHAIN") {
+        return Some(format!("RUSTUP_TOOLCHAIN={toolchain}"));
+    }
+    if let Some(cc) = root.env_overrides.get("CC") {
+        return Some(format!("CC={cc}"));
+    }
+    None
+}
+
 /// Attempts to set up RUSTC-wrapper substitution (`cargo_wrapper` module
-/// doc) for a Cargo root command: resolves a real `rustc` on `PATH` and
-/// this crate's own `laminaria-rustc-wrapper` binary, then returns the env
-/// vars to inject plus the events file they'll write to. Returns `Err`
-/// (with an explanatory note) when either can't be resolved -- wrapping is
-/// an enhancement over the existing root-command-only tracing, not a
-/// requirement, so its absence must never fail the traced command.
+/// doc) for a Cargo root command: resolves the real `rustc` the traced
+/// command actually asked for (`resolve_real_rustc`, not just whatever's on
+/// PATH) and this crate's own `laminaria-rustc-wrapper` binary, then
+/// returns the env vars to inject plus the events file they'll write to.
+/// Returns `Err` (with an explanatory note) when either can't be resolved --
+/// wrapping is an enhancement over the existing root-command-only tracing,
+/// not a requirement, so its absence must never fail the traced command.
 fn prepare_cargo_wrapping(
+    root: &RootCommand,
     events_path: &Path,
     anchor_unix_ns: u128,
 ) -> Result<Vec<(String, String)>, String> {
-    let real_rustc = laminaria_fingerprint::exec::which("rustc")
-        .ok_or_else(|| "could not resolve a `rustc` on PATH".to_string())?;
+    let real_rustc = resolve_real_rustc(root)?;
     let wrapper_bin = find_rustc_wrapper_binary().ok_or_else(|| {
         "could not find the laminaria-rustc-wrapper binary next to the running executable \
          (expected it built alongside laminaria-cli)"
@@ -140,9 +242,12 @@ struct NimWrapping {
 /// and this crate's own `laminaria-cc-wrapper` binary, then returns the
 /// extra command-line arguments plus the env vars to inject. Same
 /// never-fail-the-traced-command contract as `prepare_cargo_wrapping`.
-fn prepare_nim_wrapping(events_path: &Path, anchor_unix_ns: u128) -> Result<NimWrapping, String> {
-    let real_cc = laminaria_fingerprint::exec::which("cc")
-        .ok_or_else(|| "could not resolve a `cc` on PATH".to_string())?;
+fn prepare_nim_wrapping(
+    root: &RootCommand,
+    events_path: &Path,
+    anchor_unix_ns: u128,
+) -> Result<NimWrapping, String> {
+    let real_cc = resolve_real_cc(root)?;
     let wrapper_bin = find_cc_wrapper_binary().ok_or_else(|| {
         "could not find the laminaria-cc-wrapper binary next to the running executable \
          (expected it built alongside laminaria-cli)"
@@ -239,7 +344,7 @@ pub fn run_and_record(
         // either -- both are extra instrumentation the baseline shouldn't
         // carry (see tracer::trace_root_command_level0's doc comment).
     } else if is_cargo_command(&root) {
-        match prepare_cargo_wrapping(&wrapper_events_path, clock.anchor_unix_ns()) {
+        match prepare_cargo_wrapping(&root, &wrapper_events_path, clock.anchor_unix_ns()) {
             Ok(env_vars) => {
                 for (key, value) in env_vars {
                     effective_root.env_overrides.insert(key, value);
@@ -257,15 +362,19 @@ pub fn run_and_record(
         // Cargo's real source before relying on it (see cargo_telemetry's
         // module doc). Only for the subcommands independently verified
         // not to error on the flag, and never overriding an explicit
-        // --message-format the caller already specified.
-        if cargo_telemetry::should_inject_message_format(&root.args) {
+        // --message-format the caller already specified. Inserted right
+        // after the subcommand (`message_format_insert_index`), never
+        // pushed onto the end of args -- appending unconditionally could
+        // land the flag past a `--` separator and hand it to the target
+        // program instead of Cargo (e.g. `cargo run -- my-program-arg`).
+        if let Some(insert_at) = cargo_telemetry::message_format_insert_index(&root.args) {
             effective_root
                 .args
-                .push("--message-format=json".to_string());
+                .insert(insert_at, "--message-format=json".to_string());
             cargo_telemetry_requested = true;
         }
     } else if is_nim_c_command(&root) {
-        match prepare_nim_wrapping(&wrapper_events_path, clock.anchor_unix_ns()) {
+        match prepare_nim_wrapping(&root, &wrapper_events_path, clock.anchor_unix_ns()) {
             Ok(NimWrapping {
                 extra_args,
                 env_vars,
@@ -298,6 +407,12 @@ pub fn run_and_record(
         nim_telemetry_requested = true;
     }
 
+    // Computed from the original, unwrapped `root` -- not `effective_root`,
+    // whose RUSTC/CC env vars now point at this crate's own wrapper
+    // binaries, which would no longer reflect what the caller actually
+    // requested.
+    let requested_toolchain_selector = detect_requested_toolchain_selector(&root);
+
     let tracer_wall_start = std::time::Instant::now();
     let process_record = if is_level0 {
         tracer::trace_root_command_level0(&clock, &effective_root, &stdout_path, &stderr_path)?
@@ -306,8 +421,13 @@ pub fn run_and_record(
     };
     let tracer_overhead_seconds = tracer_wall_start.elapsed().as_secs_f64();
 
-    let wrapper_invocation_records = read_events(&wrapper_events_path).unwrap_or_default();
-    let _ = std::fs::remove_file(&wrapper_events_path);
+    // The raw wrapper-invocations.jsonl file is deliberately left on disk
+    // (not deleted) -- it's the same kind of raw evidence stdout.log/
+    // stderr.log already are, and a parse failure on one line must not cost
+    // the well-formed lines their only backing record. See
+    // EventsReadResult's own doc comment.
+    let events_result = read_events(&wrapper_events_path).unwrap_or_default();
+    let wrapper_invocation_records = events_result.records;
 
     let cargo_telemetry =
         cargo_telemetry_requested.then(|| cargo_telemetry::parse_cargo_json_messages(&stdout_path));
@@ -331,11 +451,17 @@ pub fn run_and_record(
         scenario_id: scenario_id.to_string(),
         requested_artifact,
         environment_fingerprint: doctor_run.report.environment.clone(),
-        requested_toolchain_selector: None,
+        requested_toolchain_selector,
         resolved_toolchain_fingerprint: Some(doctor_run.report),
         preparation_record: PreparationRecord::default(),
         cache_state: CacheState::default(),
-        root_command: root,
+        // The command as actually executed (including wrapper-substitution
+        // env vars and any inserted args like --message-format=json), not
+        // the caller's original request -- ProcessRecord::argv already
+        // reflects this, and root_command must match it for the Run to be
+        // reproducible/trustworthy evidence, not silently divergent from
+        // what actually ran.
+        root_command: effective_root,
         run_started_at_unix_ns: clock.anchor_unix_ns(),
         run_ended_at_unix_ns: Some(run_ended_at_unix_ns),
         result: Some(RunResult {
@@ -385,6 +511,15 @@ pub fn run_and_record(
                 );
                 if let Some(note) = wrapping_note {
                     known_gaps.push(note);
+                }
+                if events_result.unparsed_line_count > 0 {
+                    known_gaps.push(format!(
+                        "{} line(s) of wrapper-invocations.jsonl failed to parse (a partial write \
+                         from a killed process or filesystem fault) and were skipped; the \
+                         well-formed lines above were kept, and the raw file itself was left at \
+                         wrapper-invocations.jsonl in this Run's directory for manual recovery",
+                        events_result.unparsed_line_count
+                    ));
                 }
             }
             match (&cargo_telemetry, &nim_telemetry) {
@@ -472,4 +607,147 @@ pub fn run_and_record(
 
     let dir = store::write_run(runs_root, &run)?;
     Ok((run, dir))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn root(program: &str, args: &[&str]) -> RootCommand {
+        RootCommand {
+            program: program.to_string(),
+            args: args.iter().map(|s| s.to_string()).collect(),
+            cwd: None,
+            env_overrides: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn resolve_real_rustc_respects_an_explicit_rustc_override_without_touching_path() {
+        // A caller-set RUSTC must never be silently overwritten by
+        // whatever's on PATH -- that was the exact bug this fixes.
+        let mut r = root("cargo", &["build"]);
+        r.env_overrides
+            .insert("RUSTC".to_string(), "/custom/rustc".to_string());
+        assert_eq!(
+            resolve_real_rustc(&r).unwrap(),
+            PathBuf::from("/custom/rustc")
+        );
+    }
+
+    #[test]
+    fn resolve_real_cc_respects_an_explicit_cc_override() {
+        let mut r = root("nim", &["c", "main.nim"]);
+        r.env_overrides
+            .insert("CC".to_string(), "/custom/cc".to_string());
+        assert_eq!(resolve_real_cc(&r).unwrap(), PathBuf::from("/custom/cc"));
+    }
+
+    #[test]
+    fn detect_requested_toolchain_selector_prefers_explicit_rustc_over_toolchain_arg() {
+        let mut r = root("cargo", &["+nightly", "build"]);
+        r.env_overrides
+            .insert("RUSTC".to_string(), "/custom/rustc".to_string());
+        assert_eq!(
+            detect_requested_toolchain_selector(&r),
+            Some("RUSTC=/custom/rustc".to_string())
+        );
+    }
+
+    #[test]
+    fn detect_requested_toolchain_selector_reads_a_leading_plus_toolchain_arg() {
+        let r = root("cargo", &["+nightly", "build"]);
+        assert_eq!(
+            detect_requested_toolchain_selector(&r),
+            Some("cargo +nightly".to_string())
+        );
+    }
+
+    #[test]
+    fn detect_requested_toolchain_selector_is_none_when_nothing_was_requested() {
+        let r = root("cargo", &["build"]);
+        assert_eq!(detect_requested_toolchain_selector(&r), None);
+    }
+
+    #[test]
+    fn run_and_record_stores_the_command_as_actually_executed_not_the_original_request() {
+        // Regression test for the root_command/ProcessRecord divergence bug:
+        // for a plain (non-Cargo, non-Nim) command nothing should be
+        // rewritten, so root_command must still equal the caller's request
+        // exactly -- verifying this crate didn't just start unconditionally
+        // recording *some* mutated command; it records the real effective
+        // one, which happens to equal the request here.
+        let tmp = std::env::temp_dir().join(format!(
+            "laminaria-run-lib-test-plain-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let lock = tmp.join("toolchains.lock.toml");
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(&lock, "").unwrap();
+
+        let r = root("true", &[]);
+        let (run, _dir) = run_and_record(
+            &tmp,
+            "test-workload",
+            "test-scenario",
+            None,
+            &lock,
+            &tmp,
+            r.clone(),
+            ProbeLevel::Level1ProcessResource,
+        )
+        .unwrap();
+
+        assert_eq!(run.root_command.program, r.program);
+        assert_eq!(run.root_command.args, r.args);
+    }
+
+    #[test]
+    fn run_and_record_on_a_cargo_root_records_the_actually_injected_message_format_arg() {
+        // Regression test for the two bugs together: the recorded
+        // root_command must reflect the actually-inserted
+        // --message-format=json (finding 2), and it must land in Cargo's
+        // own option region, immediately after the subcommand (finding 3) --
+        // not silently absent, and not pushed past a `--` if one were
+        // present.
+        let tmp = std::env::temp_dir().join(format!(
+            "laminaria-run-lib-test-cargo-argv-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let lock = tmp.join("toolchains.lock.toml");
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(&lock, "").unwrap();
+
+        // "cargo --version" doesn't actually build anything, so this stays
+        // fast and network-free; "--version" itself is not a subcommand
+        // this crate recognizes, so use a recognized-but-harmless spelling
+        // that also fails fast without a real manifest present, since the
+        // point here is only to inspect the *recorded* root_command, not to
+        // require a successful build.
+        let r = root("cargo", &["check", "--manifest-path", "does-not-exist"]);
+        let (run, _dir) = run_and_record(
+            &tmp,
+            "test-workload",
+            "test-scenario",
+            None,
+            &lock,
+            &tmp,
+            r,
+            ProbeLevel::Level1ProcessResource,
+        )
+        .unwrap();
+
+        assert_eq!(
+            run.root_command.args,
+            vec![
+                "check".to_string(),
+                "--message-format=json".to_string(),
+                "--manifest-path".to_string(),
+                "does-not-exist".to_string(),
+            ]
+        );
+    }
 }

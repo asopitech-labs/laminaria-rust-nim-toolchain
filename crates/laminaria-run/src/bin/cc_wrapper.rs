@@ -101,7 +101,12 @@ fn main() -> ExitCode {
     }
 
     match (exit_status.code, exit_status.signal) {
-        (Some(code), _) => ExitCode::from(code as u8),
+        // std::process::exit, not ExitCode::from(code as u8) -- see
+        // rustc_wrapper.rs's identical fix for why: ExitCode::from only
+        // accepts a u8 on every platform, silently truncating any exit code
+        // above 255, whereas std::process::exit passes the real compiler's
+        // full i32 exit code through to the OS.
+        (Some(code), _) => std::process::exit(code),
         (None, Some(_signal)) => ExitCode::from(1),
         (None, None) => ExitCode::from(1),
     }

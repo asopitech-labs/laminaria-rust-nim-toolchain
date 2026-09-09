@@ -129,24 +129,52 @@ fn parse_artifact(value: &serde_json::Value) -> Option<CompilerArtifactRecord> {
     })
 }
 
-/// Whether `--message-format=json` should be injected for this Cargo
-/// invocation: `args[0]` (the subcommand -- this crate's own callers,
-/// `laminaria run -- cargo <subcommand> ...`, always place it first; a
-/// flag *before* the subcommand, e.g. `cargo --manifest-path x build`, is
-/// not recognized by this simple check and is a known limitation, not
-/// silently mishandled) is one of `CARGO_MESSAGE_FORMAT_SUBCOMMANDS`, and
-/// the caller hasn't already specified a `--message-format`/
-/// `--message-format=...` of their own (never override an explicit
-/// user choice).
-pub fn should_inject_message_format(args: &[String]) -> bool {
-    let subcommand_supported = args
-        .first()
-        .map(|s| CARGO_MESSAGE_FORMAT_SUBCOMMANDS.contains(&s.as_str()))
-        .unwrap_or(false);
-    let already_specified = args
+/// Determines whether `--message-format=json` should be injected for this
+/// Cargo invocation and, if so, the index in `args` to insert it at --
+/// always immediately after the subcommand (accounting for a leading
+/// `+toolchain` arg ahead of it), which is always inside Cargo's own
+/// option-parsing region, never past a literal `--` separator (the region
+/// after `--` belongs to the program Cargo runs, not to Cargo itself --
+/// e.g. `cargo run -- my-program-arg`. Appending the flag unconditionally
+/// at the very end of `args`, as an earlier version of this crate did,
+/// could push it past `--` and hand it to the target program instead of
+/// Cargo; verified against Cargo's own argument-parsing convention, not
+/// assumed).
+///
+/// `args[0]` (or `args[1]` when `args[0]` is a `+toolchain` selector -- this
+/// crate's own callers, `laminaria run -- cargo [+toolchain] <subcommand>
+/// ...`, always place the subcommand there; a flag *before* the subcommand,
+/// e.g. `cargo --manifest-path x build`, is not recognized by this simple
+/// check and is a known limitation, not silently mishandled) must be one of
+/// `CARGO_MESSAGE_FORMAT_SUBCOMMANDS`, and the caller must not have already
+/// specified a `--message-format`/`--message-format=...` of their own
+/// (checked only in Cargo's own option region, before any `--`, so an
+/// unrelated `--message-format` the caller passes through to the target
+/// program doesn't false-positive) -- never override an explicit user
+/// choice.
+pub fn message_format_insert_index(args: &[String]) -> Option<usize> {
+    let subcommand_index = if args.first().is_some_and(|a| a.starts_with('+')) {
+        1
+    } else {
+        0
+    };
+    let subcommand = args.get(subcommand_index)?;
+    if !CARGO_MESSAGE_FORMAT_SUBCOMMANDS.contains(&subcommand.as_str()) {
+        return None;
+    }
+
+    let cargo_owned_args = match args.iter().position(|a| a == "--") {
+        Some(dashdash_index) => &args[..dashdash_index],
+        None => args,
+    };
+    let already_specified = cargo_owned_args
         .iter()
         .any(|a| a == "--message-format" || a.starts_with("--message-format="));
-    subcommand_supported && !already_specified
+    if already_specified {
+        return None;
+    }
+
+    Some(subcommand_index + 1)
 }
 
 #[cfg(test)]
@@ -237,28 +265,65 @@ mod tests {
 
     #[test]
     fn should_inject_only_for_verified_subcommands_and_never_overrides_an_explicit_choice() {
-        assert!(should_inject_message_format(&["build".to_string()]));
-        assert!(should_inject_message_format(&[
-            "check".to_string(),
-            "--manifest-path".to_string(),
-            "x".to_string(),
-        ]));
-        assert!(!should_inject_message_format(&["clean".to_string()]));
+        assert_eq!(message_format_insert_index(&["build".to_string()]), Some(1));
+        assert_eq!(
+            message_format_insert_index(&[
+                "check".to_string(),
+                "--manifest-path".to_string(),
+                "x".to_string(),
+            ]),
+            Some(1)
+        );
+        assert_eq!(message_format_insert_index(&["clean".to_string()]), None);
         // Documented limitation: a flag *before* the subcommand is not
-        // recognized (args[0] must be the subcommand itself).
-        assert!(!should_inject_message_format(&[
-            "--manifest-path".to_string(),
-            "x".to_string(),
-            "check".to_string(),
-        ]));
-        assert!(!should_inject_message_format(&[
-            "build".to_string(),
-            "--message-format=human".to_string(),
-        ]));
-        assert!(!should_inject_message_format(&[
-            "build".to_string(),
-            "--message-format".to_string(),
-            "human".to_string(),
-        ]));
+        // recognized (args[0] must be the subcommand itself, or a
+        // +toolchain selector immediately ahead of it).
+        assert_eq!(
+            message_format_insert_index(&[
+                "--manifest-path".to_string(),
+                "x".to_string(),
+                "check".to_string(),
+            ]),
+            None
+        );
+        assert_eq!(
+            message_format_insert_index(&[
+                "build".to_string(),
+                "--message-format=human".to_string(),
+            ]),
+            None
+        );
+        assert_eq!(
+            message_format_insert_index(&[
+                "build".to_string(),
+                "--message-format".to_string(),
+                "human".to_string(),
+            ]),
+            None
+        );
+    }
+
+    #[test]
+    fn a_leading_toolchain_selector_shifts_the_subcommand_and_insertion_index() {
+        assert_eq!(
+            message_format_insert_index(&["+nightly".to_string(), "build".to_string()]),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn inserts_before_the_dash_dash_separator_not_after_target_program_args() {
+        // cargo run -- my-program-arg --message-format=human: the flag
+        // after `--` belongs to the target program, not Cargo, so it must
+        // not suppress injection or be mistaken for Cargo's own choice.
+        assert_eq!(
+            message_format_insert_index(&[
+                "run".to_string(),
+                "--".to_string(),
+                "my-program-arg".to_string(),
+                "--message-format=human".to_string(),
+            ]),
+            Some(1)
+        );
     }
 }

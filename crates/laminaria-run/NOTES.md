@@ -552,3 +552,96 @@ point if this is picked up), artifact inventory (section 8), and
 `PreparationRecord`/`CacheState` population (sections 9-10) — the schema
 has fields for these so a later implementation doesn't need a migration,
 but nothing populates them yet.
+
+## Correctness/evidence-integrity review, and fixes
+
+An external review of this crate (implementation code only, not
+documentation) found ten real defects, six of them P1 -- evidence-integrity
+or correctness bugs, not documentation gaps. All ten were verified against
+the actual source (not taken on faith) and fixed:
+
+1. **Windows always failed at the CLI's default probe level.**
+   `tracer::reap`'s `#[cfg(not(unix))]` arm unconditionally returned
+   `Unsupported`, and `trace_root_command` (Level 1, the CLI default) had
+   no fallback -- `laminaria run` without `--probe-level level0` failed
+   outright on Windows. Fixed: a `#[cfg(not(unix))]` `trace_root_command`
+   now falls back to the same portable `Child::wait`-based tracing Level 0
+   uses, with its own `NON_UNIX_LEVEL1_FALLBACK_NOTE` distinguishing "Level
+   1 requested but unavailable, fell back automatically" from Level 0's own
+   deliberate scope -- not silently relabeled as real Level 1 data. Closed
+   the "no CI ever exercises this" gap too: a new lean `windows` CI job
+   (deliberately not folded into the existing bash/jq-heavy `rust` matrix)
+   runs the workspace test suite plus a `laminaria run` smoke test on
+   `windows-latest`.
+2. **The recorded `root_command` didn't match what actually ran.**
+   `run_and_record` mutated a cloned `effective_root` (wrapper env vars,
+   inserted args) but stored the original, unmutated `root` on the `Run` --
+   so `ProcessRecord::argv` (the true, executed argv) and `Run::root_command`
+   disagreed. Fixed: `root_command` now stores `effective_root`. Verified
+   live against a real `cargo build` through `laminaria run`: `root_command`
+   now shows the actual `RUSTC`-wrapper env vars and the inserted
+   `--message-format=json`, not the bare original command.
+3. **`--message-format=json` was appended at the end of `args`
+   unconditionally**, which for `cargo run -- my-program-arg` would land the
+   flag *after* the `--` separator and hand it to the target program instead
+   of Cargo. Fixed: `cargo_telemetry::message_format_insert_index` computes
+   the correct index (immediately after the subcommand, before any `--`),
+   also accounting for a leading `+toolchain` arg and restricting the
+   "already specified" check to Cargo's own option region.
+4. **`requested_toolchain_selector` was hardcoded to `None`.** Fixed:
+   `detect_requested_toolchain_selector` records a best-effort selector
+   (explicit `RUSTC`/`CC` override, `cargo +toolchain`, or
+   `RUSTUP_TOOLCHAIN`) from the *original* root command. A
+   `rust-toolchain(.toml)` file is a real, separate mechanism this still
+   does not detect -- named as an open gap, not silently treated as "no
+   selector requested".
+5. **A single corrupted line in `wrapper-invocations.jsonl` discarded every
+   well-formed line, and the raw file was then deleted.** `read_events`
+   used `.collect::<Result<Vec<_>, _>>()`, so one bad line turned the whole
+   read into `Err`, silently swallowed by `run_and_record`'s
+   `.unwrap_or_default()` -- and the raw file was deleted immediately after
+   regardless. Fixed: `read_events` now returns `EventsReadResult{records,
+   unparsed_line_count}`, keeping every line that *did* parse; the raw file
+   is no longer deleted (kept as evidence, like `stdout.log`/`stderr.log`
+   already are); `known_gaps` now surfaces a note when any line failed to
+   parse.
+6. **Wrapper substitution silently forced whichever `rustc`/`cc` happened
+   to be on `PATH`**, discarding a `cargo +nightly` request or a caller-set
+   `RUSTC`/`CC` -- a real risk, since Cargo's own `RUSTC` env var bypasses
+   rustup toolchain selection entirely. Fixed: `resolve_real_rustc`/
+   `resolve_real_cc` respect an explicit `RUSTC`/`CC` the caller already
+   set, and `resolve_real_rustc` resolves a `+toolchain` arg or
+   `RUSTUP_TOOLCHAIN` via `rustup which rustc --toolchain <toolchain>`
+   rather than silently substituting PATH's default. A
+   `rust-toolchain(.toml)` file remains unhandled -- same named gap as #4.
+7. **`run_id` path traversal.** Neither `store::run_dir` nor its callers
+   validated `run_id`, so `laminaria regenerate-summary --runs-root runs
+   "../../etc/passwd"` could read/write outside `runs_root`. Fixed:
+   `store::validate_run_id` rejects anything but a single safe path
+   component, called from `write_run`, `read_run`, and (transitively)
+   `regenerate_summary_from_disk` -- the CLI-exposed entry point. Verified
+   live: `regenerate-summary ... "../../../etc/passwd"` now fails cleanly
+   with `InvalidInput` instead of touching the filesystem outside
+   `runs_root`.
+8. **`laminaria_fingerprint::exec::run` treated a failed command's non-empty
+   stdout as a successful read** -- contradicting its own doc comment
+   ("`None` if ... exits non-zero"). Fixed: any non-zero exit now returns
+   `None` unconditionally, matching the documented contract.
+9. **The two wrapper binaries (`rustc_wrapper`, `cc_wrapper`) truncated the
+   real compiler's exit code to `u8`** via `ExitCode::from(code as u8)` --
+   `ExitCode::from` only accepts a `u8` on every platform, not just Windows,
+   so any exit code above 255 was silently wrong everywhere, worse on
+   Windows where exit codes routinely exceed that range. Fixed: both now
+   call `std::process::exit(code)` directly, which passes the real `i32`
+   through to the OS.
+10. **No Windows CI coverage at all** for any of the above. Fixed: see
+    item 1's new `windows` job.
+
+All ten fixes are covered by tests (new unit tests for the pure helpers,
+two new `run_and_record`-level regression tests for the root_command/
+message-format fix, `store`-level path-traversal rejection tests,
+`exec::run`'s corrected contract, and a live smoke run against the real
+`rust-heavy-workspace` fixture confirming the recorded `root_command` now
+matches the actually-executed command). `cargo test --workspace`,
+`cargo clippy --workspace --all-targets -- -D warnings`, and
+`cargo fmt --all -- --check` all pass after the fixes.

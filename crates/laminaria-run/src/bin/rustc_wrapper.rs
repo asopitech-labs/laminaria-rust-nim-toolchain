@@ -114,7 +114,13 @@ fn main() -> ExitCode {
     }
 
     match (exit_status.code, exit_status.signal) {
-        (Some(code), _) => ExitCode::from(code as u8),
+        // std::process::exit, not ExitCode::from(code as u8): the real
+        // compiler's exit code is an i32 (verified: ExitStatusRecord::code
+        // is Option<i32>), and Cargo may care about the exact value beyond
+        // 0/non-zero. ExitCode::from only accepts a u8 on every platform
+        // (not just Windows), so it silently truncates any code above 255 --
+        // std::process::exit passes the full i32 through to the OS instead.
+        (Some(code), _) => std::process::exit(code),
         (None, Some(_signal)) => ExitCode::from(1),
         (None, None) => ExitCode::from(1),
     }

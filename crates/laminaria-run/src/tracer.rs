@@ -36,6 +36,12 @@ pub const LEVEL0_COVERAGE_NOTE: &str = "Level 0 lifecycle-only tracing: exit sta
     minimal-wrapper baseline docs/measurement-foundation.md section 12 and issue #19 Experiment 6 \
     ask for, to measure Level 1's own observer overhead against";
 
+pub const NON_UNIX_LEVEL1_FALLBACK_NOTE: &str = "Level 1 (wait4-based resource accounting) was \
+    requested but is only implemented for Unix targets; this platform automatically fell back to \
+    portable lifecycle-only tracing (std::process::Child::wait, the same mechanism Level 0 uses) \
+    rather than failing the Run outright -- resource_usage is all-None here, not a deliberate \
+    Level 0 scoping choice like trace_root_command_level0's own note describes";
+
 fn build_command(
     root: &RootCommand,
     stdout_path: &Path,
@@ -68,7 +74,10 @@ fn root_argv(root: &RootCommand) -> Vec<String> {
 /// are relative to `clock`. Level 1: captures `wait4`-derived resource
 /// usage (see this module's doc comment). For the Level 0 lifecycle-only
 /// counterpart used to measure this level's own observer overhead, see
-/// `trace_root_command_level0`.
+/// `trace_root_command_level0`. Unix-only -- see the `#[cfg(not(unix))]`
+/// counterpart of this same function further down for the automatic
+/// portable fallback on other platforms.
+#[cfg(unix)]
 pub fn trace_root_command(
     clock: &RunClock,
     root: &RootCommand,
@@ -121,6 +130,30 @@ pub fn trace_root_command_level0(
     stdout_path: &Path,
     stderr_path: &Path,
 ) -> io::Result<ProcessRecord> {
+    portable_lifecycle_trace(
+        clock,
+        root,
+        stdout_path,
+        stderr_path,
+        ProbeLevel::Level0Lifecycle,
+        LEVEL0_COVERAGE_NOTE,
+    )
+}
+
+/// Shared portable (non-`wait4`) spawn/wait/record-building logic behind
+/// both `trace_root_command_level0` (Level 0's deliberate scope) and the
+/// non-Unix fallback for `trace_root_command` below (Level 1 requested but
+/// unavailable) -- same mechanism, different `probe_level`/`coverage_note`
+/// so a reader of the resulting `ProcessRecord` can tell *why* no resource
+/// usage was captured.
+fn portable_lifecycle_trace(
+    clock: &RunClock,
+    root: &RootCommand,
+    stdout_path: &Path,
+    stderr_path: &Path,
+    probe_level: ProbeLevel,
+    coverage_note: &str,
+) -> io::Result<ProcessRecord> {
     let mut command = build_command(root, stdout_path, stderr_path)?;
 
     let start_elapsed_ns = clock.elapsed_ns();
@@ -167,9 +200,34 @@ pub fn trace_root_command_level0(
             unsupported_fields,
             ..ResourceUsage::default()
         },
-        probe_level: ProbeLevel::Level0Lifecycle,
-        coverage_note: LEVEL0_COVERAGE_NOTE.to_string(),
+        probe_level,
+        coverage_note: coverage_note.to_string(),
     })
+}
+
+/// Non-Unix counterpart to the `#[cfg(unix)]` `trace_root_command` below:
+/// `wait4`-based resource accounting is Unix-only (see `reap`'s doc
+/// comment), so a Level 1 request on any other platform automatically
+/// falls back to the same portable lifecycle-only tracing Level 0 uses,
+/// rather than failing the whole Run outright. The returned record's own
+/// `probe_level`/`coverage_note` say `Level0Lifecycle`/
+/// `NON_UNIX_LEVEL1_FALLBACK_NOTE` -- truthful about what was actually
+/// captured, not a claim that Level 1 resource data exists here.
+#[cfg(not(unix))]
+pub fn trace_root_command(
+    clock: &RunClock,
+    root: &RootCommand,
+    stdout_path: &Path,
+    stderr_path: &Path,
+) -> io::Result<ProcessRecord> {
+    portable_lifecycle_trace(
+        clock,
+        root,
+        stdout_path,
+        stderr_path,
+        ProbeLevel::Level0Lifecycle,
+        NON_UNIX_LEVEL1_FALLBACK_NOTE,
+    )
 }
 
 /// Resolves `program` to an absolute path when it's found on `PATH`,

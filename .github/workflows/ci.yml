@@ -6,6 +6,50 @@ on:
   pull_request:
 
 jobs:
+  # A separate, deliberately lean job rather than adding windows-latest to
+  # the `rust` matrix below: that job's fixture steps are bash/jq-heavy and
+  # Unix-specific throughout (rm -rf, awk, /tmp paths, Nim install), and
+  # porting all of it to Windows is out of scope here. This job exists
+  # specifically to give the Windows-only code paths *some* CI coverage
+  # instead of none (there was none before): laminaria-run's tracer.rs had
+  # a Level 1 (default probe level) code path that unconditionally failed
+  # on non-Unix targets, entirely undetected by CI, since only Ubuntu/macOS
+  # ever ran it.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: cargo test --workspace
+        run: cargo test --workspace
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo build --workspace
+        run: cargo build --workspace
+
+      - name: laminaria run smoke test -- Level 1 (the CLI default) must not hard-fail here
+        shell: bash
+        run: |
+          cargo run -q -p laminaria-cli -- run \
+            --workload-id windows-smoke --scenario-id smoke --runs-root runs --json \
+            -- cmd /c "echo hello" \
+            > run.json
+          SUCCESS=$(jq -r '.result.success' run.json)
+          [ "$SUCCESS" = "true" ] || { echo "expected success=true, got $SUCCESS"; cat run.json; exit 1; }
+          PROBE_LEVEL=$(jq -r '.process_trace.processes[0].probe_level' run.json)
+          echo "probe_level recorded: $PROBE_LEVEL (Level 1 falls back to portable lifecycle-only tracing on this platform -- see tracer.rs's NON_UNIX_LEVEL1_FALLBACK_NOTE)"
+
+      - name: laminaria regenerate-summary rejects a path-traversal run_id
+        shell: bash
+        run: |
+          mkdir -p runs
+          if cargo run -q -p laminaria-cli -- regenerate-summary --runs-root runs "../outside"; then
+            echo "expected regenerate-summary to reject a path-traversal run_id"
+            exit 1
+          fi
+
   rust:
     strategy:
       matrix:
