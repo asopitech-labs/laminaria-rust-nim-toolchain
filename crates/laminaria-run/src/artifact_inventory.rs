@@ -144,9 +144,32 @@ fn snapshot(roots: &[PathBuf]) -> (BTreeMap<PathBuf, FileStat>, f64) {
     let start = Instant::now();
     let mut out = BTreeMap::new();
     for root in roots {
-        walk_into(root, &mut out);
+        walk_root(root, &mut out);
     }
     (out, start.elapsed().as_secs_f64())
+}
+
+/// Handles one observation root, which may itself be a regular file, not
+/// only a directory -- a real bug an external review caught: the Nim
+/// scenario preset (`scenario::nim_heavy_workspace_scenario`) passes
+/// `out_path` (the final linked binary, a single file) as one of its
+/// observation roots, and this walker previously called `read_dir` on
+/// every root unconditionally, which errors on a file -- silently
+/// collapsed into the *same* "zero entries" outcome this module
+/// deliberately uses for a root that doesn't exist yet, so the final Nim
+/// binary's own creation/modification/deletion was never tracked at all,
+/// reproduced directly (rewriting the file left the inventory with 0
+/// records). A root that genuinely doesn't exist still contributes zero
+/// entries, not an error -- that part of the design is deliberate and
+/// unchanged.
+fn walk_root(root: &Path, out: &mut BTreeMap<PathBuf, FileStat>) {
+    match std::fs::symlink_metadata(root) {
+        Ok(metadata) if metadata.is_file() => {
+            out.insert(root.to_path_buf(), file_stat(&metadata));
+        }
+        Ok(metadata) if metadata.is_dir() => walk_into(root, out),
+        _ => {} // missing/unreadable/symlink root: zero entries, not an error
+    }
 }
 
 /// Recurses into `dir`, inserting an absolute-path key -> `FileStat` for
@@ -176,19 +199,20 @@ fn walk_into(dir: &Path, out: &mut BTreeMap<PathBuf, FileStat>) {
         let Ok(metadata) = entry.metadata() else {
             continue;
         };
-        let modified_unix_ns = metadata
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        out.insert(
-            path,
-            FileStat {
-                size: metadata.len(),
-                modified_unix_ns,
-            },
-        );
+        out.insert(path, file_stat(&metadata));
+    }
+}
+
+fn file_stat(metadata: &std::fs::Metadata) -> FileStat {
+    let modified_unix_ns = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    FileStat {
+        size: metadata.len(),
+        modified_unix_ns,
     }
 }
 
@@ -263,14 +287,27 @@ fn diff(
 /// location"). Falls back to the absolute path if it somehow isn't under
 /// any observation root -- should not happen given how `snapshot` builds
 /// its keys, but never panics on it.
+///
+/// Prefixes with the root's own *index* in `roots` (`root0-`, `root1-`,
+/// ...), not just its bare file name -- a real bug an external review
+/// caught: two distinct observation roots that happen to share the same
+/// final path component (e.g. `a/target` and `b/target`, both named
+/// `target`) previously collapsed to the identical logical path
+/// (`target/output.o` for both), so two genuinely different files with
+/// different digests were reported under one colliding identity.
+/// Reproduced directly: distinct content, same reported logical path. The
+/// index is stable across a single Run's own pre/post snapshot pair (both
+/// built from the same `roots` slice, in the same order) without needing
+/// the full absolute path, which would defeat the "decoupled from one
+/// particular run's own filesystem layout" purpose this exists for.
 fn to_logical_path(roots: &[PathBuf], path: &Path) -> PathBuf {
-    for root in roots {
+    for (index, root) in roots.iter().enumerate() {
         if let Ok(rel) = path.strip_prefix(root) {
-            return root
+            let root_name = root
                 .file_name()
-                .map(PathBuf::from)
-                .unwrap_or_else(|| root.clone())
-                .join(rel);
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| root.display().to_string());
+            return PathBuf::from(format!("root{index}-{root_name}")).join(rel);
         }
     }
     path.to_path_buf()
@@ -422,6 +459,92 @@ mod tests {
 
         assert_eq!(inventory.records.len(), 1);
         assert_eq!(inventory.records[0].state, ArtifactState::Created);
+    }
+
+    /// The exact bug an external review caught: the Nim scenario preset
+    /// passes a single *file* (the final linked binary) as an observation
+    /// root, not just directories -- reproduced literally: rewriting that
+    /// file's content previously left the inventory with 0 records.
+    #[test]
+    fn a_single_file_observation_root_is_tracked_directly() {
+        let root = tmp_dir("single-file-root");
+        let file_root = root.join("fixture_out");
+        std::fs::write(&file_root, b"binary-v1").unwrap();
+        let roots = vec![file_root.clone()];
+
+        let inventory = observe_around(&roots, || -> Result<(), ()> {
+            std::fs::write(&file_root, b"binary-v2-longer").unwrap();
+            Ok(())
+        })
+        .unwrap()
+        .1;
+
+        assert_eq!(
+            inventory.records.len(),
+            1,
+            "a single-file observation root must produce exactly one record, not zero"
+        );
+        assert_eq!(inventory.records[0].state, ArtifactState::Modified);
+        assert!(inventory.records[0].digest_sha256.is_some());
+    }
+
+    #[test]
+    fn a_newly_created_single_file_observation_root_is_tracked() {
+        let root = tmp_dir("single-file-root-created");
+        let file_root = root.join("fixture_out");
+        let _ = std::fs::remove_file(&file_root);
+        let roots = vec![file_root.clone()];
+
+        let inventory = observe_around(&roots, || -> Result<(), ()> {
+            std::fs::write(&file_root, b"binary-v1").unwrap();
+            Ok(())
+        })
+        .unwrap()
+        .1;
+
+        assert_eq!(inventory.records.len(), 1);
+        assert_eq!(inventory.records[0].state, ArtifactState::Created);
+    }
+
+    /// The exact bug an external review caught: two distinct observation
+    /// roots that happen to share the same final path component (both
+    /// named `target`) must not collapse to one colliding logical path.
+    #[test]
+    fn two_roots_sharing_a_final_path_component_do_not_collide() {
+        let base = tmp_dir("collision");
+        let root_a = base.join("a").join("target");
+        let root_b = base.join("b").join("target");
+        std::fs::create_dir_all(&root_a).unwrap();
+        std::fs::create_dir_all(&root_b).unwrap();
+        std::fs::write(root_a.join("output.o"), b"from-a").unwrap();
+        std::fs::write(root_b.join("output.o"), b"from-b-different").unwrap();
+        let roots = vec![root_a, root_b];
+
+        let inventory = observe_around(&roots, || -> Result<(), ()> { Ok(()) })
+            .unwrap()
+            .1;
+
+        assert_eq!(
+            inventory.records.len(),
+            2,
+            "two distinct files must produce two distinct records, not one collapsed by a \
+             colliding logical_path"
+        );
+        let logical_paths: std::collections::HashSet<_> = inventory
+            .records
+            .iter()
+            .map(|r| r.logical_path.clone())
+            .collect();
+        assert_eq!(
+            logical_paths.len(),
+            2,
+            "logical_path must be unique per distinct observation root, got {:?}",
+            inventory
+                .records
+                .iter()
+                .map(|r| &r.logical_path)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

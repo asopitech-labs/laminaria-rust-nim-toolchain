@@ -996,3 +996,77 @@ real CLI binary -- required after fix #2, since running scenarios
 in-process via `cargo test` can never engage wrapper substitution at all,
 a pre-existing crate limitation this fix's own test had to route around).
 `cargo test --workspace`: 68 passed (up from 56). Clippy and fmt clean.
+
+Two of the six new tests were themselves environment-dependent and needed
+a follow-up fix: `detect_requested_toolchain_selector_is_none_when_nothing_was_requested`
+asserted `None` unconditionally, but GitHub's rustup-managed CI runners
+(confirmed on both macOS and Windows) set `RUSTUP_TOOLCHAIN` in the
+ambient environment globally -- `effective_env_var` (fix #1) correctly
+picks this up, so the test now self-skips when an ambient var is already
+present rather than asserting something false. The real-fixture test
+itself passes on Linux/macOS but, as expected, cannot exercise wrapper
+substitution on Windows at all (`prepare_cargo_wrapping`'s own long-
+standing `#[cfg(unix)]`-equivalent guard) -- gated `#[cfg(unix)]`
+accordingly, along with its now-otherwise-unused helper functions.
+
+## Third review pass: 5 more bugs (2 P1-adjacent, 3 P2), plus a P2 in the #25 substrate prototype
+
+Continuing the same external review, five more real bugs across
+`scenario.rs`/`artifact_inventory.rs` and the issue #25 substrate
+prototype fixture, all fixed and verified:
+
+6. **`TrueNoop`'s empty `prepare` had no precondition check**, and the
+   touch-only "edit" scenario was misleadingly named. Reproduced: running
+   a `TrueNoop` scenario against a workload whose output had never been
+   built triggered a real, full build (Cargo itself correctly reported
+   `fresh=false`), yet the `Run` was still recorded `cache_state=TrueNoop`.
+   Fixed with `verify_true_noop_precondition`, checked before any
+   preparation or the timed command runs, erroring when an observation
+   root doesn't already exist. Also renamed the `Warm`/touch-only
+   scenario's own id from `"rust-implementation-edit"`/`
+   "nim-implementation-edit"` to `"rust-mtime-touch-edit"`/`
+   "nim-mtime-touch-edit"` -- it's an mtime bump, not a content change (see
+   `reuse.rs`'s own dependence on exactly that property), and issue #21's
+   actual "implementation-only edit" scenario remains a separate, still-
+   open gap.
+7. **The artifact-inventory walker couldn't handle a single-file
+   observation root.** The Nim scenario preset passes `out_path` (the
+   final linked binary, one file) as an observation root, and the walker
+   called `read_dir` on every root unconditionally -- which errors on a
+   file, silently collapsed into the same "zero entries" outcome the
+   module deliberately uses for a root that doesn't exist yet. Reproduced:
+   rewriting a single-file root's content left the inventory with 0
+   records. Fixed with `walk_root`, which checks whether a root is a file
+   (tracked directly) or a directory (walked as before) before falling
+   back to "doesn't exist, zero entries."
+8. **Two observation roots sharing a final path component collided into
+   one logical path.** `to_logical_path` used only `root.file_name()` as
+   the logical prefix, so `a/target/output.o` and `b/target/output.o`
+   (both named `target`) both reported as `target/output.o` -- two
+   distinct files, different digests, one colliding identity. Fixed by
+   prefixing with the root's own index in the `roots` slice (`root0-`,
+   `root1-`, ...) instead of just its bare name.
+9. *(Already covered above alongside #4: the `(min, max)`-range fix for
+   `compare_reports`'s process-count/artifact-profile comparison.)*
+10. **[Issue #25 substrate prototype] The inliner could duplicate a
+    side-effecting argument expression.** `substitute_params` copies the
+    argument expression verbatim into *every* occurrence of a parameter
+    in the callee's body -- but `inline_call` only ever checked the
+    *callee's* `has_side_effects` fact, never whether the actual argument
+    itself contained a call that inlining would then duplicate.
+    Reproduced directly: `double(effect(x))` (`double`'s own body, `x +%
+    x`, references its parameter twice; `effect` registered
+    `has_side_effects=true`) was permitted, silently invoking `effect`
+    twice. Fixed: `inline_call` now also refuses whenever a
+    multiply-referenced parameter's actual argument contains any `Call`
+    -- fails closed on "cannot prove this argument is safe to duplicate,"
+    not "assume it's pure." A singly-referenced parameter receiving a
+    call argument is still permitted (nothing to duplicate), verified by
+    a dedicated test so the fix isn't an overbroad "never inline a call
+    argument" rule.
+
+All five verified by new tests; `cargo test --workspace`: 74 passed (up
+from 68). The substrate prototype's own `cargo test`/`cargo clippy`
+(run separately, it's outside the main workspace) and `trace.sh`'s full
+cross-check (real Rust/Nim binaries, reference evaluator, LLVM-IR
+projection, and the allowed/rejected inlining demo) all still pass.

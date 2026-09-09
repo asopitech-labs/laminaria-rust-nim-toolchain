@@ -108,6 +108,31 @@ glossed over).
   main.rs` -- nothing mechanically enforces the three lists stay in sync,
   a real, small maintenance risk, named rather than hidden.
 
+## Correction: the inliner could duplicate a side-effecting argument
+
+An external review caught a real bug in `inline.rs`'s transformation:
+`substitute_params` copies the actual argument expression verbatim into
+*every* occurrence of the corresponding parameter in the callee's body --
+but `inline_call` only ever checked the *callee's own* `has_side_effects`
+fact, never whether the argument expression itself contained a call that
+inlining would then duplicate. Since `double`'s own body (`x +% x`)
+references its one parameter twice, `double(effect(x))` (with a
+hypothetical `effect` function registered `has_side_effects=true`) was
+permitted to inline, silently invoking `effect` twice -- exactly the
+class of correctness bug a real inliner has to avoid, and exactly what
+this fixture's own "allowed vs. rejected" demonstration was supposed to
+be about, just missing this second dimension of the hazard.
+
+Fixed: `inline_call` now also refuses whenever a multiply-referenced
+parameter's actual argument expression contains any `Call` -- fails
+closed ("cannot prove this argument is safe to duplicate"), not "assume
+it's pure unless a fact says otherwise." Verified both that the
+duplicating case is now refused, and that a singly-referenced parameter
+receiving a call argument is still permitted (nothing to duplicate there),
+so the fix is scoped to the actual hazard, not an overbroad "never inline
+a call argument" rule. See `inline.rs`'s own doc comment on `inline_call`
+for the full reasoning.
+
 ## Relation to `fixtures/llvm-rediscovery-semantic-workload`
 
 That fixture traces one difference (`"probe-stack"`) all the way to

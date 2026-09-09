@@ -142,7 +142,16 @@ pub fn rust_heavy_workspace_scenario(
         id: match kind {
             CacheStateLabel::Cold => "cold-build".to_string(),
             CacheStateLabel::TrueNoop => "true-noop".to_string(),
-            CacheStateLabel::Warm => "rust-implementation-edit".to_string(),
+            // Not "rust-implementation-edit" -- an external review
+            // correctly pointed out that a bare `touch` doesn't change
+            // content at all (see reuse.rs's own real-fixture test, which
+            // relies on exactly that property), so labeling it as an
+            // "implementation edit" overstates what it actually is: an
+            // mtime-only experiment. A real content-changing edit
+            // scenario is a genuine, separate gap (issue #21's own
+            // required "Rust implementation-only edit" scenario is not
+            // yet actually implemented by this preset).
+            CacheStateLabel::Warm => "rust-mtime-touch-edit".to_string(),
         },
         workload_id: "rust-heavy-workspace".to_string(),
         prepare,
@@ -189,7 +198,8 @@ pub fn nim_heavy_workspace_scenario(
         id: match kind {
             CacheStateLabel::Cold => "cold-build".to_string(),
             CacheStateLabel::TrueNoop => "true-noop".to_string(),
-            CacheStateLabel::Warm => "nim-implementation-edit".to_string(),
+            // See rust_heavy_workspace_scenario's identical comment.
+            CacheStateLabel::Warm => "nim-mtime-touch-edit".to_string(),
         },
         workload_id: "nim-heavy-workspace".to_string(),
         prepare,
@@ -223,6 +233,37 @@ fn run_prepare_steps(steps: &[RootCommand]) -> std::io::Result<Vec<String>> {
     Ok(descriptions)
 }
 
+/// `CacheStateLabel::TrueNoop`'s own precondition: its observation roots
+/// must already exist, from a prior successful build. A real bug an
+/// external review caught: `TrueNoop`'s `prepare` is empty by design (see
+/// this module's own doc comment), so running it against a workload whose
+/// output had never been built produced a real, full build -- Cargo
+/// itself correctly reported `fresh=false` -- yet the resulting `Run` was
+/// still recorded with `cache_state=TrueNoop`, a real mislabeling, not
+/// just an edge case. Checked here rather than silently trusting the
+/// caller to sequence scenarios correctly (cold, then true-noop).
+fn verify_true_noop_precondition(scenario: &Scenario) -> std::io::Result<()> {
+    if scenario.cache_state_label != CacheStateLabel::TrueNoop {
+        return Ok(());
+    }
+    for root in &scenario.observation_roots {
+        if !root.exists() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!(
+                    "scenario {:?} is labeled TrueNoop, but its observation root {} does not \
+                     exist -- a true no-op requires a prior successful build to have already \
+                     produced it (run a Cold scenario against the same workload first); \
+                     otherwise this would run a real, full build and mislabel it TrueNoop",
+                    scenario.id,
+                    root.display()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Runs `scenario` once: preparation (untimed, recorded into
 /// `PreparationRecord`), then the timed measured command via
 /// `crate::run_and_record`. Patches the returned `Run`'s
@@ -238,6 +279,7 @@ pub fn run_scenario_once(
     lock_path: &Path,
     repo_root: &Path,
 ) -> std::io::Result<Run> {
+    verify_true_noop_precondition(scenario)?;
     let prep_descriptions = run_prepare_steps(&scenario.prepare)?;
     let cache_clears: Vec<String> = prep_descriptions
         .iter()
@@ -771,6 +813,95 @@ mod tests {
             compiler_telemetry: None,
             artifact_delta: None,
             measurement_overhead: None,
+        }
+    }
+
+    /// The exact bug an external review caught: `TrueNoop` against a
+    /// workload whose output was never built would previously run
+    /// unconditionally and get mislabeled `TrueNoop` regardless.
+    #[test]
+    fn true_noop_against_a_never_built_workload_is_rejected_before_running() {
+        let observation_root = std::env::temp_dir().join(format!(
+            "laminaria-run-scenario-test-noop-precondition-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&observation_root);
+
+        let scenario = Scenario {
+            id: "true-noop".to_string(),
+            workload_id: "test-workload".to_string(),
+            prepare: Vec::new(),
+            root: RootCommand {
+                program: "true".to_string(),
+                args: Vec::new(),
+                cwd: None,
+                env_overrides: BTreeMap::new(),
+            },
+            observation_roots: vec![observation_root],
+            cache_state_label: CacheStateLabel::TrueNoop,
+        };
+
+        let result = verify_true_noop_precondition(&scenario);
+
+        assert!(
+            result.is_err(),
+            "a TrueNoop scenario whose observation root was never built must be rejected \
+             before running, not silently run and mislabeled TrueNoop"
+        );
+    }
+
+    #[test]
+    fn true_noop_precondition_passes_once_the_observation_root_exists() {
+        let observation_root = std::env::temp_dir().join(format!(
+            "laminaria-run-scenario-test-noop-precondition-ok-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&observation_root).unwrap();
+
+        let scenario = Scenario {
+            id: "true-noop".to_string(),
+            workload_id: "test-workload".to_string(),
+            prepare: Vec::new(),
+            root: RootCommand {
+                program: "true".to_string(),
+                args: Vec::new(),
+                cwd: None,
+                env_overrides: BTreeMap::new(),
+            },
+            observation_roots: vec![observation_root.clone()],
+            cache_state_label: CacheStateLabel::TrueNoop,
+        };
+
+        assert!(verify_true_noop_precondition(&scenario).is_ok());
+        let _ = std::fs::remove_dir_all(&observation_root);
+    }
+
+    #[test]
+    fn precondition_check_does_not_apply_to_cold_or_warm_scenarios() {
+        let missing_root = std::env::temp_dir().join(format!(
+            "laminaria-run-scenario-test-precondition-not-applicable-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&missing_root);
+
+        for kind in [CacheStateLabel::Cold, CacheStateLabel::Warm] {
+            let scenario = Scenario {
+                id: "test".to_string(),
+                workload_id: "test-workload".to_string(),
+                prepare: Vec::new(),
+                root: RootCommand {
+                    program: "true".to_string(),
+                    args: Vec::new(),
+                    cwd: None,
+                    env_overrides: BTreeMap::new(),
+                },
+                observation_roots: vec![missing_root.clone()],
+                cache_state_label: kind,
+            };
+            assert!(
+                verify_true_noop_precondition(&scenario).is_ok(),
+                "the TrueNoop precondition must not apply to {kind:?}"
+            );
         }
     }
 
