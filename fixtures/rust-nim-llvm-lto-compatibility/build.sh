@@ -46,7 +46,14 @@ echo "--- llvm-dis: inspect the result ---"
 cat merged-opt.ll
 
 echo "--- llc: compile the merged+optimized module to a native object ---"
-"$LLC_BIN" -filetype=obj merged-opt.bc -o merged-opt.o
+# -relocation-model=pic: llc defaults to a non-PIC relocation model,
+# which produces R_X86_64_32S relocations against .rodata that the
+# system linker rejects when building a PIE (Ubuntu's default) --
+# "relocation ... can not be used when making a PIE object." Rust's own
+# emitted IR already carries `!{i32 8, !"PIC Level", i32 2}`; llc still
+# needs this told explicitly since it doesn't read that module flag as
+# a relocation-model default on its own.
+"$LLC_BIN" -relocation-model=pic -filetype=obj merged-opt.bc -o merged-opt.o
 
 echo "--- cc: link the native object into an executable (system driver, standard crt/libs) ---"
 cc merged-opt.o -o merged-native -lpthread
