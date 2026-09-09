@@ -129,6 +129,17 @@ jobs:
             exit 1
           fi
 
+      # Issue #4 Layer 4, also previously untested: does calling into
+      # Rust's extern "C" functions work from an OS thread *Nim*
+      # created (not one Rust's own std::thread::spawn set up)? See
+      # thread-experiment/main.nim and NOTES.md.
+      - name: Build and run the direct-native-link thread-boundary experiment
+        run: |
+          cd fixtures/direct-native-link/thread-experiment
+          cargo build --release --manifest-path ../rust-lib/Cargo.toml
+          nim c --threads:on --nimcache:nimcache --passL:"-L../rust-lib/target/release -lrustlib" -o:main main.nim
+          ./main
+
   # Issue #4's genuinely-open question, not #11's: every fixture above
   # uses `nim c`, which always produces native code via a generated-C
   # intermediate -- even with no header file, that route's ABI/symbol
@@ -246,6 +257,14 @@ jobs:
             echo "main exited with unexpected status $STATUS on the nlvm route -- expected SIGABRT (134), investigate"
             exit 1
           fi
+
+      # Cross-route confirmation of the thread-boundary experiment too.
+      - name: Build and run the thread-boundary experiment via nlvm
+        run: |
+          rm -rf ~/.cache/nim/main_d
+          cd fixtures/direct-native-link/thread-experiment
+          "$NLVM_BIN" c --threads:on --passL:"-L../rust-lib/target/release -lrustlib" main.nim
+          ./main
 
       # #11's own fixture (not #4's investigation, though it reuses this
       # job's nlvm download): does Rust's own LLVM IR and Nim's own LLVM

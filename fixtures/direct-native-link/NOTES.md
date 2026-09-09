@@ -492,6 +492,48 @@ code is on the stack, e.g. Rust calling back into a Nim callback that
 raises) — no experiment in this fixture has Rust call into Nim yet,
 every call here goes Nim → Rust only.
 
+## Layer 4: does calling into Rust from a Nim-spawned thread work? (`thread-experiment/`)
+
+Previously untested. Rust's stdlib normally registers per-thread
+bookkeeping (`std::thread::current()` metadata, stack-overflow guard
+page) when it spawns a thread itself via `std::thread::spawn`; an OS
+thread Nim creates directly (`createThread`/pthread) is "foreign" to
+Rust — it never went through that registration. Whether Rust code
+still works correctly when called from such a thread is a real
+question, not an obviously-yes one, so it was checked with two calls
+of increasing risk rather than assumed from "the allocator is
+documented as thread-safe":
+
+1. `rust_transform` — pure arithmetic, touches no thread-local state at
+   all. Expected to work regardless; a baseline sanity check.
+2. `rust_vec_growth_probe` — allocates and reallocates a `Vec`,
+   actually exercising Rust's global allocator from this foreign
+   thread. The real stress test.
+
+```
+$ ./main
+worker thread: rust_transform(21)=43
+worker thread: rust_vec_growth_probe len_after=1010 (allocator exercised from a Nim-spawned, Rust-foreign OS thread)
+main thread: worker completed successfully -- Rust calls from a Nim-spawned thread work correctly
+```
+
+**Result: both calls succeed correctly**, on both the `nim c` and
+`nlvm` routes, with no special thread-registration step on either
+side. Rust's default allocator (the system allocator on the platforms
+this project targets) genuinely doesn't require a thread to have gone
+through `std::thread::spawn` to use it safely — confirmed directly for
+this project's actual boundary shape, not merely cited from Rust's own
+allocator documentation.
+
+Not tested: anything that *would* touch Rust's per-thread metadata
+directly (e.g. `std::thread::current().name()`, which panics without a
+registered thread — a `panic!` here would additionally exercise the
+Layer 4 panic-boundary finding above, but wasn't combined with it in
+this session), or threads created by *Rust* and called into by Nim
+(the reverse direction), or any GC-safety interaction with Nim's own
+ORC when Nim-side code (not just Rust's allocator) runs on this
+thread.
+
 ## Explicitly not attempted, and why (Layer 3/4 scope)
 
 Per `docs/rust-nim-native-linking.md`'s own required "compatibility
