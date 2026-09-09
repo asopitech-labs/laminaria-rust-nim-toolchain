@@ -67,6 +67,15 @@ cargo run -p laminaria-cli -- doctor --json   # machine-readable EnvironmentFing
 
 Named toolchain selectors live in [`toolchains.lock.toml`](toolchains.lock.toml); `rust-toolchain.toml` only pins the toolchain used to build LAMINARIA's own Rust code, not the toolchains under measurement.
 
+`scripts/bootstrap.sh` prefers exact, non-system-package-manager sources where one exists (`rustup` toolchains + its `llvm-tools` component, `choosenim` for exact Nim versions, `cargo install --version` for pure-Rust CLI tools); a system package manager is only used for the couple of tools with no such alternative (`clang`/`llvm-config`, Binaryen's `wasm-opt`). For a fully reproducible bootstrap independent of any one host's package manager state — e.g. to sanity-check the toolchain set on a clean machine — [`docker/bootstrap.Dockerfile`](docker/bootstrap.Dockerfile) builds and runs the same stack in a container:
+
+```bash
+docker build -f docker/bootstrap.Dockerfile -t laminaria-bootstrap .
+docker run --rm laminaria-bootstrap doctor
+```
+
+Per `docs/measurement-foundation.md` §2, this is for bootstrap/correctness reproduction only — canonical performance measurements should run natively on the host being measured, and `doctor` records `environment_class = "container"` so such runs are never silently compared to a native baseline.
+
 ## Documentation
 
 - [Agent-oriented toolchain UX and bounded planning (English)](docs/agent-oriented-toolchain-ux.md)

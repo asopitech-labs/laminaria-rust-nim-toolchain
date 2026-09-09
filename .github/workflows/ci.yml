@@ -29,3 +29,17 @@ jobs:
       - name: doctor (environment fingerprint, informational)
         run: cargo run -p laminaria-cli -- doctor
         continue-on-error: true
+
+  # Exercises the "container" EnvironmentFingerprint class from a clean,
+  # native (non-Rosetta) environment — see docker/bootstrap.Dockerfile for
+  # why this is a bootstrap/correctness check, not a performance baseline.
+  docker-bootstrap:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build bootstrap image
+        run: docker build -f docker/bootstrap.Dockerfile -t laminaria-bootstrap .
+
+      - name: doctor inside the container
+        run: docker run --rm laminaria-bootstrap doctor
