@@ -962,13 +962,27 @@ symbol and calling convention. The entire measurable cost of the
 "conventional C ABI baseline" shape here is the generated-header
 build-time artifact above, not runtime overhead.
 
+### Confirmed in CI on both platforms this project targets
+
+Checked beyond the local arm64 macOS run above: CI (`34333279125`,
+`rust` matrix job, both `ubuntu-latest` and `macos-latest`) runs
+`cbindgen` fresh and rebuilds+runs both routes on every push. Both
+platforms produced the identical correct output (`result=43`,
+`layout (header-imported Point): size=8 align=4 offset_x=0 offset_y=4`,
+`scale_in_place: 15,20`, and the full opaque-handle lifecycle) — the
+comparison isn't specific to this dev machine's toolchain or
+architecture. Header-generation cost was measured on both:
+`ubuntu-latest` 40ms, `macos-latest` (CI) 126ms — both trivial, same
+219-line/7262-byte header either way (cbindgen's output is
+platform-independent, as expected: it reads Rust source, not compiled
+artifacts).
+
 ### Not yet attempted, for this comparison specifically
 
-Only checked on the `nim c` route, locally (arm64 macOS) — not yet run
-in CI, and not yet ported to the `nlvm` route (unclear whether nlvm's C
-codegen path can consume a `{.header.}`-imported type the same way at
-all, given nlvm never generates or reads C source anywhere in its own
-pipeline — a real open question, not assumed either way). Link time and
+Not yet ported to the `nlvm` route (unclear whether nlvm's C codegen
+path can consume a `{.header.}`-imported type the same way at all, given
+nlvm never generates or reads C source anywhere in its own pipeline — a
+real open question, not assumed either way). Link time and
 incremental-rebuild-scope, two of Layer 5's other required measurements,
 were not measured here — this crate is too small for link time to be
 a meaningful signal, and no incremental-edit scenario was run.
