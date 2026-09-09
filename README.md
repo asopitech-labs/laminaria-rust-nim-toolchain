@@ -53,6 +53,20 @@ The boundary is **computation and planning vs. execution and side effects**, not
 - WebAssembly Target Pipeline
 - Agent-Oriented / Explainable Toolchain
 
+## Environment and toolchain setup
+
+The first permanent code in this repository is the environment/toolchain identity layer for issue [#18](https://github.com/asopitech-labs/laminaria-rust-nim-toolchain/issues/18): a repository-owned multi-toolchain lock and a `doctor` command that resolves it to exact `EnvironmentFingerprint`/`ToolchainFingerprint` records.
+
+```bash
+scripts/bootstrap.sh              # report missing tools against toolchains.lock.toml
+scripts/bootstrap.sh --install    # also install them (macOS/Homebrew + rustup)
+
+cargo run -p laminaria-cli -- doctor          # human-readable environment/toolchain report
+cargo run -p laminaria-cli -- doctor --json   # machine-readable EnvironmentFingerprint/ToolchainFingerprint
+```
+
+Named toolchain selectors live in [`toolchains.lock.toml`](toolchains.lock.toml); `rust-toolchain.toml` only pins the toolchain used to build LAMINARIA's own Rust code, not the toolchains under measurement.
+
 ## Documentation
 
 - [Agent-oriented toolchain UX and bounded planning (English)](docs/agent-oriented-toolchain-ux.md)

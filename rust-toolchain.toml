@@ -1,0 +1,8 @@
+# Project-level toolchain selector for building LAMINARIA's own Rust code
+# (the CLI/fingerprint crates), not a research-measurement toolchain pin.
+# `toolchains.lock.toml` / `doctor` separately resolve and fingerprint the
+# exact toolchains used *by* LAMINARIA's measurements
+# (docs/measurement-foundation.md section 3).
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]

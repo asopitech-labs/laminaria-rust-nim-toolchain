@@ -1,0 +1,62 @@
+# Repository-owned multi-toolchain lock (issue #18).
+#
+# This file names the toolchain *selectors* LAMINARIA measurements are
+# allowed to request. It is not a cache of resolved versions: `doctor`
+# (`cargo run -p laminaria-cli -- doctor`) resolves each selector below to an
+# exact ToolchainFingerprint (executable path, digest, resolved
+# version/commit, bundled LLVM, ...) and records both the selector and the
+# resolution together, per docs/multi-version-toolchains.md section 8.
+#
+# `latest` is never a valid selector value here — see
+# docs/measurement-foundation.md section 3.
+
+schema_version = "0.1.0"
+
+# --- Rust -------------------------------------------------------------
+#
+# Selectors are resolved through `rustup` when available
+# (`rustup run <selector> ...`), so multiple exact Rust toolchains can be
+# added here and coexist without one overwriting another. Add a new
+# `[rust.toolchains.<name>]` entry (and `rustup toolchain install <selector>`)
+# for every additional exact stable/beta/nightly/source-built toolchain a
+# scenario needs.
+
+[rust.toolchains.system_stable]
+selector = "stable"
+components = ["rustc", "cargo", "rust-std"]
+
+# --- Nim ----------------------------------------------------------------
+#
+# Nim 2 and Nimony/Nim 3 are meant to share this same named-toolchain
+# abstraction. Only one Nim install can currently be resolved (there is no
+# `rustup`-equivalent multi-Nim switcher wired into `doctor` yet), so for now
+# this names whatever `nim`/`nimble` are active on PATH; `doctor` flags a
+# selector/resolved-version mismatch explicitly rather than hiding it.
+
+[nim.toolchains.system_nim2]
+selector = "2.2"
+
+# --- Backend / target tools ---------------------------------------------
+#
+# LLVM/Clang/LLD, the WebAssembly toolchain, and other non-Rust/Nim
+# executables consumed by later backend-pipeline research (#13-#17).
+# `selector = "system"` means "whatever resolves on PATH"; pin an exact
+# version selector once a bootstrap/install path exists for it.
+
+[tools.llvm]
+selector = "system"
+
+[tools.clang]
+selector = "system"
+
+[tools.lld]
+selector = "system"
+
+[tools.wasm_ld]
+selector = "system"
+
+[tools.wasm_opt]
+selector = "system"
+
+[tools.wasm_tools]
+selector = "system"

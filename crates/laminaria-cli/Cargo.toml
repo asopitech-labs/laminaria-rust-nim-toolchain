@@ -1,0 +1,15 @@
+[package]
+name = "laminaria-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "LAMINARIA command-line entry point (doctor: environment and toolchain fingerprinting, issue #18)."
+
+[[bin]]
+name = "laminaria"
+path = "src/main.rs"
+
+[dependencies]
+laminaria-fingerprint = { path = "../laminaria-fingerprint" }
+clap = { version = "4", features = ["derive"] }
