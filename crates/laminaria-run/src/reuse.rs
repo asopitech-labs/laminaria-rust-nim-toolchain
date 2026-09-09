@@ -323,7 +323,10 @@ mod tests {
     /// Portable recursive directory copy for
     /// `reuse_decision_matches_real_fixture_behavior_across_cold_noop_and_edits`
     /// -- deliberately not `std::process::Command::new("cp")`; see that
-    /// test's own comment for why.
+    /// test's own comment for why. `#[cfg(unix)]`, matching that test's
+    /// own gating: unused (and therefore a `-D warnings` dead-code error
+    /// under clippy) on every other platform.
+    #[cfg(unix)]
     fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
         std::fs::create_dir_all(dst)?;
         for entry in std::fs::read_dir(src)? {
@@ -737,7 +740,9 @@ mod tests {
     /// *running executable* -- inside `cargo test`, that's this test
     /// binary itself, not `laminaria-cli`, so wrapper substitution would
     /// silently never engage and every toolchain digest would read `None`
-    /// regardless of what this test is trying to check.
+    /// regardless of what this test is trying to check. `#[cfg(unix)]`,
+    /// matching this whole test group's own gating.
+    #[cfg(unix)]
     fn laminaria_cli_binary(repo_root: &Path) -> PathBuf {
         // `--workspace`, not `-p laminaria-cli`: `laminaria-rustc-wrapper`/
         // `laminaria-cc-wrapper` are laminaria-run's own [[bin]] targets,
@@ -778,6 +783,8 @@ mod tests {
     /// `toolchain_identity_from_run` correctly matches the *used*
     /// toolchain against the lock file), rather than depending on this
     /// machine's own PATH configuration to happen to agree with it.
+    /// `#[cfg(unix)]`, matching this whole test group's own gating.
+    #[cfg(unix)]
     fn lock_resolved_rustc_path(cli_bin: &Path, repo_root: &Path, lock_path: &Path) -> PathBuf {
         let output = std::process::Command::new(cli_bin)
             .args(["doctor", "--json"])
@@ -799,7 +806,9 @@ mod tests {
     /// `--repeat 1`), returning the single resulting `Run` read back from
     /// disk -- not the `ScenarioReport` this subcommand prints, which
     /// doesn't carry the full `Run` (toolchain fingerprint, root_command)
-    /// this test needs.
+    /// this test needs. `#[cfg(unix)]`, matching this whole test group's
+    /// own gating.
+    #[cfg(unix)]
     #[allow(clippy::too_many_arguments)]
     fn run_scenario_via_cli(
         cli_bin: &Path,
