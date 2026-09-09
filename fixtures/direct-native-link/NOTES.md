@@ -589,20 +589,25 @@ and an outright crash as an argument followed by more parameters. None
 of this is present on the `nim c` route at all; `rust-lib`'s Rust side
 is unmodified between the two comparisons.
 
-**Conclusion**: this specific `nlvm` build (`continuous`, commit
-`a9c3397`) does not yet implement SysV small-struct-by-value ABI
-classification correctly for either function arguments or return
-values, on any of the three shapes tested. The Layer 1-2 result (bare
-scalars, no C header) generalizes cleanly across both Nim-side routes.
-The Layer 3 result (fixed-layout structs) does **not** generalize as-is
-— it is `nim c`-route-specific until `nlvm`'s struct ABI is complete —
-but the underlying mitigation pattern this whole fixture already
-converged on independently (pass aggregates by pointer, never by value)
-turns out to be exactly what keeps working on both routes. That's not
-a coincidence to read too much into on one data point, but it is a
-concrete, actionable finding for anyone building on `nlvm` today: avoid
-by-value structs across this boundary entirely, pointers only, until
-upstream's own TODO is resolved.
+**Conclusion, correctly weighted**: the finding worth acting on is the
+*positive* one, not the by-value breakage. Every pattern this project's
+design already uses — scalars, pointer-to-struct, pointer-to-array,
+`seq`/`Vec` pointer resolution, `GC_ref` pinning — is route-independent:
+identical, correct behavior on both `nim c` and `nlvm`. That's what
+makes the C-free route viable at all for this project's actual boundary
+design.
+
+By-value struct passing being broken on this `nlvm` build (`continuous`,
+commit `a9c3397`, in every shape tested — argument, return, argument-
+followed-by-more) is not itself a problem to solve: this project's
+boundary design was already pointer-only before this comparison, for
+reasons independent of `nlvm` (see the Layer 3 compatibility-matrix note
+in `docs/rust-nim-native-linking.md`), so nothing here changes what gets
+built. It's confirmatory, not actionable — evidence that avoiding
+by-value aggregates is required on `nlvm` specifically, on top of
+already being this project's default everywhere. Not pursued further:
+no upstream report to `nlvm`'s tracker, no attempt to work around it —
+correctly out of scope for a pattern nothing here was going to use.
 
 Symbol resolution held throughout, same as the `nim c` route, including
 the two by-value-broken and one crashing function — `nlvm`'s linker
@@ -656,5 +661,8 @@ macOS), set aside in favor of CI's already-working Linux path rather
 than fixing this machine's broken local Colima/Lima install (a known,
 separate, pre-existing environment issue — see `toolchains.lock.toml`
 history). Reporting the by-value-struct ABI finding upstream to `nlvm`'s
-own issue tracker is a reasonable next step but was not done in this
-session — a decision for whoever owns that relationship.
+own issue tracker was considered and deliberately not pursued: this
+project's own boundary design was already pointer-only for reasons
+independent of `nlvm` (see the Layer 3 note above), so the finding is
+confirmatory rather than something this project needs fixed upstream to
+proceed.
