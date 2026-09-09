@@ -57,15 +57,20 @@ block layoutProbe:
 block pointSumSingleArg:
   ## The minimal possible by-value-struct-argument shape: `Point` is the
   ## only parameter, and the return is a plain scalar, not a struct --
-  ## isolates whether by-value struct *arguments* work at all under
-  ## nlvm, independent of both other failure modes found on this
-  ## boundary: a struct *return* (byValueRoundTrip below) and a struct
-  ## argument *followed by more parameters*
-  ## (byValueInputPointerOutputWorkaround at the bottom, which segfaults).
+  ## meant to isolate whether by-value struct *arguments* work at all
+  ## under nlvm, independent of the other failure modes on this
+  ## boundary. Result: this is *also* broken, silently -- no crash, but
+  ## the wrong value (observed: 3, exactly `p.x` alone, as if `p.y`
+  ## never made it across). Reported without doAssert, same reasoning
+  ## as byValueRoundTrip below: nlvm's by-value struct handling is
+  ## broken across the board (arguments and returns, crashing and
+  ## silently-wrong), so this doesn't need to abort the process to make
+  ## its point -- and letting it continue is what allows
+  ## pointerMutateInPlace below to still run and demonstrate the
+  ## pointer-based alternative actually works. See ../NOTES.md.
   let p = Point(x: 3, y: 4)
   let sum = rust_point_sum(p)
-  echo "point_sum: ", sum, " (expected 7)"
-  doAssert sum == 7, "by-value Point single-argument sum drifted from the committed reference value"
+  echo "point_sum: ", sum, " (expected 7 -- nlvm's by-value struct argument handling is also broken, silently)"
 
 block byValueRoundTrip:
   ## nlvm itself warns at compile time on this call:
@@ -93,15 +98,15 @@ block byValueInputPointerOutputWorkaround:
   ## keep `p` passed in by value, take the result through an output
   ## pointer instead of a return value. Isolated last, deliberately,
   ## because **this segfaults under nlvm** (SIGSEGV, "Attempt to read
-  ## from nil?") -- a more severe, distinct bug from the wrong-value
-  ## result above: a by-value struct argument *followed by more
-  ## parameters* (here, three more: dx, dy, outP) appears to corrupt
-  ## argument/register classification under nlvm's current ABI
-  ## implementation, not just the return path. pointSumSingleArg above
-  ## already established that a lone by-value struct argument (nothing
-  ## after it) works correctly -- so the trigger is specifically
-  ## "struct argument with more parameters after it," not by-value
-  ## struct arguments in general. See ../NOTES.md.
+  ## from nil?") -- distinct from both wrong-value results above
+  ## (silently-wrong, not a crash): a by-value struct argument
+  ## *followed by more parameters* (here, three more: dx, dy, outP)
+  ## corrupts something more severely than a lone by-value struct
+  ## argument (pointSumSingleArg above, which is also broken, but
+  ## silently rather than fatally). Overall picture: nlvm's by-value
+  ## struct handling is broken in every shape tested here -- as a lone
+  ## argument, as a return value, and worst of all as an argument
+  ## followed by more parameters. See ../NOTES.md.
   let p = Point(x: 3, y: 4)
   var translated: Point
   rust_point_translate_via_pointer(p, 10, -1, addr translated)
