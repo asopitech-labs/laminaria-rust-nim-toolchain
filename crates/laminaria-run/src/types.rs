@@ -216,3 +216,52 @@ pub struct Summary {
     pub process_record_count: usize,
     pub known_gaps: Vec<String>,
 }
+
+/// One `"reason": "compiler-artifact"` message from Cargo's real JSON
+/// message stream (`--message-format=json`), reduced to the fields
+/// `docs/measurement-foundation.md` section 8 (artifact inventory) and
+/// section 10 (explicit cache state) actually need. Field names and shape
+/// verified against Cargo's own source
+/// (`.reference/cargo/src/util/machine_message.rs`'s `Artifact` struct),
+/// not assumed from documentation -- see `crate::cargo_telemetry`'s module
+/// doc for what was checked and how.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompilerArtifactRecord {
+    pub package_id: String,
+    pub target_name: String,
+    pub target_kind: Vec<String>,
+    pub filenames: Vec<PathBuf>,
+    pub executable: Option<PathBuf>,
+    /// Cargo's own per-crate cache-state signal: `true` means this
+    /// specific crate's artifact was already up to date and was not
+    /// recompiled. Far more precise than inferring cache state from
+    /// whole-build CPU time, since it's reported per compilation unit,
+    /// straight from Cargo's own dependency-freshness check -- not
+    /// derived or inferred by this crate at all.
+    pub fresh: bool,
+}
+
+/// Level 2 compiler-native telemetry for a Cargo build
+/// (`docs/measurement-foundation.md` section 7's "Rust / Cargo" adapter).
+/// Populated from Cargo's real `--message-format=json` output by
+/// `crate::cargo_telemetry::parse_cargo_json_messages`, stored on
+/// `Run::compiler_telemetry` as a generic `serde_json::Value` (that field
+/// stays adapter-agnostic in the schema; this is Cargo's own JSON shape).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CargoCompilerTelemetry {
+    pub artifacts: Vec<CompilerArtifactRecord>,
+    /// From the one `"reason": "build-finished"` message Cargo emits at
+    /// the end of a successful parse of its own message stream. `None`
+    /// when that message was never seen (e.g. the traced command crashed
+    /// before Cargo could emit it, or wasn't given `--message-format=json`
+    /// at all).
+    pub build_finished_success: Option<bool>,
+    pub compiler_message_count: usize,
+    pub build_script_executed_count: usize,
+    /// Lines from the traced command's stdout that were not one of
+    /// Cargo's own known message `reason`s or failed to parse as JSON at
+    /// all -- explicit, not silently dropped, so a reader can tell
+    /// "zero artifacts" apart from "this wasn't actually a
+    /// --message-format=json stream".
+    pub unparsed_line_count: usize,
+}

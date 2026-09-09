@@ -1,5 +1,6 @@
-//! Versioned Run envelope and Level 0/1 process/resource tracer for
-//! LAMINARIA (issue #19), following `docs/measurement-foundation.md`.
+//! Versioned Run envelope and Level 0/1/2 process/resource/compiler
+//! tracer for LAMINARIA (issue #19), following
+//! `docs/measurement-foundation.md`.
 //!
 //! This crate implements a first, honest slice of that design, not the
 //! whole thing. See each module's doc comment for exactly what it covers;
@@ -12,17 +13,29 @@
 //!   lifecycle data and Level 1 `wait4`-derived resource usage for that
 //!   one process (cumulative over its reaped subtree -- see `tracer`'s
 //!   doc comment for what that does and does not mean).
+//! - `cargo_wrapper`/`nim_wrapper`: per-invocation granularity for
+//!   Cargo/rustc and `nim c`/`cpp` builds via wrapper substitution --
+//!   *not* OS-level process-tree walking, modeled on real prior art
+//!   (`rustc-perf`'s `rustc-fake`) and Nim's own real compiler source,
+//!   studied before implementing either (see each module's doc comment).
+//! - `cargo_telemetry`: Level 2 compiler-native telemetry for Cargo
+//!   builds, parsed from Cargo's own real `--message-format=json` output
+//!   (studied from Cargo's actual source, not assumed) -- real artifact
+//!   paths and a precise per-crate cache-freshness signal, not derived or
+//!   inferred by this crate.
 //! - `store`: the `runs/<run-id>/` on-disk layout (section 5) and
 //!   `summary.json` regeneration from raw evidence.
 //!
 //! **Not yet implemented, deliberately left as explicit gaps rather than
-//! silently assumed**: individual descendant-process enumeration (only
-//! the root command's own record exists so far), Level 2 compiler-native
-//! telemetry adapters, Level 3 platform profiler integration, artifact
-//! inventory (section 8), cache-state/preparation-record population
-//! (sections 9-10), and measurement-overhead comparison across probe
-//! levels (section 12).
+//! silently assumed**: general (non-Cargo, non-Nim) parent/child process
+//! enumeration, Level 2 telemetry for any toolchain other than Cargo
+//! (rustc `-Z self-profile`, Nim stage diagnostics), Level 3 platform
+//! profiler integration, full artifact inventory (section 8 -- Cargo's
+//! own reported artifact paths/freshness are captured, but size/digest/
+//! change-state are not), and cache-state/preparation-record population
+//! (sections 9-10, beyond what Cargo's own telemetry incidentally gives).
 
+pub mod cargo_telemetry;
 pub mod cargo_wrapper;
 pub mod clock;
 pub mod nim_wrapper;
@@ -210,8 +223,11 @@ pub fn run_and_record(
     let mut effective_root = root.clone();
     let mut wrapping_note: Option<String> = None;
     let mut wrapping_kind: Option<&'static str> = None;
+    let mut cargo_telemetry_requested = false;
     if is_level0 {
-        // no-op: Level 0 never wraps
+        // no-op: Level 0 never wraps and never requests Level 2 telemetry
+        // either -- both are extra instrumentation the baseline shouldn't
+        // carry (see tracer::trace_root_command_level0's doc comment).
     } else if is_cargo_command(&root) {
         match prepare_cargo_wrapping(&wrapper_events_path, clock.anchor_unix_ns()) {
             Ok(env_vars) => {
@@ -225,6 +241,18 @@ pub fn run_and_record(
                     "per-rustc-invocation tracing via RUSTC-wrapper substitution was not applied: {reason}"
                 ));
             }
+        }
+        // Level 2 compiler telemetry (docs/measurement-foundation.md
+        // section 7): Cargo's own --message-format=json, studied from
+        // Cargo's real source before relying on it (see cargo_telemetry's
+        // module doc). Only for the subcommands independently verified
+        // not to error on the flag, and never overriding an explicit
+        // --message-format the caller already specified.
+        if cargo_telemetry::should_inject_message_format(&root.args) {
+            effective_root
+                .args
+                .push("--message-format=json".to_string());
+            cargo_telemetry_requested = true;
         }
     } else if is_nim_c_command(&root) {
         match prepare_nim_wrapping(&wrapper_events_path, clock.anchor_unix_ns()) {
@@ -261,6 +289,9 @@ pub fn run_and_record(
 
     let wrapper_invocation_records = read_events(&wrapper_events_path).unwrap_or_default();
     let _ = std::fs::remove_file(&wrapper_events_path);
+
+    let cargo_telemetry =
+        cargo_telemetry_requested.then(|| cargo_telemetry::parse_cargo_json_messages(&stdout_path));
 
     let run_ended_at_unix_ns = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -335,22 +366,46 @@ pub fn run_and_record(
                     known_gaps.push(note);
                 }
             }
-            known_gaps.push(
-                "Level 2 compiler-native telemetry and Level 3 platform profiler data are not \
-                 captured"
-                    .to_string(),
-            );
-            known_gaps.push(
-                "artifact inventory (docs/measurement-foundation.md section 8) is not captured"
-                    .to_string(),
-            );
+            match &cargo_telemetry {
+                Some(telemetry) => {
+                    known_gaps.push(format!(
+                        "Level 2 compiler telemetry captured via Cargo's own --message-format=json \
+                         ({} artifact(s) reported, {} fresh/cached); Level 3 platform profiler data \
+                         is still not captured, and this is Cargo-specific -- no equivalent exists \
+                         for Nim builds",
+                        telemetry.artifacts.len(),
+                        telemetry.artifacts.iter().filter(|a| a.fresh).count()
+                    ));
+                    known_gaps.push(
+                        "artifact inventory (docs/measurement-foundation.md section 8) is only \
+                         partially covered: Cargo's own reported artifact paths and freshness are \
+                         in compiler_telemetry, but size, content digest, and create/change/delete \
+                         state (the rest of section 8's required fields) are not captured"
+                            .to_string(),
+                    );
+                }
+                None => {
+                    known_gaps.push(
+                        "Level 2 compiler-native telemetry and Level 3 platform profiler data are \
+                         not captured"
+                            .to_string(),
+                    );
+                    known_gaps.push(
+                        "artifact inventory (docs/measurement-foundation.md section 8) is not \
+                         captured"
+                            .to_string(),
+                    );
+                }
+            }
 
             ProcessTrace {
                 processes,
                 known_gaps,
             }
         },
-        compiler_telemetry: None,
+        compiler_telemetry: cargo_telemetry
+            .as_ref()
+            .and_then(|t| serde_json::to_value(t).ok()),
         artifact_delta: None,
         measurement_overhead: Some(MeasurementOverhead {
             probe_level,
