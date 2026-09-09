@@ -12,6 +12,8 @@ Central rule:
 
 LAMINARIA should use known constraints, validated profiles, compatibility evidence, and reusable negative knowledge to shrink the search space before execution and return a small number of viable plans with structured explanations.
 
+The falsifiable hypotheses, exploration budgets, UX metrics, failure semantics, and baselines for this direction are defined in `toolchain-ux-research-contract.md`.
+
 ## 1. UX is an independent success criterion
 
 A technically correct toolchain is still inadequate if users must manually discover version/backend/linker combinations through trial and error.
