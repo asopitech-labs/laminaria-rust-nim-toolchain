@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/stage-01",
+    "crates/stage-02",
+    "crates/stage-03",
+    "crates/stage-04",
+    "crates/stage-05",
+    "crates/stage-06",
+    "crates/stage-07",
+    "crates/stage-08",
+    "crates/stage-09",
+    "crates/stage-10",
+    "crates/stage-11",
+    "crates/stage-12",
+    "crates/fixture-bin",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+publish = false

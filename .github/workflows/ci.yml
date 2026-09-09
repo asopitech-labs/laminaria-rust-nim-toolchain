@@ -65,6 +65,13 @@ jobs:
           cargo test --workspace
           cargo run -q -p aggregator
 
+      - name: Build deep-critical-path-graph fixture
+        run: |
+          cd fixtures/deep-critical-path-graph
+          cargo build --workspace
+          cargo test --workspace
+          cargo run -q -p fixture-bin
+
   # Exercises the "container" EnvironmentFingerprint class from a clean,
   # native (non-Rosetta) environment — see docker/bootstrap.Dockerfile for
   # why this is a bootstrap/correctness check, not a performance baseline.

@@ -1,0 +1,12 @@
+[package]
+name = "fixture-bin"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "fixture-bin"
+path = "src/main.rs"
+
+[dependencies]
+stage-12 = { path = "../stage-12" }

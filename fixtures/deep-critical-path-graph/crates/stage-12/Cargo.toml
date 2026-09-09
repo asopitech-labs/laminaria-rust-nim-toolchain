@@ -1,0 +1,8 @@
+[package]
+name = "stage-12"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+stage-11 = { path = "../stage-11" }
