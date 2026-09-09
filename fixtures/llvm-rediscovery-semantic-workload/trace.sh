@@ -72,15 +72,20 @@ if [ -z "$NIM_LL" ]; then
   find . -iname '*.ll'
   exit 1
 fi
-cp "$NIM_LL" "$OUT_DIR/nim/add.ll"
+TARGET_LL="$OUT_DIR/nim/add.ll"
+if [ "$(cd "$(dirname "$NIM_LL")" && pwd)/$(basename "$NIM_LL")" != "$(cd "$(dirname "$TARGET_LL")" && pwd)/$(basename "$TARGET_LL")" ]; then
+  cp "$NIM_LL" "$TARGET_LL"
+else
+  TARGET_LL="$NIM_LL"
+fi
 echo "nim LLVM IR at: $NIM_LL"
 
 echo "=== Nim (via nlvm): LLVM-facing attributes/metadata on add() itself ==="
-grep -A1 '^define.*@add(' "$OUT_DIR/nim/add.ll" || echo "(no @add definition found -- see full add.ll)"
-grep '^attributes' "$OUT_DIR/nim/add.ll" || true
+grep -A1 '^define.*@add(' "$TARGET_LL" || echo "(no @add definition found -- see full add.ll)"
+grep '^attributes' "$TARGET_LL" || true
 
 echo "=== Nim (via nlvm): optimization result (opt -O2, capturing LLVM's own remarks) ==="
-"$OPT_BIN" -O2 "$OUT_DIR/nim/add.ll" -o "$OUT_DIR/nim/add-opt.bc" \
+"$OPT_BIN" -O2 "$TARGET_LL" -o "$OUT_DIR/nim/add-opt.bc" \
   --pass-remarks='.*' --pass-remarks-missed='.*' --pass-remarks-analysis='.*' \
   --pass-remarks-output="$OUT_DIR/nim/remarks.yaml"
 "$LLVM_DIS_BIN" "$OUT_DIR/nim/add-opt.bc" -o "$OUT_DIR/nim/add-opt.ll"
@@ -89,5 +94,5 @@ echo "--- remarks (LLVM's own record, not our inference) ---"
 cat "$OUT_DIR/nim/remarks.yaml"
 
 echo "=== side-by-side: does add()'s attribute set differ between the two sides? ==="
-diff <(grep '^attributes' "$OUT_DIR/rust/add.ll" || true) <(grep '^attributes' "$OUT_DIR/nim/add.ll" || true) \
+diff <(grep '^attributes' "$OUT_DIR/rust/add.ll" || true) <(grep '^attributes' "$TARGET_LL" || true) \
   && echo "identical attribute sets" || echo "(difference shown above -- expected; see NOTES.md)"
