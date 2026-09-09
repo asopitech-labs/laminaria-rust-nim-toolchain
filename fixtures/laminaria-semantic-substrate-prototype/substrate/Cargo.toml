@@ -1,0 +1,11 @@
+[workspace]
+
+[package]
+name = "substrate"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "substrate"
+path = "src/main.rs"

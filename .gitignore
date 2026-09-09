@@ -41,6 +41,7 @@ runs/
 
 # Fixture build output (fixtures/llvm-rediscovery-semantic-workload/trace.sh)
 fixtures/llvm-rediscovery-semantic-workload/trace-out/
+fixtures/laminaria-semantic-substrate-prototype/trace-out/
 
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can

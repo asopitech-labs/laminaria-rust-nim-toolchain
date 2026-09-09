@@ -1,0 +1,120 @@
+# `laminaria-semantic-substrate-prototype` — issue #25's first candidate-substrate experiment
+
+**Status: not complete, not claimed complete.** This is a first prototype
+of "a candidate LAMINARIA semantic/optimization substrate" and a
+backend-route projection, per issue #25's own instruction -- covering
+exactly one small workload (a function call plus a branch, added to the
+existing wrapping-addition workload from
+`fixtures/llvm-rediscovery-semantic-workload/`). None of issue #25's ten
+acceptance criteria are checked off by this fixture alone.
+
+## What was actually built and verified, not assumed
+
+Four independent programs, all producing the workload's
+`add_or_double(a, b, use_double)` result for the same four test inputs,
+diffed byte-for-byte via `trace.sh`:
+
+1. The real Rust binary (`rust-src/add_or_double.rs`, `rustc -O`).
+2. The real Nim binary (`nim-src/add_or_double.nim`, `nim c -d:release`).
+3. `substrate`'s reference evaluator (`substrate/src/eval.rs`), directly
+   interpreting the candidate representation (`substrate/src/repr.rs`).
+4. `substrate`'s LLVM-IR backend projection (`substrate/src/llvm_ir.rs`),
+   emitted from the *same* representation (never from rustc's/nlvm's own
+   IR), compiled with `llc` (LLVM 22.1.8, this repo's already-pinned
+   version) and `cc`, then run as a real native executable.
+
+All four agree, byte-for-byte, on all four test inputs:
+
+```text
+3,4,0,7
+3,4,1,6
+2147483647,1,0,-2147483648
+-5,10,1,-10
+```
+
+This is real evidence the representation is faithful to the workload's
+documented semantic contract (`CONTRACT.md`) *for these four inputs and
+this one workload* -- not a general claim the representation is correct
+for arbitrary programs. See "What this does not establish" below.
+
+## The allowed-vs-rejected transformation, issue #25's explicit ask
+
+`substrate/src/inline.rs` implements one transformation -- inlining a call
+to `double` at its call site inside `add_or_double` -- gated on exactly
+one tracked fact, `FnFact::has_side_effects`:
+
+- **Allowed**: `double`'s real fact has `has_side_effects: false`.
+  Inlining is permitted, and the transformed representation was actually
+  re-evaluated against the reference evaluator across the same test
+  inputs (plus one extra, `[7, -7, 1]`) to confirm the transformation is
+  behavior-preserving -- not merely assumed correct because the
+  substitution was mechanical.
+- **Rejected**: a hypothetical `double` variant
+  (`repr::double_with_side_effect_fact`) with `has_side_effects: true`.
+  Inlining is refused *because the tracked fact says so*, verified by a
+  test asserting the refusal actually happens (`inline::tests::
+  rejected_case_inlining_is_refused_when_the_side_effect_fact_is_set`),
+  not just documented as an intention.
+
+This is the same *shape* of decision `fixtures/
+llvm-rediscovery-semantic-workload/NOTES.md` found LLVM's real inliner
+making on `rust_add` (refusing inlining over an attribute-compatibility
+fact, categorically, before any cost heuristic) -- reproduced here inside
+this project's own representation, on this project's own facts, not
+observed inside LLVM.
+
+## What this does not establish
+
+Against issue #25's own acceptance criteria: this is one workload
+(criterion 2, extended from `llvm-rediscovery-semantic-workload`'s
+wrapping-addition-only workload to include a call and a branch, but still
+only one workload), one candidate representation prototyped (criterion 5,
+first instance, not validated against a second, differently-shaped
+workload), one backend-route projection demonstrated (criterion 6, LLVM
+IR only -- no second backend route attempted), and zero LLVM concepts
+independently re-derived or rejected from scratch (criterion 3 needs
+five; this fixture's representation reuses SSA-like temporaries and
+basic-block control flow directly, closer to "adopting an LLVM-shaped
+idea" than "re-deriving or rejecting one" -- an honest limitation, not
+glossed over).
+
+## Real, named limitations of the representation and this experiment
+
+- **Hand-transcribed, not mechanically extracted.** `repr::
+  workload_program()` was written by hand to match `rust-src/
+  add_or_double.rs`/`nim-src/add_or_double.nim`'s documented contract --
+  nothing checks the representation actually matches either source's real
+  compiler output (MIR, LLVM IR) structurally. The four-way output
+  cross-check is behavioral (same printed results), not structural.
+- **`has_side_effects` is a bare boolean**, not a description of what the
+  effect is, where it's observable, or whether it commutes with anything
+  else. Real effect systems (regions, capabilities, points-to) are a
+  large design space this prototype does not enter -- it only shows that
+  *even a single boolean fact*, tracked and checked explicitly, already
+  changes a transformation's correctness, which is the minimal point
+  issue #25 asks this prototype to make.
+- **The inliner only handles a single-`Return`-bodied callee.** `double`'s
+  real body happens to be exactly that shape; a callee with its own
+  branch would need a real inlining strategy (parameter substitution
+  through control flow, not just through an expression tree) this
+  experiment doesn't attempt.
+- **The LLVM-IR emitter has no target triple/datalayout of its own** --
+  it relies on `llc`'s host-default inference, verified locally
+  (`aarch64-apple-darwin`) and matching CI's runners
+  (`x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`). A cross-compiled
+  target would need this made explicit; not attempted here.
+- **`TEST_INPUTS` is duplicated by hand** across `rust-src/
+  add_or_double.rs`, `nim-src/add_or_double.nim`, and `substrate/src/
+  main.rs` -- nothing mechanically enforces the three lists stay in sync,
+  a real, small maintenance risk, named rather than hidden.
+
+## Relation to `fixtures/llvm-rediscovery-semantic-workload`
+
+That fixture traces one difference (`"probe-stack"`) all the way to
+rustc's real target-policy source, and candidate-lists what LAMINARIA
+should preserve -- but never attempts a representation or a
+transformation of its own. This fixture is the next, complementary step:
+same workload family (extended with a call and a branch), but building
+forward from "what would LAMINARIA's own substrate need to track, and
+what would it let LAMINARIA safely do with that" rather than backward
+from "what does LLVM already do and why."

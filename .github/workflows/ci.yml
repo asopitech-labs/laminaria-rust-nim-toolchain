@@ -661,6 +661,26 @@ jobs:
           cd fixtures/llvm-rediscovery-semantic-workload
           ./trace.sh
 
+      # Issue #25's candidate-substrate prototype (docs/
+      # llvm-rediscovery-research.md's "prototype a candidate LAMINARIA
+      # semantic/optimization substrate" + "demonstrate a backend-route
+      # projection" acceptance criteria) -- a small representation, a
+      # reference evaluator, an LLVM-IR backend projection, and one
+      # transformation demonstrated both allowed (a real fact permits it)
+      # and rejected (a hypothetical fact blocks it). Separate concern
+      # from the two steps above: those trace what Rust/Nim's real
+      # compilers do; this builds LAMINARIA's own candidate representation
+      # and checks it against them. Needs plain `nim` (not nlvm -- this
+      # fixture only needs Nim's real compiled *output* to cross-check
+      # against, not its LLVM IR), not otherwise installed in this job.
+      - name: Install Nim (for laminaria-semantic-substrate-prototype's cross-check)
+        run: sudo apt-get install -y nim
+
+      - name: Build and verify the candidate semantic substrate prototype (issue #25)
+        run: |
+          cd fixtures/laminaria-semantic-substrate-prototype
+          NIM_BIN=$(command -v nim) ./trace.sh
+
   # Exercises the "container" EnvironmentFingerprint class from a clean,
   # native (non-Rosetta) environment — see docker/bootstrap.Dockerfile for
   # why this is a bootstrap/correctness check, not a performance baseline.
