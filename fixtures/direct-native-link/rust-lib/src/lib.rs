@@ -259,6 +259,82 @@ pub unsafe extern "C" fn rust_vec_growth_probe(
     *out_len_after = v.len() as i32;
 }
 
+// --- Type/layout matrix: opaque handles. Unlike `Point` above, this is
+// the pattern real hand-written FFI code actually uses for anything
+// non-trivial: Nim never sees or reconstructs the Rust-side layout at
+// all, only ever holds an opaque `*mut Counter` it got from
+// `rust_counter_new` and passes back unmodified. `Counter` itself
+// deliberately contains a heap-owning field (`String`, via `label`) so
+// this isn't just "a Point that Nim can't see the inside of" -- it
+// tests the create/use/destroy lifecycle for a type Nim structurally
+// cannot construct or copy correctly even by accident.
+
+pub struct Counter {
+    value: i64,
+    label: String,
+}
+
+/// Creates a heap-allocated `Counter` and hands ownership to the caller
+/// as an opaque pointer. The caller must eventually pass it to exactly
+/// one `rust_counter_free` call.
+#[no_mangle]
+pub extern "C" fn rust_counter_new(start: i64) -> *mut Counter {
+    Box::into_raw(Box::new(Counter {
+        value: start,
+        label: format!("counter@{start}"),
+    }))
+}
+
+/// Mutates the `Counter` through its opaque handle.
+///
+/// # Safety
+///
+/// `handle` must be a live pointer previously returned by
+/// `rust_counter_new` and not yet passed to `rust_counter_free`.
+#[no_mangle]
+pub unsafe extern "C" fn rust_counter_increment(handle: *mut Counter, by: i64) {
+    (*handle).value += by;
+}
+
+/// Reads the `Counter`'s current value through its opaque handle.
+///
+/// # Safety
+///
+/// `handle` must be a live pointer previously returned by
+/// `rust_counter_new` and not yet passed to `rust_counter_free`.
+#[no_mangle]
+pub unsafe extern "C" fn rust_counter_get(handle: *const Counter) -> i64 {
+    (*handle).value
+}
+
+/// Reads the length of the `Counter`'s heap-owned `label`, through its
+/// opaque handle -- exercises that the field Nim could never construct
+/// or copy correctly (a Rust-owned `String`) round-trips intact across
+/// the create/mutate/read lifecycle, not just the plain-`i64` `value`
+/// field.
+///
+/// # Safety
+///
+/// `handle` must be a live pointer previously returned by
+/// `rust_counter_new` and not yet passed to `rust_counter_free`.
+#[no_mangle]
+pub unsafe extern "C" fn rust_counter_label_len(handle: *const Counter) -> i32 {
+    let counter: &Counter = &*handle;
+    counter.label.len() as i32
+}
+
+/// Reclaims a `Counter` previously returned by `rust_counter_new`. The
+/// handle must not be used again after this call.
+///
+/// # Safety
+///
+/// `handle` must be a pointer previously returned by `rust_counter_new`,
+/// not already freed, and not used again after this call.
+#[no_mangle]
+pub unsafe extern "C" fn rust_counter_free(handle: *mut Counter) {
+    drop(Box::from_raw(handle));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -368,5 +444,22 @@ mod tests {
         assert_eq!(align, std::mem::align_of::<Point>() as i32);
         assert_eq!(off_x, std::mem::offset_of!(Point, x) as i32);
         assert_eq!(off_y, std::mem::offset_of!(Point, y) as i32);
+    }
+
+    #[test]
+    fn counter_handle_lifecycle_known_values() {
+        unsafe {
+            let handle = rust_counter_new(10);
+            assert_eq!(rust_counter_get(handle), 10);
+            assert_eq!(rust_counter_label_len(handle), "counter@10".len() as i32);
+
+            rust_counter_increment(handle, 5);
+            assert_eq!(rust_counter_get(handle), 15);
+
+            rust_counter_increment(handle, -20);
+            assert_eq!(rust_counter_get(handle), -5);
+
+            rust_counter_free(handle);
+        }
     }
 }

@@ -309,3 +309,36 @@ block nimRefSeqBoxGcRefKeepsAlive:
     "wrapper's own lexical scope -- either the documented mechanism doesn't cover this " &
     "case on this Nim version, or this experiment used it incorrectly; either finding " &
     "matters for issue #4"
+
+# --- Type/layout matrix: opaque handles. Unlike `Point` above, this is
+# the pattern real hand-written FFI code actually uses for anything
+# non-trivial: Nim never sees or reconstructs `Counter`'s layout at all,
+# only ever holds a `pointer` it got from `rust_counter_new` and passes
+# back unmodified. `Counter` deliberately contains a heap-owning `String`
+# on the Rust side, so this tests the create/mutate/read/free lifecycle
+# for a type Nim structurally cannot construct or copy correctly even by
+# accident -- not just "a Point Nim can't see the inside of."
+
+proc rust_counter_new(start: clong): pointer {.importc: "rust_counter_new", cdecl.}
+proc rust_counter_increment(handle: pointer, by: clong) {.importc: "rust_counter_increment", cdecl.}
+proc rust_counter_get(handle: pointer): clong {.importc: "rust_counter_get", cdecl.}
+proc rust_counter_label_len(handle: pointer): cint {.importc: "rust_counter_label_len", cdecl.}
+proc rust_counter_free(handle: pointer) {.importc: "rust_counter_free", cdecl.}
+
+block opaqueHandleLifecycle:
+  let handle = rust_counter_new(10)
+  echo "counter_new(10) -> value=", rust_counter_get(handle), " label_len=", rust_counter_label_len(handle)
+  doAssert rust_counter_get(handle) == 10, "fresh Counter handle's value drifted from the committed reference value"
+  doAssert rust_counter_label_len(handle) == cint(len("counter@10")),
+    "fresh Counter handle's heap-owned label length drifted from the committed reference value"
+
+  rust_counter_increment(handle, 5)
+  echo "after increment(5) -> value=", rust_counter_get(handle)
+  doAssert rust_counter_get(handle) == 15, "Counter handle's value after increment drifted from the committed reference value"
+
+  rust_counter_increment(handle, -20)
+  echo "after increment(-20) -> value=", rust_counter_get(handle)
+  doAssert rust_counter_get(handle) == -5, "Counter handle's value after negative increment drifted from the committed reference value"
+
+  rust_counter_free(handle)
+  echo "counter handle freed"
