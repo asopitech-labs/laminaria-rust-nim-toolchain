@@ -11,6 +11,11 @@
 ## `Point` is declared here independently again, same as
 ## `../nim-bin/main.nim` -- no shared file with either the Nim-via-C
 ## declaration or the Rust declaration.
+##
+## Blocks are ordered safest-first: known-working, then known-broken-
+## but-non-fatal (wrong value, doesn't crash), then the one known-fatal
+## call is isolated last, so every other result is captured regardless
+## of what that last block does. See ../NOTES.md for the full findings.
 
 proc rust_transform(x: cint): cint {.importc: "rust_transform", cdecl.}
 
@@ -24,6 +29,7 @@ doAssert result == Expected, "rust_transform result drifted from the committed r
 type Point {.bycopy.} = object
   x, y: cint
 
+proc rust_point_sum(p: Point): cint {.importc: "rust_point_sum", cdecl.}
 proc rust_point_translate(p: Point, dx, dy: cint): Point {.importc: "rust_point_translate", cdecl.}
 proc rust_point_translate_via_pointer(p: Point, dx, dy: cint, outP: ptr Point) {.importc: "rust_point_translate_via_pointer", cdecl.}
 proc rust_point_scale_in_place(p: ptr Point, factor: cint) {.importc: "rust_point_scale_in_place", cdecl.}
@@ -48,30 +54,30 @@ block layoutProbe:
   doAssert nimOffsetX == rustOffsetX, "Point.x offset disagreement between independently-declared Nim and Rust layouts"
   doAssert nimOffsetY == rustOffsetY, "Point.y offset disagreement between independently-declared Nim and Rust layouts"
 
+block pointSumSingleArg:
+  ## The minimal possible by-value-struct-argument shape: `Point` is the
+  ## only parameter, and the return is a plain scalar, not a struct --
+  ## isolates whether by-value struct *arguments* work at all under
+  ## nlvm, independent of both other failure modes found on this
+  ## boundary: a struct *return* (byValueRoundTrip below) and a struct
+  ## argument *followed by more parameters*
+  ## (byValueInputPointerOutputWorkaround at the bottom, which segfaults).
+  let p = Point(x: 3, y: 4)
+  let sum = rust_point_sum(p)
+  echo "point_sum: ", sum, " (expected 7)"
+  doAssert sum == 7, "by-value Point single-argument sum drifted from the committed reference value"
+
 block byValueRoundTrip:
   ## nlvm itself warns at compile time on this call:
   ## "TODO: C ABI for small struct returns not implemented - there may
   ## be issues: rust_point_translate" -- a real, self-acknowledged
   ## limitation, not a maybe. Reported without doAssert (unlike every
   ## other block here) so a known-broken result doesn't abort the
-  ## process before pointerMutateInPlace below gets to run; see
-  ## ../NOTES.md for the full finding.
+  ## process before the blocks below get to run; see ../NOTES.md for
+  ## the full finding.
   let p = Point(x: 3, y: 4)
   let translated = rust_point_translate(p, 10, -1)
   echo "translate: ", translated.x, ",", translated.y, " (expected 13,3 -- nlvm's small-struct-return ABI is a known-incomplete TODO)"
-
-block byValueInputPointerOutputWorkaround:
-  ## The practical mitigation for the known-broken block above: keep
-  ## `p` passed in by value (only the *return* ABI is the known-broken
-  ## half), and take the result through an output pointer instead of a
-  ## return value. Isolates whether by-value struct *input* is actually
-  ## fine on nlvm, independent of the broken by-value *return* path.
-  let p = Point(x: 3, y: 4)
-  var translated: Point
-  rust_point_translate_via_pointer(p, 10, -1, addr translated)
-  echo "translate_via_pointer: ", translated.x, ",", translated.y
-  doAssert translated.x == 13 and translated.y == 3,
-    "by-value-input/pointer-output Point translate drifted from the committed reference value"
 
 block pointerMutateInPlace:
   var p = Point(x: 3, y: 4)
@@ -79,5 +85,28 @@ block pointerMutateInPlace:
   echo "scale_in_place: ", p.x, ",", p.y
   doAssert p.x == 15 and p.y == 20,
     "pointer-to-Point mutation drifted from the committed reference value"
+
+echo "all non-fatal nlvm-route Layer 1-3 experiments completed"
+
+block byValueInputPointerOutputWorkaround:
+  ## Attempted mitigation for byValueRoundTrip's known-broken return:
+  ## keep `p` passed in by value, take the result through an output
+  ## pointer instead of a return value. Isolated last, deliberately,
+  ## because **this segfaults under nlvm** (SIGSEGV, "Attempt to read
+  ## from nil?") -- a more severe, distinct bug from the wrong-value
+  ## result above: a by-value struct argument *followed by more
+  ## parameters* (here, three more: dx, dy, outP) appears to corrupt
+  ## argument/register classification under nlvm's current ABI
+  ## implementation, not just the return path. pointSumSingleArg above
+  ## already established that a lone by-value struct argument (nothing
+  ## after it) works correctly -- so the trigger is specifically
+  ## "struct argument with more parameters after it," not by-value
+  ## struct arguments in general. See ../NOTES.md.
+  let p = Point(x: 3, y: 4)
+  var translated: Point
+  rust_point_translate_via_pointer(p, 10, -1, addr translated)
+  echo "translate_via_pointer: ", translated.x, ",", translated.y
+  doAssert translated.x == 13 and translated.y == 3,
+    "by-value-input/pointer-output Point translate drifted from the committed reference value"
 
 echo "all nlvm-route Layer 1-3 experiments passed"

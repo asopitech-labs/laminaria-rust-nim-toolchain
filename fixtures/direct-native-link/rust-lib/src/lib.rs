@@ -54,6 +54,18 @@ pub extern "C" fn rust_point_translate(p: Point, dx: i32, dy: i32) -> Point {
     }
 }
 
+/// The minimal possible by-value-struct-argument shape: `Point` is the
+/// only parameter, and the return is a plain scalar (not a struct) --
+/// isolates whether by-value struct *arguments* work at all under an
+/// ABI implementation, independent of both other failure modes found
+/// on this call: a struct *return* (`rust_point_translate`) and a
+/// struct argument *followed by more parameters*
+/// (`rust_point_translate_via_pointer`, which segfaults under nlvm).
+#[no_mangle]
+pub extern "C" fn rust_point_sum(p: Point) -> i32 {
+    p.x + p.y
+}
+
 /// Same computation as `rust_point_translate`, but writes the result
 /// through an output pointer instead of returning it by value. Exists
 /// to isolate which half of a by-value round trip an ABI implementation
@@ -209,6 +221,12 @@ mod tests {
         // fixture actually needs is that both addresses were captured
         // without UB, which the assertions above already exercise.
         let _ = (before, after);
+    }
+
+    #[test]
+    fn point_sum_known_value() {
+        let p = Point { x: 3, y: 4 };
+        assert_eq!(rust_point_sum(p), 7);
     }
 
     #[test]

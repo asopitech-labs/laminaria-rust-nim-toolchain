@@ -32,6 +32,7 @@ doAssert result == Expected, "rust_transform result drifted from the committed r
 type Point {.bycopy.} = object
   x, y: cint
 
+proc rust_point_sum(p: Point): cint {.importc: "rust_point_sum", cdecl.}
 proc rust_point_translate(p: Point, dx, dy: cint): Point {.importc: "rust_point_translate", cdecl.}
 proc rust_point_translate_via_pointer(p: Point, dx, dy: cint, outP: ptr Point) {.importc: "rust_point_translate_via_pointer", cdecl.}
 proc rust_point_scale_in_place(p: ptr Point, factor: cint) {.importc: "rust_point_scale_in_place", cdecl.}
@@ -55,6 +56,16 @@ block layoutProbe:
   doAssert nimAlign == rustAlign, "Point alignment disagreement between independently-declared Nim and Rust layouts"
   doAssert nimOffsetX == rustOffsetX, "Point.x offset disagreement between independently-declared Nim and Rust layouts"
   doAssert nimOffsetY == rustOffsetY, "Point.y offset disagreement between independently-declared Nim and Rust layouts"
+
+block pointSumSingleArg:
+  ## Comparison point for ../nlvm-experiment/main.nim, where this
+  ## specific shape (a lone by-value struct argument, scalar return) is
+  ## the isolating test for a family of nlvm-specific ABI bugs this
+  ## route (nim c) never exhibits.
+  let p = Point(x: 3, y: 4)
+  let sum = rust_point_sum(p)
+  echo "point_sum: ", sum, " (expected 7)"
+  doAssert sum == 7, "by-value Point single-argument sum drifted from the committed reference value"
 
 block byValueRoundTrip:
   let p = Point(x: 3, y: 4)
