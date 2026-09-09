@@ -89,6 +89,18 @@ jobs:
           cargo run
           cargo build
 
+      - name: Build incremental-semantic-edit fixture
+        run: |
+          cd fixtures/incremental-semantic-edit
+          cargo build --workspace
+          cargo test --workspace
+          cargo run -q -p aggregator
+          scripts/apply-edit.sh
+          cargo run -q -p aggregator
+          scripts/revert-edit.sh
+          cargo run -q -p aggregator
+          git diff --exit-code crates/leaf-b/src/lib.rs
+
   # Exercises the "container" EnvironmentFingerprint class from a clean,
   # native (non-Rosetta) environment — see docker/bootstrap.Dockerfile for
   # why this is a bootstrap/correctness check, not a performance baseline.

@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/leaf-a",
+    "crates/leaf-b",
+    "crates/leaf-c",
+    "crates/aggregator",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+publish = false

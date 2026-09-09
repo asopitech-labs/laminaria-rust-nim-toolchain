@@ -87,7 +87,18 @@ LAMINARIA itself.
   `cargo test`/`cargo run` with no source changes already demonstrates
   the no-op (`Finished ... in 0.00s`, nothing recompiled).
 
-All eight are built (not just version-checked) as part of CI — natively on
+- `incremental-semantic-edit/` — the "incremental semantic edit" workload:
+  three independent leaf crates (`leaf-a`, `leaf-b`, `leaf-c`) plus an
+  `aggregator` that sums them, with one *designated* single-line semantic
+  edit to `leaf-b` (`scripts/apply-edit.sh` / `scripts/revert-edit.sh`
+  swap its `src/lib.rs` between the committed `lib.baseline.rs` and
+  `lib.edited.rs` variants) and a documented expected invalidation set —
+  `leaf-b` and `aggregator` should recompile, `leaf-a`/`leaf-c` should
+  not. See `EDIT.md` for the full scenario and expected values; this is
+  the shape a future Run/scenario harness (#19-21) needs to check this
+  issue's "unexpected extra actions" acceptance criterion.
+
+All nine are built (not just version-checked) as part of CI — natively on
 `ubuntu-latest`/`macos-latest`, and inside `docker/bootstrap.Dockerfile`'s
 container environment — which is the actual evidence for #18's fixture
 reproduction criterion.
@@ -96,9 +107,9 @@ reproduction criterion.
 
 Direct native-link workload, backend-route variant workload, backend
 checkpoint-economics workload, LLVM pass/pipeline observation workload,
-ThinLTO/DTLTO dynamic backend-job workload, incremental semantic edit,
-worktree reuse, mixed-language WASM workload, Wasm link/post-link/component
-invalidation workload, Rust/Nim 2/Nimony shared LLVM/LTO compatibility
-workload, compiler/backend-work-elimination fixture. Most of these need the
+ThinLTO/DTLTO dynamic backend-job workload, worktree reuse, mixed-language
+WASM workload, Wasm link/post-link/component invalidation workload,
+Rust/Nim 2/Nimony shared LLVM/LTO compatibility workload,
+compiler/backend-work-elimination fixture. Most of these need the
 Run/scenario machinery from #19-21 to be meaningful, not just a buildable
 workspace.
