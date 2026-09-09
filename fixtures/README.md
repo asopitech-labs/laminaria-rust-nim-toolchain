@@ -98,18 +98,31 @@ LAMINARIA itself.
   the shape a future Run/scenario harness (#19-21) needs to check this
   issue's "unexpected extra actions" acceptance criterion.
 
-All nine are built (not just version-checked) as part of CI — natively on
+- `direct-native-link/` — the "direct native-link workload" workload: the
+  minimal Layer 1 proof from `docs/rust-nim-native-linking.md` ("one
+  Rust-produced object and one Nim-produced object in the same link, with
+  an intentionally simple symbol relationship and no generated C header
+  contract"). Reverses every other Rust/Nim fixture's direction — Nim is
+  the final linked binary (`nim-bin/main.nim`) and links directly against
+  a Rust static library (`rust-lib`) via a hand-named `importc`/
+  `#[no_mangle] extern "C"` symbol, no header generator involved. See
+  `NOTES.md` for `nm` symbol-inspection evidence (undefined in Nim's own
+  object, defined in Rust's, resolved in the final binary) — the fixture
+  future direct native-link research (#4) builds its deeper Layers 2-6 on
+  top of, not that research itself.
+
+All ten are built (not just version-checked) as part of CI — natively on
 `ubuntu-latest`/`macos-latest`, and inside `docker/bootstrap.Dockerfile`'s
 container environment — which is the actual evidence for #18's fixture
 reproduction criterion.
 
 ## Still open (per #11's full "Core workloads" list)
 
-Direct native-link workload, backend-route variant workload, backend
-checkpoint-economics workload, LLVM pass/pipeline observation workload,
-ThinLTO/DTLTO dynamic backend-job workload, worktree reuse, mixed-language
-WASM workload, Wasm link/post-link/component invalidation workload,
-Rust/Nim 2/Nimony shared LLVM/LTO compatibility workload,
-compiler/backend-work-elimination fixture. Most of these need the
-Run/scenario machinery from #19-21 to be meaningful, not just a buildable
-workspace.
+Backend-route variant workload, backend checkpoint-economics workload,
+LLVM pass/pipeline observation workload, ThinLTO/DTLTO dynamic backend-job
+workload, worktree reuse, mixed-language WASM workload, Wasm
+link/post-link/component invalidation workload, Rust/Nim 2/Nimony shared
+LLVM/LTO compatibility workload, compiler/backend-work-elimination
+fixture. Every one of these needs backend/Run infrastructure from #4
+(beyond its own Layer 1 fixture above), #12, or #19-21 to be more than a
+placeholder, not just a buildable workspace.

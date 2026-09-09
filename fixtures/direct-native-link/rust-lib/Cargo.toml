@@ -1,0 +1,11 @@
+[workspace]
+
+[package]
+name = "rust-lib"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "rustlib"
+crate-type = ["staticlib", "rlib"]

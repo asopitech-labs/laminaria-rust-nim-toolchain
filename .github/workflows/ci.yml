@@ -101,6 +101,12 @@ jobs:
           cargo run -q -p aggregator
           git diff --exit-code crates/leaf-b/src/lib.rs
 
+      - name: Build direct-native-link fixture
+        run: |
+          cd fixtures/direct-native-link
+          cargo test --manifest-path rust-lib/Cargo.toml
+          ./build.sh
+
   # Exercises the "container" EnvironmentFingerprint class from a clean,
   # native (non-Rosetta) environment — see docker/bootstrap.Dockerfile for
   # why this is a bootstrap/correctness check, not a performance baseline.
