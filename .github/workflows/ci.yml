@@ -120,6 +120,23 @@ jobs:
             exit 1
           }
           echo "per-rustc-invocation records: $PROCESS_COUNT total, $DISTINCT_PIDS distinct pids, 0 missing resource usage"
+          # Level 2 compiler telemetry via Cargo's own --message-format=json
+          # (crates/laminaria-run/src/cargo_telemetry.rs -- see NOTES.md).
+          # The cold build should report 3 artifacts, none fresh; the
+          # true-no-op rebuild should report the same 3 artifacts, all
+          # fresh -- Cargo's own per-crate cache-freshness signal, checked
+          # directly rather than only inferred from CPU time.
+          COLD_ARTIFACTS=$(jq '.compiler_telemetry.artifacts | length' /tmp/cold-run.json)
+          COLD_FRESH=$(jq '[.compiler_telemetry.artifacts[] | select(.fresh)] | length' /tmp/cold-run.json)
+          NOOP_ARTIFACTS=$(jq '.compiler_telemetry.artifacts | length' /tmp/noop-run.json)
+          NOOP_FRESH=$(jq '[.compiler_telemetry.artifacts[] | select(.fresh)] | length' /tmp/noop-run.json)
+          [ "$COLD_ARTIFACTS" = "3" ] || { echo "expected 3 reported artifacts on the cold build, got $COLD_ARTIFACTS"; exit 1; }
+          [ "$COLD_FRESH" = "0" ] || { echo "expected 0 fresh artifacts on the cold build, got $COLD_FRESH"; exit 1; }
+          [ "$NOOP_ARTIFACTS" = "3" ] || { echo "expected 3 reported artifacts on the true-no-op rebuild, got $NOOP_ARTIFACTS"; exit 1; }
+          [ "$NOOP_FRESH" = "3" ] || { echo "expected all 3 artifacts fresh on the true-no-op rebuild, got $NOOP_FRESH"; exit 1; }
+          BUILD_FINISHED=$(jq -r '.compiler_telemetry.build_finished_success' /tmp/cold-run.json)
+          [ "$BUILD_FINISHED" = "true" ] || { echo "expected compiler_telemetry.build_finished_success == true, got $BUILD_FINISHED"; exit 1; }
+          echo "Level 2 compiler telemetry: cold 0/$COLD_ARTIFACTS fresh, true-noop $NOOP_FRESH/$NOOP_ARTIFACTS fresh"
 
       - name: Trace a cold nim-heavy-workspace build (issue #19 Experiment 2)
         run: |
