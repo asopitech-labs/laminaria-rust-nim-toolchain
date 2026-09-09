@@ -362,7 +362,13 @@ fn scenario_compare_command(baseline_path: PathBuf, candidate_path: PathBuf) -> 
         }
     };
 
-    let comparison = laminaria_run::scenario::compare_reports(&baseline, &candidate);
+    let comparison = match laminaria_run::scenario::compare_reports(&baseline, &candidate) {
+        Ok(comparison) => comparison,
+        Err(reason) => {
+            eprintln!("laminaria scenario-compare: {reason}");
+            return 2;
+        }
+    };
     match serde_json::to_string_pretty(&comparison) {
         Ok(text) => println!("{text}"),
         Err(err) => {
@@ -397,7 +403,19 @@ fn print_scenario_report(report: &laminaria_run::scenario::ScenarioReport, json:
     } else {
         println!("scenario_id: {}", report.scenario_id);
         println!("workload_id: {}", report.workload_id);
-        println!("sample_count: {}", report.wall_seconds.sample_count);
+        println!("success: {:?}", report.success);
+        let failed_count = report.success.iter().filter(|s| !**s).count();
+        if failed_count > 0 {
+            println!(
+                "  ! {failed_count}/{} repetition(s) failed -- excluded from wall_seconds below, \
+                 not counted as fast samples",
+                report.success.len()
+            );
+        }
+        println!(
+            "sample_count: {} (successful repetitions only)",
+            report.wall_seconds.sample_count
+        );
         println!(
             "wall_seconds: min={:.3} p50={:.3} p90={:.3} mean={:.3} stddev={:.3}",
             report.wall_seconds.min,

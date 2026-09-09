@@ -30,10 +30,13 @@
 //!   against, but also not a rigorous statistical test (no confidence
 //!   interval, no correction for small sample counts). A first, honest
 //!   slice, not a finished statistics engine.
-//! - Cross-environment comparison rejection (issue #21's acceptance
-//!   criterion 7) is not implemented -- `compare_reports` does not check
-//!   whether the two reports came from comparable `EnvironmentFingerprint`s
-//!   at all in this first slice.
+//! - Cross-environment/cross-toolchain comparison rejection (issue #21's
+//!   acceptance criterion 7) checks `workload_id`, `EnvironmentFingerprint`
+//!   comparability (`laminaria_fingerprint::comparability`, reused
+//!   directly, not reinvented), and toolchain identity (reusing
+//!   `reuse::toolchain_identity_from_run`) -- but only using the *first*
+//!   repetition's own identity as each report's representative value, not
+//!   cross-validating that every repetition inside one report agrees.
 
 use std::path::{Path, PathBuf};
 
@@ -324,6 +327,7 @@ fn nearest_rank(count: usize, fraction: f64) -> usize {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RunExtract {
     run_id: String,
+    success: bool,
     wall_seconds: f64,
     process_count: usize,
     artifact_created: usize,
@@ -364,6 +368,7 @@ fn extract(run: &Run) -> RunExtract {
 
     RunExtract {
         run_id: run.run_id.clone(),
+        success: run.result.as_ref().is_some_and(|r| r.success),
         wall_seconds,
         process_count,
         artifact_created: created,
@@ -379,6 +384,16 @@ pub struct ScenarioReport {
     pub scenario_id: String,
     pub workload_id: String,
     pub run_ids: Vec<String>,
+    /// One entry per `run_ids`, in order -- issue #21's "a correct final
+    /// binary produced by rebuilding everything does not satisfy
+    /// incremental-work acceptance criteria" cuts both ways: a *failed*
+    /// repetition must never be silently folded into `wall_seconds` as if
+    /// it were a normal, fast sample. `run_ids`/`process_counts`/
+    /// `artifact_*` below still cover every repetition regardless of
+    /// success -- failure evidence is retained, not discarded -- but
+    /// `wall_seconds` is computed from successful repetitions only (see
+    /// `build_report`).
+    pub success: Vec<bool>,
     pub wall_seconds: Stats,
     /// One process count per repetition, in `run_ids` order -- kept
     /// alongside `wall_seconds` (not reduced to a single summary number)
@@ -390,22 +405,81 @@ pub struct ScenarioReport {
     pub artifact_modified: Vec<usize>,
     pub artifact_deleted: Vec<usize>,
     pub artifact_unchanged: Vec<usize>,
+    /// This report's own comparability identity -- issue #21's acceptance
+    /// criterion 7 ("cross-environment comparison is rejected or
+    /// explicitly marked non-comparable by default"), a real gap an
+    /// external review caught: without recording *any* environment/
+    /// toolchain identity here, `compare_reports` had nothing to check
+    /// two reports against, and happily produced a numeric verdict for
+    /// two entirely different workloads. Taken from the *first*
+    /// repetition only -- not cross-validated against the rest of this
+    /// same report's own repetitions.
+    pub environment_fingerprint: laminaria_fingerprint::EnvironmentFingerprint,
+    /// The actually-used toolchain's own digest (`reuse::
+    /// toolchain_identity_from_run`) -- `None` when it couldn't be
+    /// identified (matches that function's own fail-closed behavior, see
+    /// its doc comment), which `compare_reports` treats as "not
+    /// comparable," never as "assume it matches."
+    pub toolchain_digest_sha256: Option<String>,
 }
 
-fn build_report(scenario_id: &str, workload_id: &str, runs: &[Run]) -> ScenarioReport {
+/// Builds a `ScenarioReport` from `runs`. `wall_seconds` (and its own
+/// `Stats::sample_count`) are computed from **successful repetitions
+/// only** -- a real bug an external review caught: a scenario whose
+/// command fails partway through (a real, deliberately-triggered failure,
+/// or an environment regression) was being aggregated as a normal,
+/// often-fast sample, making an early failure look like a speedup rather
+/// than the invalid measurement it is. Failure evidence itself is not
+/// discarded: `run_ids`/`success`/`process_counts`/`artifact_*` still
+/// cover every repetition, successful or not, and each failed run's own
+/// full evidence remains on disk at `run.json` as always. Returns an
+/// error when *every* repetition failed, since there is then no valid
+/// wall-time sample to report at all -- not a zero-length `Stats`
+/// (`Stats::from_samples` itself refuses an empty input), and not a
+/// silently fabricated one either.
+fn build_report(
+    scenario_id: &str,
+    workload_id: &str,
+    runs: &[Run],
+) -> std::io::Result<ScenarioReport> {
     let extracts: Vec<RunExtract> = runs.iter().map(extract).collect();
-    ScenarioReport {
+    let successful_wall_seconds: Vec<f64> = extracts
+        .iter()
+        .filter(|e| e.success)
+        .map(|e| e.wall_seconds)
+        .collect();
+    if successful_wall_seconds.is_empty() {
+        return Err(std::io::Error::other(format!(
+            "scenario {scenario_id:?}: all {} repetition(s) failed -- no valid wall-time sample \
+             to report (evidence preserved in each repetition's own run.json: {:?})",
+            extracts.len(),
+            extracts.iter().map(|e| &e.run_id).collect::<Vec<_>>()
+        )));
+    }
+    let first_run = runs.first().ok_or_else(|| {
+        std::io::Error::other(format!("scenario {scenario_id:?}: no repetitions given"))
+    })?;
+    let is_nim = is_nim_root_program(&first_run.root_command.program);
+    let (toolchain_digest_sha256, _) = crate::reuse::toolchain_identity_from_run(first_run, is_nim);
+    Ok(ScenarioReport {
         schema_version: SCENARIO_SCHEMA_VERSION.to_string(),
         scenario_id: scenario_id.to_string(),
         workload_id: workload_id.to_string(),
         run_ids: extracts.iter().map(|e| e.run_id.clone()).collect(),
-        wall_seconds: Stats::from_samples(extracts.iter().map(|e| e.wall_seconds).collect()),
+        success: extracts.iter().map(|e| e.success).collect(),
+        wall_seconds: Stats::from_samples(successful_wall_seconds),
         process_counts: extracts.iter().map(|e| e.process_count).collect(),
         artifact_created: extracts.iter().map(|e| e.artifact_created).collect(),
         artifact_modified: extracts.iter().map(|e| e.artifact_modified).collect(),
         artifact_deleted: extracts.iter().map(|e| e.artifact_deleted).collect(),
         artifact_unchanged: extracts.iter().map(|e| e.artifact_unchanged).collect(),
-    }
+        environment_fingerprint: first_run.environment_fingerprint.clone(),
+        toolchain_digest_sha256,
+    })
+}
+
+fn is_nim_root_program(program: &str) -> bool {
+    Path::new(program).file_stem().and_then(|s| s.to_str()) == Some("nim")
 }
 
 /// Runs `scenario` `repeat_count` times (each a full `run_scenario_once`,
@@ -429,7 +503,7 @@ pub fn run_scenario_repeated(
             scenario, runs_root, lock_path, repo_root,
         )?);
     }
-    Ok(build_report(&scenario.id, &scenario.workload_id, &runs))
+    build_report(&scenario.id, &scenario.workload_id, &runs)
 }
 
 /// Rebuilds a `ScenarioReport` purely from already-written `run.json`
@@ -449,7 +523,7 @@ pub fn regenerate_report_from_disk(
         .first()
         .map(|r| r.workload_id.clone())
         .unwrap_or_default();
-    Ok(build_report(scenario_id, &workload_id, &runs))
+    build_report(scenario_id, &workload_id, &runs)
 }
 
 /// How many standard deviations of separation between two reports' mean
@@ -484,15 +558,75 @@ pub struct Comparison {
     pub confounding_notes: Vec<String>,
 }
 
+/// The min and max of a `&[usize]` slice, as a single comparable value --
+/// used instead of a bare minimum (see `compare_reports`'s own doc
+/// comment for why a bare minimum was a real bug).
+fn range(values: &[usize]) -> (usize, usize) {
+    (
+        values.iter().min().copied().unwrap_or(0),
+        values.iter().max().copied().unwrap_or(0),
+    )
+}
+
 /// Compares `candidate` against `baseline`, using `baseline`'s own
-/// measured `stddev` as the noise floor (see `NOISE_FLOOR_STDDEV_MULTIPLIER`).
-/// Also checks whether the two reports' process counts or artifact
-/// create/modify/delete/unchanged profiles actually match (using each
-/// report's own min, the most conservative single number available
-/// without re-deriving a second distribution) -- if they don't, the two
-/// runs did structurally different work, and `wall_time_verdict` alone
-/// must not be read as a valid regression/improvement result.
-pub fn compare_reports(baseline: &ScenarioReport, candidate: &ScenarioReport) -> Comparison {
+/// measured `stddev` as the noise floor (see
+/// `NOISE_FLOOR_STDDEV_MULTIPLIER`).
+///
+/// **Rejects the comparison outright** (`Err`, before computing any
+/// numeric verdict at all) unless `workload_id` matches, the two reports'
+/// `EnvironmentFingerprint`s are comparable
+/// (`laminaria_fingerprint::comparability::environments_comparable`,
+/// reused directly), and both sides have the *same, resolved* toolchain
+/// digest (`reuse::toolchain_identity_from_run`'s fail-closed rule
+/// applies here too: an unresolved digest on either side is never treated
+/// as a match). A real bug an external review caught: comparing two
+/// reports from different workloads (with no environment/toolchain
+/// identity recorded on either at all, prior to this fix) produced an
+/// ordinary-looking `BelowNoise` verdict with zero `confounding_notes` --
+/// exactly the kind of not-actually-comparable result issue #21's
+/// acceptance criterion 7 exists to prevent.
+///
+/// Once eligible, also checks whether the two reports' process counts or
+/// artifact create/modify/delete profiles actually match -- using each
+/// report's own `(min, max)` **range**, not a bare minimum (another real
+/// bug: a baseline of `[1]` and a candidate of `[1, 50, 50]` share the
+/// same minimum, silently hiding that two of the three candidate
+/// repetitions did far more work). If the ranges don't match, the two
+/// scenarios did structurally different work, and `wall_time_verdict`
+/// alone must not be read as a valid regression/improvement result.
+pub fn compare_reports(
+    baseline: &ScenarioReport,
+    candidate: &ScenarioReport,
+) -> Result<Comparison, String> {
+    if baseline.workload_id != candidate.workload_id {
+        return Err(format!(
+            "not comparable: workload_id differs (baseline={:?}, candidate={:?})",
+            baseline.workload_id, candidate.workload_id
+        ));
+    }
+    if let Err(reasons) = laminaria_fingerprint::comparability::environments_comparable(
+        &baseline.environment_fingerprint,
+        &candidate.environment_fingerprint,
+    ) {
+        return Err(format!(
+            "not comparable: environment differs: {}",
+            reasons.join("; ")
+        ));
+    }
+    match (
+        &baseline.toolchain_digest_sha256,
+        &candidate.toolchain_digest_sha256,
+    ) {
+        (Some(a), Some(b)) if a == b => {}
+        (a, b) => {
+            return Err(format!(
+                "not comparable: toolchain digest differs or unresolved (baseline={a:?}, \
+                 candidate={b:?}) -- an unresolved digest on either side is never treated as a \
+                 match"
+            ));
+        }
+    }
+
     let diff = candidate.wall_seconds.mean - baseline.wall_seconds.mean;
     let relative_diff = if baseline.wall_seconds.mean != 0.0 {
         diff / baseline.wall_seconds.mean
@@ -510,58 +644,38 @@ pub fn compare_reports(baseline: &ScenarioReport, candidate: &ScenarioReport) ->
 
     let mut confounding_notes = Vec::new();
 
-    let baseline_process_count = baseline.process_counts.iter().min().copied().unwrap_or(0);
-    let candidate_process_count = candidate.process_counts.iter().min().copied().unwrap_or(0);
-    let process_count_changed = baseline_process_count != candidate_process_count;
+    let baseline_process_range = range(&baseline.process_counts);
+    let candidate_process_range = range(&candidate.process_counts);
+    let process_count_changed = baseline_process_range != candidate_process_range;
     if process_count_changed {
         confounding_notes.push(format!(
-            "process count differs (baseline={baseline_process_count}, \
-             candidate={candidate_process_count}) -- more or fewer compiler/backend actions were \
-             executed, so a wall-time difference here reflects a different amount of work, not \
-             purely a speed change"
+            "process count range differs (baseline={baseline_process_range:?}, \
+             candidate={candidate_process_range:?}) -- more or fewer compiler/backend actions \
+             were executed in at least one repetition, so a wall-time difference here reflects a \
+             different amount of work, not purely a speed change"
         ));
     }
 
     let baseline_artifact_profile = (
-        baseline.artifact_created.iter().min().copied().unwrap_or(0),
-        baseline
-            .artifact_modified
-            .iter()
-            .min()
-            .copied()
-            .unwrap_or(0),
-        baseline.artifact_deleted.iter().min().copied().unwrap_or(0),
+        range(&baseline.artifact_created),
+        range(&baseline.artifact_modified),
+        range(&baseline.artifact_deleted),
     );
     let candidate_artifact_profile = (
-        candidate
-            .artifact_created
-            .iter()
-            .min()
-            .copied()
-            .unwrap_or(0),
-        candidate
-            .artifact_modified
-            .iter()
-            .min()
-            .copied()
-            .unwrap_or(0),
-        candidate
-            .artifact_deleted
-            .iter()
-            .min()
-            .copied()
-            .unwrap_or(0),
+        range(&candidate.artifact_created),
+        range(&candidate.artifact_modified),
+        range(&candidate.artifact_deleted),
     );
     let artifact_profile_changed = baseline_artifact_profile != candidate_artifact_profile;
     if artifact_profile_changed {
         confounding_notes.push(format!(
-            "artifact create/modify/delete profile differs (baseline={baseline_artifact_profile:?}, \
-             candidate={candidate_artifact_profile:?}) -- the two runs did not produce/change the \
-             same set of artifacts"
+            "artifact create/modify/delete range differs (baseline={baseline_artifact_profile:?}, \
+             candidate={candidate_artifact_profile:?}) -- the two scenarios did not consistently \
+             produce/change the same set of artifacts across repetitions"
         ));
     }
 
-    Comparison {
+    Ok(Comparison {
         baseline_scenario_id: baseline.scenario_id.clone(),
         candidate_scenario_id: candidate.scenario_id.clone(),
         wall_seconds_relative_diff: relative_diff,
@@ -569,12 +683,139 @@ pub fn compare_reports(baseline: &ScenarioReport, candidate: &ScenarioReport) ->
         process_count_changed,
         artifact_profile_changed,
         confounding_notes,
-    }
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{
+        ExitStatusRecord, ProbeLevel, ProcessRecord, ProcessTrace, ResourceUsage, RunResult,
+        SCHEMA_VERSION,
+    };
+    use std::collections::BTreeMap;
+
+    fn sample_run(run_id: &str, success: bool, wall_seconds: f64) -> Run {
+        let end_elapsed_ns = (wall_seconds * 1e9) as u64;
+        Run {
+            run_id: run_id.to_string(),
+            schema_version: SCHEMA_VERSION.to_string(),
+            workload_id: "test-workload".to_string(),
+            scenario_id: "test-scenario".to_string(),
+            requested_artifact: None,
+            environment_fingerprint: laminaria_fingerprint::EnvironmentFingerprint {
+                schema_version: "0.1.0".to_string(),
+                captured_at_unix: 0,
+                os: "test-os".to_string(),
+                os_version: None,
+                kernel: None,
+                architecture: "test-arch".to_string(),
+                cpu_model: None,
+                cpu_physical_cores: None,
+                cpu_logical_cores: None,
+                memory_bytes: None,
+                filesystem_type: None,
+                environment_class: "unknown".to_string(),
+                repository: laminaria_fingerprint::RepositoryState {
+                    commit: None,
+                    dirty: None,
+                },
+                sdk_path: None,
+                measurement_harness: "test".to_string(),
+                architecture_notice: None,
+                self_process_translation_notice: None,
+                path_toolchain_shadow: None,
+                allowed_environment_variables: BTreeMap::new(),
+                unobserved_fields: Vec::new(),
+            },
+            requested_toolchain_selector: None,
+            resolved_toolchain_fingerprint: None,
+            preparation_record: crate::types::PreparationRecord::default(),
+            cache_state: crate::types::CacheState::default(),
+            root_command: RootCommand {
+                program: "true".to_string(),
+                args: Vec::new(),
+                cwd: None,
+                env_overrides: BTreeMap::new(),
+            },
+            run_started_at_unix_ns: 0,
+            run_ended_at_unix_ns: Some(end_elapsed_ns as u128),
+            result: Some(RunResult {
+                success,
+                root_exit_status: ExitStatusRecord {
+                    success,
+                    code: Some(if success { 0 } else { 1 }),
+                    signal: None,
+                },
+            }),
+            process_trace: ProcessTrace {
+                processes: vec![ProcessRecord {
+                    pid: Some(1),
+                    parent_pid: Some(1),
+                    executable: None,
+                    argv: vec!["true".to_string()],
+                    cwd: None,
+                    start_elapsed_ns: 0,
+                    end_elapsed_ns: Some(end_elapsed_ns),
+                    exit_status: Some(ExitStatusRecord {
+                        success,
+                        code: Some(if success { 0 } else { 1 }),
+                        signal: None,
+                    }),
+                    resource_usage: ResourceUsage::default(),
+                    probe_level: ProbeLevel::Level1ProcessResource,
+                    coverage_note: "test".to_string(),
+                }],
+                known_gaps: Vec::new(),
+            },
+            compiler_telemetry: None,
+            artifact_delta: None,
+            measurement_overhead: None,
+        }
+    }
+
+    /// The exact bug an external review caught: a failed repetition's own
+    /// (often short) wall time must never be silently averaged in as if
+    /// it were a normal, fast, successful sample.
+    #[test]
+    fn a_failed_repetition_is_excluded_from_wall_seconds_but_its_evidence_is_kept() {
+        let runs = vec![
+            sample_run("run-fast-fail", false, 0.01),
+            sample_run("run-ok-1", true, 10.0),
+            sample_run("run-ok-2", true, 10.2),
+        ];
+        let report = build_report("edit", "test-workload", &runs).unwrap();
+
+        assert_eq!(
+            report.run_ids.len(),
+            3,
+            "every repetition's evidence must be kept"
+        );
+        assert_eq!(report.success, vec![false, true, true]);
+        assert_eq!(
+            report.wall_seconds.sample_count, 2,
+            "only the two successful repetitions may contribute to the wall-time statistics"
+        );
+        assert!(
+            report.wall_seconds.min >= 9.0,
+            "the failed run's fast 0.01s must not pull the reported minimum down, got {}",
+            report.wall_seconds.min
+        );
+    }
+
+    #[test]
+    fn a_scenario_where_every_repetition_failed_reports_no_wall_time_sample() {
+        let runs = vec![
+            sample_run("run-fail-1", false, 0.01),
+            sample_run("run-fail-2", false, 0.02),
+        ];
+        let result = build_report("edit", "test-workload", &runs);
+        assert!(
+            result.is_err(),
+            "an all-failed scenario must not produce a ScenarioReport with a fabricated or \
+             empty wall_seconds Stats"
+        );
+    }
 
     #[test]
     fn stats_computes_min_p50_p90_mean_stddev_from_a_small_sample() {
@@ -595,6 +836,39 @@ mod tests {
         assert_eq!(stats.mean, 2.0);
     }
 
+    fn sample_environment_fingerprint() -> laminaria_fingerprint::EnvironmentFingerprint {
+        laminaria_fingerprint::EnvironmentFingerprint {
+            schema_version: "0.1.0".to_string(),
+            captured_at_unix: 0,
+            os: "test-os".to_string(),
+            os_version: None,
+            kernel: None,
+            architecture: "test-arch".to_string(),
+            cpu_model: None,
+            cpu_physical_cores: None,
+            cpu_logical_cores: None,
+            memory_bytes: None,
+            filesystem_type: None,
+            environment_class: "unknown".to_string(),
+            repository: laminaria_fingerprint::RepositoryState {
+                commit: None,
+                dirty: None,
+            },
+            sdk_path: None,
+            measurement_harness: "test".to_string(),
+            architecture_notice: None,
+            self_process_translation_notice: None,
+            path_toolchain_shadow: None,
+            allowed_environment_variables: BTreeMap::new(),
+            unobserved_fields: Vec::new(),
+        }
+    }
+
+    /// Two reports built with this same helper are, by default, eligible
+    /// for comparison (same workload/environment/toolchain) -- tests that
+    /// specifically exercise `compare_reports`'s eligibility rejection
+    /// override `workload_id`/`environment_fingerprint`/
+    /// `toolchain_digest_sha256` explicitly instead.
     fn report(
         scenario_id: &str,
         wall_samples: Vec<f64>,
@@ -607,12 +881,15 @@ mod tests {
             run_ids: (0..wall_samples.len())
                 .map(|i| format!("run-{i}"))
                 .collect(),
+            success: vec![true; wall_samples.len()],
             wall_seconds: Stats::from_samples(wall_samples),
             process_counts,
             artifact_created: vec![0],
             artifact_modified: vec![0],
             artifact_deleted: vec![0],
             artifact_unchanged: vec![0],
+            environment_fingerprint: sample_environment_fingerprint(),
+            toolchain_digest_sha256: Some("test-toolchain-digest".to_string()),
         }
     }
 
@@ -623,7 +900,7 @@ mod tests {
         let baseline = report("baseline", vec![1.0, 1.1, 0.9, 1.05, 0.95], vec![4]);
         let candidate = report("candidate", vec![1.02, 1.08, 1.0], vec![4]);
 
-        let comparison = compare_reports(&baseline, &candidate);
+        let comparison = compare_reports(&baseline, &candidate).unwrap();
 
         assert_eq!(comparison.wall_time_verdict, WallTimeVerdict::WithinNoise);
         assert!(comparison.confounding_notes.is_empty());
@@ -634,7 +911,7 @@ mod tests {
         let baseline = report("baseline", vec![1.0, 1.02, 0.98, 1.01, 0.99], vec![4]);
         let candidate = report("candidate", vec![5.0, 5.1, 4.9], vec![4]);
 
-        let comparison = compare_reports(&baseline, &candidate);
+        let comparison = compare_reports(&baseline, &candidate).unwrap();
 
         assert_eq!(comparison.wall_time_verdict, WallTimeVerdict::AboveNoise);
         assert!(comparison.wall_seconds_relative_diff > 3.0);
@@ -650,11 +927,85 @@ mod tests {
         let baseline = report("baseline", vec![10.0, 10.1, 9.9], vec![6]);
         let candidate = report("candidate", vec![1.0, 1.1, 0.9], vec![1]);
 
-        let comparison = compare_reports(&baseline, &candidate);
+        let comparison = compare_reports(&baseline, &candidate).unwrap();
 
         assert_eq!(comparison.wall_time_verdict, WallTimeVerdict::BelowNoise);
         assert!(comparison.process_count_changed);
         assert!(!comparison.confounding_notes.is_empty());
+    }
+
+    /// The exact bug an external review caught: a baseline whose every
+    /// repetition used exactly 1 process shares a *minimum* of 1 with a
+    /// candidate where two of three repetitions spiked to 50 -- a
+    /// min-only comparison would miss that entirely.
+    #[test]
+    fn a_process_count_spike_in_some_but_not_all_repetitions_is_still_flagged() {
+        let baseline = report("baseline", vec![1.0, 1.0, 1.0], vec![1]);
+        let candidate = report("candidate", vec![1.0, 1.0, 1.0], vec![1, 50, 50]);
+
+        let comparison = compare_reports(&baseline, &candidate).unwrap();
+
+        assert!(
+            comparison.process_count_changed,
+            "a min-only comparison would miss this: both sides share a minimum of 1"
+        );
+        assert!(!comparison.confounding_notes.is_empty());
+    }
+
+    /// The exact bug an external review caught: comparing two reports
+    /// from genuinely different workloads (or with no recorded
+    /// environment/toolchain identity at all) must be rejected outright,
+    /// not silently reduced to a wall-time-only verdict.
+    #[test]
+    fn comparing_different_workloads_is_rejected_before_any_numeric_verdict() {
+        let mut baseline = report("baseline", vec![10.0, 10.1, 9.9], vec![4]);
+        baseline.workload_id = "rust-heavy-workspace".to_string();
+        let mut candidate = report("candidate", vec![5.0, 5.1, 4.9], vec![4]);
+        candidate.workload_id = "nim-heavy-workspace".to_string();
+
+        let result = compare_reports(&baseline, &candidate);
+
+        assert!(
+            result.is_err(),
+            "comparing two different workloads must be rejected, not silently scored as \
+             below_noise with zero confounding_notes"
+        );
+    }
+
+    #[test]
+    fn comparing_reports_with_an_unresolved_toolchain_on_either_side_is_rejected() {
+        let mut baseline = report("baseline", vec![10.0, 10.1, 9.9], vec![4]);
+        baseline.toolchain_digest_sha256 = None;
+        let candidate = report("candidate", vec![5.0, 5.1, 4.9], vec![4]);
+
+        let result = compare_reports(&baseline, &candidate);
+
+        assert!(
+            result.is_err(),
+            "an unresolved toolchain digest on either side must never be treated as a match"
+        );
+    }
+
+    #[test]
+    fn comparing_reports_with_different_toolchain_digests_is_rejected() {
+        let baseline = report("baseline", vec![10.0, 10.1, 9.9], vec![4]);
+        let mut candidate = report("candidate", vec![5.0, 5.1, 4.9], vec![4]);
+        candidate.toolchain_digest_sha256 = Some("a-different-toolchain-digest".to_string());
+
+        let result = compare_reports(&baseline, &candidate);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn comparing_reports_from_different_environments_is_rejected() {
+        let baseline = report("baseline", vec![10.0, 10.1, 9.9], vec![4]);
+        let mut candidate = report("candidate", vec![5.0, 5.1, 4.9], vec![4]);
+        candidate.environment_fingerprint.os = "a-different-os".to_string();
+
+        let result = compare_reports(&baseline, &candidate);
+
+        assert!(result.is_err());
     }
 
     #[test]
@@ -663,7 +1014,7 @@ mod tests {
         let mut candidate = report("candidate", vec![1.0, 1.0, 1.0], vec![4]);
         candidate.artifact_created = vec![5];
 
-        let comparison = compare_reports(&baseline, &candidate);
+        let comparison = compare_reports(&baseline, &candidate).unwrap();
 
         assert_eq!(comparison.wall_time_verdict, WallTimeVerdict::WithinNoise);
         assert!(comparison.artifact_profile_changed);

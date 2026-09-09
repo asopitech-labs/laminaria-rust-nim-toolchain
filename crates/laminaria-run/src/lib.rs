@@ -125,8 +125,22 @@ fn is_nim_c_command(root: &RootCommand) -> bool {
 /// A `rust-toolchain`/`rust-toolchain.toml` file in the invoked directory is
 /// a real, separate selection mechanism this does not check -- a named,
 /// open gap, not silently treated as equivalent to "no override".
+///
+/// Checks `root.env_overrides` *and* this process's own ambient
+/// environment (`effective_env_var`) -- a real bug found by external
+/// review: `RootCommand.env_overrides` is only ever populated by an
+/// explicit `--env`-style mechanism this CLI doesn't even expose today,
+/// so a caller who set `RUSTC=/usr/bin/false` in their own shell before
+/// running `laminaria run -- cargo check` had that choice silently
+/// discarded -- `tracer::build_command` inherits the parent's full
+/// environment by default, so the child *would* have seen the caller's
+/// own `RUSTC` unless this function's own unconditional wrapper
+/// substitution then overwrote it. Reproduced directly: `RUSTC=/usr/bin/
+/// false cargo check` fails as expected, but the same environment through
+/// `laminaria run` silently succeeded against PATH's default rustc
+/// instead.
 fn resolve_real_rustc(root: &RootCommand) -> Result<PathBuf, String> {
-    if let Some(rustc) = root.env_overrides.get("RUSTC") {
+    if let Some(rustc) = effective_env_var(root, "RUSTC") {
         return Ok(PathBuf::from(rustc));
     }
     if let Some(plus_arg) = root.args.first().filter(|a| a.starts_with('+')) {
@@ -140,8 +154,8 @@ fn resolve_real_rustc(root: &RootCommand) -> Result<PathBuf, String> {
             )
         });
     }
-    if let Some(toolchain) = root.env_overrides.get("RUSTUP_TOOLCHAIN") {
-        return resolve_rustc_via_rustup(toolchain).ok_or_else(|| {
+    if let Some(toolchain) = effective_env_var(root, "RUSTUP_TOOLCHAIN") {
+        return resolve_rustc_via_rustup(&toolchain).ok_or_else(|| {
             format!(
                 "root command sets RUSTUP_TOOLCHAIN={toolchain} but the real rustc for it could \
                  not be resolved via `rustup which rustc --toolchain {toolchain}`; refusing to \
@@ -151,6 +165,21 @@ fn resolve_real_rustc(root: &RootCommand) -> Result<PathBuf, String> {
     }
     laminaria_fingerprint::exec::which("rustc")
         .ok_or_else(|| "could not resolve a `rustc` on PATH".to_string())
+}
+
+/// Reads `key` from `root.env_overrides` first (an explicit override this
+/// crate's own caller attached to the specific `RootCommand`), falling
+/// back to this process's own ambient environment
+/// (`std::env::var`) -- since `tracer::build_command` spawns the traced
+/// command with the full parent environment by default (only overriding
+/// what `env_overrides` explicitly names), an ambient env var the *user's
+/// own shell* set is just as real an explicit choice as one passed
+/// through `env_overrides`, and must not be silently treated as absent.
+fn effective_env_var(root: &RootCommand, key: &str) -> Option<String> {
+    root.env_overrides
+        .get(key)
+        .cloned()
+        .or_else(|| std::env::var(key).ok())
 }
 
 fn resolve_rustc_via_rustup(toolchain: &str) -> Option<PathBuf> {
@@ -167,11 +196,12 @@ fn resolve_rustc_via_rustup(toolchain: &str) -> Option<PathBuf> {
 }
 
 /// Same reasoning as `resolve_real_rustc`, for the CC-wrapper side: never
-/// overwrite a `CC` the caller already set on `root.env_overrides`. Nim
-/// has no `+toolchain`-style selector syntax for its C backend, so unlike
-/// the Rust side there is no equivalent second case to check.
+/// overwrite a `CC` the caller already set, whether via `root.env_overrides`
+/// or their own ambient shell environment (`effective_env_var`). Nim has no
+/// `+toolchain`-style selector syntax for its C backend, so unlike the Rust
+/// side there is no equivalent second case to check.
 fn resolve_real_cc(root: &RootCommand) -> Result<PathBuf, String> {
-    if let Some(cc) = root.env_overrides.get("CC") {
+    if let Some(cc) = effective_env_var(root, "CC") {
         return Ok(PathBuf::from(cc));
     }
     laminaria_fingerprint::exec::which("cc")
@@ -188,16 +218,16 @@ fn resolve_real_cc(root: &RootCommand) -> Result<PathBuf, String> {
 /// real, separate mechanism this does not detect -- named as a gap, not
 /// silently treated as "no selector was requested".
 fn detect_requested_toolchain_selector(root: &RootCommand) -> Option<String> {
-    if let Some(rustc) = root.env_overrides.get("RUSTC") {
+    if let Some(rustc) = effective_env_var(root, "RUSTC") {
         return Some(format!("RUSTC={rustc}"));
     }
     if let Some(plus_arg) = root.args.first().filter(|a| a.starts_with('+')) {
         return Some(format!("cargo {plus_arg}"));
     }
-    if let Some(toolchain) = root.env_overrides.get("RUSTUP_TOOLCHAIN") {
+    if let Some(toolchain) = effective_env_var(root, "RUSTUP_TOOLCHAIN") {
         return Some(format!("RUSTUP_TOOLCHAIN={toolchain}"));
     }
-    if let Some(cc) = root.env_overrides.get("CC") {
+    if let Some(cc) = effective_env_var(root, "CC") {
         return Some(format!("CC={cc}"));
     }
     None

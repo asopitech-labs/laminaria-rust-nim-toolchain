@@ -912,3 +912,87 @@ cross-toolchain-version reuse; no actual "skip the compiler" behavior --
 distinction beyond one triple/OS-CPU pair, no persistence-tier modeling;
 no `laminaria-cli` subcommand exposing this yet (verified via a direct
 `cargo test`, not the CLI).
+
+## Second review pass: 5 more correctness bugs, all fixed and verified
+
+An external review of commits `a75c314..ab60dfa` (the full #19-review-fix
+→ #20 → #25 → #21 → #7/#12 sequence above) found five more P1 bugs
+touching measurement/reuse correctness directly, plus one P2 the same
+code region made cheap to fix at the same time. All six verified against
+real reproductions, not just patched blind.
+
+1. **`resolve_real_rustc`/`resolve_real_cc` ignored the caller's own
+   ambient environment.** Only `root.env_overrides` was checked, never
+   `std::env::var` -- but `RootCommand.env_overrides` is only populated by
+   an explicit mechanism this CLI doesn't even expose, so a caller who set
+   `RUSTC=/usr/bin/false` in their own shell had that choice silently
+   discarded: `tracer::build_command` inherits the parent's full
+   environment by default, and this crate's own unconditional wrapper
+   substitution then overwrote it. Reproduced directly: `RUSTC=/usr/bin/
+   false cargo check` fails as expected; the same environment through
+   `laminaria run` silently substituted PATH's default rustc and
+   succeeded. Fixed with a shared `effective_env_var` helper (checks
+   `env_overrides` first, then ambient `std::env::var`), used by
+   `resolve_real_rustc`/`resolve_real_cc`/`detect_requested_toolchain_selector`
+   alike. Re-verified live: `requested_toolchain_selector` now correctly
+   reads `"RUSTC=/usr/bin/false"`, and the traced build now genuinely
+   fails, matching direct Cargo behavior.
+2. **`toolchain_identity_from_run` used `.first()` instead of the
+   actually-invoked toolchain.** `toolchains.lock.toml` can declare more
+   than one Rust/Nim toolchain, and `ToolchainReport` resolves *all* of
+   them regardless of which one a given Run actually used -- so changing
+   a requested selector from toolchain A to B still compared as
+   `Reusable`, because both keys carried A's digest (declared first).
+   Fixed by matching the Run's actually-used compiler path (the wrapper's
+   own `LAMINARIA_WRAPPED_RUSTC` record for Rust, the root process
+   record's resolved `executable` for Nim) against the report's declared
+   toolchains by path, returning `None` (fail-closed) when it matches
+   none. Caught a second, genuine environment fact in the process: this
+   session's own dev machine has a non-rustup `rustc` shadowing `PATH`
+   ahead of the rustup-managed one (`EnvironmentFingerprint::
+   path_toolchain_shadow` already named this), so the real-fixture test
+   now pins `RUSTC` explicitly to the lock-resolved path rather than
+   depending on `PATH` happening to agree with it.
+3. **A failed scenario repetition was aggregated as a normal, fast wall-
+   time sample.** `build_report` fed every repetition's wall time into
+   `Stats::from_samples` regardless of `Run::result.success` -- an early
+   failure (exiting fast) looked like a speedup. Fixed: `wall_seconds` is
+   now computed from successful repetitions only; `run_ids`/`success`/
+   `process_counts`/`artifact_*` still cover every repetition (failure
+   evidence is kept, not discarded, and each failed run's own `run.json`
+   is untouched); a scenario where *every* repetition failed now returns
+   an error rather than fabricating an empty or fictitious `Stats`.
+4. **`compare_reports` had no workload/environment/toolchain eligibility
+   check at all.** Two reports from genuinely different workloads (or
+   with no comparability identity recorded on either side, prior to this
+   fix) produced an ordinary `below_noise` verdict with zero
+   `confounding_notes`. Fixed: `ScenarioReport` now carries
+   `environment_fingerprint` and `toolchain_digest_sha256` (from the
+   first repetition), and `compare_reports` checks `workload_id` equality,
+   environment comparability (`laminaria_fingerprint::comparability::
+   environments_comparable`, reused directly, not reinvented), and
+   toolchain digest equality -- rejecting the comparison outright
+   (`Result::Err`, before any numeric verdict is computed) on a mismatch
+   or an unresolved digest on either side. `scenario-compare`'s CLI exit
+   code reflects this too.
+5. **`hash_source_roots` swallowed I/O errors as an empty source set.** A
+   nonexistent root, an unreadable directory, or a single *file* passed as
+   a root (`read_dir` on a file simply errors) were all silently treated
+   as contributing zero entries -- reproduced directly: editing a
+   single-file root's content never changed its digest at all, since the
+   walk silently saw nothing regardless. Fixed: each of those cases now
+   returns a real `io::Error` instead of an empty-set digest.
+6. **[P2, fixed alongside #4] `compare_reports`'s process-count/artifact-
+   profile comparison used only each report's minimum**, so a baseline of
+   `[1]` and a candidate of `[1, 50, 50]` shared the same minimum and
+   compared as unchanged, hiding that two of three candidate repetitions
+   did far more work. Fixed: both now compare `(min, max)` ranges instead
+   of a bare minimum.
+
+All six are covered by new, targeted tests (fast synthetic unit tests for
+the identity/comparison logic, plus the existing real-fixture integration
+test extended to actually exercise RUSTC-wrapper substitution through the
+real CLI binary -- required after fix #2, since running scenarios
+in-process via `cargo test` can never engage wrapper substitution at all,
+a pre-existing crate limitation this fix's own test had to route around).
+`cargo test --workspace`: 68 passed (up from 56). Clippy and fmt clean.
