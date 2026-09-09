@@ -107,6 +107,25 @@ jobs:
           cargo test --manifest-path rust-lib/Cargo.toml
           ./build.sh
 
+      # Issue #4 Layer 5's required comparison: "conventional C ABI
+      # baseline" (a cbindgen-generated header as the single source of
+      # truth for the boundary) against the direct route just built
+      # above, against the *same* unmodified rust-lib static library.
+      # Run right after the direct route so both binaries being compared
+      # for size exist from the same CI run. See
+      # fixtures/direct-native-link/NOTES.md's "c-abi-baseline/" section
+      # for what evidence this produces and its limits (whole-binary
+      # size is confounded by unequal workload coverage between the two
+      # main.nim files; call-overhead is not -- see the disassembly
+      # comparison there).
+      - name: Install cbindgen
+        run: cargo install cbindgen --locked
+
+      - name: Build and run the direct-native-link c-abi-baseline comparison
+        run: |
+          cd fixtures/direct-native-link/c-abi-baseline
+          ./build.sh
+
       # Issue #4 Layer 4, previously entirely untested: what happens
       # when a Rust function panics while called from Nim? Expected,
       # deterministic outcome verified below: SIGABRT (134) -- a plain

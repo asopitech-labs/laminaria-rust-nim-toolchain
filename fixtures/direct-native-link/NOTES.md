@@ -896,6 +896,83 @@ with an explicit create/use/free lifecycle, exactly as this experiment
 does, rather than waiting on the tooling-level auto-wrapping idea
 mentioned above.
 
+## `c-abi-baseline/`: Layer 5's required comparison against a conventional C ABI boundary
+
+`docs/rust-nim-native-linking.md`'s Layer 5 requires comparing this
+project's direct path against "conventional C ABI baseline" — its own
+framing: *"C ABI as mandatory architectural boundary versus C ABI/
+adapters as one possible boundary artifact chosen only where required."*
+`c-abi-baseline/main.nim` is that baseline: it links the **exact same,
+unmodified** `../rust-lib` static library — not rebuilt differently, not
+one line changed — so any difference found is attributable only to how
+the Nim side establishes the contract, never to a different Rust
+artifact. The one difference: every type and function in
+`c-abi-baseline/main.nim` is imported straight from `bindings.h`, a
+`cbindgen`-generated header that is the single source of truth for the
+boundary (the conventional, mandatory-C-ABI-contract shape), instead of
+`../nim-bin/main.nim`'s independently hand-written `importc`
+declarations with no generated header at all — whose agreement with
+Rust's actual layout is instead verified *at runtime* (`layoutProbe`).
+Three representative classes from the type/layout matrix are covered:
+a scalar call (`rust_transform`), a fixed-layout struct used by pointer
+(`Point`), and an opaque handle (`Counter`).
+
+### What actually differs, measured rather than assumed
+
+**Build cost — a real, attributable, one-sided cost.** Header generation
+(`cbindgen --crate rust-lib --lang c -o bindings.h ../rust-lib`) took
+33ms locally and produced a 219-line, 7262-byte header (`c-abi-baseline/
+build.sh` output). This step, and only this step, has no counterpart on
+the direct route — `../nim-bin/main.nim` never runs `cbindgen` at all.
+On a crate this small the wall-clock cost is trivial, but the artifact
+itself is not: it is one more generated file that must be kept in sync,
+regenerated on every Rust-side signature change, and reviewed for drift
+— a real, structural cost the direct route does not pay, independent of
+how fast the tool happens to run on a small crate.
+
+**Whole-binary size — checked, and explicitly NOT usable as a clean
+finding.** `nim-bin/direct_native_link_out` (1,550,408 bytes, `__TEXT`
+917,504) came out larger than `c-abi-baseline/c_abi_baseline_out`
+(1,510,032 bytes, `__TEXT` 884,736) in this run. This is **not** evidence
+that the header-based path produces smaller binaries: `nim-bin/main.nim`
+exercises substantially more of the type/layout matrix (enums, seq/Vec
+pointer resolution, GC_ref) than `c-abi-baseline/main.nim`'s three-class
+subset, so the two binaries contain different amounts of Nim-generated
+code by construction. Recorded here specifically so this confound is not
+silently reintroduced by a later, less careful reading of these two
+numbers — a same-workload, same-call-count binary-size comparison was
+not attempted, and the true zero-confound way to answer the *call
+overhead* question directly is the disassembly below.
+
+**Call overhead — checked directly, not inferred from binary size.**
+Both binaries were disassembled (`otool -tV`, arm64) at the exact call
+site for `rust_transform`:
+
+```
+direct route:        000000010000e488  bl  _rust_transform
+c-abi-baseline route: 000000010000d29c  bl  _rust_transform
+```
+
+**Identical**: one direct-call instruction, no trampoline, no shim, no
+indirection, on either route. This is the actual answer to Layer 5's
+"call overhead" question for this workload: there isn't any — going
+through a generated C header changes nothing about the compiled call
+site, because both routes ultimately agree on the same `extern "C"`
+symbol and calling convention. The entire measurable cost of the
+"conventional C ABI baseline" shape here is the generated-header
+build-time artifact above, not runtime overhead.
+
+### Not yet attempted, for this comparison specifically
+
+Only checked on the `nim c` route, locally (arm64 macOS) — not yet run
+in CI, and not yet ported to the `nlvm` route (unclear whether nlvm's C
+codegen path can consume a `{.header.}`-imported type the same way at
+all, given nlvm never generates or reads C source anywhere in its own
+pipeline — a real open question, not assumed either way). Link time and
+incremental-rebuild-scope, two of Layer 5's other required measurements,
+were not measured here — this crate is too small for link time to be
+a meaningful signal, and no incremental-edit scenario was run.
+
 ### Not yet attempted
 
 The `nlvm`-via-Docker path on this dev machine's own architecture (arm64
