@@ -59,6 +59,20 @@ jobs:
       # (whose target/nimcache dirs are now warm) so the traced runs below
       # are true no-ops, and a fresh cold build is forced explicitly where
       # the cold/no-op distinction itself is the thing being checked.
+      #
+      # `laminaria run` locates its `laminaria-rustc-wrapper` auxiliary
+      # binary (crates/laminaria-run/src/cargo_wrapper.rs's
+      # find_rustc_wrapper_binary) next to its own running executable in
+      # `target/debug/`. The earlier `cargo test --workspace` step does
+      # NOT put it there -- it only compiles a separately-hashed test
+      # harness copy under `target/debug/deps/` -- so an explicit
+      # `cargo build --workspace` is required first, or wrapper
+      # substitution silently falls back to root-only tracing (a real gap
+      # this exact step's assertions caught in CI once already: see the
+      # laminaria-run NOTES.md history).
+      - name: Build workspace binaries (laminaria-rustc-wrapper needs the plain target/debug/ copy)
+        run: cargo build --workspace
+
       - name: Trace a cold and a true-no-op rust-heavy-workspace build (issue #19 Experiment 1)
         run: |
           rm -rf fixtures/rust-heavy-workspace/target
