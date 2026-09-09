@@ -31,8 +31,17 @@ LAMINARIA itself.
   reference point that research will be compared against. Computes the
   same prime-grid/cluster values as the two fixtures above, so all three
   produce identical output for cross-checking.
+- `wide-parallel-graph/` — the "wide parallel graph" workload: 8 mutually
+  independent leaf crates (`leaf-fibonacci`, `leaf-factorial`, `leaf-gcd`,
+  `leaf-sum-of-squares`, `leaf-palindrome`, `leaf-bubble-sort`,
+  `leaf-binary-search`, `leaf-matrix-sum`, each with real logic and unit
+  tests) with no dependencies on each other, all depended on by one
+  `aggregator` binary. Deliberately the opposite topology from
+  `rust-heavy-workspace`'s linear chain — a correct build scheduler can
+  compile all 8 leaves in parallel before linking `aggregator`, which is
+  exactly what future scheduler research (#6) needs a fixture to exercise.
 
-All three are built (not just version-checked) as part of CI — natively on
+All four are built (not just version-checked) as part of CI — natively on
 `ubuntu-latest`/`macos-latest`, and inside `docker/bootstrap.Dockerfile`'s
 container environment — which is the actual evidence for #18's fixture
 reproduction criterion.
@@ -43,7 +52,7 @@ Mixed Rust/Nim native executable (Rust and Nim linked into one binary
 without the fixture-per-language split above), direct native-link workload,
 backend-route variant workload, backend checkpoint-economics workload, LLVM
 pass/pipeline observation workload, ThinLTO/DTLTO dynamic backend-job
-workload, wide parallel graph, deep critical-path graph, boundary-heavy
+workload, deep critical-path graph, boundary-heavy
 workload, incremental semantic edit, unchanged/no-op workspace, worktree
 reuse, mixed-language WASM workload, Wasm link/post-link/component
 invalidation workload, Rust/Nim 2/Nimony shared LLVM/LTO compatibility

@@ -1,0 +1,19 @@
+[package]
+name = "aggregator"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "aggregator"
+path = "src/main.rs"
+
+[dependencies]
+leaf-fibonacci = { path = "../leaf-fibonacci" }
+leaf-factorial = { path = "../leaf-factorial" }
+leaf-gcd = { path = "../leaf-gcd" }
+leaf-sum-of-squares = { path = "../leaf-sum-of-squares" }
+leaf-palindrome = { path = "../leaf-palindrome" }
+leaf-bubble-sort = { path = "../leaf-bubble-sort" }
+leaf-binary-search = { path = "../leaf-binary-search" }
+leaf-matrix-sum = { path = "../leaf-matrix-sum" }

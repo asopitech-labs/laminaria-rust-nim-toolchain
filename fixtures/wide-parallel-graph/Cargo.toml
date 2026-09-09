@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/leaf-fibonacci",
+    "crates/leaf-factorial",
+    "crates/leaf-gcd",
+    "crates/leaf-sum-of-squares",
+    "crates/leaf-palindrome",
+    "crates/leaf-bubble-sort",
+    "crates/leaf-binary-search",
+    "crates/leaf-matrix-sum",
+    "crates/aggregator",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+publish = false

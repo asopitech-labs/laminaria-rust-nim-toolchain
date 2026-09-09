@@ -58,6 +58,13 @@ jobs:
           cd fixtures/rust-nim-c-abi-baseline/rust-bin
           cargo run
 
+      - name: Build wide-parallel-graph fixture
+        run: |
+          cd fixtures/wide-parallel-graph
+          cargo build --workspace
+          cargo test --workspace
+          cargo run -q -p aggregator
+
   # Exercises the "container" EnvironmentFingerprint class from a clean,
   # native (non-Rosetta) environment — see docker/bootstrap.Dockerfile for
   # why this is a bootstrap/correctness check, not a performance baseline.
