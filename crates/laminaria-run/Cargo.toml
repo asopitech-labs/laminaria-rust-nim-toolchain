@@ -1,0 +1,16 @@
+[package]
+name = "laminaria-run"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Versioned Run envelope and process/resource tracer for LAMINARIA (issue #19)."
+
+[dependencies]
+laminaria-fingerprint = { path = "../laminaria-fingerprint" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

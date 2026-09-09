@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/laminaria-fingerprint",
+    "crates/laminaria-run",
     "crates/laminaria-cli",
 ]
 
