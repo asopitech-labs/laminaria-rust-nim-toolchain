@@ -205,6 +205,29 @@ jobs:
           echo "--- symbol resolution trail, same methodology as NOTES.md's nim-bin evidence ---"
           nm main | grep -E 'rust_transform|rust_point' || true
 
+      # #11's own fixture (not #4's investigation, though it reuses this
+      # job's nlvm download): does Rust's own LLVM IR and Nim's own LLVM
+      # IR (via nlvm) merge into one module with llvm-link, before
+      # either side reaches native codegen? See
+      # fixtures/rust-nim-llvm-lto-compatibility/NOTES.md. Needs
+      # llvm-link/opt/llvm-dis matching nlvm's pinned LLVM version
+      # (checked directly to be 22.1.8, matching this project's own
+      # pinned rustc's bundled LLVM exactly) -- installed here via
+      # apt.llvm.org's own installer script, the standard route.
+      - name: Install LLVM 22 tools (llvm-link/opt/llvm-dis) matching nlvm's pinned version
+        run: |
+          wget -O /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x /tmp/llvm.sh
+          sudo /tmp/llvm.sh 22
+          echo "LLVM_LINK_BIN=$(command -v llvm-link-22)" >> "$GITHUB_ENV"
+          echo "OPT_BIN=$(command -v opt-22)" >> "$GITHUB_ENV"
+          echo "LLVM_DIS_BIN=$(command -v llvm-dis-22)" >> "$GITHUB_ENV"
+
+      - name: Build rust-nim-llvm-lto-compatibility fixture
+        run: |
+          cd fixtures/rust-nim-llvm-lto-compatibility
+          ./build.sh
+
   # Exercises the "container" EnvironmentFingerprint class from a clean,
   # native (non-Rosetta) environment — see docker/bootstrap.Dockerfile for
   # why this is a bootstrap/correctness check, not a performance baseline.

@@ -118,8 +118,19 @@ Nim's default cache lives outside the repo entirely).
   future direct native-link research (#4) builds its deeper Layers 2-6 on
   top of, not that research itself.
 
-All ten are built (not just version-checked) as part of CI — natively on
-`ubuntu-latest`/`macos-latest`, and inside `docker/bootstrap.Dockerfile`'s
+- `rust-nim-llvm-lto-compatibility/` — the "Rust/Nim 2/Nimony shared
+  LLVM/LTO compatibility workload": the minimal first proof from
+  `docs/research-program.md` Track J. Not "can the linker resolve
+  symbols across two native objects" (every other fixture here) but
+  "can Rust's own LLVM IR and Nim's own LLVM IR (via `nlvm`) be merged
+  into *one module* with `llvm-link`, before either side reaches native
+  codegen." Reachable now because `direct-native-link/`'s `nlvm`
+  investigation (issue #4) established `nlvm`'s pinned LLVM version is
+  exactly `22.1.8`, matching this project's own pinned `rustc`'s
+  bundled LLVM precisely. See `NOTES.md` for method and status.
+
+All eleven are built (not just version-checked) as part of CI — natively
+on `ubuntu-latest`/`macos-latest`, and inside `docker/bootstrap.Dockerfile`'s
 container environment — which is the actual evidence for #18's fixture
 reproduction criterion.
 
@@ -128,8 +139,7 @@ reproduction criterion.
 Backend-route variant workload, backend checkpoint-economics workload,
 LLVM pass/pipeline observation workload, ThinLTO/DTLTO dynamic backend-job
 workload, worktree reuse, mixed-language WASM workload, Wasm
-link/post-link/component invalidation workload, Rust/Nim 2/Nimony shared
-LLVM/LTO compatibility workload, compiler/backend-work-elimination
-fixture. Every one of these needs backend/Run infrastructure from #4
-(beyond its own Layer 1 fixture above), #12, or #19-21 to be more than a
-placeholder, not just a buildable workspace.
+link/post-link/component invalidation workload, compiler/backend-work-
+elimination fixture. Every one of these needs backend/Run infrastructure
+from #4, #12, or #19-21 to be more than a placeholder, not just a
+buildable workspace.
