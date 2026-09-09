@@ -54,6 +54,7 @@ pub mod cargo_wrapper;
 pub mod clock;
 pub mod nim_telemetry;
 pub mod nim_wrapper;
+pub mod scenario;
 pub mod store;
 pub mod tracer;
 pub mod types;

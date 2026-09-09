@@ -212,6 +212,67 @@ jobs:
           }
           echo "artifact inventory: cold $COLD_ARTIFACT_CREATED/$COLD_ARTIFACT_TOTAL created, true-noop $NOOP_ARTIFACT_UNCHANGED unchanged / $NOOP_ARTIFACT_CANDIDATES changed candidate(s) hashed in ${NOOP_ARTIFACT_HASH_SECONDS}s"
 
+      # Scenario repetition and noise-floor-aware comparison (issue #21's
+      # first slice, crates/laminaria-run/src/scenario.rs -- see NOTES.md).
+      # Separate concern from the step above: that one traces a single
+      # cold/no-op pair; this one exercises repeated sampling, statistics,
+      # report regeneration from disk, and the comparator's confounding-
+      # factor detection (process count / artifact profile), not just raw
+      # Run capture.
+      - name: Scenario repetition, regeneration, and noise-floor comparison (issue #21)
+        run: |
+          rm -rf fixtures/rust-heavy-workspace/target
+          cargo run -q -p laminaria-cli -- scenario-run \
+            --workload rust-heavy-workspace --kind cold --repeat 2 --runs-root runs --json \
+            > /tmp/scenario-cold.json
+          cargo run -q -p laminaria-cli -- scenario-run \
+            --workload rust-heavy-workspace --kind noop --repeat 3 --runs-root runs --json \
+            > /tmp/scenario-noop.json
+
+          COLD_SAMPLE_COUNT=$(jq '.wall_seconds.sample_count' /tmp/scenario-cold.json)
+          [ "$COLD_SAMPLE_COUNT" = "2" ] || { echo "expected 2 retained cold samples, got $COLD_SAMPLE_COUNT"; exit 1; }
+          NOOP_SAMPLE_COUNT=$(jq '.wall_seconds.sample_count' /tmp/scenario-noop.json)
+          [ "$NOOP_SAMPLE_COUNT" = "3" ] || { echo "expected 3 retained no-op samples, got $NOOP_SAMPLE_COUNT"; exit 1; }
+
+          # Preparation/cache-state must actually be recorded now (issue
+          # #19's known_gaps note about these always being default is
+          # closed for scenario-run specifically -- see scenario.rs).
+          FIRST_COLD_RUN_ID=$(jq -r '.run_ids[0]' /tmp/scenario-cold.json)
+          COLD_CACHE_STATE=$(jq -r '.cache_state.notes[0]' "runs/$FIRST_COLD_RUN_ID/run.json")
+          [ "$COLD_CACHE_STATE" = "Cold" ] || { echo "expected cache_state.notes[0]=Cold, got $COLD_CACHE_STATE"; exit 1; }
+          COLD_PREP_STEPS=$(jq '.preparation_record.steps | length' "runs/$FIRST_COLD_RUN_ID/run.json")
+          [ "$COLD_PREP_STEPS" -ge 1 ] || { echo "expected at least one recorded preparation step"; exit 1; }
+
+          # Regeneration from disk must reproduce the same report exactly.
+          RUN_ID_ARGS=$(jq -r '.run_ids[] | "--run-id " + .' /tmp/scenario-cold.json | tr '\n' ' ')
+          eval cargo run -q -p laminaria-cli -- scenario-regenerate \
+            --runs-root runs --scenario-id cold-build $RUN_ID_ARGS \
+            > /tmp/scenario-cold-regenerated.json
+          diff <(jq -S . /tmp/scenario-cold.json) <(jq -S . /tmp/scenario-cold-regenerated.json) \
+            && echo "regenerated report matches the original exactly" \
+            || { echo "regenerated report does not match the original"; exit 1; }
+
+          # The comparator: cold vs. no-op must be flagged above_noise with
+          # both confounding factors present (this is the literal
+          # acceptance criterion "a deliberately noisy or path-divergent
+          # run is prevented from being labeled a valid regression/
+          # improvement result" -- cold vs. no-op is exactly such a pair).
+          set +e
+          cargo run -q -p laminaria-cli -- scenario-compare \
+            --baseline /tmp/scenario-noop.json --candidate /tmp/scenario-cold.json \
+            > /tmp/scenario-compare.json
+          COMPARE_EXIT=$?
+          set -e
+          [ "$COMPARE_EXIT" = "1" ] || {
+            echo "expected scenario-compare to exit 1 (confounding factors present) comparing no-op vs cold, got $COMPARE_EXIT"
+            exit 1
+          }
+          VERDICT=$(jq -r '.wall_time_verdict' /tmp/scenario-compare.json)
+          [ "$VERDICT" = "above_noise" ] || { echo "expected above_noise, got $VERDICT"; exit 1; }
+          PROCESS_COUNT_CHANGED=$(jq -r '.process_count_changed' /tmp/scenario-compare.json)
+          [ "$PROCESS_COUNT_CHANGED" = "true" ] || { echo "expected process_count_changed=true"; exit 1; }
+          echo "scenario comparison: $(jq -c '.confounding_notes' /tmp/scenario-compare.json)"
+
       - name: Trace a cold nim-heavy-workspace build (issue #19 Experiment 2)
         run: |
           rm -rf fixtures/nim-heavy-workspace/nimcache fixtures/nim-heavy-workspace/fixture_out

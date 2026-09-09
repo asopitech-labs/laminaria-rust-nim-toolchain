@@ -757,3 +757,84 @@ experiment; no rustc self-profile/LLVM pass-timing/Nim-Nimony telemetry
 attached to artifacts; no auto-detection of Cargo/Nim output directories
 (the caller must name `--observe` roots explicitly); `Modified` conflates
 metadata-change with content-change, as described above.
+
+## Issue #21's first slice: scenario repetition and noise-floor-aware comparison (`scenario.rs`)
+
+**Status: one independently-reviewable slice of issue #21, not the whole
+issue.** None of #21's ten acceptance criteria are claimed fully closed.
+
+### What it does
+
+`laminaria scenario-run --workload {rust-heavy-workspace,nim-heavy-workspace}
+--kind {cold,noop,edit} --repeat N` runs one of the four scenarios issue
+#21 names to start with, `N` times, each repetition a full
+`run_and_record` (preparation excluded from the timed interval, then
+recorded into `PreparationRecord`/`CacheState` -- both previously always
+`::default()`, now genuinely populated for the first time). Every raw
+sample is retained (`ScenarioReport::wall_seconds.samples`); aggregated
+stats (min/p50/p90/mean/stddev) are also computed, but the raw samples
+stay in the report, not discarded after aggregation.
+
+`laminaria scenario-regenerate` rebuilds the same report purely from
+already-written `run.json` files -- verified as a real disk round trip:
+regenerated JSON matched the original byte-for-byte in manual testing.
+
+`laminaria scenario-compare --baseline <report.json> --candidate
+<report.json>` compares two reports: a noise-floor-aware wall-time
+verdict (`above_noise`/`within_noise`/`below_noise`, using the *baseline
+report's own* measured stddev × 2 as the floor -- not one universal
+percentage threshold across environments, per issue #21's explicit
+warning), plus two independent structural checks -- process count and
+artifact create/modify/delete profile -- that are flagged in
+`confounding_notes` regardless of what the wall-time verdict says. This is
+the literal "a result is not an improvement merely because wall time
+fell" requirement: `scenario-compare`'s own exit code is non-zero
+whenever `confounding_notes` is non-empty, so a caller can't accidentally
+treat a structurally-different comparison as a clean pass.
+
+### Verified against the real `rust-heavy-workspace` fixture
+
+`scenario-run --kind cold --repeat 2`: both repetitions independently
+`rm -rf target` then rebuild from scratch, producing 147 created
+artifacts and 7 process records each time (root + 6 wrapper-recorded
+`rustc` invocations) -- consistent across repetitions, as a cold build
+should be.
+
+`scenario-run --kind noop --repeat 3`: 1 process record each time (Cargo
+determined everything was fresh without spawning any `rustc` at all --
+confirmed, not assumed, from the actual recorded process count), wall
+time ~0.035s consistently, and artifact records mostly `Unchanged` (one
+of Cargo's own `.d` dep-info files still shows as changed on every
+repetition -- the same real finding `artifact_inventory`'s own NOTES.md
+section documents).
+
+`scenario-compare` on the cold vs. noop reports above: wall-time verdict
+`above_noise` (52x), **and** both `process_count_changed`
+(1 vs. 7) and `artifact_profile_changed` are flagged in
+`confounding_notes` -- exactly the intended behavior: a caller reading
+only the wall-time verdict would correctly conclude "much slower," but
+the confounding notes correctly explain *why* (a completely different set
+of actions ran), rather than presenting it as a clean apples-to-apples
+timing comparison.
+
+### What this does not establish
+
+Against issue #21's own acceptance criteria: scenario schema versioned
+(`SCENARIO_SCHEMA_VERSION`) -- met. Cold/no-op have explicit reproducible
+preconditions, edits mutate exactly the intended source file, cache state
+is explicit (if only a 3-value label), raw samples retained and reports
+regenerable, observed differences compared against a measured noise
+floor rather than a fixed threshold, work/resource/path changes surfaced
+alongside wall time -- all met *for this one slice's four scenarios*, not
+validated more broadly. **Not** met: cross-environment comparison
+rejection (`compare_reports` does not check `EnvironmentFingerprint`
+compatibility at all yet); the cache-state contract is a bare 3-value
+label, not the full per-subsystem contract (Cargo target dir vs. compiler
+incremental state vs. sccache vs. ThinLTO cache vs. filesystem/page-cache
+policy) issue #21 actually asks for; the observer-overhead-by-layer
+matrix (issue #19's Level 0/1 comparison already exists, but Level 2/3
+and artifact-hashing overhead are not broken out per layer here);
+backend/config-only, link-only, worktree-relocation, and every
+ThinLTO/Wasm scenario remain unimplemented; the noise-floor comparison
+itself is a fixed stddev multiplier, not a rigorous statistical test (no
+confidence interval, no small-sample correction).

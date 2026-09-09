@@ -108,6 +108,88 @@ enum Commands {
         runs_root: PathBuf,
         run_id: String,
     },
+    /// Runs one of the four preset baseline scenarios (issue #21: cold
+    /// build, true no-op, or an implementation-only edit) against
+    /// `fixtures/rust-heavy-workspace` or `fixtures/nim-heavy-workspace`,
+    /// repeated `--repeat` times, and reports aggregated statistics.
+    ScenarioRun {
+        #[arg(long, value_enum)]
+        workload: ScenarioWorkloadArg,
+        #[arg(long, value_enum)]
+        kind: ScenarioKindArg,
+        /// Required only for `--kind edit`: the source file to `touch`
+        /// before each repetition.
+        #[arg(long)]
+        edited_source_path: Option<PathBuf>,
+        /// `fixtures/rust-heavy-workspace/Cargo.toml`-relative or
+        /// `fixtures/nim-heavy-workspace/src/fixture.nim`-relative,
+        /// depending on `--workload`; defaults match this repo's own
+        /// fixture layout.
+        #[arg(long)]
+        manifest_path: Option<PathBuf>,
+        #[arg(long)]
+        target_dir: Option<PathBuf>,
+        #[arg(long)]
+        nimcache_dir: Option<PathBuf>,
+        #[arg(long)]
+        out_path: Option<PathBuf>,
+        #[arg(long, default_value_t = 1)]
+        repeat: usize,
+        #[arg(long, default_value = "runs")]
+        runs_root: PathBuf,
+        #[arg(long, default_value = "toolchains.lock.toml")]
+        lock: PathBuf,
+        #[arg(long, default_value = ".")]
+        repo_root: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Rebuilds a `ScenarioReport` purely from already-written `run.json`
+    /// files (issue #21's "reports are regenerable" acceptance
+    /// criterion), without rerunning anything.
+    ScenarioRegenerate {
+        #[arg(long, default_value = "runs")]
+        runs_root: PathBuf,
+        #[arg(long)]
+        scenario_id: String,
+        /// Repeatable: every run_id that belongs to this scenario's
+        /// repetition set.
+        #[arg(long = "run-id", required = true)]
+        run_ids: Vec<String>,
+    },
+    /// Compares two already-generated `ScenarioReport` JSON files
+    /// (`laminaria scenario-run --json > report.json`), noise-floor-aware
+    /// and flagging process-count/artifact-profile changes separately
+    /// from the wall-time verdict (issue #21).
+    ScenarioCompare {
+        #[arg(long)]
+        baseline: PathBuf,
+        #[arg(long)]
+        candidate: PathBuf,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ScenarioWorkloadArg {
+    RustHeavyWorkspace,
+    NimHeavyWorkspace,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ScenarioKindArg {
+    Cold,
+    Noop,
+    Edit,
+}
+
+impl From<ScenarioKindArg> for laminaria_run::scenario::CacheStateLabel {
+    fn from(value: ScenarioKindArg) -> Self {
+        match value {
+            ScenarioKindArg::Cold => laminaria_run::scenario::CacheStateLabel::Cold,
+            ScenarioKindArg::Noop => laminaria_run::scenario::CacheStateLabel::TrueNoop,
+            ScenarioKindArg::Edit => laminaria_run::scenario::CacheStateLabel::Warm,
+        }
+    }
 }
 
 fn main() {
@@ -144,8 +226,196 @@ fn main() {
         Commands::RegenerateSummary { runs_root, run_id } => {
             regenerate_summary_command(runs_root, run_id)
         }
+        Commands::ScenarioRun {
+            workload,
+            kind,
+            edited_source_path,
+            manifest_path,
+            target_dir,
+            nimcache_dir,
+            out_path,
+            repeat,
+            runs_root,
+            lock,
+            repo_root,
+            json,
+        } => scenario_run_command(
+            workload,
+            kind,
+            edited_source_path,
+            manifest_path,
+            target_dir,
+            nimcache_dir,
+            out_path,
+            repeat,
+            runs_root,
+            lock,
+            repo_root,
+            json,
+        ),
+        Commands::ScenarioRegenerate {
+            runs_root,
+            scenario_id,
+            run_ids,
+        } => scenario_regenerate_command(runs_root, scenario_id, run_ids),
+        Commands::ScenarioCompare {
+            baseline,
+            candidate,
+        } => scenario_compare_command(baseline, candidate),
     };
     std::process::exit(code);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scenario_run_command(
+    workload: ScenarioWorkloadArg,
+    kind: ScenarioKindArg,
+    edited_source_path: Option<PathBuf>,
+    manifest_path: Option<PathBuf>,
+    target_dir: Option<PathBuf>,
+    nimcache_dir: Option<PathBuf>,
+    out_path: Option<PathBuf>,
+    repeat: usize,
+    runs_root: PathBuf,
+    lock: PathBuf,
+    repo_root: PathBuf,
+    json: bool,
+) -> i32 {
+    let cache_state_label = kind.into();
+    if matches!(kind, ScenarioKindArg::Edit) && edited_source_path.is_none() {
+        eprintln!("laminaria scenario-run: --edited-source-path is required for --kind edit");
+        return 2;
+    }
+
+    let scenario = match workload {
+        ScenarioWorkloadArg::RustHeavyWorkspace => {
+            laminaria_run::scenario::rust_heavy_workspace_scenario(
+                cache_state_label,
+                &manifest_path
+                    .unwrap_or_else(|| PathBuf::from("fixtures/rust-heavy-workspace/Cargo.toml")),
+                &target_dir
+                    .unwrap_or_else(|| PathBuf::from("fixtures/rust-heavy-workspace/target")),
+                edited_source_path.as_deref(),
+            )
+        }
+        ScenarioWorkloadArg::NimHeavyWorkspace => {
+            laminaria_run::scenario::nim_heavy_workspace_scenario(
+                cache_state_label,
+                &manifest_path.unwrap_or_else(|| {
+                    PathBuf::from("fixtures/nim-heavy-workspace/src/fixture.nim")
+                }),
+                &nimcache_dir
+                    .unwrap_or_else(|| PathBuf::from("fixtures/nim-heavy-workspace/nimcache")),
+                &out_path
+                    .unwrap_or_else(|| PathBuf::from("fixtures/nim-heavy-workspace/fixture_out")),
+                edited_source_path.as_deref(),
+            )
+        }
+    };
+
+    let report = match laminaria_run::scenario::run_scenario_repeated(
+        &scenario, repeat, &runs_root, &lock, &repo_root,
+    ) {
+        Ok(report) => report,
+        Err(err) => {
+            eprintln!("laminaria scenario-run: failed: {err}");
+            return 2;
+        }
+    };
+
+    print_scenario_report(&report, json)
+}
+
+fn scenario_regenerate_command(
+    runs_root: PathBuf,
+    scenario_id: String,
+    run_ids: Vec<String>,
+) -> i32 {
+    match laminaria_run::scenario::regenerate_report_from_disk(&runs_root, &scenario_id, &run_ids) {
+        Ok(report) => print_scenario_report(&report, true),
+        Err(err) => {
+            eprintln!("laminaria scenario-regenerate: failed: {err}");
+            2
+        }
+    }
+}
+
+fn scenario_compare_command(baseline_path: PathBuf, candidate_path: PathBuf) -> i32 {
+    let baseline = match read_scenario_report(&baseline_path) {
+        Ok(report) => report,
+        Err(err) => {
+            eprintln!(
+                "laminaria scenario-compare: failed to read {}: {err}",
+                baseline_path.display()
+            );
+            return 2;
+        }
+    };
+    let candidate = match read_scenario_report(&candidate_path) {
+        Ok(report) => report,
+        Err(err) => {
+            eprintln!(
+                "laminaria scenario-compare: failed to read {}: {err}",
+                candidate_path.display()
+            );
+            return 2;
+        }
+    };
+
+    let comparison = laminaria_run::scenario::compare_reports(&baseline, &candidate);
+    match serde_json::to_string_pretty(&comparison) {
+        Ok(text) => println!("{text}"),
+        Err(err) => {
+            eprintln!("laminaria scenario-compare: failed to serialize comparison: {err}");
+            return 2;
+        }
+    }
+
+    if !comparison.confounding_notes.is_empty() {
+        1
+    } else {
+        0
+    }
+}
+
+fn read_scenario_report(
+    path: &PathBuf,
+) -> std::io::Result<laminaria_run::scenario::ScenarioReport> {
+    let text = std::fs::read_to_string(path)?;
+    serde_json::from_str(&text).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
+fn print_scenario_report(report: &laminaria_run::scenario::ScenarioReport, json: bool) -> i32 {
+    if json {
+        match serde_json::to_string_pretty(report) {
+            Ok(text) => println!("{text}"),
+            Err(err) => {
+                eprintln!("laminaria scenario: failed to serialize report: {err}");
+                return 2;
+            }
+        }
+    } else {
+        println!("scenario_id: {}", report.scenario_id);
+        println!("workload_id: {}", report.workload_id);
+        println!("sample_count: {}", report.wall_seconds.sample_count);
+        println!(
+            "wall_seconds: min={:.3} p50={:.3} p90={:.3} mean={:.3} stddev={:.3}",
+            report.wall_seconds.min,
+            report.wall_seconds.p50,
+            report.wall_seconds.p90,
+            report.wall_seconds.mean,
+            report.wall_seconds.stddev,
+        );
+        println!("process_counts: {:?}", report.process_counts);
+        println!(
+            "artifacts: created={:?} modified={:?} deleted={:?} unchanged={:?}",
+            report.artifact_created,
+            report.artifact_modified,
+            report.artifact_deleted,
+            report.artifact_unchanged
+        );
+    }
+    0
 }
 
 #[allow(clippy::too_many_arguments)]
