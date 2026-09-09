@@ -89,6 +89,8 @@ Candidate classes:
 
 For every accepted class, record size, alignment, field offsets, ownership, lifetime and mutation rules. If a class requires a generated adapter, the adapter becomes an explicit Action Graph node and artifact.
 
+**Working evidence, `fixtures/direct-native-link/NOTES.md`**: fixed-layout records/structs are safe to share **by pointer** — an independently-declared Rust `#[repr(C)] struct` and Nim `{.bycopy.} object` agree in size/alignment/field offsets, verified by both sides computing their own layout at runtime and cross-checking, on every Nim-side route tested (`nim c` and `nlvm`). Sharing the same struct **by value** (as an argument or return value) is *not* uniformly safe: it works correctly on the `nim c` route but is broken in every shape tested on `nlvm` (silently wrong as a lone argument, silently wrong as a return value, an outright crash as an argument followed by more parameters) — `nlvm`'s own compiler self-reports the return case as an incomplete TODO. By-value aggregate passing is therefore backend-route-dependent and not currently part of this compatibility matrix's accepted baseline; by-pointer is the verified-safe pattern across every route tested so far, and the practical default this project's own fixtures already converged on independently. Fixed-width integers, floats and raw pointers (Layer 1-2 scalars) show no such route-dependence.
+
 ### Layer 4 — Runtime and failure semantics
 
 Investigate:
