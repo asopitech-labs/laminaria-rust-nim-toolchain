@@ -30,19 +30,25 @@
 //!   instead -- a materially weaker reliability claim than the Cargo
 //!   adapter, stated explicitly rather than glossed over (see that
 //!   module's doc comment).
+//! - `artifact_inventory`: issue #20's first slice -- a no-op-safe
+//!   create/modify/delete/unchanged artifact diff around the traced
+//!   command, for explicitly-given `--observe` roots (no Cargo/Nim
+//!   output-directory auto-detection), with enumeration and content-hashing
+//!   costs measured separately (see that module's doc comment for exactly
+//!   what "Modified" does and does not mean, and issue #20's remaining
+//!   open acceptance criteria).
 //! - `store`: the `runs/<run-id>/` on-disk layout (section 5) and
 //!   `summary.json` regeneration from raw evidence.
 //!
 //! **Not yet implemented, deliberately left as explicit gaps rather than
 //! silently assumed**: general (non-Cargo, non-Nim) parent/child process
 //! enumeration, rustc `-Z self-profile`, Level 3 platform profiler
-//! integration, full artifact inventory (section 8 -- Cargo's own
-//! reported artifact paths/freshness are captured, but size/digest/
-//! change-state are not, and Nim's telemetry reports module names, not
-//! artifact paths, at all), and cache-state/preparation-record
-//! population (sections 9-10, beyond what Cargo's own telemetry
-//! incidentally gives).
+//! integration, per-artifact producing-ToolchainFingerprint/producer
+//! correlation, artifact-inventory auto-detection of Cargo/Nim output
+//! directories, and cache-state/preparation-record population (sections
+//! 9-10, beyond what Cargo's own telemetry incidentally gives).
 
+pub mod artifact_inventory;
 pub mod cargo_telemetry;
 pub mod cargo_wrapper;
 pub mod clock;
@@ -323,6 +329,14 @@ pub fn generate_run_id() -> String {
 /// portable `Child::wait` only). Any other `ProbeLevel` falls back to
 /// Level 1 -- Level 2/3 are not implemented by this crate yet.
 ///
+/// `observation_roots` (issue #20's artifact inventory) selects which
+/// directories get a before/after snapshot around the traced command,
+/// producing `Run::artifact_delta` (create/modify/delete/unchanged per
+/// file, with enumeration/hashing costs recorded separately -- see
+/// `artifact_inventory`'s module doc for exactly what this first slice
+/// does and does not cover). An empty slice means no artifact inventory is
+/// captured at all, noted in `known_gaps`, not silently absent.
+///
 /// Returns the written `Run` and the directory it was written to.
 #[allow(clippy::too_many_arguments)]
 pub fn run_and_record(
@@ -334,6 +348,7 @@ pub fn run_and_record(
     repo_root: &Path,
     root: RootCommand,
     probe_level: ProbeLevel,
+    observation_roots: &[PathBuf],
 ) -> std::io::Result<(Run, PathBuf)> {
     let clock = RunClock::start();
     let run_id = generate_run_id();
@@ -438,13 +453,30 @@ pub fn run_and_record(
     // requested.
     let requested_toolchain_selector = detect_requested_toolchain_selector(&root);
 
-    let tracer_wall_start = std::time::Instant::now();
-    let process_record = if is_level0 {
-        tracer::trace_root_command_level0(&clock, &effective_root, &stdout_path, &stderr_path)?
-    } else {
-        tracer::trace_root_command(&clock, &effective_root, &stdout_path, &stderr_path)?
+    // Timed separately from artifact_inventory's own enumeration_seconds/
+    // hash_seconds via this Cell, whether or not observation_roots is
+    // empty -- tracer_overhead_seconds must keep meaning exactly what
+    // issue #19 Experiment 6 already measured it as (spawn/reap/
+    // record-building), not grow to silently include artifact-snapshot
+    // wall time too.
+    let tracer_overhead_seconds_cell = std::cell::Cell::new(0.0f64);
+    let do_trace = || {
+        let start = std::time::Instant::now();
+        let result = if is_level0 {
+            tracer::trace_root_command_level0(&clock, &effective_root, &stdout_path, &stderr_path)
+        } else {
+            tracer::trace_root_command(&clock, &effective_root, &stdout_path, &stderr_path)
+        };
+        tracer_overhead_seconds_cell.set(start.elapsed().as_secs_f64());
+        result
     };
-    let tracer_overhead_seconds = tracer_wall_start.elapsed().as_secs_f64();
+    let (process_record, artifact_inventory) = if observation_roots.is_empty() {
+        (do_trace()?, None)
+    } else {
+        let (record, inventory) = artifact_inventory::observe_around(observation_roots, do_trace)?;
+        (record, Some(inventory))
+    };
+    let tracer_overhead_seconds = tracer_overhead_seconds_cell.get();
 
     // The raw wrapper-invocations.jsonl file is deliberately left on disk
     // (not deleted) -- it's the same kind of raw evidence stdout.log/
@@ -557,13 +589,6 @@ pub fn run_and_record(
                         telemetry.artifacts.len(),
                         telemetry.artifacts.iter().filter(|a| a.fresh).count()
                     ));
-                    known_gaps.push(
-                        "artifact inventory (docs/measurement-foundation.md section 8) is only \
-                         partially covered: Cargo's own reported artifact paths and freshness are \
-                         in compiler_telemetry, but size, content digest, and create/change/delete \
-                         state (the rest of section 8's required fields) are not captured"
-                            .to_string(),
-                    );
                 }
                 (None, Some(telemetry)) => {
                     known_gaps.push(format!(
@@ -575,13 +600,6 @@ pub fn run_and_record(
                         telemetry.processed_modules.len(),
                         telemetry.linked
                     ));
-                    known_gaps.push(
-                        "artifact inventory (docs/measurement-foundation.md section 8) is not \
-                         captured for Nim builds -- Nim's hint stream reports module names \
-                         reaching C-codegen, not artifact file paths the way Cargo's \
-                         --message-format=json does"
-                            .to_string(),
-                    );
                 }
                 (None, None) => {
                     known_gaps.push(
@@ -589,9 +607,45 @@ pub fn run_and_record(
                          not captured"
                             .to_string(),
                     );
+                }
+            }
+            match &artifact_inventory {
+                Some(inventory) => {
+                    let created = inventory
+                        .records
+                        .iter()
+                        .filter(|r| r.state == artifact_inventory::ArtifactState::Created)
+                        .count();
+                    let modified = inventory
+                        .records
+                        .iter()
+                        .filter(|r| r.state == artifact_inventory::ArtifactState::Modified)
+                        .count();
+                    let deleted = inventory
+                        .records
+                        .iter()
+                        .filter(|r| r.state == artifact_inventory::ArtifactState::Deleted)
+                        .count();
+                    known_gaps.push(format!(
+                        "artifact inventory (issue #20) captured over {} observation root(s): \
+                         {created} created, {modified} modified, {deleted} deleted, {} unchanged \
+                         (of {} total); {} changed candidate(s) hashed in {:.3}s, enumeration took \
+                         {:.3}s -- producer identity is always Unknown in this first slice (not yet \
+                         correlated with wrapper-invocation/Cargo-message evidence), and only the \
+                         explicitly given observation roots are covered, not an auto-detected \
+                         Cargo/Nim output directory",
+                        inventory.observation_roots.len(),
+                        inventory.records.len() - created - modified - deleted,
+                        inventory.records.len(),
+                        inventory.changed_candidate_count,
+                        inventory.hash_seconds,
+                        inventory.enumeration_seconds,
+                    ));
+                }
+                None => {
                     known_gaps.push(
-                        "artifact inventory (docs/measurement-foundation.md section 8) is not \
-                         captured"
+                        "artifact inventory (issue #20) was not captured -- no --observe root(s) \
+                         were given to this Run"
                             .to_string(),
                     );
                 }
@@ -610,7 +664,9 @@ pub fn run_and_record(
                     .as_ref()
                     .and_then(|t| serde_json::to_value(t).ok())
             }),
-        artifact_delta: None,
+        artifact_delta: artifact_inventory
+            .as_ref()
+            .and_then(|inv| serde_json::to_value(inv).ok()),
         measurement_overhead: Some(MeasurementOverhead {
             probe_level,
             tracer_overhead_seconds: Some(tracer_overhead_seconds),
@@ -722,11 +778,13 @@ mod tests {
             &tmp,
             r.clone(),
             ProbeLevel::Level1ProcessResource,
+            &[],
         )
         .unwrap();
 
         assert_eq!(run.root_command.program, r.program);
         assert_eq!(run.root_command.args, r.args);
+        assert!(run.artifact_delta.is_none());
     }
 
     #[test]
@@ -762,6 +820,7 @@ mod tests {
             &tmp,
             r,
             ProbeLevel::Level1ProcessResource,
+            &[],
         )
         .unwrap();
 
@@ -774,5 +833,52 @@ mod tests {
                 "does-not-exist".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn run_and_record_with_observation_roots_populates_artifact_delta() {
+        let tmp = std::env::temp_dir().join(format!(
+            "laminaria-run-lib-test-observe-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let lock = tmp.join("toolchains.lock.toml");
+        let observed = tmp.join("observed");
+        std::fs::create_dir_all(&observed).unwrap();
+        std::fs::write(&lock, "").unwrap();
+
+        let r = root(
+            "sh",
+            &[
+                "-c",
+                &format!("echo hi > {}/created.txt", observed.display()),
+            ],
+        );
+        let (run, _dir) = run_and_record(
+            &tmp,
+            "test-workload",
+            "test-scenario",
+            None,
+            &lock,
+            &tmp,
+            r,
+            ProbeLevel::Level1ProcessResource,
+            std::slice::from_ref(&observed),
+        )
+        .unwrap();
+
+        let delta = run.artifact_delta.expect("artifact_delta must be Some");
+        let inventory: artifact_inventory::ArtifactInventory =
+            serde_json::from_value(delta).unwrap();
+        assert_eq!(inventory.records.len(), 1);
+        assert_eq!(
+            inventory.records[0].state,
+            artifact_inventory::ArtifactState::Created
+        );
+        assert!(run
+            .process_trace
+            .known_gaps
+            .iter()
+            .any(|g| g.contains("artifact inventory (issue #20) captured")));
     }
 }

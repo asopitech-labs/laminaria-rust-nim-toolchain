@@ -122,10 +122,12 @@ jobs:
           rm -rf fixtures/rust-heavy-workspace/target
           cargo run -q -p laminaria-cli -- run \
             --workload-id rust-heavy-workspace --scenario-id cold-build --runs-root runs --json \
+            --observe fixtures/rust-heavy-workspace/target \
             -- cargo build --manifest-path fixtures/rust-heavy-workspace/Cargo.toml --workspace \
             > /tmp/cold-run.json
           cargo run -q -p laminaria-cli -- run \
             --workload-id rust-heavy-workspace --scenario-id true-noop --runs-root runs --json \
+            --observe fixtures/rust-heavy-workspace/target \
             -- cargo build --manifest-path fixtures/rust-heavy-workspace/Cargo.toml --workspace \
             > /tmp/noop-run.json
           COLD_SUCCESS=$(jq -r '.result.success' /tmp/cold-run.json)
@@ -181,6 +183,34 @@ jobs:
           BUILD_FINISHED=$(jq -r '.compiler_telemetry.build_finished_success' /tmp/cold-run.json)
           [ "$BUILD_FINISHED" = "true" ] || { echo "expected compiler_telemetry.build_finished_success == true, got $BUILD_FINISHED"; exit 1; }
           echo "Level 2 compiler telemetry: cold 0/$COLD_ARTIFACTS fresh, true-noop $NOOP_FRESH/$NOOP_ARTIFACTS fresh"
+          # No-op-safe artifact inventory (crates/laminaria-run/src/
+          # artifact_inventory.rs -- issue #20's first slice, see NOTES.md).
+          # A cold build's pre-snapshot of target/ is empty, so every
+          # record must be Created; a true no-op rebuild's pre/post
+          # snapshots should be identical for the vast majority of files --
+          # allowing a small, bounded number of Cargo-internal exceptions
+          # (its own .d dep-info files are rewritten with identical content
+          # on every invocation, a real finding documented in NOTES.md, not
+          # a bug in this check).
+          COLD_ARTIFACT_TOTAL=$(jq '.artifact_delta.records | length' /tmp/cold-run.json)
+          COLD_ARTIFACT_CREATED=$(jq '[.artifact_delta.records[] | select(.state=="Created")] | length' /tmp/cold-run.json)
+          [ "$COLD_ARTIFACT_TOTAL" -gt 0 ] || { echo "expected a non-empty artifact inventory on the cold build"; exit 1; }
+          [ "$COLD_ARTIFACT_TOTAL" = "$COLD_ARTIFACT_CREATED" ] || {
+            echo "expected every artifact record to be Created on a cold build (empty pre-snapshot), got $COLD_ARTIFACT_CREATED/$COLD_ARTIFACT_TOTAL"
+            exit 1
+          }
+          NOOP_ARTIFACT_UNCHANGED=$(jq '[.artifact_delta.records[] | select(.state=="Unchanged")] | length' /tmp/noop-run.json)
+          NOOP_ARTIFACT_CANDIDATES=$(jq '.artifact_delta.changed_candidate_count' /tmp/noop-run.json)
+          NOOP_ARTIFACT_HASH_SECONDS=$(jq '.artifact_delta.hash_seconds' /tmp/noop-run.json)
+          [ "$NOOP_ARTIFACT_CANDIDATES" -le 5 ] || {
+            echo "expected at most a handful of changed candidates on a true no-op rebuild, got $NOOP_ARTIFACT_CANDIDATES -- if this grows, either Cargo's own no-op behavior changed or artifact_inventory's diff logic regressed"
+            exit 1
+          }
+          awk -v cold="$COLD_ARTIFACT_CREATED" -v unchanged="$NOOP_ARTIFACT_UNCHANGED" 'BEGIN { exit !(unchanged >= cold - 5) }' || {
+            echo "expected the true no-op rebuild's Unchanged count ($NOOP_ARTIFACT_UNCHANGED) to be close to the cold build's total artifact count ($COLD_ARTIFACT_CREATED)"
+            exit 1
+          }
+          echo "artifact inventory: cold $COLD_ARTIFACT_CREATED/$COLD_ARTIFACT_TOTAL created, true-noop $NOOP_ARTIFACT_UNCHANGED unchanged / $NOOP_ARTIFACT_CANDIDATES changed candidate(s) hashed in ${NOOP_ARTIFACT_HASH_SECONDS}s"
 
       - name: Trace a cold nim-heavy-workspace build (issue #19 Experiment 2)
         run: |

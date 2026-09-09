@@ -6,6 +6,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::artifact_inventory::ArtifactRecord;
 use crate::types::{ProcessRecord, Run, Summary};
 
 /// Directory for one Run: `<runs_root>/<run_id>/`.
@@ -55,12 +56,13 @@ pub fn write_run(runs_root: &Path, run: &Run) -> io::Result<PathBuf> {
     write_json(&dir.join("run.json"), run)?;
     write_json(&dir.join("environment.json"), &run.environment_fingerprint)?;
     write_jsonl(&dir.join("processes.jsonl"), &run.process_trace.processes)?;
-    // Level 2 (compiler telemetry) and artifact-inventory evidence are not
-    // yet produced by this crate -- the files still exist (empty), matching
-    // docs/measurement-foundation.md section 5's candidate layout, so a
-    // later writer can append to them without a layout migration.
+    // Level 2 (compiler telemetry) evidence is not yet produced as its own
+    // JSONL stream (see Run::compiler_telemetry instead) -- this file still
+    // exists (empty), matching docs/measurement-foundation.md section 5's
+    // candidate layout, so a later writer can append to it without a
+    // layout migration.
     touch(&dir.join("compiler-events.jsonl"))?;
-    touch(&dir.join("artifacts.jsonl"))?;
+    write_artifact_records(&dir.join("artifacts.jsonl"), run)?;
 
     let summary = regenerate_summary(run);
     write_json(&dir.join("summary.json"), &summary)?;
@@ -119,6 +121,24 @@ fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> io::Result<()> {
     let text = serde_json::to_string_pretty(value)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     fs::write(path, text)
+}
+
+/// Writes `run.artifact_delta`'s `records` (issue #20's artifact
+/// inventory, see `artifact_inventory`'s module doc) as JSONL -- one line
+/// per `ArtifactRecord`. `artifact_delta` is a generic `serde_json::Value`
+/// on `Run` (matching how `compiler_telemetry` is stored, to avoid
+/// coupling `types::Run`'s schema to this specific adapter's shape), so
+/// this re-parses it into the concrete type before writing. No inventory
+/// captured (no `--observe` roots given) writes an empty file, matching
+/// the layout `write_run` has always produced.
+fn write_artifact_records(path: &Path, run: &Run) -> io::Result<()> {
+    let records: Vec<ArtifactRecord> = run
+        .artifact_delta
+        .as_ref()
+        .and_then(|delta| delta.get("records"))
+        .and_then(|records| serde_json::from_value(records.clone()).ok())
+        .unwrap_or_default();
+    write_jsonl(path, &records)
 }
 
 fn write_jsonl<T: serde::Serialize>(path: &Path, items: &[T]) -> io::Result<()> {

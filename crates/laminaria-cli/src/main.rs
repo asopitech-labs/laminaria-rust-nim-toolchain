@@ -90,6 +90,13 @@ enum Commands {
         /// overhead against, issue #19 Experiment 6).
         #[arg(long, value_enum, default_value_t = ProbeLevelArg::Level1)]
         probe_level: ProbeLevelArg,
+        /// Directory to snapshot before and after the traced command, to
+        /// capture an artifact create/modify/delete/unchanged inventory
+        /// (issue #20). Repeatable. Not auto-detected -- e.g. pass
+        /// `--observe target` for a Cargo build's own target directory.
+        /// Omit for no artifact inventory at all.
+        #[arg(long)]
+        observe: Vec<PathBuf>,
         /// The root command to trace, e.g. `-- cargo build --release`.
         #[arg(required = true, num_args = 1.., last = true)]
         command: Vec<String>,
@@ -120,6 +127,7 @@ fn main() {
             repo_root,
             json,
             probe_level,
+            observe,
             command,
         } => run_command(
             workload_id,
@@ -130,6 +138,7 @@ fn main() {
             repo_root,
             json,
             probe_level,
+            observe,
             command,
         ),
         Commands::RegenerateSummary { runs_root, run_id } => {
@@ -149,6 +158,7 @@ fn run_command(
     repo_root: PathBuf,
     json: bool,
     probe_level: ProbeLevelArg,
+    observe: Vec<PathBuf>,
     command: Vec<String>,
 ) -> i32 {
     let program = command[0].clone();
@@ -169,6 +179,7 @@ fn run_command(
         &repo_root,
         root,
         probe_level.into(),
+        &observe,
     ) {
         Ok(result) => result,
         Err(err) => {

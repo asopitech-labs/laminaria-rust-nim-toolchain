@@ -683,3 +683,77 @@ test suite. Fixed: `prepare_cargo_wrapping`/`prepare_nim_wrapping` now
 return `Err` immediately on non-Unix, with an explanatory note, so wrapper
 substitution is skipped (root-command-only tracing still applies, via the
 portable fallback from item 1) rather than silently breaking the build.
+
+## Issue #20's first slice: no-op-safe artifact inventory (`artifact_inventory.rs`)
+
+**Status: one independently-reviewable slice of issue #20, not the whole
+issue.** None of #20's thirteen acceptance criteria are claimed complete
+by this alone -- several explicitly require multi-toolchain experiments
+(#20's "at least two exact Rust toolchains"), LLVM pass timing, Nim/Nimony
+comparison, none of which this slice touches. See "What this does not
+establish" below.
+
+### What it does
+
+`laminaria run --observe <path>` (repeatable) snapshots each given
+directory immediately before the traced command spawns and again
+immediately after it exits, then diffs the two snapshots into
+`Run::artifact_delta` and `runs/<run-id>/artifacts.jsonl`. Per issue #20's
+explicit phase separation: metadata enumeration (`stat()`-only) is timed
+separately from content hashing, and hashing only ever runs on changed
+candidates (created, or size/mtime differs from the pre-snapshot) --
+never on files metadata already proved unchanged. Producer identity is
+always `Unknown` (not wired to wrapper-invocation/Cargo-message evidence
+in this slice -- see the module's own doc comment).
+
+### Verified against the real `rust-heavy-workspace` fixture, not just synthetic tests
+
+Ran `laminaria run --observe fixtures/rust-heavy-workspace/target -- cargo
+build ...` three times in sequence: a cold build (after `rm -rf target`),
+an immediate true no-op rebuild, and a rebuild after `touch`-ing one
+source file (`fixture-core/src/lib.rs`). Real, non-fabricated numbers:
+
+```text
+cold:  147 total, 147 created,   0 modified,   0 unchanged, 147 hashed, hash_seconds=0.357s
+noop:  147 total,   0 created,   2 modified, 145 unchanged,   2 hashed, hash_seconds=0.0001s
+edit:  263 total, 116 created,  23 modified, 124 unchanged, 139 hashed, hash_seconds=0.353s
+```
+
+Enumeration cost stayed ~0.001-0.003s across all three (proportional to
+tree size, not to how much changed) -- the no-op-safe property issue #20
+asks for: the no-op rebuild's hashing cost (0.0001s, 2 files) is nowhere
+near the cold build's (0.357s, 147 files), even though both walked
+comparably-sized trees.
+
+### A real, kept-not-smoothed-over finding: the true no-op rebuild still shows 2 "Modified" records
+
+`target/debug/fixture-bin.d` and `target/debug/libfixture_mid.d` (Cargo's
+own dep-info files) are flagged `Modified` on every single invocation,
+including the genuinely no-op one. Checked, not assumed: their
+`digest_sha256` is byte-identical to what the prior (cold) Run recorded
+for the same path -- Cargo rewrites these files' content identically but
+bumps their mtime on every invocation, confirmed by comparing the actual
+recorded digests across the two Runs, not inferred from Cargo's docs.
+This means `ArtifactState::Modified` in this crate's current design means
+"metadata (size/mtime) changed", not "content changed" -- documented
+directly on the enum variant now, not left implicit. A CPU-time-only
+no-op heuristic (this project's earlier telemetry) would never have
+surfaced this; Cargo's own `--message-format=json` `fresh` flag also
+reports `.d` files as part of the crate's freshness, not separately.
+Fixing this precisely (comparing pre- and post- content hashes, not just
+metadata) is real follow-up work, deliberately not done here -- would
+require hashing the pre-state too, which this slice's design intentionally
+avoids for the common case (see the module's phase-separation doc comment).
+
+### What this does not establish
+
+Against issue #20's own acceptance criteria: artifact schema is versioned
+(`ARTIFACT_SCHEMA_VERSION`) -- met. Detection costs separately measurable,
+no-op measurement doesn't hide full-tree hashing behind a cache-hit stat,
+producer identity proven-or-unknown (not filename-inferred) -- met, for
+this one slice. **Not** met: no ToolchainFingerprint attached to
+individual artifact records yet (only to the whole Run); no multi-toolchain
+experiment; no rustc self-profile/LLVM pass-timing/Nim-Nimony telemetry
+attached to artifacts; no auto-detection of Cargo/Nim output directories
+(the caller must name `--observe` roots explicitly); `Modified` conflates
+metadata-change with content-change, as described above.
