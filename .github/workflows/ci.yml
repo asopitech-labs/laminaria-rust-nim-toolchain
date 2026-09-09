@@ -144,7 +144,14 @@ jobs:
           "$NLVM_BIN" c hello.nim
           ./hello
           echo "--- confirming no .c file exists anywhere in nlvm's own build output ---"
-          find . -iname '*.c' && exit 1 || echo "no .c files found (expected)"
+          if [ -n "$(find "$(dirname "$NLVM_BIN")/.." -iname '*.c' 2>/dev/null)" ] || \
+             [ -n "$(find . -iname '*.c' 2>/dev/null)" ] || \
+             [ -n "$(find ~/.cache/nim -iname '*.c' 2>/dev/null)" ]; then
+            echo "found .c file(s) -- nlvm generated C source somewhere, contradicting the C-free claim"
+            find "$(dirname "$NLVM_BIN")/.." . ~/.cache/nim -iname '*.c' 2>/dev/null
+            exit 1
+          fi
+          echo "no .c files found anywhere nlvm could plausibly have written one (expected)"
 
   # Exercises the "container" EnvironmentFingerprint class from a clean,
   # native (non-Rosetta) environment — see docker/bootstrap.Dockerfile for
