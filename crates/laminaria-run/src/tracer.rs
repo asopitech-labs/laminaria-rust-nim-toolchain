@@ -323,8 +323,14 @@ fn resource_usage_from_rusage(rusage: &libc::rusage) -> ResourceUsage {
     }
 }
 
+// `pub`, matching the `#[cfg(unix)]` definition above: `src/bin/
+// rustc_wrapper.rs`/`cc_wrapper.rs` import this unconditionally (they build
+// on every target laminaria-run itself does), so a private non-unix
+// definition would fail their build outright, not just behave differently
+// at runtime -- caught by the `windows` CI job added alongside the Unix-only
+// wrapper-substitution guard in `crate::is_wrapper_substitution_supported`.
 #[cfg(not(unix))]
-fn reap(_pid: u32) -> io::Result<(ExitStatusRecord, ResourceUsage)> {
+pub fn reap(_pid: u32) -> io::Result<(ExitStatusRecord, ResourceUsage)> {
     // Level 1 (resource accounting) is Unix-only in this first pass --
     // explicitly unsupported here rather than fabricating zeros, per
     // docs/measurement-foundation.md section 6's acceptance criterion.
@@ -459,6 +465,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn traces_a_signal_killed_command() {
         let clock = RunClock::start();
         let (stdout_path, stderr_path) = tmp_paths("signal");

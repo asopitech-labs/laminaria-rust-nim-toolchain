@@ -645,3 +645,41 @@ message-format fix, `store`-level path-traversal rejection tests,
 matches the actually-executed command). `cargo test --workspace`,
 `cargo clippy --workspace --all-targets -- -D warnings`, and
 `cargo fmt --all -- --check` all pass after the fixes.
+
+### The new `windows` job immediately caught a real regression in item 1's own fix
+
+Not a hypothetical benefit -- this happened on the very first push. The new
+`windows` job (item 10 above) failed to even compile:
+
+- `tracer.rs`'s `traces_a_signal_killed_command` test referenced
+  `libc::SIGTERM` unconditionally, but `libc` is a `[target.'cfg(unix)'.
+  dependencies]` -- doesn't exist in the dependency graph on Windows at
+  all. Fixed: gated that test `#[cfg(unix)]` (its assertions about
+  `ExitStatusRecord::signal` are inherently Unix-specific: the non-Unix
+  fallback path always returns `signal: None`).
+- The non-Unix `reap` in `tracer.rs` was private (`fn reap`, not `pub fn
+  reap`), but `src/bin/rustc_wrapper.rs`/`cc_wrapper.rs` import it
+  unconditionally on every target laminaria-run itself builds for --
+  `E0603: function 'reap' is private` on Windows. Fixed: made it `pub`,
+  matching the `#[cfg(unix)]` definition.
+
+Fixing just those two would have been enough to make the `windows` job
+*compile* -- but not enough to make it *correct*. Making `reap` merely
+compile on Windows would leave it doing exactly what its own doc comment
+says: returning `Unsupported` unconditionally. `prepare_cargo_wrapping`/
+`prepare_nim_wrapping` had no platform gate of their own, so on Windows
+they would still set Cargo's `RUSTC` (or Nim's C-compiler override) to the
+substituted wrapper binary -- which would then fail *every single
+compilation unit* Cargo/Nim tries to run through it, since the wrapper
+binary's own measurement calls this same `Unsupported`-returning `reap`.
+That is a strictly worse outcome than the original bug (item 1): the
+original bug failed the whole Run immediately, before touching Cargo/Nim
+at all; this one would have let the traced command start and then broken
+every real compiler invocation partway through, for any Cargo/Nim root
+command specifically -- exactly the kind of thing "fix the reported bug in
+isolation" would have missed, and the reason this crate's own tracer.rs
+fix was checked against a *running* CI job, not just a passing local unit
+test suite. Fixed: `prepare_cargo_wrapping`/`prepare_nim_wrapping` now
+return `Err` immediately on non-Unix, with an explanatory note, so wrapper
+substitution is skipped (root-command-only tracing still applies, via the
+portable fallback from item 1) rather than silently breaking the build.

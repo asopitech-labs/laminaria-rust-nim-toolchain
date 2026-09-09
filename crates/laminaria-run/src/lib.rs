@@ -203,11 +203,26 @@ fn detect_requested_toolchain_selector(root: &RootCommand) -> Option<String> {
 /// Returns `Err` (with an explanatory note) when either can't be resolved --
 /// wrapping is an enhancement over the existing root-command-only tracing,
 /// not a requirement, so its absence must never fail the traced command.
+///
+/// Unix-only, checked here rather than left implicit: the substituted
+/// `laminaria-rustc-wrapper` binary itself measures each real `rustc`
+/// invocation via `tracer::reap` (`wait4`-based), which is `Unsupported` on
+/// every other platform (see tracer.rs's non-unix `reap`). Letting wrapper
+/// substitution proceed there would set Cargo's `RUSTC` to a wrapper binary
+/// that then fails every single compilation unit -- silently breaking the
+/// actual traced build, a strictly worse outcome than simply not wrapping.
 fn prepare_cargo_wrapping(
     root: &RootCommand,
     events_path: &Path,
     anchor_unix_ns: u128,
 ) -> Result<Vec<(String, String)>, String> {
+    if !cfg!(unix) {
+        return Err(
+            "RUSTC-wrapper substitution is only implemented for Unix targets (the wrapper \
+             binary's own per-invocation measurement is wait4-based)"
+                .to_string(),
+        );
+    }
     let real_rustc = resolve_real_rustc(root)?;
     let wrapper_bin = find_rustc_wrapper_binary().ok_or_else(|| {
         "could not find the laminaria-rustc-wrapper binary next to the running executable \
@@ -247,6 +262,16 @@ fn prepare_nim_wrapping(
     events_path: &Path,
     anchor_unix_ns: u128,
 ) -> Result<NimWrapping, String> {
+    if !cfg!(unix) {
+        // Same reasoning as prepare_cargo_wrapping's identical guard: the
+        // substituted laminaria-cc-wrapper binary's own per-invocation
+        // measurement is wait4-based and Unsupported on non-Unix targets.
+        return Err(
+            "CC-wrapper substitution is only implemented for Unix targets (the wrapper binary's \
+             own per-invocation measurement is wait4-based)"
+                .to_string(),
+        );
+    }
     let real_cc = resolve_real_cc(root)?;
     let wrapper_bin = find_cc_wrapper_binary().ok_or_else(|| {
         "could not find the laminaria-cc-wrapper binary next to the running executable \
