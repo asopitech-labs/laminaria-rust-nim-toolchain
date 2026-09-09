@@ -143,6 +143,8 @@ The horizontal-distribution charter compares object-level, LLVM-derived backend-
 
 Persistence is part of that decision. #7 must distinguish logical artifacts from physical replicas and compare keeping, materializing, replicating, transferring and recomputing them across memory, local storage, peer caches and remote durable stores. The relevant cost includes CPU, memory, storage I/O, network I/O, serialization, hashing, consistency, recovery and retention—not only cache-hit rate.
 
+Node heterogeneity is another explicit dimension. The scheduler must separate `execute-on` from `produces-for` and qualify Windows, macOS and Raspberry Pi nodes by host OS/ISA, target OS/ISA, ABI, sysroot/SDK, linker, target features, runtime and trust. Cross-compilation actions may run concurrently across heterogeneous nodes when their contracts are independent, while native tests, target-specific linking and performance measurements must be placed on compatible nodes.
+
 ## Tool UX rule
 
 Tool UX is a first-class project objective, not only CLI cosmetics.

@@ -90,6 +90,10 @@ Track queue wait, dependency/resource wait, execution time, CPU, memory and I/O.
 
 Horizontal distribution is a first-class research subject across the scheduler, cache, backend and LLVM-rediscovery tracks. Compare Kbuild-shaped object distribution, LLVM ThinLTO/DTLTO backend distribution and action-level remote execution without assuming that any of their partition units is the canonical LAMINARIA semantic partition. See `horizontal-distribution-research.md` and `horizontal-distribution-research_ja.md`.
 
+Heterogeneous node participation is a separate dimension of that research. Distinguish execution host from compilation target: a Windows, macOS or Raspberry Pi node may compile for itself, cross-compile for another target, execute tests, or only provide measurement evidence. A node is eligible for a given action only when its OS, ISA, ABI, target triple, sysroot/SDK, linker, compiler/toolchain, target features, runtime and trust/qualification constraints are satisfied. Rust target support tiers and Cargo's explicit target selection are useful baselines, not proof that an arbitrary mixed-node action is valid.
+
+The scheduler must therefore model host/target pairs and target-specific artifact boundaries explicitly. Cross-compilation actions can run concurrently on heterogeneous nodes when their toolchain, sysroot, inputs and target contract are independent; native execution, target-specific linking, performance measurement and runtime tests may still require a matching node. CPU architecture, endianness, pointer width, libc/ABI, object format, SDK availability and enabled CPU features must participate in identity, placement, invalidation and explanation.
+
 ## Track E — Artifact identity, incremental invalidation and CAS
 
 Define identities for semantic artifacts, generated source, backend IR/bitcode, LTO indexes, backend outputs, native objects, Core Wasm, optimized Wasm, components and final artifacts.

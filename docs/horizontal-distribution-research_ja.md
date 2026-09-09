@@ -195,7 +195,38 @@ persistence recordでは次を分離する。
 - serialize、hash、write、read、upload、download、recomputeしたbytes
 - persistence、transfer、recomputeを選んだ理由の説明
 
-## 7. 研究上の問い
+## 7. Heterogeneous nodeの参加とcross-compilation
+
+execution hostとcompilation targetを分離する。
+
+```text
+execution host: OS × ISA × ABI × resources × toolchain environment
+compilation target: OS × ISA × ABI × object format × sysroot/SDK × features
+```
+
+Windows、macOS、Raspberry Pi nodeは、native builder、cross-compiler、test runner、performance measurement node、evidence-only observerのいずれにもなりうる。nodeのOSやCPU名だけからroleを推測してはいけない。
+
+node capability fingerprintには少なくとも次を持たせる。
+
+- host OS、kernel/runtime、ISA
+- physical/logical core、core class、memory、I/O/network topology
+- endianness、pointer width、ABI、libc/runtime、object format
+- compiler、linker、sysroot/SDK、exact revision
+- supported target tripleとtarget feature
+- virtualization/container/emulation capability
+- trust、qualification、availability、measurement status
+
+各actionには`execute-on`と`produces-for`の両方のconstraintを持たせる。input、toolchain/sysroot、target contract、outputが独立していれば、cross-compilation actionは異種node上で同時実行できる。一方、native execution、target-specific linking、performance measurement、runtime testは対応target nodeを要求することがある。cross-compiled artifactが生成成功しただけで、host-executable test artifactとして消費してはいけない。
+
+混在nodeの結果を次の3つに分ける。
+
+1. portable target artifact: exact contractの下で、qualified hostなら生成できる。
+2. target-bound artifact: productionはportableだが、link/runtime/testにはtarget-compatible nodeが必要。
+3. host/target-coupled action: producer自身が特定hostまたはtoolchain environmentを要求する。
+
+architecture、ABI、sysroot、linker、target feature、artifact format、runtime obligation、reproducibility constraintが明示されている場合だけmixed-node schedulingをvalidとする。速いnodeでも、要求target contractを生成または検証できないならeligibleではない。
+
+## 8. 研究上の問い
 
 1. 独立したRust/Nim backend workを可能にする最小global fact setは何か。
 2. semantic informationをbackend-specific IRへlowerする前にpartitionを定義できるか。
@@ -209,8 +240,10 @@ persistence recordでは次を分離する。
 10. LLVM/Kbuild/Bazelのどの設計判断がLAMINARIAにも必要で、どれがbackend固有・歴史的選択なのか。
 11. remote persistenceがlocal persistenceまたはrecomputationより安く有用になる条件は何か。
 12. どのintermediateをvertical integrationの中でephemeralに保ち、どれをhorizontal materializationするべきか。
+13. どのhost/target pairが同一action graphへ参加でき、OS、ISA、ABI、sysroot、runtime obligationのどこでboundaryが必要になるか。
+14. 複数target向けの独立したcross-compilation actionを同時実行しつつ、target-specific testを正しいnodeへ配置できるか。
 
-## 8. 反証可能な仮説
+## 9. 反証可能な仮説
 
 ### H1 — coarse translation-unit分散はbaselineとして有効
 
@@ -232,7 +265,7 @@ remote resultの再利用にはproducer、compiler/backend version、target/data
 
 LLVM pass、細かなsemantic relation、tiny artifactまで分割すると、locality低下、serialization/scheduler overhead、optimization quality低下が起きる。少なくとも一つのover-fine candidateを測定して却下する。
 
-## 9. Workloadと実験
+## 10. Workloadと実験
 
 ### Experiment 0 — Kbuild-shaped object DAG
 
@@ -258,7 +291,7 @@ local semantic edit、Rust/Nim boundary変更、generated-header/config変更、
 
 worker削除、worker速度差、compiler identity変更、missing input、backend job interruptionを試す。fail closedまたは明示的fallbackにする。黙ったlocal rebuildはdistributed execution成功とみなさない。
 
-## 10. 必須証拠
+## 11. 必須証拠
 
 - exact source revisionとsemantic workload contract
 - Rust/Nim/frontend/backend/compiler/linker/toolchain identity
@@ -274,7 +307,7 @@ worker削除、worker速度差、compiler identity変更、missing input、backe
 - semantic informationのretained/transformed/lost記録
 - negative result、fallback、未解決obligation
 
-## 11. 完了条件
+## 12. 完了条件
 
 Linux kernelまたはLLVM ThinLTOのbuildが複数machineで動くだけでは完了としない。
 
@@ -289,7 +322,7 @@ Linux kernelまたはLLVM ThinLTOのbuildが複数machineで動くだけでは�
 9. hidden nested compiler schedulerではなくglobal schedulerがworker resource useを計上した証拠
 10. reproducible command、fixture、committed machine-readable evidence
 
-## 12. 既存研究trackとの関係
+## 13. 既存研究trackとの関係
 
 - **#6 Scheduler:** global resource-aware placementとexecution accounting
 - **#7 CAS/invalidation:** remote input/outputのidentityとreuse policy
@@ -299,7 +332,7 @@ Linux kernelまたはLLVM ThinLTOのbuildが複数machineで動くだけでは�
 - **#17 Rust/Nim LLVM convergence:** lowered artifact compatibility evidenceを供給するがfinal common substrateではない
 - **#25 LLVM rediscovery:** distributed partitionをLLVM-derived、semantic-fact-derived、hybridのどれにするか決める
 
-## 13. 非目標
+## 14. 非目標
 
 - 全compiler passをremote processにすること
 - remote speedupをcommon semantic substrateの証明とすること

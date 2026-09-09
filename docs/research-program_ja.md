@@ -101,6 +101,10 @@ critical pathの分析では、Actionごとに少なくともqueue wait、depend
 
 水平分散はscheduler、cache、backend、LLVM再発見trackを横断するfirst-class research subjectである。Kbuild型のobject分散、LLVM ThinLTO/DTLTO backend分散、Action-level remote executionを比較するが、どのpartition単位もLAMINARIAのcanonical semantic partitionとは仮定しない。詳細は `horizontal-distribution-research.md` / `_ja.md` を参照する。
 
+異種nodeの参加は、この研究の別軸である。execution hostとcompilation targetを分離する。Windows、macOS、Raspberry Pi nodeは、自身向けcompile、別targetへのcross-compile、test実行、measurement evidenceの提供のいずれも担いうる。actionへの参加可否は、OS、ISA、ABI、target triple、sysroot/SDK、linker、compiler/toolchain、target feature、runtime、trust/qualification constraintを満たす場合だけvalidとする。Rustのtarget support tierとCargoの明示的target選択はbaselineであり、任意の混在node actionのvalidityを保証するものではない。
+
+schedulerはhost/target pairとtarget-specific artifact boundaryを明示的に扱う必要がある。toolchain、sysroot、input、target contractが独立していれば、cross-compilation actionは異種node上で同時実行できる。一方、native execution、target-specific linking、performance measurement、runtime testは対応するnodeを要求することがある。CPU architecture、endianness、pointer width、libc/ABI、object format、SDK availability、enabled CPU featureをidentity、placement、invalidation、explanationへ含める。
+
 DTLTO等、上流Actionの実行後にchild backend jobsが判明する場合は、hidden nested schedulerではなくDynamic Graph Expansionとして扱えるかを研究する。
 
 ## 研究トラックE — Artifact Identity / Incremental / CAS

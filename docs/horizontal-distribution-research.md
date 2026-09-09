@@ -199,7 +199,38 @@ The persistence record must separate:
 - bytes serialized, hashed, written, read, uploaded, downloaded and recomputed;
 - the explanation for choosing persistence, transfer or recomputation.
 
-## 7. Research questions
+## 7. Heterogeneous node participation and cross-compilation
+
+Separate the execution host from the compilation target:
+
+```text
+execution host: OS × ISA × ABI × resources × toolchain environment
+compilation target: OS × ISA × ABI × object format × sysroot/SDK × features
+```
+
+A Windows, macOS or Raspberry Pi node may be a native builder, a cross-compiler, a test runner, a performance-measurement node or an evidence-only observer. These roles must not be inferred from the node's operating system or CPU name alone.
+
+Represent a node capability fingerprint with at least:
+
+- host OS, kernel/runtime and ISA;
+- physical/logical cores, core classes, memory and I/O/network topology;
+- endianness, pointer width, ABI, libc/runtime and object format;
+- installed compiler, linker, sysroot/SDK and exact revisions;
+- supported target triples and target features;
+- virtualization/container/emulation capability;
+- trust, qualification, availability and measurement status.
+
+Represent each action with both `execute-on` and `produces-for` constraints. Cross-compilation actions may run concurrently on heterogeneous nodes when their inputs, toolchain/sysroot, target contract and outputs are independent. Native execution, target-specific linking, performance measurement and runtime tests may require a matching target node. A cross-compiled artifact must not be consumed as a host-executable test artifact merely because it was produced successfully.
+
+The research must distinguish three outcomes:
+
+1. portable target artifact: any qualified host can produce it under the exact contract;
+2. target-bound artifact: production is portable but link/runtime/test requires a target-compatible node;
+3. host/target-coupled action: the producer itself requires a specific host or toolchain environment.
+
+Mixed-node scheduling is valid only when architecture, ABI, sysroot, linker, target features, artifact format, runtime obligations and reproducibility constraints are explicit. A faster node is not eligible if it cannot produce or validate the requested target contract.
+
+## 8. Research questions
 
 1. What is the smallest global fact set that permits independent Rust/Nim backend work?
 2. Can a partition be defined before lowering semantic information into a backend-specific IR?
@@ -213,8 +244,10 @@ The persistence record must separate:
 10. Which LLVM/Kbuild/Bazel design choices are independently necessary for LAMINARIA, and which are historical or backend-specific choices?
 11. When is remote persistence cheaper or more useful than local persistence or recomputation?
 12. Which intermediate artifacts should remain vertically integrated and ephemeral, and which deserve horizontal materialization?
+13. Which host/target pairs can participate in the same action graph, and where do OS, ISA, ABI, sysroot or runtime obligations force a boundary?
+14. Can independent cross-compilation actions for multiple targets run concurrently while target-specific tests remain correctly placed?
 
-## 8. Falsifiable hypotheses
+## 9. Falsifiable hypotheses
 
 ### H1 — Coarse translation-unit distribution is a useful baseline
 
@@ -236,7 +269,7 @@ A reusable remote result must include producer, compiler/backend version, target
 
 Splitting by LLVM pass, small semantic relation or tiny generated artifact eventually loses locality, increases serialization and scheduling overhead, or changes optimization quality. At least one over-fine candidate must be measured and rejected.
 
-## 9. Workloads and experiments
+## 10. Workloads and experiments
 
 ### Experiment 0 — Kbuild-shaped object DAG
 
@@ -278,7 +311,7 @@ Measure which remote jobs are avoided, which are reused, which are invalidated a
 
 Remove workers, vary worker speed, change compiler identity, inject a missing input, and interrupt a backend job. The result must fail closed or use an explicit documented fallback; silent local rebuilding is not equivalent to successful distributed execution.
 
-## 10. Required evidence
+## 11. Required evidence
 
 - exact source revisions and semantic workload contracts;
 - exact Rust/Nim/frontend/backend/compiler/linker/toolchain identities;
@@ -294,7 +327,7 @@ Remove workers, vary worker speed, change compiler identity, inject a missing in
 - semantic information retained, transformed and lost;
 - negative results, fallbacks and unresolved obligations.
 
-## 11. Completion criteria
+## 12. Completion criteria
 
 This research is not complete when a Linux kernel or LLVM ThinLTO build merely runs on multiple machines.
 
@@ -311,7 +344,7 @@ Completion requires:
 9. evidence that the global scheduler, not a hidden nested compiler scheduler, accounts for worker resource use;
 10. reproducible commands, fixtures and committed machine-readable evidence.
 
-## 12. Relation to existing research tracks
+## 13. Relation to existing research tracks
 
 - **#6 Scheduler:** owns global resource-aware placement and execution accounting.
 - **#7 CAS/invalidation:** owns identity and reuse policy for remote inputs and outputs.
@@ -321,7 +354,7 @@ Completion requires:
 - **#17 Rust/Nim LLVM convergence:** supplies lowered-artifact compatibility evidence, not the final common substrate.
 - **#25 LLVM rediscovery:** decides whether the distributed partition should be LLVM-derived, semantic-fact-derived, or a hybrid.
 
-## 13. Non-goals
+## 14. Non-goals
 
 - claiming that every compiler pass should become a remote process;
 - treating remote execution speedup as proof of a common semantic substrate;
