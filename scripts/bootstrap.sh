@@ -3,8 +3,13 @@
 #
 # By default this only reports what is missing against toolchains.lock.toml
 # and prints the command that would install it — it does not touch the
-# system. Pass --install to actually run those commands (macOS/Homebrew and
-# rustup only for now).
+# system. Pass --install to actually run those commands.
+#
+# Prefers exact, non-system-package-manager sources where one exists:
+# rustup (Rust toolchains + the llvm-tools component, which also provides
+# ld.lld/wasm-ld/opt/llc), choosenim (exact Nim versions), and `cargo
+# install --version` (wasm-tools). Homebrew is only used for the handful of
+# tools with no such alternative (clang/llvm-config, Binaryen's wasm-opt).
 #
 # Usage:
 #   scripts/bootstrap.sh            # report only
@@ -59,6 +64,29 @@ with open(sys.argv[1], "rb") as f:
     data = tomllib.load(f)
 for entry in data.get("rust", {}).get("toolchains", {}).values():
     print(entry["selector"])
+PY
+)
+
+  # Components (e.g. llvm-tools, which is what provides ld.lld/wasm-ld/opt/llc
+  # below without needing a separate system LLVM install).
+  while IFS=$'\t' read -r selector component; do
+    [[ -z "$selector" || -z "$component" ]] && continue
+    if rustup component list --installed --toolchain "$selector" 2>/dev/null | grep -q "^${component}"; then
+      ok "rust component '$component' installed for toolchain '$selector'"
+    else
+      note "rust component '$component' missing for toolchain '$selector'. Install with: rustup component add $component --toolchain $selector"
+      missing=1
+      if [[ "$INSTALL" == "1" ]]; then
+        rustup component add "$component" --toolchain "$selector"
+      fi
+    fi
+  done < <(python3 - "$REPO_ROOT/toolchains.lock.toml" <<'PY'
+import sys, tomllib
+with open(sys.argv[1], "rb") as f:
+    data = tomllib.load(f)
+for entry in data.get("rust", {}).get("toolchains", {}).values():
+    for component in entry.get("components", []):
+        print(f"{entry['selector']}\t{component}")
 PY
 )
 fi
@@ -116,10 +144,32 @@ echo
 echo "Backend / target tools"
 check "clang" clang "xcode-select --install"
 check "llvm-config" llvm-config "brew install llvm"
-check "ld.lld" ld.lld "brew install llvm"
-check "wasm-ld" wasm-ld "brew install llvm"
+echo "  (ld.lld / wasm-ld / opt / llc come from the rust toolchain's llvm-tools component installed above, not a system package)"
 check "wasm-opt" wasm-opt "brew install binaryen"
-check "wasm-tools" wasm-tools "brew install wasm-tools"
+
+# [tools.*] entries with via = "cargo" pin an exact version installed with
+# `cargo install`, independent of any system package manager.
+while IFS=$'\t' read -r name selector; do
+  [[ -z "$name" ]] && continue
+  bin_name="${name//_/-}"
+  if command -v "$bin_name" >/dev/null 2>&1 && "$bin_name" --version 2>&1 | grep -q "$selector"; then
+    ok "$bin_name $selector (cargo-installed, found: $(command -v "$bin_name"))"
+  else
+    note "$bin_name $selector missing/mismatched. Install with: cargo install $bin_name --version $selector"
+    missing=1
+    if [[ "$INSTALL" == "1" ]]; then
+      cargo install "$bin_name" --version "$selector"
+    fi
+  fi
+done < <(python3 - "$REPO_ROOT/toolchains.lock.toml" <<'PY'
+import sys, tomllib
+with open(sys.argv[1], "rb") as f:
+    data = tomllib.load(f)
+for name, entry in data.get("tools", {}).items():
+    if entry.get("via") == "cargo":
+        print(f"{name}\t{entry['selector']}")
+PY
+)
 echo
 
 if [[ "$missing" == "1" && "$INSTALL" == "0" ]]; then

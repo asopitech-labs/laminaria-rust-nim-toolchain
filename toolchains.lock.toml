@@ -23,7 +23,7 @@ schema_version = "0.1.0"
 
 [rust.toolchains.system_stable]
 selector = "stable"
-components = ["rustc", "cargo", "rust-std"]
+components = ["rustc", "cargo", "rust-std", "llvm-tools"]
 
 # --- Nim ----------------------------------------------------------------
 #
@@ -50,22 +50,36 @@ bin_dir = "~/.choosenim/toolchains/nim-2.2.10/bin"
 # LLVM/Clang/LLD, the WebAssembly toolchain, and other non-Rust/Nim
 # executables consumed by later backend-pipeline research (#13-#17).
 # `selector = "system"` means "whatever resolves on PATH"; pin an exact
-# version selector once a bootstrap/install path exists for it.
+# version selector once a bootstrap/install path exists for it. Prefer
+# `via = "rustup-llvm-tools"` or `via = "cargo"` (see lock.rs::ToolSelector)
+# over a system package manager wherever the tool has one: it avoids an
+# extra untracked dependency and, for LLVM specifically, ties the tool's
+# version exactly to the resolved rustc toolchain rather than to whatever a
+# package manager happens to have.
 
 [tools.llvm]
 selector = "system"
+# llvm-config itself is not produced by `rustup component add llvm-tools`
+# (only individual tools like `opt`/`llc` are); a system LLVM install is
+# still the only source for it today.
 
 [tools.clang]
 selector = "system"
 
 [tools.lld]
-selector = "system"
+selector = "bundled-with-rust-toolchain"
+via = "rustup-llvm-tools"
 
 [tools.wasm_ld]
-selector = "system"
+selector = "bundled-with-rust-toolchain"
+via = "rustup-llvm-tools"
 
 [tools.wasm_opt]
 selector = "system"
+# Binaryen has no rustup/cargo-installable equivalent; a system package
+# manager (or a manually downloaded, pinned GitHub release) remains the
+# only path for this one tool.
 
 [tools.wasm_tools]
-selector = "system"
+selector = "1.255.0"
+via = "cargo"

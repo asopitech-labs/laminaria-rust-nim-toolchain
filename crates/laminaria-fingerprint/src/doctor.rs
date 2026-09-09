@@ -65,7 +65,7 @@ pub fn build(lock_path: &Path, repo_root: &Path) -> DoctorRun {
         .map(|lf| {
             lf.tools
                 .iter()
-                .map(|(name, sel)| external::resolve(name, sel))
+                .map(|(name, sel)| external::resolve(name, sel, &rust_toolchains))
                 .collect()
         })
         .unwrap_or_default();

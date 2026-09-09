@@ -61,6 +61,23 @@ pub struct NimToolchainSelector {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ToolSelector {
     pub selector: String,
+    /// Where this tool is expected to come from, so doctor/bootstrap don't
+    /// default to a system package manager when a more exact, already-
+    /// managed source exists:
+    ///
+    /// - `"rustup-llvm-tools"`: resolved from a Rust toolchain's own sysroot
+    ///   (`rustup component add llvm-tools`) instead of `PATH` — this LLVM
+    ///   identity is exactly the one bundled with the resolved rustc, per
+    ///   `docs/multi-version-toolchains.md` section 8's "bundled or
+    ///   selected LLVM/backend identity" field, rather than an independently
+    ///   versioned system install;
+    /// - `"cargo"`: installed with `cargo install <tool> --version
+    ///   <selector>`, an exact pin independent of any system package
+    ///   manager;
+    /// - omitted: whatever resolves on `PATH` (system package manager or
+    ///   manual install).
+    #[serde(default)]
+    pub via: Option<String>,
 }
 
 #[derive(Debug)]
