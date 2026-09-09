@@ -1,0 +1,11 @@
+[workspace]
+
+[package]
+name = "rust-nim-c-abi-baseline"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "rust-nim-c-abi-baseline"
+path = "src/main.rs"

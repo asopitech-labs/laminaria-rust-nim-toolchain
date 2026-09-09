@@ -53,6 +53,11 @@ jobs:
           nim c -o:fixture_out src/fixture.nim
           ./fixture_out
 
+      - name: Build rust-nim-c-abi-baseline fixture
+        run: |
+          cd fixtures/rust-nim-c-abi-baseline/rust-bin
+          cargo run
+
   # Exercises the "container" EnvironmentFingerprint class from a clean,
   # native (non-Rosetta) environment — see docker/bootstrap.Dockerfile for
   # why this is a bootstrap/correctness check, not a performance baseline.
