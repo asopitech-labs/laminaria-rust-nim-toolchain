@@ -135,6 +135,30 @@ jobs:
           [ "$SUCCESS" = "true" ] || { echo "nim build Run should have succeeded"; exit 1; }
           [ "$CPU" != "null" ] || { echo "resource usage must not be missing on a supported (Linux/macOS) runner"; exit 1; }
           echo "nim build user_cpu_seconds=$CPU"
+          # Per-C-compiler-invocation granularity via CC-wrapper
+          # substitution (crates/laminaria-run/src/nim_wrapper.rs, modeled
+          # on Nim's own --<ccname>.exe/--<ccname>.linkerexe config vars --
+          # see NOTES.md). nim-heavy-workspace (primes -> geometry ->
+          # fixture, plus stdlib modules) should produce multiple recorded
+          # compiler invocations (one per generated .c file) plus one
+          # separately-recorded link invocation, each with a distinct pid
+          # and non-null resource usage.
+          NIM_PROCESS_COUNT=$(jq '.process_trace.processes | length' /tmp/nim-run.json)
+          [ "$NIM_PROCESS_COUNT" -ge 5 ] || {
+            echo "expected at least 5 process records (1 root + several per-.c-file compiles + 1 link), got $NIM_PROCESS_COUNT"
+            exit 1
+          }
+          NIM_DISTINCT_PIDS=$(jq '[.process_trace.processes[].pid] | unique | length' /tmp/nim-run.json)
+          [ "$NIM_DISTINCT_PIDS" = "$NIM_PROCESS_COUNT" ] || {
+            echo "expected every process record to have a distinct pid, got $NIM_DISTINCT_PIDS distinct out of $NIM_PROCESS_COUNT records"
+            exit 1
+          }
+          CC_CPU_NULLS=$(jq '[.process_trace.processes[1:][].resource_usage.user_cpu_seconds | select(. == null)] | length' /tmp/nim-run.json)
+          [ "$CC_CPU_NULLS" = "0" ] || {
+            echo "expected every wrapper-recorded compiler invocation to have non-null resource usage, found $CC_CPU_NULLS missing"
+            exit 1
+          }
+          echo "per-C-compiler-invocation records: $NIM_PROCESS_COUNT total, $NIM_DISTINCT_PIDS distinct pids, 0 missing resource usage"
 
       # Issue #19 Experiment 5: a failed child process must not discard
       # partial evidence. Checked here rather than only in laminaria-run's
