@@ -77,6 +77,11 @@ jobs:
           cd fixtures/mixed-rust-nim-executable/rust-bin
           cargo run
 
+      - name: Build boundary-heavy-workload fixture
+        run: |
+          cd fixtures/boundary-heavy-workload/rust-bin
+          cargo run
+
   # Exercises the "container" EnvironmentFingerprint class from a clean,
   # native (non-Rosetta) environment — see docker/bootstrap.Dockerfile for
   # why this is a bootstrap/correctness check, not a performance baseline.

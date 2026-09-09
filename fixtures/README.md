@@ -64,7 +64,18 @@ LAMINARIA itself.
   Exercises the everyday array-marshaling FFI pattern that #4's baseline
   deliberately avoids.
 
-All six are built (not just version-checked) as part of CI — natively on
+- `boundary-heavy-workload/` — the "boundary-heavy workload" workload:
+  crosses the Rust/Nim FFI boundary once per loop iteration for
+  1,000,000 iterations, with a deliberately trivial per-call payload
+  (two `u32`s in, one `u32` out via `nim_fold_step`) and trivial per-call
+  computation, so the *count* of boundary crossings dominates cost rather
+  than data volume or per-call work — unlike `mixed-rust-nim-executable`'s
+  handful of calls over a whole array. Runs the identical FNV-1a-style
+  fold natively in pure Rust over the same input sequence as a same-logic
+  comparison point; both final accumulators are asserted equal to each
+  other and to a committed reference constant.
+
+All seven are built (not just version-checked) as part of CI — natively on
 `ubuntu-latest`/`macos-latest`, and inside `docker/bootstrap.Dockerfile`'s
 container environment — which is the actual evidence for #18's fixture
 reproduction criterion.
@@ -73,10 +84,9 @@ reproduction criterion.
 
 Direct native-link workload, backend-route variant workload, backend
 checkpoint-economics workload, LLVM pass/pipeline observation workload,
-ThinLTO/DTLTO dynamic backend-job workload, boundary-heavy workload,
-incremental semantic edit, unchanged/no-op workspace, worktree reuse,
-mixed-language WASM workload, Wasm link/post-link/component invalidation
-workload, Rust/Nim 2/Nimony shared LLVM/LTO compatibility workload,
-compiler/backend-work-elimination fixture. Most of these need the
-Run/scenario machinery from #19-21 to be meaningful, not just a buildable
-workspace.
+ThinLTO/DTLTO dynamic backend-job workload, incremental semantic edit,
+unchanged/no-op workspace, worktree reuse, mixed-language WASM workload,
+Wasm link/post-link/component invalidation workload, Rust/Nim 2/Nimony
+shared LLVM/LTO compatibility workload, compiler/backend-work-elimination
+fixture. Most of these need the Run/scenario machinery from #19-21 to be
+meaningful, not just a buildable workspace.

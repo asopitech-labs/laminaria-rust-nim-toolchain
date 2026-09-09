@@ -1,0 +1,11 @@
+[workspace]
+
+[package]
+name = "boundary-heavy-workload"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "boundary-heavy-workload"
+path = "src/main.rs"
