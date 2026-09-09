@@ -99,6 +99,8 @@ Cargo、Nim、LLVM/LTO等がそれぞれ独立にCPUを使い切るnested parall
 
 critical pathの分析では、Actionごとに少なくともqueue wait、dependency/resource wait、execution timeを分離し、「処理自体が遅い」のか「開始が遅れた」のかを区別する。
 
+水平分散はscheduler、cache、backend、LLVM再発見trackを横断するfirst-class research subjectである。Kbuild型のobject分散、LLVM ThinLTO/DTLTO backend分散、Action-level remote executionを比較するが、どのpartition単位もLAMINARIAのcanonical semantic partitionとは仮定しない。詳細は `horizontal-distribution-research.md` / `_ja.md` を参照する。
+
 DTLTO等、上流Actionの実行後にchild backend jobsが判明する場合は、hidden nested schedulerではなくDynamic Graph Expansionとして扱えるかを研究する。
 
 ## 研究トラックE — Artifact Identity / Incremental / CAS

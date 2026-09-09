@@ -42,6 +42,21 @@ The detailed designs are documented in:
 - `agent-oriented-toolchain-ux.md`
 - `agent-oriented-toolchain-ux_ja.md`
 
+## Horizontal distribution research
+
+Horizontal distribution is a cross-cutting research subject, not a deployment assumption. The canonical charter is documented in:
+
+- `horizontal-distribution-research.md`
+- `horizontal-distribution-research_ja.md`
+
+The comparison must keep three partition levels separate:
+
+1. source/build-graph translation-unit, object and archive distribution;
+2. global-summary/index followed by backend-job distribution, as in ThinLTO/DTLTO;
+3. action-level remote execution.
+
+Kbuild, distcc/icecream, LLVM ThinLTO/DTLTO and Bazel Remote Execution are prior-art baselines. None defines the canonical LAMINARIA semantic partition. The candidate partition must be derived from preserved Rust/Nim semantic facts, global requirements, invalidation boundaries, resource constraints and explanation needs.
+
 ## Core tracks
 
 2. Compiler pipeline decomposition across supported toolchain versions — #3
@@ -121,6 +136,10 @@ Later research may extend these schemas with backend-specific data, but must not
 ### #6/#7/#12 versus #15
 
 #15 is not a separate scheduler/cache architecture. It is the ThinLTO/DTLTO stress case that must use #6 scheduling, #7 identity/CAS and #12 work-elimination semantics. DTLTO's externally described backend jobs are used to test dynamic graph expansion rather than adding a hidden nested scheduler.
+
+### Horizontal distribution versus #6/#7/#13–#17/#25
+
+The horizontal-distribution charter compares object-level, LLVM-derived backend-level and action-level remote partitions. #6 owns placement/resource accounting, #7 owns identity/invalidation/reuse, #13 owns logical/checkpoint/execution boundary economics, #14–#17 supply LLVM/ThinLTO/WASM baselines, and #25 owns the independent semantic-fact-derived partition. Remote execution is evidence about placement and cost; it must not silently become a new semantic substrate or hidden scheduler.
 
 ## Tool UX rule
 

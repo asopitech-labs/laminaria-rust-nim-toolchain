@@ -88,6 +88,8 @@ Can Rust codegen work, Nim-generated native compilation, backend jobs, binding/s
 
 Track queue wait, dependency/resource wait, execution time, CPU, memory and I/O. Where backend jobs are discovered dynamically, as with DTLTO, investigate explicit dynamic graph expansion rather than hidden nested scheduling.
 
+Horizontal distribution is a first-class research subject across the scheduler, cache, backend and LLVM-rediscovery tracks. Compare Kbuild-shaped object distribution, LLVM ThinLTO/DTLTO backend distribution and action-level remote execution without assuming that any of their partition units is the canonical LAMINARIA semantic partition. See `horizontal-distribution-research.md` and `horizontal-distribution-research_ja.md`.
+
 ## Track E — Artifact identity, incremental invalidation and CAS
 
 Define identities for semantic artifacts, generated source, backend IR/bitcode, LTO indexes, backend outputs, native objects, Core Wasm, optimized Wasm, components and final artifacts.
