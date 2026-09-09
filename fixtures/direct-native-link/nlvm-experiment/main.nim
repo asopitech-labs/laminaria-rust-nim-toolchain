@@ -93,6 +93,81 @@ block pointerMutateInPlace:
 
 echo "all non-fatal nlvm-route Layer 1-3 experiments completed"
 
+# --- Porting ../nim-bin/main.nim's seq/Vec pointer-resolution and
+# GC_ref findings to this route: every one of these calls only ever
+# crosses the boundary via scalars and pointers, never a by-value
+# struct, so the hypothesis is that they carry over unaffected by the
+# by-value-struct ABI bugs above. Verified here, not assumed.
+
+proc rust_sum_via_pointer(data: ptr cint, len: cint): clong {.importc: "rust_sum_via_pointer", cdecl.}
+proc rust_double_in_place(data: ptr cint, len: cint) {.importc: "rust_double_in_place", cdecl.}
+proc rust_vec_growth_probe(len: cint, outAddrBefore, outAddrAfter: ptr clong, outLenAfter: ptr cint) {.importc: "rust_vec_growth_probe", cdecl.}
+
+block nimSeqPointerIntoRust:
+  var buf: seq[cint] = @[10.cint, 20, 30, 40, 50]
+
+  let sum = rust_sum_via_pointer(addr buf[0], cint(buf.len))
+  echo "nim seq -> rust sum: ", sum
+  doAssert sum == 150, "sum via pointer into a Nim-owned seq drifted from the committed reference value"
+
+  rust_double_in_place(addr buf[0], cint(buf.len))
+  echo "nim seq after rust double_in_place: ", buf
+  doAssert buf == @[20.cint, 40, 60, 80, 100],
+    "in-place mutation via pointer into a Nim-owned seq drifted from the committed reference value"
+
+block nimSeqGrowthAddressObservation:
+  var buf: seq[cint] = @[10.cint, 20, 30, 40, 50]
+  let addrBefore = cast[int](addr buf[0])
+  buf.setLen(buf.len + 1000)
+  let addrAfter = cast[int](addr buf[0])
+  echo "nim seq buffer address before growth=", addrBefore, " after growth=", addrAfter,
+    " changed=", addrBefore != addrAfter, " (allocator-dependent; both outcomes are valid)"
+  doAssert buf.len == 1005, "seq length after setLen drifted from the committed reference value"
+
+block rustVecGrowthAddressObservation:
+  var addrBefore, addrAfter: clong
+  var lenAfter: cint
+  rust_vec_growth_probe(5, addr addrBefore, addr addrAfter, addr lenAfter)
+  echo "rust vec buffer address before growth=", addrBefore, " after growth=", addrAfter,
+    " len_after=", lenAfter, " changed=", addrBefore != addrAfter, " (allocator-dependent; both outcomes are valid)"
+  doAssert lenAfter == 1010, "rust_vec_growth_probe's reported post-growth length drifted"
+
+block nimSeqLastReferenceDropDanger:
+  var freedAddr: int
+  block innerScope:
+    var doomed: seq[cint] = @[1.cint, 2, 3, 4, 5]
+    freedAddr = cast[int](addr doomed[0])
+
+  var fresh: seq[cint] = @[9.cint, 9, 9, 9, 9]
+  let freshAddr = cast[int](addr fresh[0])
+  echo "freed seq buffer address=", freedAddr, " new seq buffer address=", freshAddr,
+    " reused=", freedAddr == freshAddr, " (suggestive of reuse-after-free risk; never dereferenced)"
+
+type SeqBox = ref object
+  data: seq[cint]
+
+block nimRefSeqBoxGcRefKeepsAlive:
+  var pinnedAddr: int
+  block innerScope:
+    var localBox = SeqBox(data: @[111.cint, 222, 333, 444, 555])
+    GC_ref(localBox)
+    pinnedAddr = cast[int](addr localBox.data[0])
+
+  var fresh: seq[cint] = @[9.cint, 9, 9, 9, 9]
+  let freshAddr = cast[int](addr fresh[0])
+  echo "GC_ref-pinned SeqBox.data buffer address=", pinnedAddr, " new seq buffer address=", freshAddr,
+    " reused=", pinnedAddr == freshAddr
+
+  let stillThere = cast[ptr UncheckedArray[cint]](pinnedAddr)
+  echo "data read back through the GC_ref-pinned pointer, after its variable's scope ended: ",
+    stillThere[0], ",", stillThere[1], ",", stillThere[2], ",", stillThere[3], ",", stillThere[4]
+  doAssert stillThere[0] == 111 and stillThere[1] == 222 and stillThere[2] == 333 and
+    stillThere[3] == 444 and stillThere[4] == 555,
+    "GC_ref(ref object) did not keep its embedded seq's buffer alive/intact past the " &
+    "wrapper's own lexical scope, on the nlvm route"
+
+echo "all seq/Vec pointer-resolution and GC_ref experiments completed on the nlvm route"
+
 block byValueInputPointerOutputWorkaround:
   ## Attempted mitigation for byValueRoundTrip's known-broken return:
   ## keep `p` passed in by value, take the result through an output
