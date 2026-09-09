@@ -183,3 +183,74 @@ block nimSeqLastReferenceDropDanger:
   echo "if Rust had captured and kept using a pointer from the freed seq past its scope, " &
     "this would be a real use-after-free -- distinct from, and more dangerous than, the " &
     "growth-reallocation caveat above, and not exercised by any earlier block in this file"
+
+# --- Does a solution exist, and is it anything other than an explicit,
+# FFI-style manual ownership protocol? Rust and Nim remain two separate
+# compile-time ownership-tracking systems even once linked into one
+# binary -- Rust's borrow checker has no visibility into Nim's
+# destructor injection, and vice versa -- so there is no "single binary"
+# trick that lets one side's scope rules automatically account for the
+# other's usage. Nim's own documented answer for exactly this case
+# ("lifetime of garbage-collected types... can be extended by calling
+# GC_ref and GC_unref") is tested here directly, against the identical
+# scenario that failed above, rather than assumed to work from reading
+# the docs alone.
+
+## First attempt, left visible because failing to compile *is* the
+## finding: `GC_ref(doomed)` where `doomed: seq[cint]` does not compile
+## under this Nim/mm combination.
+##
+##   proc GC_ref*[T](x: ref T) {.magic: "GCref", ...}   <- system/arc.nim,
+##                                                          the only overload
+##                                                          active under ARC/ORC
+##
+## `system/gc_interface.nim` *does* declare `GC_ref[T](x: seq[T])` and
+## `GC_ref(x: string)` too -- but guarded by
+## `when hasAlloc and not defined(js) and not usesDestructors:`, i.e.
+## only for the legacy `refc` GC. `--mm:orc` sets `usesDestructors`, so
+## that whole block -- including the seq/string overloads -- is not
+## even compiled in. **`GC_ref`/`GC_unref` only ever apply to `ref T` on
+## this toolchain, never to `seq`/`string` directly, confirmed by
+## reading the installed compiler's own source, not assumed from
+## documentation or search results (which describe the pre-ORC API).**
+## The real mechanism, tested below: wrap the seq in a `ref object` and
+## pin *that*.
+
+type SeqBox = ref object
+  data: seq[cint]
+
+block nimRefSeqBoxGcRefKeepsAlive:
+  var pinnedAddr: int
+  block innerScope:
+    var localBox = SeqBox(data: @[111.cint, 222, 333, 444, 555])
+    GC_ref(localBox) # pins the ref object's cell -- this compiles and is the documented mechanism
+    pinnedAddr = cast[int](addr localBox.data[0])
+    # `localBox` goes out of scope here -- its own lexical reference is
+    # gone, and it was never copied/aliased outside this block. Only
+    # the GC_ref pin above can keep its cell (and therefore its `data`
+    # seq's payload) alive past this point.
+
+  # Deliberately not calling GC_unref: doing so needs a live handle onto
+  # the same cell, and nothing outside `innerScope` has one -- by
+  # design, to keep this test isolated to "does GC_ref alone work,"
+  # not "can this fixture also reconstruct an unref handle." A real
+  # pin/unpin protocol crossing into Rust would need Nim to hand back an
+  # explicit token for the release step; this fixture deliberately
+  # leaks one small allocation rather than fabricate that design.
+
+  var fresh: seq[cint] = @[9.cint, 9, 9, 9, 9]
+  let freshAddr = cast[int](addr fresh[0])
+  echo "GC_ref-pinned SeqBox.data buffer address=", pinnedAddr, " new seq buffer address=", freshAddr,
+    " reused=", pinnedAddr == freshAddr
+
+  # The definitive test: read back through the captured address. Safe
+  # to do now, if and only if GC_ref actually kept the buffer alive.
+  let stillThere = cast[ptr UncheckedArray[cint]](pinnedAddr)
+  echo "data read back through the GC_ref-pinned pointer, after its variable's scope ended: ",
+    stillThere[0], ",", stillThere[1], ",", stillThere[2], ",", stillThere[3], ",", stillThere[4]
+  doAssert stillThere[0] == 111 and stillThere[1] == 222 and stillThere[2] == 333 and
+    stillThere[3] == 444 and stillThere[4] == 555,
+    "GC_ref(ref object) did not keep its embedded seq's buffer alive/intact past the " &
+    "wrapper's own lexical scope -- either the documented mechanism doesn't cover this " &
+    "case on this Nim version, or this experiment used it incorrectly; either finding " &
+    "matters for issue #4"

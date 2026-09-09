@@ -10,6 +10,40 @@ it establishes only that the link is possible and inspects the resulting
 symbols, nothing about type/layout compatibility, runtime semantics, or
 optimization (#4's Layers 2-5).
 
+## Scope warning, load-bearing for every finding below
+
+Every experiment in `nim-bin/` uses `nim c` — Nim's default backend,
+which always generates C source and hands it to a C compiler before a
+native object exists. Even with no `.h` file and hand-matched symbol
+names (this fixture's actual Layer 1 claim), the resulting object's
+calling convention, name-mangling scheme, and aggregate-layout rules are
+still fundamentally C's, because a C compiler is what produced them.
+That is a real, useful finding on its own — "no generated header" is not
+nothing — but it is **not** the same claim as "Rust and Nim participate
+in one native link without being constrained by C's ABI at all," which
+is `docs/rust-nim-native-linking.md`'s actual framing (a Rust codegen
+pipeline and a Nim codegen pipeline sharing one artifact/link model, not
+each independently targeting C's calling convention and happening to
+agree).
+
+Per this project's own `docs/research-program.md` Track J, there are at
+least three distinct Nim-side native-code routes, evaluated separately
+by design:
+
+```text
+Nim 2 -> generated C -> Clang -> LLVM IR/bitcode   <- nim-bin/, every experiment above
+Nim 2 -> nlvm -> LLVM IR                            <- nlvm-experiment/, first attempt below
+Nim 3/Nimony -> Leng/lengc -> LLVM IR               <- not attempted; separate, future compiler
+```
+
+`nlvm` (https://github.com/arnetheduck/nlvm) bypasses C entirely: Nim
+source to nlvm's own LLVM IR emission to native object, no C source or C
+compiler anywhere in the path. `nlvm-experiment/` is a first,
+genuinely-different-route attempt — see that section below. Nothing in
+`nim-bin/` should be read as evidence about the C-free route; it's
+evidence about the C-generating route only, useful mainly as the
+baseline the C-free route needs to be compared against.
+
 ## Direction
 
 Every other Rust/Nim fixture in this directory has Rust as the build
@@ -315,17 +349,83 @@ observing either way.
 **This is the real headline finding for this focal question**, sharper
 than the growth caveat: pointer resolution into Nim-owned memory is only
 safe for as long as the Nim side guarantees the owning reference stays
-alive. Nothing in any experiment in this fixture establishes such a
-guarantee across an FFI call boundary — every access here re-derives its
-pointer immediately before use, inside the same scope that owns the
-`seq`, and never holds one past a call where the other side could run
-code. A future direct-native-link design that wants to hand out a
-pointer whose validity outlives one call needs an explicit ownership/
-lifetime contract (e.g. Nim promising not to drop the reference, or an
-explicit "pin" operation, or the boundary requiring reference-counted
-ownership on both sides) — none of which exists yet, and this
-experiment is exactly why it can't be skipped: the danger is not
-hypothetical, it's directly observable with a two-line reproduction.
+alive. Nothing in the experiments above establishes such a guarantee
+across an FFI call boundary — every access re-derives its pointer
+immediately before use, inside the same scope that owns the `seq`, and
+never holds one past a call where the other side could run code.
+
+### Does a solution exist, and is it anything other than an explicit protocol?
+
+Asked directly: Rust and Nim remain two separate compile-time
+ownership-tracking systems even once linked into one binary — Rust's
+borrow checker has no visibility into Nim's compiler-injected
+destructors, and vice versa. There is no "single binary" trick that
+makes one side's scope rules automatically account for the other side's
+usage; some kind of explicit, manually-operated ownership protocol
+across the boundary is the only generally-available answer, the same
+way it is for CPython's `Py_INCREF`/`Py_DECREF` or JNI's global
+references. That expectation was checked directly against Nim's own
+documented mechanism, rather than assumed to hold from precedent.
+
+**First finding: the documented API doesn't mean what the docs (and
+initial web research) suggested.** Nim's manual and several search
+results describe `GC_ref`/`GC_unref` as accepting `seq[T]`/`string`
+directly. Trying that — `GC_ref(doomed)` where `doomed: seq[cint]` —
+**fails to compile** under this toolchain. Reading the installed
+compiler's own source settles why:
+
+```
+$ grep -n -A2 'proc GC_ref' /usr/local/Cellar/nim/2.2.10/nim/lib/system/arc.nim
+proc GC_ref*[T](x: ref T) =
+  ## New runtime only supports this operation for 'ref T'.
+  if x != nil: nimIncRef(cast[pointer](x))
+```
+
+`system/gc_interface.nim` *does* declare `seq`/`string` overloads too —
+guarded by `when hasAlloc and not defined(js) and not usesDestructors:`.
+`--mm:orc` sets `usesDestructors`, so that whole block, seq/string
+overloads included, is never even compiled in. **`GC_ref`/`GC_unref`
+apply only to `ref T` under ARC/ORC — never to `seq`/`string`
+directly.** The search results describing a `seq` overload were
+describing the legacy `refc` GC's API, not current default Nim; ground
+truth came from the compiler's own source and an actual failed
+compilation, not from documentation or search summaries.
+
+**Second finding: wrapped in a `ref object`, the documented mechanism
+works, verified by reading data back, not just observing an address.**
+`nimRefSeqBoxGcRefKeepsAlive`: wrap the `seq` in `type SeqBox = ref
+object; data: seq[cint]`, call `GC_ref(localBox)` before `localBox` goes
+out of scope (with no other Nim-level reference to it anywhere), then —
+past that scope — read the data back through the raw pointer captured
+earlier:
+
+```
+$ ./build.sh
+...
+GC_ref-pinned SeqBox.data buffer address=4304490632 new seq buffer address=4304490600 reused=false
+data read back through the GC_ref-pinned pointer, after its variable's scope ended: 111,222,333,444,555
+```
+
+Correct, original data (`111,222,333,444,555`), read back through a
+pointer captured before the only Nim-level reference went out of scope
+— reproduced identically across multiple repeated runs. This is the
+positive counterpart to the danger finding above: **the danger is real,
+and a real, working solution for it already exists in Nim, provided the
+shared data is wrapped in a `ref object` rather than passed as a bare
+`seq`/`string`.**
+
+### What's still unsolved
+
+This fixture deliberately never calls the matching `GC_unref` — doing
+so needs a live Nim-level handle onto the same cell, and by design
+nothing outside `nimRefSeqBoxGcRefKeepsAlive`'s inner scope has one (one
+small allocation is deliberately leaked as a result). That gap is
+itself the real remaining design question for issue #4: a usable
+cross-language pin/unpin protocol needs Nim to hand Rust back an
+explicit release token when pinning, and Rust needs to call an exported
+Nim proc (not raw `GC_unref`, which isn't itself `exportc`-friendly
+across the boundary as used here) to release it — a small, concrete,
+buildable next increment, not attempted in this session.
 
 ## Explicitly not attempted, and why (Layer 3/4 scope)
 
@@ -384,6 +484,35 @@ and a first slice of the Layer 3/4 boundary (pointer resolution into a
 growable, reference-counted buffer, both directions, plus its two
 validity caveats — reallocation and deallocation) — not the full
 compatibility matrix, and not the rest of Layer 4-6 (thread/TLS
-obligations, exceptions, WASM). Issue #4's own research is expected to
-extend this with more type classes and the remaining runtime/failure/
-optimization layers `docs/rust-nim-native-linking.md` describes.
+obligations, exceptions, WASM). All of it is `nim c`-route evidence
+only, per the scope warning above. Issue #4's own research is expected
+to extend this with more type classes, the remaining runtime/failure/
+optimization layers `docs/rust-nim-native-linking.md` describes, and —
+per the scope warning above — the actual C-free route this issue is
+ultimately about.
+
+## `nlvm-experiment/`: the first attempt at the actual C-free route
+
+`nim-bin/`'s entire evidence base is `nim c`-route-specific (see the
+scope warning at the top of this document). `nlvm-experiment/` is a
+first, minimal attempt at issue #4's real subject: Nim reaching a native
+artifact through a route that never generates C at all.
+
+No pre-built `nlvm` binary exists for macOS (only Linux and Windows
+release assets); building from source on this dev machine was assessed
+and set aside for now — `nlvm`'s own build pins and builds its own exact
+LLVM revision rather than reusing the host's existing Homebrew LLVM, and
+bootstraps its own Nim from C sources, which is a large, failure-prone
+time investment relative to the Linux release binary this project's own
+CI can already run today. `.github/workflows/ci.yml`'s `nlvm-smoke-test`
+job downloads that binary and compiles/runs `hello.nim` — the smallest
+possible confirmation that `nlvm` works at all on this project's CI
+before attempting the harder direct-link-with-Rust experiment. Isolated
+in its own CI job, not the main `rust` matrix, so a failure here
+(plausible — this is genuinely exploratory territory) doesn't fail-fast
+cancel the fixture suite that already works.
+
+Status: initial smoke test only. Not yet attempted: compiling `Point`/
+`rust_transform`-equivalent exports through `nlvm` and linking them
+against Rust the way `nim-bin/main.nim` does — that's the actual
+apples-to-apples comparison this section exists to eventually reach.

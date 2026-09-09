@@ -107,6 +107,45 @@ jobs:
           cargo test --manifest-path rust-lib/Cargo.toml
           ./build.sh
 
+  # Issue #4's genuinely-open question, not #11's: every fixture above
+  # uses `nim c`, which always produces native code via a generated-C
+  # intermediate -- even with no header file, that route's ABI/symbol
+  # shape is fundamentally C's. nlvm (https://github.com/arnetheduck/nlvm)
+  # is Nim's existing LLVM-direct backend: no C source, no C compiler,
+  # anywhere in the path. Isolated in its own job (not the `rust` matrix
+  # above) because it's exploratory -- a failure here must not fail-fast
+  # cancel the main fixture suite. Only Linux/Windows release binaries
+  # exist upstream; no macOS build was attempted (nlvm's own build
+  # pins/builds its own exact LLVM revision rather than reusing the
+  # host's, and bootstraps its own Nim from C sources -- a large, risky
+  # time investment for this session, versus this job's already-working
+  # Linux binary).
+  nlvm-smoke-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download nlvm (Linux continuous build)
+        run: |
+          curl -fLo nlvm.tar.xz https://github.com/arnetheduck/nlvm/releases/download/continuous/nlvm-linux-a9c3397.tar.xz
+          tar xf nlvm.tar.xz
+          find . -maxdepth 4 -iname 'nlvm*' -type f -exec chmod +x {} \;
+          find . -maxdepth 4 -iname 'nlvm*' -type f
+
+      - name: nlvm --version
+        run: |
+          NLVM_BIN=$(find "$PWD" -maxdepth 4 -iname 'nlvm' -type f -perm -u+x | head -1)
+          echo "NLVM_BIN=$NLVM_BIN" >> "$GITHUB_ENV"
+          "$NLVM_BIN" --version
+
+      - name: Compile and run a trivial Nim program via nlvm (no C anywhere)
+        run: |
+          cd fixtures/direct-native-link/nlvm-experiment
+          "$NLVM_BIN" c hello.nim
+          ./hello
+          echo "--- confirming no .c file exists anywhere in nlvm's own build output ---"
+          find . -iname '*.c' && exit 1 || echo "no .c files found (expected)"
+
   # Exercises the "container" EnvironmentFingerprint class from a clean,
   # native (non-Rosetta) environment — see docker/bootstrap.Dockerfile for
   # why this is a bootstrap/correctness check, not a performance baseline.
