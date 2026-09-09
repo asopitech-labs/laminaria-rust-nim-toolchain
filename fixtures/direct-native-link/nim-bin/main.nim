@@ -68,3 +68,65 @@ block pointerMutateInPlace:
   echo "scale_in_place: ", p.x, ",", p.y
   doAssert p.x == 15 and p.y == 20,
     "pointer-to-Point mutation drifted from the committed reference value"
+
+# --- Issue #4 focal question: pointer resolution into *GC-managed*
+# memory, both directions. Every earlier fixture in this repo that
+# crosses array data (`mixed-rust-nim-executable`) has Rust own a
+# plain `Vec` and merely lend Nim a pointer into it — never the harder
+# direction of a pointer into memory a GC actually manages and can move.
+# See ../NOTES.md for the full discussion of both directions and their
+# results.
+
+proc rust_sum_via_pointer(data: ptr cint, len: cint): clong {.importc: "rust_sum_via_pointer", cdecl.}
+proc rust_double_in_place(data: ptr cint, len: cint) {.importc: "rust_double_in_place", cdecl.}
+proc rust_vec_growth_probe(len: cint, outAddrBefore, outAddrAfter: ptr clong, outLenAfter: ptr cint) {.importc: "rust_vec_growth_probe", cdecl.}
+
+block nimSeqPointerIntoRust:
+  ## Direction 1: Nim owns a genuine `seq` (ORC-managed, growable) --
+  ## not a caller-owned fixed buffer -- and hands Rust a raw pointer
+  ## into its live buffer. Proves resolution (read) and mutation
+  ## (write-through) both work when the pointer originates from Nim's
+  ## own managed heap, not just from memory Rust itself allocated.
+  var buf: seq[cint] = @[10.cint, 20, 30, 40, 50]
+
+  let sum = rust_sum_via_pointer(addr buf[0], cint(buf.len))
+  echo "nim seq -> rust sum: ", sum
+  doAssert sum == 150, "sum via pointer into a Nim-owned seq drifted from the committed reference value"
+
+  rust_double_in_place(addr buf[0], cint(buf.len))
+  echo "nim seq after rust double_in_place: ", buf
+  doAssert buf == @[20.cint, 40, 60, 80, 100],
+    "in-place mutation via pointer into a Nim-owned seq drifted from the committed reference value"
+
+block nimSeqGrowthInvalidatesPointer:
+  ## The caveat half of direction 1: a pointer into a Nim `seq`'s buffer
+  ## is only valid until the `seq` next reallocates. This never
+  ## dereferences the stale address after growth -- only compares it as
+  ## a plain integer -- so the point is made without actually invoking
+  ## undefined behavior.
+  var buf: seq[cint] = @[10.cint, 20, 30, 40, 50]
+  let addrBefore = cast[int](addr buf[0])
+  buf.setLen(buf.len + 1000) # force reallocation well past original capacity
+  let addrAfter = cast[int](addr buf[0])
+  echo "nim seq buffer address before growth=", addrBefore, " after growth=", addrAfter,
+    " changed=", addrBefore != addrAfter
+  doAssert addrBefore != addrAfter,
+    "expected seq growth to reallocate on this run -- if it didn't, the caveat this block exists " &
+    "to demonstrate wasn't actually exercised (not itself proof the caveat is false in general)"
+
+block rustVecGrowthInvalidatesPointer:
+  ## Direction 2, the symmetric reverse: Rust owns a growable `Vec`,
+  ## forces its own internal reallocation, and reports both buffer
+  ## addresses as plain integers -- Nim never receives, and therefore
+  ## never risks dereferencing, an invalidated pointer. This is what
+  ## would go stale if a caller captured the "before" pointer via a
+  ## variant of this API and kept using it past a growing call.
+  var addrBefore, addrAfter: clong
+  var lenAfter: cint
+  rust_vec_growth_probe(5, addr addrBefore, addr addrAfter, addr lenAfter)
+  echo "rust vec buffer address before growth=", addrBefore, " after growth=", addrAfter,
+    " len_after=", lenAfter, " changed=", addrBefore != addrAfter
+  doAssert lenAfter == 1010, "rust_vec_growth_probe's reported post-growth length drifted"
+  doAssert addrBefore != addrAfter,
+    "expected Vec growth to reallocate on this run -- if it didn't, the caveat this block exists " &
+    "to demonstrate wasn't actually exercised (not itself proof the caveat is false in general)"

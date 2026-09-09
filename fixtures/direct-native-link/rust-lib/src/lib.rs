@@ -85,6 +85,71 @@ pub unsafe extern "C" fn rust_point_layout_probe(
     *out_offset_y = std::mem::offset_of!(Point, y) as i32;
 }
 
+// --- Issue #4 Layer 3/4 focal question: can Rust resolve a pointer
+// obtained from *Nim-owned, GC-managed* memory (a `seq`'s buffer), not
+// only from Rust-owned memory Nim was merely lent a pointer into
+// (`mixed-rust-nim-executable`'s pattern)? See `NOTES.md` for the full
+// discussion — this is the harder direction, and where a validity
+// caveat (pointer stability across Nim-side reallocation) actually
+// matters.
+
+/// Reads through a pointer into memory Rust does not own (may be a
+/// Nim `seq`'s buffer) and sums it. Read-only: proves resolution alone,
+/// independent of the mutation question below.
+///
+/// # Safety
+///
+/// `data` must point to `len` valid, initialized, readable `i32`s for
+/// the duration of this call.
+#[no_mangle]
+pub unsafe extern "C" fn rust_sum_via_pointer(data: *const i32, len: i32) -> i64 {
+    let slice = std::slice::from_raw_parts(data, len as usize);
+    slice.iter().map(|&x| x as i64).sum()
+}
+
+/// Mutates memory Rust does not own (may be a Nim `seq`'s buffer)
+/// in place, through a raw pointer, doubling each element.
+///
+/// # Safety
+///
+/// `data` must point to `len` valid, aligned, writable `i32`s for the
+/// duration of this call, and no other reference to that memory may be
+/// live concurrently.
+#[no_mangle]
+pub unsafe extern "C" fn rust_double_in_place(data: *mut i32, len: i32) {
+    let slice = std::slice::from_raw_parts_mut(data, len as usize);
+    for v in slice.iter_mut() {
+        *v = v.wrapping_mul(2);
+    }
+}
+
+/// The symmetric, reverse-direction caveat: Rust owns a growable
+/// `Vec<i32>`, takes its buffer address, forces a reallocation (a
+/// `Vec` push/extend past capacity moves the buffer, exactly like a Nim
+/// `seq` growing past capacity does), and reports both addresses as
+/// plain integers — never as pointers Nim could be tempted to
+/// dereference — so the caller can observe whether the address changed
+/// without ever touching invalidated memory. `Vec` drops normally at
+/// the end of this call; nothing is leaked or exposed past its lifetime.
+///
+/// # Safety
+///
+/// Every `out_*` pointer must point to a valid, aligned, writable
+/// destination of the matching type.
+#[no_mangle]
+pub unsafe extern "C" fn rust_vec_growth_probe(
+    len: i32,
+    out_addr_before: *mut i64,
+    out_addr_after: *mut i64,
+    out_len_after: *mut i32,
+) {
+    let mut v: Vec<i32> = (0..len).map(|i| i * 10).collect();
+    *out_addr_before = v.as_ptr() as i64;
+    v.extend(std::iter::repeat_n(0, v.len() + 1000));
+    *out_addr_after = v.as_ptr() as i64;
+    *out_len_after = v.len() as i32;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,6 +157,32 @@ mod tests {
     #[test]
     fn transform_known_value() {
         assert_eq!(rust_transform(21), 43);
+    }
+
+    #[test]
+    fn sum_via_pointer_known_value() {
+        let data = [10i32, 20, 30, 40, 50];
+        let sum = unsafe { rust_sum_via_pointer(data.as_ptr(), data.len() as i32) };
+        assert_eq!(sum, 150);
+    }
+
+    #[test]
+    fn double_in_place_known_value() {
+        let mut data = [10i32, 20, 30, 40, 50];
+        unsafe { rust_double_in_place(data.as_mut_ptr(), data.len() as i32) };
+        assert_eq!(data, [20, 40, 60, 80, 100]);
+    }
+
+    #[test]
+    fn vec_growth_probe_reports_len_and_runs_without_ub() {
+        let (mut before, mut after, mut len_after) = (0i64, 0i64, 0i32);
+        unsafe { rust_vec_growth_probe(5, &mut before, &mut after, &mut len_after) };
+        assert_eq!(len_after, 1010);
+        // Address equality/inequality is platform-allocator-dependent (a
+        // small allocator could in principle grow in place); what this
+        // fixture actually needs is that both addresses were captured
+        // without UB, which the assertions above already exercise.
+        let _ = (before, after);
     }
 
     #[test]
