@@ -831,6 +831,34 @@ expressed as scalars and pointers — including `GC_ref`'s `ref object`
 pinning mechanism itself — carries over identically to the C-free route
 with no adaptation needed.
 
+### C-style enums (bare discriminant) round-trip correctly on both routes — verified, not assumed
+
+The by-value-struct ABI gap above raised an obvious question for the
+type/layout matrix: does the same gap hit a C-style enum (`Status`:
+`Ok=0, Warning=1, Error=2`, `#[repr(i32)]` on the Rust side,
+`{.size: sizeof(cint).}` on the Nim side, no payload on either side)?
+The hypothesis was that it shouldn't — a bare discriminant is just an
+integer under the hood, not an aggregate, so it should sidestep the
+by-value-struct bug class entirely rather than merely being deprioritized
+like by-value `Point` is.
+
+Checked directly, both directions (`rust_classify(cint) -> Status`,
+`rust_status_code(Status) -> cint`), on both routes:
+
+- `nim c` route (local `./build.sh`): `classify: ok=sOk warning=sWarning
+  error=sError`, `status_code: ok=0 warning=1 error=2` — correct.
+- `nlvm` route (CI `34331684027`, job `nlvm-experiment`, same run that
+  reproduced the by-value `Point` bugs above in the same process):
+  `classify: ok=sOk warning=sWarning error=sError`, `status_code: ok=0
+  warning=1 error=2` — correct, in the same log right next to
+  `point_sum: 3 (expected 7 ...)` and `translate: 7,10 (expected 13,3
+  ...)`.
+
+**Confirms the hypothesis cleanly**: the by-value ABI gap on `nlvm` is
+specific to multi-field aggregates, not to "by-value" as such. A bare
+discriminant enum, passed and returned by value, is route-independent —
+no pointer-wrapping workaround needed for this type class.
+
 ### Not yet attempted
 
 The `nlvm`-via-Docker path on this dev machine's own architecture (arm64
