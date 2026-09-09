@@ -25,6 +25,7 @@
 
 pub mod cargo_wrapper;
 pub mod clock;
+pub mod nim_wrapper;
 pub mod store;
 pub mod tracer;
 pub mod types;
@@ -38,6 +39,7 @@ use crate::cargo_wrapper::{
     ENV_WRAPPED_RUSTC,
 };
 use crate::clock::RunClock;
+use crate::nim_wrapper::{find_cc_wrapper_binary, wrapper_args, ENV_WRAPPED_CC};
 use crate::types::{
     CacheState, MeasurementOverhead, PreparationRecord, ProbeLevel, ProcessTrace, RootCommand, Run,
     RunResult, SCHEMA_VERSION,
@@ -54,10 +56,26 @@ fn is_cargo_command(root: &RootCommand) -> bool {
         == Some("cargo")
 }
 
+/// Whether `root` invokes `nim c` or `nim cpp` -- the two Nim subcommands
+/// that actually shell out to a C/C++ compiler (`compiler/extccomp.nim`,
+/// studied before writing `nim_wrapper.rs`). Other subcommands (`doc`,
+/// `check`, `js`, ...) never trigger CC-wrapper substitution.
+fn is_nim_c_command(root: &RootCommand) -> bool {
+    let is_nim = Path::new(&root.program)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        == Some("nim");
+    is_nim
+        && matches!(
+            root.args.first().map(String::as_str),
+            Some("c") | Some("cpp")
+        )
+}
+
 /// Attempts to set up RUSTC-wrapper substitution (`cargo_wrapper` module
 /// doc) for a Cargo root command: resolves a real `rustc` on `PATH` and
 /// this crate's own `laminaria-rustc-wrapper` binary, then returns the env
-/// vars to inject plus the events file they'll write to. Returns `None`
+/// vars to inject plus the events file they'll write to. Returns `Err`
 /// (with an explanatory note) when either can't be resolved -- wrapping is
 /// an enhancement over the existing root-command-only tracing, not a
 /// requirement, so its absence must never fail the traced command.
@@ -88,6 +106,43 @@ fn prepare_cargo_wrapping(
             anchor_unix_ns.to_string(),
         ),
     ])
+}
+
+struct NimWrapping {
+    extra_args: Vec<String>,
+    env_vars: Vec<(String, String)>,
+}
+
+/// Attempts to set up CC-wrapper substitution (`nim_wrapper` module doc)
+/// for a `nim c`/`nim cpp` root command: resolves a real `cc` on `PATH`
+/// and this crate's own `laminaria-cc-wrapper` binary, then returns the
+/// extra command-line arguments plus the env vars to inject. Same
+/// never-fail-the-traced-command contract as `prepare_cargo_wrapping`.
+fn prepare_nim_wrapping(events_path: &Path, anchor_unix_ns: u128) -> Result<NimWrapping, String> {
+    let real_cc = laminaria_fingerprint::exec::which("cc")
+        .ok_or_else(|| "could not resolve a `cc` on PATH".to_string())?;
+    let wrapper_bin = find_cc_wrapper_binary().ok_or_else(|| {
+        "could not find the laminaria-cc-wrapper binary next to the running executable \
+         (expected it built alongside laminaria-cli)"
+            .to_string()
+    })?;
+
+    let extra_args = wrapper_args(&wrapper_bin);
+    let env_vars = vec![
+        (ENV_WRAPPED_CC.to_string(), real_cc.display().to_string()),
+        (
+            ENV_EVENTS_PATH.to_string(),
+            events_path.display().to_string(),
+        ),
+        (
+            ENV_CLOCK_ANCHOR_UNIX_NS.to_string(),
+            anchor_unix_ns.to_string(),
+        ),
+    ];
+    Ok(NimWrapping {
+        extra_args,
+        env_vars,
+    })
 }
 
 /// Generates a Run id from the current wall-clock time and process id.
@@ -127,26 +182,54 @@ pub fn run_and_record(
     std::fs::create_dir_all(&run_dir)?;
     let stdout_path = run_dir.join("stdout.log");
     let stderr_path = run_dir.join("stderr.log");
-    let rustc_events_path = run_dir.join("rustc-invocations.jsonl");
+    let wrapper_events_path = run_dir.join("wrapper-invocations.jsonl");
 
-    // Per-rustc-invocation granularity via Cargo's RUSTC env var, modeled
-    // on rustc-perf's real `rustc-fake` (studied from its source, not
-    // re-derived -- see cargo_wrapper's module doc and NOTES.md) --
-    // *not* OS-level process-tree walking. Only attempted for a Cargo root
-    // command; a resolution failure only adds a known_gaps note; it never
-    // fails the traced command itself.
+    // Per-compiler-invocation granularity via wrapper substitution --
+    // *not* OS-level process-tree walking. Cargo/rustc: Cargo's RUSTC env
+    // var, modeled on rustc-perf's real `rustc-fake` (see cargo_wrapper's
+    // module doc). `nim c`/`nim cpp`: Nim's `--<ccname>.exe`/
+    // `--<ccname>.linkerexe` overrides, studied from Nim's own
+    // compiler/extccomp.nim source (see nim_wrapper's module doc). At
+    // most one applies per Run, since a root command is either Cargo or
+    // Nim, never both. A resolution failure only adds a known_gaps note;
+    // it never fails the traced command itself.
     let mut effective_root = root.clone();
-    let mut cargo_wrapping_note: Option<String> = None;
+    let mut wrapping_note: Option<String> = None;
+    let mut wrapping_kind: Option<&'static str> = None;
     if is_cargo_command(&root) {
-        match prepare_cargo_wrapping(&rustc_events_path, clock.anchor_unix_ns()) {
+        match prepare_cargo_wrapping(&wrapper_events_path, clock.anchor_unix_ns()) {
             Ok(env_vars) => {
                 for (key, value) in env_vars {
                     effective_root.env_overrides.insert(key, value);
                 }
+                wrapping_kind = Some("rustc");
             }
             Err(reason) => {
-                cargo_wrapping_note = Some(format!(
+                wrapping_note = Some(format!(
                     "per-rustc-invocation tracing via RUSTC-wrapper substitution was not applied: {reason}"
+                ));
+            }
+        }
+    } else if is_nim_c_command(&root) {
+        match prepare_nim_wrapping(&wrapper_events_path, clock.anchor_unix_ns()) {
+            Ok(NimWrapping {
+                extra_args,
+                env_vars,
+            }) => {
+                // Inserted right after the "c"/"cpp" subcommand -- verified
+                // this ordering compiles correctly on nim-heavy-workspace
+                // before relying on it (see nim_wrapper's module doc).
+                for (i, arg) in extra_args.into_iter().enumerate() {
+                    effective_root.args.insert(1 + i, arg);
+                }
+                for (key, value) in env_vars {
+                    effective_root.env_overrides.insert(key, value);
+                }
+                wrapping_kind = Some("cc");
+            }
+            Err(reason) => {
+                wrapping_note = Some(format!(
+                    "per-C-compiler-invocation tracing via CC-wrapper substitution was not applied: {reason}"
                 ));
             }
         }
@@ -157,8 +240,8 @@ pub fn run_and_record(
         tracer::trace_root_command(&clock, &effective_root, &stdout_path, &stderr_path)?;
     let tracer_overhead_seconds = tracer_wall_start.elapsed().as_secs_f64();
 
-    let rustc_invocation_records = read_events(&rustc_events_path).unwrap_or_default();
-    let _ = std::fs::remove_file(&rustc_events_path);
+    let wrapper_invocation_records = read_events(&wrapper_events_path).unwrap_or_default();
+    let _ = std::fs::remove_file(&wrapper_events_path);
 
     let run_ended_at_unix_ns = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -189,28 +272,37 @@ pub fn run_and_record(
             root_exit_status: exit_status,
         }),
         process_trace: {
-            let rustc_invocation_count = rustc_invocation_records.len();
+            let wrapper_invocation_count = wrapper_invocation_records.len();
             let mut processes = vec![process_record];
-            processes.extend(rustc_invocation_records);
+            processes.extend(wrapper_invocation_records);
 
             let mut known_gaps = Vec::new();
-            if rustc_invocation_count > 0 {
-                known_gaps.push(format!(
-                    "{rustc_invocation_count} individual rustc invocation(s) were recorded via \
-                     RUSTC-wrapper substitution (see laminaria_run::cargo_wrapper), but this is \
-                     Cargo/rustc-specific -- no equivalent per-invocation wrapping exists yet for \
-                     the linker, Nim's compiler, or any non-Cargo root command; those still only \
-                     have the root record's cumulative wait4-based resource_usage"
-                ));
-            } else {
-                known_gaps.push(
+            match wrapping_kind {
+                Some("rustc") if wrapper_invocation_count > 0 => known_gaps.push(format!(
+                    "{wrapper_invocation_count} individual rustc invocation(s) were recorded via \
+                     RUSTC-wrapper substitution (see laminaria_run::cargo_wrapper); the linker is \
+                     not separately recorded -- its cost rolls up into whichever rustc invocation \
+                     spawned it, matching rustc-fake's own accepted scope"
+                )),
+                Some("cc") if wrapper_invocation_count > 0 => known_gaps.push(format!(
+                    "{wrapper_invocation_count} individual C/C++ compiler invocation(s) (compile \
+                     and link, both) were recorded via CC-wrapper substitution (see \
+                     laminaria_run::nim_wrapper) for this nim c/cpp build"
+                )),
+                _ => known_gaps.push(
                     "individual descendant process enumeration (per-node pid/parent/argv/timing) \
                      is not implemented for this Run; resource_usage on the root record is \
                      cumulative over its entire reaped subtree via wait4"
                         .to_string(),
-                );
+                ),
             }
-            if let Some(note) = cargo_wrapping_note {
+            known_gaps.push(
+                "per-invocation wrapper substitution exists only for Cargo/rustc and nim c/cpp \
+                 root commands; any other command still only has the root record's cumulative \
+                 resource_usage"
+                    .to_string(),
+            );
+            if let Some(note) = wrapping_note {
                 known_gaps.push(note);
             }
             known_gaps.push(
