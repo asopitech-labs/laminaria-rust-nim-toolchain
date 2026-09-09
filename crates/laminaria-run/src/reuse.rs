@@ -859,7 +859,19 @@ mod tests {
     /// triggered a real Cargo rebuild (the real, honest divergence this
     /// module's own doc comment claims); a genuine content edit is
     /// correctly detected and explained.
+    ///
+    /// Unix-only: this test's own premise (`toolchain_digest_sha256` gets
+    /// resolved through the real CLI) depends on RUSTC-wrapper
+    /// substitution actually engaging, which `lib.rs::prepare_cargo_wrapping`
+    /// deliberately never attempts on non-Unix targets (see that
+    /// function's own doc comment -- the wrapper binary's own measurement
+    /// is `wait4`-based). Confirmed directly: this test passes on both
+    /// Linux and macOS CI, and fails only on the `windows` job, exactly
+    /// where wrapper substitution is expected to never engage -- a
+    /// platform limitation of the wrapper mechanism itself, not a bug in
+    /// this fix.
     #[test]
+    #[cfg(unix)]
     fn reuse_decision_matches_real_fixture_behavior_across_cold_noop_and_edits() {
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
