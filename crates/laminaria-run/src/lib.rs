@@ -23,21 +23,30 @@
 //!   (studied from Cargo's actual source, not assumed) -- real artifact
 //!   paths and a precise per-crate cache-freshness signal, not derived or
 //!   inferred by this crate.
+//! - `nim_telemetry`: Level 2 compiler-native telemetry for `nim c`/
+//!   `cpp` builds. Nim has no `--message-format=json` equivalent
+//!   (checked directly against Nim's real compiler source, not assumed),
+//!   so this parses Nim's own human-oriented hint/verbosity stream
+//!   instead -- a materially weaker reliability claim than the Cargo
+//!   adapter, stated explicitly rather than glossed over (see that
+//!   module's doc comment).
 //! - `store`: the `runs/<run-id>/` on-disk layout (section 5) and
 //!   `summary.json` regeneration from raw evidence.
 //!
 //! **Not yet implemented, deliberately left as explicit gaps rather than
 //! silently assumed**: general (non-Cargo, non-Nim) parent/child process
-//! enumeration, Level 2 telemetry for any toolchain other than Cargo
-//! (rustc `-Z self-profile`, Nim stage diagnostics), Level 3 platform
-//! profiler integration, full artifact inventory (section 8 -- Cargo's
-//! own reported artifact paths/freshness are captured, but size/digest/
-//! change-state are not), and cache-state/preparation-record population
-//! (sections 9-10, beyond what Cargo's own telemetry incidentally gives).
+//! enumeration, rustc `-Z self-profile`, Level 3 platform profiler
+//! integration, full artifact inventory (section 8 -- Cargo's own
+//! reported artifact paths/freshness are captured, but size/digest/
+//! change-state are not, and Nim's telemetry reports module names, not
+//! artifact paths, at all), and cache-state/preparation-record
+//! population (sections 9-10, beyond what Cargo's own telemetry
+//! incidentally gives).
 
 pub mod cargo_telemetry;
 pub mod cargo_wrapper;
 pub mod clock;
+pub mod nim_telemetry;
 pub mod nim_wrapper;
 pub mod store;
 pub mod tracer;
@@ -224,6 +233,7 @@ pub fn run_and_record(
     let mut wrapping_note: Option<String> = None;
     let mut wrapping_kind: Option<&'static str> = None;
     let mut cargo_telemetry_requested = false;
+    let mut nim_telemetry_requested = false;
     if is_level0 {
         // no-op: Level 0 never wraps and never requests Level 2 telemetry
         // either -- both are extra instrumentation the baseline shouldn't
@@ -277,6 +287,15 @@ pub fn run_and_record(
                 ));
             }
         }
+        // Level 2 compiler telemetry for Nim (docs/measurement-foundation.md
+        // section 7): unlike Cargo, this needs no extra flag -- Nim's hint
+        // stream is on by default -- so it's simply parsed afterward from
+        // stderr.log (see nim_telemetry's module doc for why stderr, not
+        // stdout). Still gated on Level 1 for consistency with the Cargo
+        // adapter's "no Level 2 at the minimal baseline" story, even
+        // though parsing already-produced output costs the traced command
+        // nothing extra.
+        nim_telemetry_requested = true;
     }
 
     let tracer_wall_start = std::time::Instant::now();
@@ -292,6 +311,8 @@ pub fn run_and_record(
 
     let cargo_telemetry =
         cargo_telemetry_requested.then(|| cargo_telemetry::parse_cargo_json_messages(&stdout_path));
+    let nim_telemetry =
+        nim_telemetry_requested.then(|| nim_telemetry::parse_nim_hint_stream(&stderr_path));
 
     let run_ended_at_unix_ns = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -366,8 +387,8 @@ pub fn run_and_record(
                     known_gaps.push(note);
                 }
             }
-            match &cargo_telemetry {
-                Some(telemetry) => {
+            match (&cargo_telemetry, &nim_telemetry) {
+                (Some(telemetry), _) => {
                     known_gaps.push(format!(
                         "Level 2 compiler telemetry captured via Cargo's own --message-format=json \
                          ({} artifact(s) reported, {} fresh/cached); Level 3 platform profiler data \
@@ -384,7 +405,25 @@ pub fn run_and_record(
                             .to_string(),
                     );
                 }
-                None => {
+                (None, Some(telemetry)) => {
+                    known_gaps.push(format!(
+                        "Level 2 compiler telemetry captured by parsing Nim's own hint/verbosity \
+                         stream ({} module(s) reached C-codegen, linked={}) -- unlike Cargo's \
+                         --message-format=json, this has no documented stability contract from Nim \
+                         itself (see laminaria_run::nim_telemetry); Level 3 platform profiler data \
+                         is still not captured",
+                        telemetry.processed_modules.len(),
+                        telemetry.linked
+                    ));
+                    known_gaps.push(
+                        "artifact inventory (docs/measurement-foundation.md section 8) is not \
+                         captured for Nim builds -- Nim's hint stream reports module names \
+                         reaching C-codegen, not artifact file paths the way Cargo's \
+                         --message-format=json does"
+                            .to_string(),
+                    );
+                }
+                (None, None) => {
                     known_gaps.push(
                         "Level 2 compiler-native telemetry and Level 3 platform profiler data are \
                          not captured"
@@ -405,7 +444,12 @@ pub fn run_and_record(
         },
         compiler_telemetry: cargo_telemetry
             .as_ref()
-            .and_then(|t| serde_json::to_value(t).ok()),
+            .and_then(|t| serde_json::to_value(t).ok())
+            .or_else(|| {
+                nim_telemetry
+                    .as_ref()
+                    .and_then(|t| serde_json::to_value(t).ok())
+            }),
         artifact_delta: None,
         measurement_overhead: Some(MeasurementOverhead {
             probe_level,

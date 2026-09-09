@@ -265,3 +265,47 @@ pub struct CargoCompilerTelemetry {
     /// --message-format=json stream".
     pub unparsed_line_count: usize,
 }
+
+/// Level 2 compiler-native telemetry for a `nim c`/`nim cpp` build
+/// (`docs/measurement-foundation.md` section 7's "Nim / Nimony" adapter).
+/// A deliberately different shape from `CargoCompilerTelemetry` -- not
+/// shoehorned into the same struct -- because it comes from a
+/// structurally different source: Nim has no `--message-format=json`
+/// equivalent for compile-stage events (only `nim dump --dump.format:json`,
+/// a *separate*, static-config-only command, checked directly and found
+/// unrelated to per-build telemetry -- see `crate::nim_telemetry`'s module
+/// doc). This is parsed from Nim's human-oriented hint/verbosity output on
+/// **stderr** (Cargo's machine messages are on stdout -- a real,
+/// confirmed difference between the two toolchains' conventions, not an
+/// assumption carried over from the Cargo adapter), so it carries a
+/// materially weaker reliability claim: Nim makes no documented
+/// backward-compatibility promise about this output's exact text, unlike
+/// Cargo's `--message-format=json`, which is an explicit stable machine
+/// interface.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct NimCompilerTelemetry {
+    /// Module names from `hintCC` ("CC: <module>") lines, in the order
+    /// Nim's frontend processed them -- one per module that reached
+    /// C-codegen, not one per file Nim merely parsed/imported.
+    pub processed_modules: Vec<String>,
+    /// Whether a `hintLinking` ("Hint: ... [Link]") line was seen.
+    pub linked: bool,
+    /// From the final `hintSuccessX` summary line
+    /// (`compiler/lineinfos.nim`'s `hintSuccessX` format string,
+    /// `$loc lines; ${sec}s; $mem; proj: $project; out: $output`).
+    pub lines_compiled: Option<u64>,
+    /// Nim's own self-reported wall-clock compile time, from the same
+    /// summary line -- independent of this crate's own `wait4`/`Instant`
+    /// measurements, useful as a cross-check but not a replacement for
+    /// them (Nim's own clock, not this Run's monotonic clock).
+    pub self_reported_seconds: Option<f64>,
+    /// Peak memory in bytes, parsed from the summary line's
+    /// human-formatted size (`strutils.formatSize`, which picks
+    /// B/KiB/MiB/GiB depending on magnitude) back into a plain byte
+    /// count.
+    pub peak_mem_bytes: Option<u64>,
+    /// Lines from the traced command's stderr that this parser recognized
+    /// no hint category for -- explicit, not silently dropped, same
+    /// reasoning as `CargoCompilerTelemetry::unparsed_line_count`.
+    pub unrecognized_line_count: usize,
+}
