@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/fixture-core",
+    "crates/fixture-mid",
+    "crates/fixture-bin",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+publish = false

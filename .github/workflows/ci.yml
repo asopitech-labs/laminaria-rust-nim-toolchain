@@ -30,6 +30,29 @@ jobs:
         run: cargo run -p laminaria-cli -- doctor
         continue-on-error: true
 
+      - name: Install Nim
+        run: |
+          if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+            sudo apt-get update && sudo apt-get install -y nim
+          else
+            brew install nim
+          fi
+
+      # #11's first two committed "Core workloads" fixtures, built natively
+      # on each runner as evidence for #18's acceptance criterion that these
+      # tool subsets actually reproduce a build, not just resolve a version.
+      - name: Build rust-heavy-workspace fixture
+        run: |
+          cd fixtures/rust-heavy-workspace
+          cargo build --workspace
+          cargo run -q -p fixture-bin
+
+      - name: Build nim-heavy-workspace fixture
+        run: |
+          cd fixtures/nim-heavy-workspace
+          nim c -o:fixture_out src/fixture.nim
+          ./fixture_out
+
   # Exercises the "container" EnvironmentFingerprint class from a clean,
   # native (non-Rosetta) environment — see docker/bootstrap.Dockerfile for
   # why this is a bootstrap/correctness check, not a performance baseline.

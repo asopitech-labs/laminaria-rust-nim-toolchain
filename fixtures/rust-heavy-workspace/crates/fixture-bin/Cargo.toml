@@ -1,0 +1,13 @@
+[package]
+name = "fixture-bin"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "fixture-bin"
+path = "src/main.rs"
+
+[dependencies]
+fixture-core = { path = "../fixture-core" }
+fixture-mid = { path = "../fixture-mid" }

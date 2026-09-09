@@ -50,5 +50,12 @@ COPY . .
 
 RUN cargo build --workspace
 
+# Actually build #11's first two committed "Core workloads" fixtures here,
+# not just run doctor — this is the real evidence for #18's acceptance
+# criterion that a fresh environment can reproduce the tool subsets a
+# fixture needs, rather than an assertion about it.
+RUN cd fixtures/rust-heavy-workspace && cargo build --workspace && cargo run -q -p fixture-bin
+RUN cd fixtures/nim-heavy-workspace && nim c -o:fixture_out src/fixture.nim && ./fixture_out
+
 ENTRYPOINT ["cargo", "run", "-q", "-p", "laminaria-cli", "--"]
 CMD ["doctor"]
