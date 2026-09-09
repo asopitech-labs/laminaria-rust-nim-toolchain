@@ -215,6 +215,66 @@ attributing `rustc`/linker descendant work to the traced root command,
 not just measuring `cargo`'s own dispatch overhead (which is what the
 no-op number alone represents).
 
+## Nim's own analog to Cargo's RUSTC — studied from Nim's real compiler source, not assumed
+
+Extending per-invocation tracing to `nim c`/`nim cpp` builds meant first
+answering: does Nim have anything like Cargo's `RUSTC` env var? Checked
+against Nim's actual compiler source
+(`.reference/Nim/compiler/extccomp.nim`, cloned locally for exactly this
+kind of question — see that directory's own `README.md`), not assumed
+from general knowledge of `nim c`.
+
+Found the real mechanism: `getCompileCFileCmd` resolves the compiler
+executable as `getConfigVar(conf, c, ".exe")` first — a command-line/
+config-file override keyed on the *selected compiler's name*
+(`--<ccname>.exe:<path>`) — falling back to `getCompilerExe`'s `CC`/`CXX`
+env-var reading only when `--cc:env` is explicitly selected as the
+compiler itself. `getLinkCmd`'s linker resolution uses the identical
+mechanism with a `.linkerexe` suffix.
+
+**A real dead end, hit and diagnosed before the working approach, not
+skipped past**: `--cc:env` (the more obvious "just override CC" route)
+was tried first and produced a genuine compile error on this project's
+own `nim-heavy-workspace` fixture — `undeclared identifier:
+'atomicStoreN'` — because `ccEnv`'s command template is generic and
+lacks the clang-specific atomics-detection flags the normal `clang`
+profile supplies. `--clang.exe:<path>` (keeping the `clang` profile
+selected, only redirecting its executable) avoided this entirely and
+compiled/linked/ran correctly.
+
+`nim_wrapper.rs` sets both `--clang.exe`/`--clang.linkerexe` and
+`--gcc.exe`/`--gcc.linkerexe` unconditionally — only whichever Nim
+actually selected as `conf.cCompiler` is ever read (confirmed by reading
+`getConfigVar`'s implementation, which looks up only the currently
+selected compiler's name), so setting the unused profile's override is a
+harmless no-op, not a silent risk.
+
+**Better coverage than the Cargo/rustc case, for a structural reason, not
+extra effort**: because Nim's `.exe`/`.linkerexe` config vars separately
+cover compiling and linking, `laminaria-cc-wrapper` records the link step
+as its own `ProcessRecord` too — something the RUSTC-wrapper approach
+cannot do, since Cargo has no equivalent per-link-step hook and the
+linker's cost there only reaches `laminaria-run` by rolling up into
+whichever `rustc` invocation spawned it.
+
+Verified end-to-end, both locally and in CI (run `34345606184`, both
+platforms): tracing `nim c` on `nim-heavy-workspace` produces 10-11
+`ProcessRecord`s (platform-dependent: 11 on `ubuntu-latest` (gcc), 10 on
+`macos-latest` (clang) — the stdlib module set each platform's default
+compiler profile pulls in differs slightly), each with a distinct pid and
+populated resource usage, and the produced binary still runs correctly.
+
+**Compiler-real-path resolution, a named limitation**: the wrapper is
+told which real compiler to forward to via a single `cc`-on-`PATH`
+resolution, done once by `laminaria run` itself — correct exactly when
+`cc` matches whichever compiler Nim actually auto-selected (true for
+`gcc`-default Linux and `clang`-default macOS, this project's own two CI
+platforms), not a universal guarantee for an unusual cross-compilation
+setup where Nim might select a compiler `cc` on `PATH` doesn't match.
+Not silently assumed safe: if that mismatch ever happens, the wrapper
+would forward to the wrong binary — recorded here as a real, specific,
+not-yet-hit limitation rather than glossed over.
+
 ## What issue #19's acceptance criteria this crate satisfies today, and what it doesn't
 
 Checked against the issue's actual acceptance-criteria list, not a
@@ -222,18 +282,23 @@ paraphrase of it:
 
 - [x] Run/process schemas are versioned (`types::SCHEMA_VERSION`,
   carried in every `Run`).
-- [~] **Parent/child process relationships are preserved** — met for
-  Cargo/`rustc` builds specifically, via RUSTC-wrapper substitution (one
-  `ProcessRecord` per real `rustc` invocation, each with its own pid).
-  **Not** met generally: any non-Cargo root command (Nim builds, plain
-  shell commands, ...) still only gets the root command's own record,
-  with cumulative (not per-node) resource usage. The linker is also not
-  separately recorded even under Cargo (its cost rolls up into whichever
-  `rustc` invocation spawned it) — matching `rustc-fake`'s own accepted
-  scope, not a LAMINARIA-specific gap.
+- [~] **Parent/child process relationships are preserved** — met for both
+  toolchains this project actually targets: Cargo/`rustc` builds via
+  RUSTC-wrapper substitution (one `ProcessRecord` per real `rustc`
+  invocation; linker cost rolls up into whichever `rustc` spawned it,
+  matching `rustc-fake`'s own accepted scope), and `nim c`/`nim cpp`
+  builds via CC-wrapper substitution (one `ProcessRecord` per C/C++
+  compiler invocation *and* the link step separately — better coverage
+  than the Cargo case, a structural consequence of Nim's `.exe`/
+  `.linkerexe` config vars covering compile and link independently, not
+  extra implementation effort). **Not** met generally: any other root
+  command (plain shell commands, other build tools) still only gets the
+  root command's own record, with cumulative (not per-node) resource
+  usage — no OS-level process-tree walking exists as a fallback for the
+  fully general case.
 - [x] Major wall/CPU/memory/I/O fields are captured where the host
-  exposes them (per-`rustc`-invocation under Cargo; root-command-cumulative
-  otherwise).
+  exposes them (per-invocation under Cargo/rustc and Nim c/cpp;
+  root-command-cumulative otherwise).
 - [x] Missing platform fields are explicit null/unsupported states, not
   fabricated zeros (`ResourceUsage::unsupported_fields`).
 - [x] All events can be correlated to one monotonic Run clock
