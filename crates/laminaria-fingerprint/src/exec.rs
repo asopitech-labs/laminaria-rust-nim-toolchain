@@ -23,6 +23,26 @@ pub fn run(cmd: &str, args: &[&str]) -> Option<String> {
     Some(stdout)
 }
 
+/// Expands a leading `~` or `~/...` to `$HOME`, since TOML config values are
+/// not shell-expanded and lock files (e.g. a `bin_dir` pointing at a
+/// `choosenim` toolchain directory) read more naturally with `~` than a
+/// hardcoded absolute home path.
+pub fn expand_tilde(path: &Path) -> PathBuf {
+    let Some(s) = path.to_str() else {
+        return path.to_path_buf();
+    };
+    if let Some(rest) = s.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home).join(rest);
+        }
+    } else if s == "~" {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home);
+        }
+    }
+    path.to_path_buf()
+}
+
 /// Resolves the absolute path of an executable on `PATH`, without relying on
 /// a shell built-in that may not exist on every platform.
 pub fn which(name: &str) -> Option<PathBuf> {
@@ -126,5 +146,38 @@ mod tests {
     #[test]
     fn first_line_trims_and_takes_only_the_first_line() {
         assert_eq!(first_line("  first  \nsecond\nthird"), "first");
+    }
+
+    #[test]
+    fn expand_tilde_expands_home_relative_paths() {
+        // SAFETY: this test module runs single-threaded within the crate's
+        // test binary; no other test reads/writes HOME concurrently.
+        unsafe {
+            std::env::set_var("HOME", "/Users/example");
+        }
+        assert_eq!(
+            expand_tilde(Path::new("~/.choosenim/toolchains/nim-2.2.10/bin")),
+            PathBuf::from("/Users/example/.choosenim/toolchains/nim-2.2.10/bin")
+        );
+        assert_eq!(
+            expand_tilde(Path::new("~")),
+            PathBuf::from("/Users/example")
+        );
+    }
+
+    #[test]
+    fn expand_tilde_leaves_absolute_paths_untouched() {
+        assert_eq!(
+            expand_tilde(Path::new("/opt/nimony/bin")),
+            PathBuf::from("/opt/nimony/bin")
+        );
+    }
+
+    #[test]
+    fn expand_tilde_leaves_paths_without_a_leading_tilde_untouched() {
+        assert_eq!(
+            expand_tilde(Path::new("relative/nim-tilde~in-name/bin")),
+            PathBuf::from("relative/nim-tilde~in-name/bin")
+        );
     }
 }

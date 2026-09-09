@@ -10,7 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::exec::{extract_version_like, first_line, run, sha256_file, which};
+use crate::exec::{expand_tilde, extract_version_like, first_line, run, sha256_file, which};
 use crate::lock::NimToolchainSelector;
 use crate::types::{ExecutableIdentity, NimToolchainFingerprint};
 
@@ -92,6 +92,7 @@ pub fn resolve(logical_name: &str, selector: &NimToolchainSelector) -> NimToolch
 }
 
 fn resolve_from_bin_dir(dir: &Path, notes: &mut Vec<String>) -> (Option<PathBuf>, Option<PathBuf>) {
+    let dir = expand_tilde(dir);
     let nim = dir.join("nim");
     let nimble = dir.join("nimble");
     let nim = if nim.is_file() {

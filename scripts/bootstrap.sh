@@ -64,9 +64,53 @@ PY
 fi
 echo
 
-echo "Nim"
-check "nim" nim "brew install nim"
-check "nimble" nimble "brew install nim"
+echo "Nim toolchain manager"
+CHOOSENIM_CMD="$(command -v choosenim || true)"
+if [[ -z "$CHOOSENIM_CMD" && -x "$HOME/.nimble/bin/choosenim" ]]; then
+  CHOOSENIM_CMD="$HOME/.nimble/bin/choosenim"
+fi
+if [[ -n "$CHOOSENIM_CMD" ]]; then
+  ok "choosenim ($CHOOSENIM_CMD found)"
+else
+  note "choosenim missing. Install with: curl https://nim-lang.org/choosenim/init.sh -sSf | sh -s -- -y"
+  missing=1
+  if [[ "$INSTALL" == "1" ]]; then
+    curl https://nim-lang.org/choosenim/init.sh -sSf | sh -s -- -y
+    CHOOSENIM_CMD="$HOME/.nimble/bin/choosenim"
+  fi
+fi
+
+# Every [nim.toolchains.*] entry whose bin_dir points into a choosenim
+# toolchain directory is installed/verified through choosenim, the same way
+# rustup pins exact Rust toolchains above — this is what lets bootstrap
+# reproduce an exact Nim version instead of depending on whatever a system
+# package manager happens to have installed. Reported even when choosenim
+# itself is still missing, so the gap is visible in report-only mode too.
+while IFS=$'\t' read -r selector bin_dir; do
+  [[ -z "$selector" || "$bin_dir" != *".choosenim/toolchains/"* ]] && continue
+  expanded_bin_dir="${bin_dir/#\~/$HOME}"
+  if [[ -x "$expanded_bin_dir/nim" ]]; then
+    ok "nim toolchain '$selector' installed at $expanded_bin_dir"
+  else
+    note "nim toolchain '$selector' not installed at $expanded_bin_dir. Install with: choosenim --yes $selector"
+    missing=1
+    if [[ "$INSTALL" == "1" && -n "$CHOOSENIM_CMD" && -x "$CHOOSENIM_CMD" ]]; then
+      "$CHOOSENIM_CMD" --yes "$selector"
+    fi
+  fi
+done < <(python3 - "$REPO_ROOT/toolchains.lock.toml" <<'PY'
+import sys, tomllib
+with open(sys.argv[1], "rb") as f:
+    data = tomllib.load(f)
+for entry in data.get("nim", {}).get("toolchains", {}).values():
+    print(f"{entry['selector']}\t{entry.get('bin_dir', '')}")
+PY
+)
+
+# Any Nim toolchain entry without a choosenim bin_dir still falls back to
+# whatever nim/nimble are active on PATH (see nim_toolchain.rs).
+check "nim (PATH fallback)" nim "brew install nim"
+check "nimble (PATH fallback)" nimble "brew install nim"
 echo
 
 echo "Backend / target tools"
