@@ -54,6 +54,43 @@ pub extern "C" fn rust_transform(x: i32) -> i32 {
     x.wrapping_mul(2).wrapping_add(1)
 }
 
+// --- Type/layout matrix: C-style enums (discriminant only, no payload).
+// Under the hood this is just a fixed-width integer, not an aggregate
+// -- the hypothesis is that it therefore avoids the whole "small
+// struct" ABI-classification bug class found for Point earlier (see
+// direct-native-link/NOTES.md), since it never becomes a multi-field
+// register-classification question on either side. Verified, not
+// assumed, in both directions: Rust returns one, Rust accepts one.
+
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Status {
+    Ok = 0,
+    Warning = 1,
+    Error = 2,
+}
+
+/// Returns an enum by value -- the enum-equivalent of `rust_point_translate`'s
+/// by-value struct return, which is broken on `nlvm`. Tests whether the
+/// same is true for a bare discriminant.
+#[no_mangle]
+pub extern "C" fn rust_classify(x: i32) -> Status {
+    if x < 0 {
+        Status::Error
+    } else if x == 0 {
+        Status::Warning
+    } else {
+        Status::Ok
+    }
+}
+
+/// Accepts an enum by value -- the enum-equivalent of `rust_point_sum`'s
+/// by-value struct argument.
+#[no_mangle]
+pub extern "C" fn rust_status_code(s: Status) -> i32 {
+    s as i32
+}
+
 // --- Issue #4 Layer 2/3 feasibility: fixed-layout struct and pointer
 // round-trips, extending past #11's own Layer-1-only scope above. See
 // `NOTES.md` for the methodology and results, and
@@ -243,6 +280,20 @@ mod tests {
     #[test]
     fn calls_callback_known_value() {
         assert_eq!(rust_calls_callback(double_it, 21), 42);
+    }
+
+    #[test]
+    fn classify_known_values() {
+        assert_eq!(rust_classify(5), Status::Ok);
+        assert_eq!(rust_classify(0), Status::Warning);
+        assert_eq!(rust_classify(-1), Status::Error);
+    }
+
+    #[test]
+    fn status_code_known_values() {
+        assert_eq!(rust_status_code(Status::Ok), 0);
+        assert_eq!(rust_status_code(Status::Warning), 1);
+        assert_eq!(rust_status_code(Status::Error), 2);
     }
 
     // Deliberately no #[should_panic] test here: it wouldn't work, and

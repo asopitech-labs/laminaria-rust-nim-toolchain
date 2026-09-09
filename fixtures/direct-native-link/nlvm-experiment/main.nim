@@ -91,6 +91,35 @@ block pointerMutateInPlace:
   doAssert p.x == 15 and p.y == 20,
     "pointer-to-Point mutation drifted from the committed reference value"
 
+type Status {.size: sizeof(cint).} = enum
+  sOk = 0
+  sWarning = 1
+  sError = 2
+
+proc rust_classify(x: cint): Status {.importc: "rust_classify", cdecl.}
+proc rust_status_code(s: Status): cint {.importc: "rust_status_code", cdecl.}
+
+block enumRoundTrip:
+  ## A bare-discriminant C-style enum crosses the boundary as a plain
+  ## integer, not an aggregate -- the hypothesis is that this sidesteps
+  ## the by-value-struct ABI bug class entirely on nlvm, unlike `Point`
+  ## above. Asserted (not just reported) because if this is wrong, it's
+  ## as fatal a finding for the type/layout matrix as the struct cases
+  ## were, and should stop the run rather than be silently swallowed.
+  let ok = rust_classify(5)
+  let warning = rust_classify(0)
+  let error = rust_classify(-1)
+  echo "classify: ok=", ok, " warning=", warning, " error=", error
+  doAssert ok == sOk and warning == sWarning and error == sError,
+    "rust_classify results drifted from the committed reference values"
+
+  let okCode = rust_status_code(sOk)
+  let warningCode = rust_status_code(sWarning)
+  let errorCode = rust_status_code(sError)
+  echo "status_code: ok=", okCode, " warning=", warningCode, " error=", errorCode
+  doAssert okCode == 0 and warningCode == 1 and errorCode == 2,
+    "rust_status_code results drifted from the committed reference values"
+
 echo "all non-fatal nlvm-route Layer 1-3 experiments completed"
 
 # --- Porting ../nim-bin/main.nim's seq/Vec pointer-resolution and

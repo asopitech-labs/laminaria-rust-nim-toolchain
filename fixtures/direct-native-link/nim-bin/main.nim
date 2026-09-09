@@ -17,6 +17,35 @@ let result = rust_transform(Input)
 echo "result=", result
 doAssert result == Expected, "rust_transform result drifted from the committed reference value"
 
+# --- Type/layout matrix: C-style enums (discriminant only, no
+# payload). Under the hood this is just a fixed-width integer, not an
+# aggregate -- tests whether it avoids the "small struct" ABI-
+# classification bug class found for Point below, in both directions
+# (Rust returns one, Rust accepts one).
+
+type Status {.size: sizeof(cint).} = enum
+  sOk = 0
+  sWarning = 1
+  sError = 2
+
+proc rust_classify(x: cint): Status {.importc: "rust_classify", cdecl.}
+proc rust_status_code(s: Status): cint {.importc: "rust_status_code", cdecl.}
+
+block enumRoundTrip:
+  let ok = rust_classify(5)
+  let warning = rust_classify(0)
+  let error = rust_classify(-1)
+  echo "classify: ok=", ok, " warning=", warning, " error=", error
+  doAssert ok == sOk and warning == sWarning and error == sError,
+    "rust_classify results drifted from the committed reference values"
+
+  let okCode = rust_status_code(sOk)
+  let warningCode = rust_status_code(sWarning)
+  let errorCode = rust_status_code(sError)
+  echo "status_code: ok=", okCode, " warning=", warningCode, " error=", errorCode
+  doAssert okCode == 0 and warningCode == 1 and errorCode == 2,
+    "rust_status_code results drifted from the committed reference values"
+
 # --- Issue #4 Layer 2/3 feasibility: fixed-layout struct and pointer
 # round-trips, extending past #11's own Layer-1-only scope above. See
 # ../NOTES.md for the methodology and results.
