@@ -141,6 +141,8 @@ Later research may extend these schemas with backend-specific data, but must not
 
 The horizontal-distribution charter compares object-level, LLVM-derived backend-level and action-level remote partitions. #6 owns placement/resource accounting, #7 owns identity/invalidation/reuse, #13 owns logical/checkpoint/execution boundary economics, #14–#17 supply LLVM/ThinLTO/WASM baselines, and #25 owns the independent semantic-fact-derived partition. Remote execution is evidence about placement and cost; it must not silently become a new semantic substrate or hidden scheduler.
 
+Persistence is part of that decision. #7 must distinguish logical artifacts from physical replicas and compare keeping, materializing, replicating, transferring and recomputing them across memory, local storage, peer caches and remote durable stores. The relevant cost includes CPU, memory, storage I/O, network I/O, serialization, hashing, consistency, recovery and retention—not only cache-hit rate.
+
 ## Tool UX rule
 
 Tool UX is a first-class project objective, not only CLI cosmetics.

@@ -111,6 +111,8 @@ worktree、CI checkout、互換machine間で同一計算を再利用できるか
 
 cache hitだけでなく、なぜ再利用できたか／できなかったかを説明可能にする。また、artifact reuseとwork elimination/no-opは別の効果として測定する。
 
+永続化とmaterializationは固定されたlocal disk実装ではなく、schedulingの判断である。logical artifact identityとphysical replicaを分離し、memory上のephemeral state、local NVMe、peer cache、remote CAS/object storage、durable archiveの間で、どこにいつ保存するかを決める。intermediateは、reuse、recovery、locality、parallelismの期待利益が、recomputation、serialization、hashing、transfer、storage、consistencyのコストを上回る場合だけmaterializeまたはreplicateする。placement、replica lineage、retention/GC、commit状態、failure recovery、residency constraintをevidenceに記録する。
+
 backend checkpoint identityでは、入力artifactだけでなくtoolchain version、target/data layout/features、optimization/pass pipeline、LTO、profile input、debug、plugin等のsemantically relevantな設定を含める。
 
 ## 研究トラックF — Variant Explosion Control

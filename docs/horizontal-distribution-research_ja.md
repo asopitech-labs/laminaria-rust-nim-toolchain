@@ -175,7 +175,27 @@ candidate partition manifestには少なくとも次を持たせる。
 
 表現が一つのIR、複数IR、typed fact set、graph relation、analysis database、hybridのいずれになるかは、workload evidenceから決める。
 
-## 6. 研究上の問い
+## 6. Persistenceとmaterializationもpartition判断に含める
+
+永続化を「すべてのintermediateをlocal diskへ書くこと」とモデル化しない。logical artifactとphysical replicaは別のobjectである。候補storage tierは次の通り。
+
+- memoryまたはprocess-local state
+- local SSD/NVMe
+- peerまたはworker-local cache
+- remote CAS/object storage
+- durable archive storage
+
+schedulerはintermediateを保持、materialize、replicate、transfer、recomputeのどれにするかを選ぶ。判断要因はreuse probability、recovery value、data locality、capacity、serialization/hash cost、transfer bandwidth/latency、storage bandwidth/latency、consistency/commit cost、failure riskである。大きなtransferではnetwork pathが古いlocal HDDより速い場合があるが、小さなI/Oのlatency、availability、coordinationによって逆転することもある。したがってlocalityはprefer ruleではなく、測定対象である。
+
+persistence recordでは次を分離する。
+
+- logical artifact identity、semantic/provenance identity、compatibility
+- physical replicaのlocationとworker/storage capability
+- replica lineage、complete/commit state、retention/GC、recovery status
+- serialize、hash、write、read、upload、download、recomputeしたbytes
+- persistence、transfer、recomputeを選んだ理由の説明
+
+## 7. 研究上の問い
 
 1. 独立したRust/Nim backend workを可能にする最小global fact setは何か。
 2. semantic informationをbackend-specific IRへlowerする前にpartitionを定義できるか。
@@ -187,8 +207,10 @@ candidate partition manifestには少なくとも次を持たせる。
 8. nested compiler/backend schedulerがglobal schedulerと競合しないようにできるか。
 9. どの境界がlogical、observation、checkpoint、execution、dynamic expansion boundaryなのか。
 10. LLVM/Kbuild/Bazelのどの設計判断がLAMINARIAにも必要で、どれがbackend固有・歴史的選択なのか。
+11. remote persistenceがlocal persistenceまたはrecomputationより安く有用になる条件は何か。
+12. どのintermediateをvertical integrationの中でephemeralに保ち、どれをhorizontal materializationするべきか。
 
-## 7. 反証可能な仮説
+## 8. 反証可能な仮説
 
 ### H1 — coarse translation-unit分散はbaselineとして有効
 
@@ -210,7 +232,7 @@ remote resultの再利用にはproducer、compiler/backend version、target/data
 
 LLVM pass、細かなsemantic relation、tiny artifactまで分割すると、locality低下、serialization/scheduler overhead、optimization quality低下が起きる。少なくとも一つのover-fine candidateを測定して却下する。
 
-## 8. Workloadと実験
+## 9. Workloadと実験
 
 ### Experiment 0 — Kbuild-shaped object DAG
 
@@ -236,7 +258,7 @@ local semantic edit、Rust/Nim boundary変更、generated-header/config変更、
 
 worker削除、worker速度差、compiler identity変更、missing input、backend job interruptionを試す。fail closedまたは明示的fallbackにする。黙ったlocal rebuildはdistributed execution成功とみなさない。
 
-## 9. 必須証拠
+## 10. 必須証拠
 
 - exact source revisionとsemantic workload contract
 - Rust/Nim/frontend/backend/compiler/linker/toolchain identity
@@ -252,7 +274,7 @@ worker削除、worker速度差、compiler identity変更、missing input、backe
 - semantic informationのretained/transformed/lost記録
 - negative result、fallback、未解決obligation
 
-## 10. 完了条件
+## 11. 完了条件
 
 Linux kernelまたはLLVM ThinLTOのbuildが複数machineで動くだけでは完了としない。
 
@@ -267,7 +289,7 @@ Linux kernelまたはLLVM ThinLTOのbuildが複数machineで動くだけでは�
 9. hidden nested compiler schedulerではなくglobal schedulerがworker resource useを計上した証拠
 10. reproducible command、fixture、committed machine-readable evidence
 
-## 11. 既存研究trackとの関係
+## 12. 既存研究trackとの関係
 
 - **#6 Scheduler:** global resource-aware placementとexecution accounting
 - **#7 CAS/invalidation:** remote input/outputのidentityとreuse policy
@@ -277,7 +299,7 @@ Linux kernelまたはLLVM ThinLTOのbuildが複数machineで動くだけでは�
 - **#17 Rust/Nim LLVM convergence:** lowered artifact compatibility evidenceを供給するがfinal common substrateではない
 - **#25 LLVM rediscovery:** distributed partitionをLLVM-derived、semantic-fact-derived、hybridのどれにするか決める
 
-## 12. 非目標
+## 13. 非目標
 
 - 全compiler passをremote processにすること
 - remote speedupをcommon semantic substrateの証明とすること

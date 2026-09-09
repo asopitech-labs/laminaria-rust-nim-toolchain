@@ -98,6 +98,8 @@ Exclude physical checkout paths where not semantically relevant. Backend checkpo
 
 Distinguish artifact reuse from work elimination/no-op behavior.
 
+Persistence and materialization are scheduling decisions, not a fixed local-disk implementation. Separate logical artifact identity from physical replicas across in-memory state, local NVMe, peer caches, remote CAS/object storage and durable archives. Materialize or replicate an intermediate only when the expected value of reuse, recovery, locality or parallelism exceeds recomputation, serialization, hashing, transfer, storage and consistency costs. Record placement, replica lineage, retention/GC, commit status, failure recovery and residency constraints as part of the evidence.
+
 ## Track F — Variant-space control
 
 Avoid eagerly materializing:

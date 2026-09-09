@@ -179,7 +179,27 @@ A candidate partition manifest should identify, at minimum:
 
 The representation may be one IR, multiple IRs, typed fact sets, graph relations, analysis databases, or a hybrid. The experiment must decide this from workload evidence.
 
-## 6. Research questions
+## 6. Persistence and materialization are part of the partition decision
+
+Do not model persistence as “write every intermediate to the local disk.” A logical artifact and its physical replicas are different objects. Candidate storage tiers include:
+
+- in-memory or process-local state;
+- local SSD/NVMe;
+- peer or worker-local cache;
+- remote CAS/object storage;
+- durable archival storage.
+
+The scheduler should choose whether to keep, materialize, replicate, transfer or recompute an intermediate. The decision depends on reuse probability, recovery value, data locality, capacity, serialization/hash cost, transfer bandwidth/latency, storage bandwidth/latency, consistency/commit cost and failure risk. A network path may beat an older local HDD for large transfers, but small I/O latency, availability and coordination can reverse that result. Locality is therefore a measured variable, not a preference rule.
+
+The persistence record must separate:
+
+- logical artifact identity, semantic/provenance identity and compatibility;
+- physical replica locations and worker/storage capabilities;
+- replica lineage, completeness, commit state, retention/GC and recovery status;
+- bytes serialized, hashed, written, read, uploaded, downloaded and recomputed;
+- the explanation for choosing persistence, transfer or recomputation.
+
+## 7. Research questions
 
 1. What is the smallest global fact set that permits independent Rust/Nim backend work?
 2. Can a partition be defined before lowering semantic information into a backend-specific IR?
@@ -191,8 +211,10 @@ The representation may be one IR, multiple IRs, typed fact sets, graph relations
 8. Can LAMINARIA prevent nested compiler/backend schedulers from competing with the global scheduler?
 9. Which boundaries are logical, observation, checkpoint, execution or dynamic-expansion boundaries?
 10. Which LLVM/Kbuild/Bazel design choices are independently necessary for LAMINARIA, and which are historical or backend-specific choices?
+11. When is remote persistence cheaper or more useful than local persistence or recomputation?
+12. Which intermediate artifacts should remain vertically integrated and ephemeral, and which deserve horizontal materialization?
 
-## 7. Falsifiable hypotheses
+## 8. Falsifiable hypotheses
 
 ### H1 — Coarse translation-unit distribution is a useful baseline
 
@@ -214,7 +236,7 @@ A reusable remote result must include producer, compiler/backend version, target
 
 Splitting by LLVM pass, small semantic relation or tiny generated artifact eventually loses locality, increases serialization and scheduling overhead, or changes optimization quality. At least one over-fine candidate must be measured and rejected.
 
-## 8. Workloads and experiments
+## 9. Workloads and experiments
 
 ### Experiment 0 — Kbuild-shaped object DAG
 
@@ -256,7 +278,7 @@ Measure which remote jobs are avoided, which are reused, which are invalidated a
 
 Remove workers, vary worker speed, change compiler identity, inject a missing input, and interrupt a backend job. The result must fail closed or use an explicit documented fallback; silent local rebuilding is not equivalent to successful distributed execution.
 
-## 9. Required evidence
+## 10. Required evidence
 
 - exact source revisions and semantic workload contracts;
 - exact Rust/Nim/frontend/backend/compiler/linker/toolchain identities;
@@ -272,7 +294,7 @@ Remove workers, vary worker speed, change compiler identity, inject a missing in
 - semantic information retained, transformed and lost;
 - negative results, fallbacks and unresolved obligations.
 
-## 10. Completion criteria
+## 11. Completion criteria
 
 This research is not complete when a Linux kernel or LLVM ThinLTO build merely runs on multiple machines.
 
@@ -289,7 +311,7 @@ Completion requires:
 9. evidence that the global scheduler, not a hidden nested compiler scheduler, accounts for worker resource use;
 10. reproducible commands, fixtures and committed machine-readable evidence.
 
-## 11. Relation to existing research tracks
+## 12. Relation to existing research tracks
 
 - **#6 Scheduler:** owns global resource-aware placement and execution accounting.
 - **#7 CAS/invalidation:** owns identity and reuse policy for remote inputs and outputs.
@@ -299,7 +321,7 @@ Completion requires:
 - **#17 Rust/Nim LLVM convergence:** supplies lowered-artifact compatibility evidence, not the final common substrate.
 - **#25 LLVM rediscovery:** decides whether the distributed partition should be LLVM-derived, semantic-fact-derived, or a hybrid.
 
-## 12. Non-goals
+## 13. Non-goals
 
 - claiming that every compiler pass should become a remote process;
 - treating remote execution speedup as proof of a common semantic substrate;
