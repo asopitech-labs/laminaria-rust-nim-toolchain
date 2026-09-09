@@ -195,6 +195,43 @@ jobs:
           diff <(jq -S . "runs/$RUN_ID/summary.json") <(jq -S . /tmp/regenerated-summary.json)
           echo "regenerated summary.json matches the file laminaria-cli wrote on disk"
 
+      # Issue #19 Experiment 6: minimal (Level 0) vs resource-traced
+      # (Level 1) modes must be comparable for observer overhead
+      # (docs/measurement-foundation.md section 12). Checked here on a CI
+      # runner too, not just this project's own dev machine -- confirms
+      # --probe-level level0 actually skips resource accounting (every
+      # resource_usage field null) and Cargo/Nim wrapper substitution
+      # (process_trace has exactly one record, the root), and reports the
+      # measured overhead delta for this run's environment.
+      - name: Compare Level 0 vs Level 1 tracer overhead (issue #19 Experiment 6)
+        run: |
+          cargo run -q -p laminaria-cli -- run \
+            --workload-id overhead-check --scenario-id level0 --runs-root runs --probe-level level0 --json \
+            -- cargo build --manifest-path fixtures/rust-heavy-workspace/Cargo.toml --workspace \
+            > /tmp/level0-run.json
+          cargo run -q -p laminaria-cli -- run \
+            --workload-id overhead-check --scenario-id level1 --runs-root runs --probe-level level1 --json \
+            -- cargo build --manifest-path fixtures/rust-heavy-workspace/Cargo.toml --workspace \
+            > /tmp/level1-run.json
+          LEVEL0_PROCESS_COUNT=$(jq '.process_trace.processes | length' /tmp/level0-run.json)
+          [ "$LEVEL0_PROCESS_COUNT" = "1" ] || {
+            echo "expected Level 0 to skip wrapper substitution entirely (1 process record), got $LEVEL0_PROCESS_COUNT"
+            exit 1
+          }
+          LEVEL0_CPU_NULL=$(jq -r '.process_trace.processes[0].resource_usage.user_cpu_seconds' /tmp/level0-run.json)
+          [ "$LEVEL0_CPU_NULL" = "null" ] || {
+            echo "expected Level 0 resource_usage.user_cpu_seconds to be null (deliberately not measured), got $LEVEL0_CPU_NULL"
+            exit 1
+          }
+          LEVEL0_OVERHEAD=$(jq -r '.measurement_overhead.probe_level' /tmp/level0-run.json)
+          [ "$LEVEL0_OVERHEAD" = "level0_lifecycle" ] || {
+            echo "expected measurement_overhead.probe_level == level0_lifecycle, got $LEVEL0_OVERHEAD"
+            exit 1
+          }
+          LEVEL0_SECONDS=$(jq -r '.measurement_overhead.tracer_overhead_seconds' /tmp/level0-run.json)
+          LEVEL1_SECONDS=$(jq -r '.measurement_overhead.tracer_overhead_seconds' /tmp/level1-run.json)
+          echo "tracer_overhead_seconds: level0=$LEVEL0_SECONDS level1=$LEVEL1_SECONDS"
+
       - name: Build rust-nim-c-abi-baseline fixture
         run: |
           cd fixtures/rust-nim-c-abi-baseline/rust-bin
