@@ -274,6 +274,87 @@ attributing `rustc`/linker descendant work to the traced root command,
 not just measuring `cargo`'s own dispatch overhead (which is what the
 no-op number alone represents).
 
+## Level 2 compiler telemetry for Cargo — Cargo's own JSON messages, studied from Cargo's real source
+
+`docs/measurement-foundation.md` section 7 names "Cargo JSON messages may
+assist artifact/process relationships" as the concrete Level 2 adapter
+for Rust/Cargo. Studied from Cargo's actual source
+(`.reference/cargo/src/util/machine_message.rs`) before implementing
+anything: the `Message` trait and its `Artifact`/`FromCompiler`/
+`BuildScript`/`BuildFinished` structs are the real, canonical schema
+`--message-format=json` emits — not reconstructed from documentation.
+
+Two fields turned out to matter well beyond "assist artifact/process
+relationships":
+
+- `Artifact.filenames`: the real, Cargo-reported paths of every artifact
+  a compilation unit produced. Directly relevant to section 8's artifact
+  inventory — though only partially: no size, content digest, or
+  create/change/delete state, since this crate doesn't diff filesystem
+  state before/after the Run. Recorded as a partial contribution, not
+  conflated with a completed artifact inventory (`known_gaps` says so
+  explicitly on every Run with telemetry).
+- `Artifact.fresh`: a **per-crate** boolean, straight from Cargo's own
+  dependency-freshness check — not inferred or derived by this crate at
+  all. This is a precise section-10 cache-state signal, strictly better
+  than the whole-build CPU-time heuristic used elsewhere in this
+  project (the cold-vs-no-op CPU comparison above): it answers "was
+  *this specific crate* rebuilt," not "did the aggregate CPU cost look
+  small."
+
+### `--message-format=json` is not safe to inject unconditionally — checked, not assumed
+
+`cargo clean --message-format=json` genuinely errors:
+`unexpected argument '--message-format' found`. Checked directly (along
+with `build`, `check`, `doc`, all of which accept the flag cleanly)
+before deciding on an allowlist (`cargo_telemetry::CARGO_MESSAGE_FORMAT_SUBCOMMANDS`)
+rather than injecting the flag for every Cargo invocation. `test`/`run`/
+`bench` are included in the allowlist on the reasoning that they share
+Cargo's compilation path with `build`/`check`, but were not independently
+run and checked the same way — noted as an assumption, not presented as
+equally verified.
+
+### Cargo writes these messages to stdout specifically — confirmed by observation, not by reading a spec
+
+No new capture mechanism was needed: `tracer::trace_root_command` already
+writes the traced command's stdout to `stdout.log`, and inspecting that
+file after enabling `--message-format=json` showed clean JSON lines with
+no interleaved human-readable "Compiling .../Finished ..." text (that
+goes to stderr, captured separately, unparsed by this crate). Confirmed
+by direct observation of the actual file contents, not by trusting that
+Cargo's stdout/stderr split matches every other CLI tool's convention.
+
+### Two real bugs caught by this module's own tests, not shipped silently
+
+- `should_inject_message_format`'s first implementation looked for "the
+  first argument not starting with `-`" as the subcommand, which matched
+  a *flag's value* (e.g. the `x` in `--manifest-path x check`) before the
+  real subcommand. Caught by a test exercising exactly that argument
+  order, which failed on first run. Fixed by simplifying to `args[0]`
+  (matches this crate's own actual call pattern, `laminaria run --
+  cargo <subcommand> ...`, subcommand always first) and documenting the
+  narrower, less general behavior explicitly rather than fixing it to be
+  fully general.
+- The test helper generating temp file paths derived the filename from
+  the number of lines written; two different tests that happened to write
+  the same number of lines got the same path, and running in parallel
+  (the default), one clobbered the other's file mid-test — a nondeterministic
+  failure, not a consistent one, caught by the test suite failing on one
+  run's `cargo test` invocation. Fixed with an atomic counter alongside the
+  process id, not just accepting one test file per `#[test]` "seems
+  probably fine."
+
+### Verified end-to-end on the real fixture, both cold and no-op, then in CI on both platforms
+
+```
+cold build:      3 artifacts reported, 0 fresh, build_finished_success=true
+true-noop rebuild: 3 artifacts reported (same 3 crates), 3 fresh
+```
+
+Confirmed identically in CI (run `34348892499`) on both `ubuntu-latest`
+and `macos-latest`: `Level 2 compiler telemetry: cold 0/3 fresh,
+true-noop 3/3 fresh` on both.
+
 ## Nim's own analog to Cargo's RUSTC — studied from Nim's real compiler source, not assumed
 
 Extending per-invocation tracing to `nim c`/`nim cpp` builds meant first
