@@ -838,3 +838,77 @@ backend/config-only, link-only, worktree-relocation, and every
 ThinLTO/Wasm scenario remain unimplemented; the noise-floor comparison
 itself is a fixed stddev multiplier, not a rigorous statistical test (no
 confidence interval, no small-sample correction).
+
+## Issues #7/#12's first slice: minimal reuse-decision core (`reuse.rs`)
+
+**Status: one independently-reviewable slice of two large [Research]
+issues, not either issue as a whole.** #7 and #12 combine for 23
+acceptance criteria spanning CAS storage, cross-toolchain-version policy,
+heterogeneous hosts, ThinLTO/Wasm reuse, and persistence tiers -- none of
+that is attempted here. This slice answers exactly one question: **given
+two Runs of the same logical scenario, can LAMINARIA decide "this
+artifact is reusable" vs. "this must rebuild," with the decision
+explained from identity differences.**
+
+### What it does
+
+`ArtifactIdentityKey`: source content digest (every file under given
+source roots, content-hashed -- not mtime-based), the resolved
+toolchain's own executable digest (`ExecutableIdentity::digest_sha256`,
+reused directly from issue #18/#19's already-captured
+`ToolchainReport`, not re-derived), a caller-supplied logical command
+identity, and target/host identity. `decide_reuse` compares two keys and
+returns `Reusable` or `MustRebuild { reasons }` -- every difference is
+named, never a bare yes/no, and an *unresolved* toolchain digest
+(`None`) is always treated as a difference, even against another `None`
+-- issue #7's own "fail closed when unknown" rule, applied literally
+rather than only documented.
+
+### Verified against a real (copied, never the tracked) `rust-heavy-workspace` fixture
+
+Ran cold build -> true no-op -> a `touch`-only edit -> a real content
+edit, computing an `ArtifactIdentityKey` after each:
+
+- Cold vs. true no-op: `Reusable` (identical source/toolchain/command/
+  target).
+- Cold vs. `touch`-only edit (mtime bumped, content byte-identical):
+  **also `Reusable`** by LAMINARIA's content-based decision -- verified
+  as a genuine divergence, not a testing artifact, by confirming via the
+  Run's own `artifact_delta` (issue #20's module) that the touch *did*
+  trigger real Cargo rebuild output (a Created/Modified artifact under
+  `target/`). This is the concrete evidence issue #12 asks for: Cargo's
+  own mtime-based invalidation did unnecessary work here that a
+  content-based reuse decision would have skipped.
+- Cold vs. a real content edit: `MustRebuild`, with `reasons` explicitly
+  naming "source content digest differs."
+
+### A real test-authoring finding, worth keeping
+
+The first version of this same test asserted the touch triggered a
+rebuild by checking `process_trace.processes.len() > 1` -- and failed,
+showing exactly 1 process record for a build that (confirmed separately
+via the CLI) really did recompile a crate. Cause: `cargo_wrapper.rs`'s
+`find_rustc_wrapper_binary` looks for `laminaria-rustc-wrapper` next to
+`std::env::current_exe()`; inside `cargo test`, that's the test binary
+itself, not `laminaria-cli`, so RUSTC-wrapper substitution silently never
+engages there (the same "cargo test doesn't put the wrapper binary in
+target/debug/" gotcha this crate's own history already names -- but this
+time it made a *test's own assertion* misleading, not just a real Run).
+Fixed by checking the artifact delta instead, which doesn't depend on
+wrapper substitution at all.
+
+### What this does not establish
+
+Against issues #7/#12's combined acceptance criteria: identity schema
+explicit and versioned, hit/miss explained from identity differences,
+reuse rejected when compatibility can't be proven (fail-closed on an
+unresolved toolchain), work elimination distinguished from a cache hit
+(the touch-edit case above) -- met, for this one slice. **Not** met: no
+CAS storage or artifact retrieval (this only decides and explains, never
+stores/fetches bytes); no cross-machine, cross-worktree-path, or
+cross-toolchain-version reuse; no actual "skip the compiler" behavior --
+`run_and_record` still always runs the traced command regardless of what
+`decide_reuse` would say; no ThinLTO/Wasm identity, no host/target
+distinction beyond one triple/OS-CPU pair, no persistence-tier modeling;
+no `laminaria-cli` subcommand exposing this yet (verified via a direct
+`cargo test`, not the CLI).
