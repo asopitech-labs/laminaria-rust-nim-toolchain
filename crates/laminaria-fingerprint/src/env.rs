@@ -273,7 +273,7 @@ fn detect_memory_bytes(unobserved: &mut Vec<String>) -> Option<u64> {
     };
     text.lines()
         .find_map(|l| l.strip_prefix("MemTotal:"))
-        .and_then(|l| l.trim().split_whitespace().next())
+        .and_then(|l| l.split_whitespace().next())
         .and_then(|kb| kb.parse::<u64>().ok())
         .map(|kb| kb * 1024)
 }
