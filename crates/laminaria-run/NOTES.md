@@ -74,7 +74,23 @@ also triggers the final link. All records' `start_elapsed_ns`/
 same shared `RunClock`, confirming cross-process event correlation
 actually works, not just compiles. Confirmed again in CI (see the
 "Trace a cold and a true-no-op rust-heavy-workspace build" step's
-per-rustc-invocation assertions).
+per-rustc-invocation assertions), on both platforms this project targets
+(run `34343348319`): `ubuntu-latest` and `macos-latest` each recorded 4
+total records (1 root + 3, one per `fixture-core`/`fixture-mid`/
+`fixture-bin`), all with distinct pids and populated resource usage.
+
+**A real gap this exact CI step caught on the first push, not a
+theoretical concern**: the initial push (`34342837526`) failed on
+`ubuntu-latest` with only 1 process record instead of the expected 4+.
+Root cause, confirmed locally with a clean `target/`: `cargo test
+--workspace` (which runs earlier in the CI job) compiles a
+separately-hashed test-harness copy of `laminaria-rustc-wrapper` under
+`target/debug/deps/`, not the plain `target/debug/laminaria-rustc-wrapper`
+`find_rustc_wrapper_binary()` looks for. Wrapper substitution correctly,
+silently fell back to root-only tracing -- the designed
+graceful-degradation path worked exactly as intended, but the CI
+assertions weren't written to tolerate it. Fixed by adding an explicit
+`cargo build --workspace` step before relying on the wrapper binary.
 
 ### The cross-process clock correlation trade-off
 
