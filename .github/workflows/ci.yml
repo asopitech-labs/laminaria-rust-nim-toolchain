@@ -140,6 +140,30 @@ jobs:
           nim c --threads:on --nimcache:nimcache --passL:"-L../rust-lib/target/release -lrustlib" -o:main main.nim
           ./main
 
+      # Issue #4 Layer 3/4, reverse direction: Rust calling a
+      # Nim-provided function pointer (the "closures/function values"
+      # matrix class, with no captured environment), and what happens
+      # when a Nim exception is raised inside that callback while a
+      # Rust stack frame is live. Expected, deterministic outcome
+      # verified below: exit code 1 with a clean, correctly-attributed
+      # "unhandled exception" report -- not a crash, not silent
+      # corruption. See callback-experiment/main.nim and NOTES.md.
+      - name: Build and run the direct-native-link callback-boundary experiment
+        run: |
+          cd fixtures/direct-native-link/callback-experiment
+          cargo build --release --manifest-path ../rust-lib/Cargo.toml
+          nim c --nimcache:nimcache --passL:"-L../rust-lib/target/release -lrustlib" -o:main main.nim
+          set +e
+          ./main
+          STATUS=$?
+          set -e
+          if [ "$STATUS" -eq 1 ]; then
+            echo "main exited with status 1 -- the expected, clean unhandled-exception report"
+          else
+            echo "main exited with unexpected status $STATUS -- expected 1, investigate"
+            exit 1
+          fi
+
   # Issue #4's genuinely-open question, not #11's: every fixture above
   # uses `nim c`, which always produces native code via a generated-C
   # intermediate -- even with no header file, that route's ABI/symbol
@@ -265,6 +289,23 @@ jobs:
           cd fixtures/direct-native-link/thread-experiment
           "$NLVM_BIN" c --threads:on --passL:"-L../rust-lib/target/release -lrustlib" main.nim
           ./main
+
+      # Cross-route confirmation of the callback-boundary experiment.
+      - name: Build and run the callback-boundary experiment via nlvm
+        run: |
+          rm -rf ~/.cache/nim/main_d
+          cd fixtures/direct-native-link/callback-experiment
+          "$NLVM_BIN" c --passL:"-L../rust-lib/target/release -lrustlib" main.nim
+          set +e
+          ./main
+          STATUS=$?
+          set -e
+          if [ "$STATUS" -eq 1 ]; then
+            echo "main exited with status 1 on the nlvm route too -- matches the nim c route"
+          else
+            echo "main exited with unexpected status $STATUS on the nlvm route -- expected 1, investigate"
+            exit 1
+          fi
 
       # #11's own fixture (not #4's investigation, though it reuses this
       # job's nlvm download): does Rust's own LLVM IR and Nim's own LLVM

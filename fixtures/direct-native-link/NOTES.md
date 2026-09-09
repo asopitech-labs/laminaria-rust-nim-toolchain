@@ -534,6 +534,64 @@ this session), or threads created by *Rust* and called into by Nim
 ORC when Nim-side code (not just Rust's allocator) runs on this
 thread.
 
+## Layer 3/4, reverse direction: Rust calling a Nim callback (`callback-experiment/`)
+
+Every experiment above has Nim call into Rust. This reverses it: Rust
+calls a Nim-provided function pointer directly (`rust_calls_callback(cb:
+extern "C" fn(i32) -> i32, x: i32)`). A plain function pointer with no
+captured environment is exactly the "closures/function values" class
+`docs/rust-nim-native-linking.md`'s compatibility matrix already lists
+as usable when nothing is captured — verified here, not just declared
+usable in principle.
+
+**Normal case**: `rust_calls_callback(nim_double, 21)` → `42`, correct,
+on both routes.
+
+**The actual focal question**: what happens when the Nim callback
+*raises a Nim exception* while a live Rust stack frame sits between it
+and Nim's own exception handling? Nim's default exception implementation
+(`--exceptions:goto`, Nim 2.x's default) isn't based on stack unwinding
+at all — it's deferred flag-checking, compiler-inserted after call
+sites — so the interesting question is whether a raw Rust function-
+pointer call site (which has no idea it needs to check anything) breaks
+that mechanism.
+
+```
+$ ./main
+rust_calls_callback(nim_double, 21)=42
+normal callback case completed
+about to call rust_calls_callback(nim_raises, 21) -- observing what happens when a Nim exception is raised while a Rust stack frame is live between it and Nim's own handler
+.../callback-experiment/main.nim(42) main
+.../callback-experiment/main.nim(31) nim_raises
+Error: unhandled exception: deliberate Nim exception inside a Rust-invoked callback [ValueError]
+```
+Exit code `1`. The line after the raising call (`echo "UNREACHABLE
+if..."`) never runs — confirmed reliably across repeated runs, not a
+one-off — and the traceback correctly attributes the exception to
+`nim_raises` at the exact line it was raised.
+
+**Result: this is safe, in the same spirit as the panic finding above**
+— not silent corruption, a clean, deterministic, correctly-attributed
+failure report, on both the `nim c` and `nlvm` routes. The Rust stack
+frame in between doesn't need to know anything about Nim's exception
+convention because Nim's goto-based mechanism was never relying on
+stack unwinding through it in the first place; the compiler-inserted
+check simply fires at the next point in *Nim-generated* code that looks
+at the call's result, which in this fixture is immediately after the
+call (assigning `afterRaise`), not delayed.
+
+One earlier version of this experiment used `discard
+rust_calls_callback(nim_raises, 21)` instead of capturing the result,
+and that version's post-call `echo` line *did* execute once before the
+error surfaced — the check still fired correctly and the process still
+exited cleanly, but *where* in the following code it fires is
+sensitive to what the generated code around the call site looks like,
+not a single fixed offset from the call itself. Practical implication:
+don't reason about "how many statements after a possibly-raising
+callback call it's safe to assume normal control flow" — the safe
+assumption is that any statement after such a call may not execute
+before the exception is reported, not that a specific one won't.
+
 ## Explicitly not attempted, and why (Layer 3/4 scope)
 
 Per `docs/rust-nim-native-linking.md`'s own required "compatibility
@@ -553,19 +611,24 @@ container's own representation never crosses the boundary.
   that differs across Nim versions/GC modes by design. Rust's ownership
   model has no compatible representation to receive one directly as a
   value.
-- **Closures/function values**: Nim closures carry an implicit
-  environment pointer with Nim-GC-managed capture semantics; Rust
-  closures are monomorphized or trait-object-boxed with no compatible
-  ABI. Only plain `proc`/`fn` pointers (no captured environment) are
-  usable across this boundary.
-- **Nim exceptions crossing into Rust**: the reverse direction of the
-  now-tested Rust-panics-into-Nim case above (see the dedicated Layer 4
-  section) — no experiment here has Rust call into Nim yet, so a Nim
-  exception raised while Rust is on the stack (e.g. via a Nim-provided
-  callback) remains untested. Rust's panic case turned out to be a
-  clean, deterministic abort rather than true undefined behavior; the
-  Nim-exception direction is not assumed to behave the same way without
-  being checked.
+- **Closures with a captured environment**: Nim closures carry an
+  implicit environment pointer with Nim-GC-managed capture semantics;
+  Rust closures are monomorphized or trait-object-boxed with no
+  compatible ABI. Plain `proc`/`fn` pointers with **no** captured
+  environment are usable across this boundary and are no longer merely
+  claimed so — verified in both directions (`callback-experiment/`
+  above; every other experiment already crosses Nim → Rust) with real
+  round-trip results.
+- **Nim exceptions crossing into Rust**: no longer entirely untested —
+  see the dedicated Layer 3/4 "reverse direction" section above for the
+  specific case of a Nim callback raising while called from Rust
+  (clean, safe: exit code 1, correctly-attributed traceback). Not
+  covered by that experiment: a Nim exception raised while Rust code
+  deeper on the stack has itself allocated resources needing cleanup
+  (Rust has no Drop-running mechanism triggered by Nim's non-unwinding
+  exception check, so any Rust-side resource acquired before the
+  callback call and only released after it returns normally would leak
+  if the exception causes Nim to never return control past that point).
 - **Holding a resolved pointer across multiple FFI calls**: every
   pointer-resolution experiment above re-derives its pointer immediately
   before use and never holds one across a call boundary where the other

@@ -28,6 +28,27 @@ pub extern "C" fn rust_panics(trigger: i32) -> i32 {
     42
 }
 
+// --- Type/layout matrix: function pointers/callbacks (Layer 3), and
+// the reverse-direction Layer 4 question every earlier experiment
+// sidesteps: everything so far has Nim call into Rust. What happens
+// when *Rust* calls a Nim-provided function pointer -- ordinary
+// direct-call semantics, or something raised inside it (see
+// `../callback-experiment/`)? A plain function pointer (no captured
+// environment) is exactly the "closures/function values" class this
+// project's compatibility matrix lists as usable across this boundary
+// when nothing is captured -- verified here, not just declared usable.
+
+/// A Nim-provided callback's C-compatible signature: `proc(x: cint):
+/// cint {.cdecl.}` on the Nim side, no captured environment.
+pub type Callback = extern "C" fn(i32) -> i32;
+
+/// Calls a Nim-provided function pointer directly -- the reverse
+/// direction from every other exported function in this crate.
+#[no_mangle]
+pub extern "C" fn rust_calls_callback(cb: Callback, x: i32) -> i32 {
+    cb(x)
+}
+
 #[no_mangle]
 pub extern "C" fn rust_transform(x: i32) -> i32 {
     x.wrapping_mul(2).wrapping_add(1)
@@ -213,6 +234,15 @@ mod tests {
     #[test]
     fn panics_returns_normally_when_not_triggered() {
         assert_eq!(rust_panics(0), 42);
+    }
+
+    extern "C" fn double_it(x: i32) -> i32 {
+        x * 2
+    }
+
+    #[test]
+    fn calls_callback_known_value() {
+        assert_eq!(rust_calls_callback(double_it, 21), 42);
     }
 
     // Deliberately no #[should_panic] test here: it wouldn't work, and
