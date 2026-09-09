@@ -140,18 +140,25 @@ jobs:
 
       - name: Compile and run a trivial Nim program via nlvm (no C anywhere)
         run: |
+          rm -rf ~/.cache/nim/hello_d # start from a clean per-project cache
           cd fixtures/direct-native-link/nlvm-experiment
           "$NLVM_BIN" c hello.nim
           ./hello
-          echo "--- confirming no .c file exists anywhere in nlvm's own build output ---"
-          if [ -n "$(find "$(dirname "$NLVM_BIN")/.." -iname '*.c' 2>/dev/null)" ] || \
-             [ -n "$(find . -iname '*.c' 2>/dev/null)" ] || \
-             [ -n "$(find ~/.cache/nim -iname '*.c' 2>/dev/null)" ]; then
-            echo "found .c file(s) -- nlvm generated C source somewhere, contradicting the C-free claim"
-            find "$(dirname "$NLVM_BIN")/.." . ~/.cache/nim -iname '*.c' 2>/dev/null
+          echo "--- confirming nlvm's own build cache for THIS project contains no .c file ---"
+          # Scope this to nlvm's actual per-project build cache
+          # (~/.cache/nim/hello_d/, confirmed from the linker invocation
+          # above), not nlvm's whole install tree -- that tree ships
+          # unrelated bundled .c files of its own (Windows mingw COM
+          # interop stubs, Nim stdlib's linenoise.c) that have nothing
+          # to do with compiling hello.nim and would be a false positive.
+          if [ -n "$(find ~/.cache/nim/hello_d -iname '*.c' 2>/dev/null)" ]; then
+            echo "found .c file(s) in nlvm's build cache for hello.nim -- contradicts the C-free claim"
+            find ~/.cache/nim/hello_d -iname '*.c'
             exit 1
           fi
-          echo "no .c files found anywhere nlvm could plausibly have written one (expected)"
+          echo "no .c files found in nlvm's build cache for hello.nim (expected)"
+          echo "cache contents for reference:"
+          find ~/.cache/nim/hello_d -type f
 
   # Exercises the "container" EnvironmentFingerprint class from a clean,
   # native (non-Rosetta) environment — see docker/bootstrap.Dockerfile for
