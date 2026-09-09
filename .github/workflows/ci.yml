@@ -53,6 +53,88 @@ jobs:
           nim c --nimcache:nimcache -o:fixture_out src/fixture.nim
           ./fixture_out
 
+      # Issue #19 Experiments 1/2/4/5: wrap real Cargo and Nim builds with
+      # `laminaria run` and check the recorded Run evidence is actually
+      # meaningful, not merely present. Runs after the plain builds above
+      # (whose target/nimcache dirs are now warm) so the traced runs below
+      # are true no-ops, and a fresh cold build is forced explicitly where
+      # the cold/no-op distinction itself is the thing being checked.
+      - name: Trace a cold and a true-no-op rust-heavy-workspace build (issue #19 Experiment 1)
+        run: |
+          rm -rf fixtures/rust-heavy-workspace/target
+          cargo run -q -p laminaria-cli -- run \
+            --workload-id rust-heavy-workspace --scenario-id cold-build --runs-root runs --json \
+            -- cargo build --manifest-path fixtures/rust-heavy-workspace/Cargo.toml --workspace \
+            > /tmp/cold-run.json
+          cargo run -q -p laminaria-cli -- run \
+            --workload-id rust-heavy-workspace --scenario-id true-noop --runs-root runs --json \
+            -- cargo build --manifest-path fixtures/rust-heavy-workspace/Cargo.toml --workspace \
+            > /tmp/noop-run.json
+          COLD_SUCCESS=$(jq -r '.result.success' /tmp/cold-run.json)
+          NOOP_SUCCESS=$(jq -r '.result.success' /tmp/noop-run.json)
+          COLD_CPU=$(jq -r '.process_trace.processes[0].resource_usage.user_cpu_seconds' /tmp/cold-run.json)
+          NOOP_CPU=$(jq -r '.process_trace.processes[0].resource_usage.user_cpu_seconds' /tmp/noop-run.json)
+          echo "cold build user_cpu_seconds=$COLD_CPU, true-noop user_cpu_seconds=$NOOP_CPU"
+          [ "$COLD_SUCCESS" = "true" ] || { echo "cold build Run should have succeeded"; exit 1; }
+          [ "$NOOP_SUCCESS" = "true" ] || { echo "no-op build Run should have succeeded"; exit 1; }
+          [ "$COLD_CPU" != "null" ] && [ "$NOOP_CPU" != "null" ] || {
+            echo "resource usage must not be missing on a supported (Linux/macOS) runner"; exit 1;
+          }
+          awk -v cold="$COLD_CPU" -v noop="$NOOP_CPU" 'BEGIN { exit !(cold > noop) }' || {
+            echo "expected the cold build's cumulative CPU (${COLD_CPU}s) to clearly exceed the true-no-op rebuild's (${NOOP_CPU}s) -- if it doesn't, the tracer isn't actually attributing rustc/linker descendant work to the traced root command"
+            exit 1
+          }
+
+      - name: Trace a cold nim-heavy-workspace build (issue #19 Experiment 2)
+        run: |
+          rm -rf fixtures/nim-heavy-workspace/nimcache fixtures/nim-heavy-workspace/fixture_out
+          cargo run -q -p laminaria-cli -- run \
+            --workload-id nim-heavy-workspace --scenario-id cold-build --runs-root runs --json \
+            -- nim c --nimcache:fixtures/nim-heavy-workspace/nimcache \
+               -o:fixtures/nim-heavy-workspace/fixture_out fixtures/nim-heavy-workspace/src/fixture.nim \
+            > /tmp/nim-run.json
+          fixtures/nim-heavy-workspace/fixture_out
+          SUCCESS=$(jq -r '.result.success' /tmp/nim-run.json)
+          CPU=$(jq -r '.process_trace.processes[0].resource_usage.user_cpu_seconds' /tmp/nim-run.json)
+          [ "$SUCCESS" = "true" ] || { echo "nim build Run should have succeeded"; exit 1; }
+          [ "$CPU" != "null" ] || { echo "resource usage must not be missing on a supported (Linux/macOS) runner"; exit 1; }
+          echo "nim build user_cpu_seconds=$CPU"
+
+      # Issue #19 Experiment 5: a failed child process must not discard
+      # partial evidence. Checked here rather than only in laminaria-run's
+      # own unit tests, so the CLI's exit-code propagation is covered too.
+      - name: Trace a failing command and confirm evidence is preserved (issue #19 Experiment 5)
+        run: |
+          set +e
+          cargo run -q -p laminaria-cli -- run \
+            --workload-id ci-smoke --scenario-id deliberate-failure --runs-root runs --json \
+            -- sh -c 'echo deliberate failure 1>&2; exit 5' \
+            > /tmp/failure-run.json
+          STATUS=$?
+          set -e
+          if [ "$STATUS" -ne 1 ]; then
+            echo "expected laminaria run to exit 1 (traced command failed), got $STATUS"
+            exit 1
+          fi
+          SUCCESS=$(jq -r '.result.success' /tmp/failure-run.json)
+          CODE=$(jq -r '.result.root_exit_status.code' /tmp/failure-run.json)
+          CPU=$(jq -r '.process_trace.processes[0].resource_usage.user_cpu_seconds' /tmp/failure-run.json)
+          [ "$SUCCESS" = "false" ] || { echo "expected result.success=false"; exit 1; }
+          [ "$CODE" = "5" ] || { echo "expected root_exit_status.code=5, got $CODE"; exit 1; }
+          [ "$CPU" != "null" ] || { echo "resource usage must be captured even for a failed command"; exit 1; }
+          echo "failure evidence preserved: exit code and resource usage both present"
+
+      # Issue #19: "raw evidence can regenerate summary.json without
+      # rerunning the workload" -- exercised end-to-end via the CLI
+      # against a real written Run, not just laminaria-run's own tests.
+      - name: Regenerate summary.json from an already-written Run (issue #19)
+        run: |
+          RUN_ID=$(jq -r '.run_id' /tmp/nim-run.json)
+          rm "runs/$RUN_ID/summary.json"
+          cargo run -q -p laminaria-cli -- regenerate-summary --runs-root runs "$RUN_ID" > /tmp/regenerated-summary.json
+          diff <(jq -S . "runs/$RUN_ID/summary.json") <(jq -S . /tmp/regenerated-summary.json)
+          echo "regenerated summary.json matches the file laminaria-cli wrote on disk"
+
       - name: Build rust-nim-c-abi-baseline fixture
         run: |
           cd fixtures/rust-nim-c-abi-baseline/rust-bin
