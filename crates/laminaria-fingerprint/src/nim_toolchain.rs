@@ -73,6 +73,7 @@ pub fn resolve(logical_name: &str, selector: &NimToolchainSelector) -> NimToolch
         requested_selector: Some(selector.selector.clone()),
         compiler_family: "nim",
         resolved_version,
+        requested_source_revision: selector.revision.clone(),
         target_os,
         target_cpu,
         compiled_at,

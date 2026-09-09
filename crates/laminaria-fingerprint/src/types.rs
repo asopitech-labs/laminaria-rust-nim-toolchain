@@ -30,6 +30,12 @@ pub struct RustToolchainFingerprint {
     pub resolved_commit_hash: Option<String>,
     pub resolved_commit_date: Option<String>,
     pub host_triple: Option<String>,
+    /// "stable" / "beta" / "nightly", derived from the resolved version
+    /// string rather than the requested selector — kept separate from
+    /// `resolved_version` so nightly-only capability requirements can be
+    /// checked without parsing a version string ad hoc every time
+    /// (`docs/multi-version-toolchains.md` section 3).
+    pub channel: Option<String>,
     /// Bundled/selected LLVM identity, where the resolved rustc build
     /// exposes it. Left `None` rather than guessed when unavailable.
     pub llvm_version: Option<String>,
@@ -49,6 +55,12 @@ pub struct NimToolchainFingerprint {
     pub requested_selector: Option<String>,
     pub compiler_family: &'static str,
     pub resolved_version: Option<String>,
+    /// Requested exact source revision (Nimony/Nim 3, nlvm, ...), from the
+    /// lock entry's `revision` field. Recorded explicitly rather than
+    /// folded into `requested_selector` — a moving `selector` and an exact
+    /// `revision` answer different questions
+    /// (`docs/multi-version-toolchains.md` sections 2 and 8).
+    pub requested_source_revision: Option<String>,
     pub target_os: Option<String>,
     pub target_cpu: Option<String>,
     pub compiled_at: Option<String>,

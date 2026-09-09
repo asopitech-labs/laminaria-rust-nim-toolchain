@@ -203,10 +203,11 @@ fn print_human(doctor_run: &DoctorRun) {
     }
     for t in &report.rust_toolchains {
         println!(
-            "  [{}] selector={} -> {} ({}, LLVM {})",
+            "  [{}] selector={} -> {} channel={} ({}, LLVM {})",
             t.logical_name,
             t.requested_selector.as_deref().unwrap_or("?"),
             t.resolved_version.as_deref().unwrap_or("UNRESOLVED"),
+            t.channel.as_deref().unwrap_or("?"),
             t.host_triple.as_deref().unwrap_or("?"),
             t.llvm_version.as_deref().unwrap_or("unknown"),
         );
@@ -236,6 +237,9 @@ fn print_human(doctor_run: &DoctorRun) {
             t.target_os.as_deref().unwrap_or("?"),
             t.target_cpu.as_deref().unwrap_or("?"),
         );
+        if let Some(rev) = &t.requested_source_revision {
+            println!("      source revision: {rev}");
+        }
         for note in &t.resolution_notes {
             println!("      ! {note}");
         }

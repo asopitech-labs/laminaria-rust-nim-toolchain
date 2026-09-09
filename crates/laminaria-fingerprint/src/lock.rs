@@ -50,6 +50,12 @@ pub struct NimToolchainSelector {
     /// (`docs/multi-version-toolchains.md` section 2).
     #[serde(default)]
     pub bin_dir: Option<PathBuf>,
+    /// Exact source revision for Nimony/Nim 3 (or nlvm) builds — see
+    /// `docs/multi-version-toolchains.md` section 8's conceptual schema.
+    /// Recorded on the fingerprint as a requested fact; this crate does not
+    /// attempt to verify it against the resolved binary.
+    #[serde(default)]
+    pub revision: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -195,6 +195,7 @@ mod tests {
             resolved_commit_hash: None,
             resolved_commit_date: None,
             host_triple: None,
+            channel: None,
             llvm_version: None,
             rustc: crate::types::ExecutableIdentity::default(),
             cargo_version: None,
