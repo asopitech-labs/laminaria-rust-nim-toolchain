@@ -282,16 +282,35 @@ dereferences the freed address — only compares it as a plain integer —
 so the finding is observed without committing the use-after-free it's
 evidence for.
 
-**Result: the freed address was reused by the very next allocation, on
-every one of several repeated runs on this platform (macOS/arm64,
-`aarch64-apple-darwin`).** This is a stark, concrete way to see the real
-danger: if Rust had captured a pointer from that `seq` and kept using it
-past the point where Nim's last reference dropped, it would not merely
-risk crashing — it would silently read and write into what is now a
-**completely different, unrelated Nim object's live memory**. That's a
-worse failure mode than a crash: silent data corruption in an object
-that has nothing to do with the one the pointer was originally taken
-from.
+**Result: the freed address was reused by the very next allocation on
+every repeated run on macOS/arm64 (`aarch64-apple-darwin`)** — a stark,
+concrete way to see the real danger: if Rust had captured a pointer from
+that `seq` and kept using it past the point where Nim's last reference
+dropped, it would not merely risk crashing — it would silently read and
+write into what is now a **completely different, unrelated Nim object's
+live memory**. That's a worse failure mode than a crash: silent data
+corruption in an object that has nothing to do with the one the pointer
+was originally taken from.
+
+CI's two platforms diverged on this specific point, which is itself
+useful confirmation that "did the address get reused" is exactly as
+allocator-dependent as the growth caveat above, not a fixed law:
+
+```
+macOS/arm64:            freed=4385329224 new=4385329224 reused=true
+ubuntu-latest/x86_64:    freed=140082439680608 new=140082439680672 reused=false
+```
+
+On this `ubuntu-latest` run, glibc handed the next allocation a *nearby*
+address (64 bytes later) rather than the exact freed one — plausibly the
+freed chunk went to a free-list and the next allocation took a
+different, adjacent slot. `reused=false` here is not evidence the
+danger doesn't exist on that platform: the memory was still freed and
+still eligible for reuse by *some* future allocation, on both platforms,
+which is the actual claim. Whether the *very next* allocation happens to
+land on the exact freed address is exactly the kind of allocator detail
+the growth caveat already established isn't something to rely on
+observing either way.
 
 **This is the real headline finding for this focal question**, sharper
 than the growth caveat: pointer resolution into Nim-owned memory is only
