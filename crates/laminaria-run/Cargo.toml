@@ -7,6 +7,10 @@ license.workspace = true
 repository.workspace = true
 description = "Versioned Run envelope and process/resource tracer for LAMINARIA (issue #19)."
 
+[[bin]]
+name = "laminaria-rustc-wrapper"
+path = "src/bin/rustc_wrapper.rs"
+
 [dependencies]
 laminaria-fingerprint = { path = "../laminaria-fingerprint" }
 serde = { version = "1", features = ["derive"] }

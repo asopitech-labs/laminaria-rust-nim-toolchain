@@ -84,6 +84,28 @@ jobs:
             echo "expected the cold build's cumulative CPU (${COLD_CPU}s) to clearly exceed the true-no-op rebuild's (${NOOP_CPU}s) -- if it doesn't, the tracer isn't actually attributing rustc/linker descendant work to the traced root command"
             exit 1
           }
+          # Per-rustc-invocation granularity via RUSTC-wrapper substitution
+          # (crates/laminaria-run/src/cargo_wrapper.rs, modeled on
+          # rustc-perf's real rustc-fake -- see NOTES.md). The 3-crate
+          # workspace (fixture-core -> fixture-mid -> fixture-bin) should
+          # produce one recorded rustc invocation per crate at minimum, each
+          # with its own pid and non-null resource usage, on the cold build.
+          PROCESS_COUNT=$(jq '.process_trace.processes | length' /tmp/cold-run.json)
+          [ "$PROCESS_COUNT" -ge 4 ] || {
+            echo "expected at least 4 process records (1 root + >=3 per-crate rustc invocations), got $PROCESS_COUNT"
+            exit 1
+          }
+          DISTINCT_PIDS=$(jq '[.process_trace.processes[].pid] | unique | length' /tmp/cold-run.json)
+          [ "$DISTINCT_PIDS" = "$PROCESS_COUNT" ] || {
+            echo "expected every process record to have a distinct pid, got $DISTINCT_PIDS distinct out of $PROCESS_COUNT records"
+            exit 1
+          }
+          RUSTC_CPU_NULLS=$(jq '[.process_trace.processes[1:][].resource_usage.user_cpu_seconds | select(. == null)] | length' /tmp/cold-run.json)
+          [ "$RUSTC_CPU_NULLS" = "0" ] || {
+            echo "expected every wrapper-recorded rustc invocation to have non-null resource usage, found $RUSTC_CPU_NULLS missing"
+            exit 1
+          }
+          echo "per-rustc-invocation records: $PROCESS_COUNT total, $DISTINCT_PIDS distinct pids, 0 missing resource usage"
 
       - name: Trace a cold nim-heavy-workspace build (issue #19 Experiment 2)
         run: |

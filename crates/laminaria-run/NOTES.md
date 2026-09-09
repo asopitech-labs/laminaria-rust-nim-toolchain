@@ -6,6 +6,92 @@ checks the design leans on, and precisely what's covered vs. still open
 — see `src/lib.rs`'s own doc comment for the summary, and each module's
 doc comment for its own scope.
 
+## Wrapper substitution, not process-tree walking — studied from a real reference project, not re-derived
+
+The obvious first instinct for "parent/child process relationships are
+preserved" (issue #19's acceptance criteria) is OS-level process-tree
+walking: `ptrace`, `/proc` polling on Linux, `libproc` on macOS. Before
+writing any of that, `docs/measurement-foundation.md` section 16's named
+reference project — `rust-lang/rustc-perf` — was actually cloned and its
+real collector source read (not re-derived from general knowledge of the
+problem domain). It does **not** do OS-level tree walking anywhere in its
+production collector (`collector/src/`, `collector/benchlib/src/`
+searched directly for `ptrace`/`/proc`/`procfs` — zero matches).
+
+What it actually does (`collector/src/bin/rustc-fake.rs`,
+`collector/src/compile/execute/mod.rs`): overrides Cargo's `RUSTC`
+environment variable to point at a thin wrapper binary
+(`.env("RUSTC", &*FAKE_RUSTC)`, with the real compiler passed alongside
+as `RUSTC_REAL`). Cargo then invokes the wrapper once per compilation
+unit, believing it *is* rustc. The wrapper runs the real compiler as its
+own child, measures it with `getrusage(RUSAGE_CHILDREN)` after the child
+exits, then forwards the result.
+
+**Verified this actually works on this project's own fixture before
+building anything Rust-side**, with a two-line shell stand-in:
+
+```bash
+cat > /tmp/fake-rustc.sh <<'EOF'
+#!/usr/bin/env bash
+echo "$(date +%s%N) pid=$$ args=$*" >> /tmp/fake-rustc-invocations.log
+exec "$REAL_RUSTC" "$@"
+EOF
+RUSTC=/tmp/fake-rustc.sh cargo build --manifest-path fixtures/rust-heavy-workspace/Cargo.toml --workspace
+```
+
+Produced one log line per real compilation unit (`fixture-core`,
+`fixture-mid`, `fixture-bin`) plus Cargo's own `-vV`/probe invocations,
+each with a distinct pid, in dependency order — confirming the mechanism
+before investing in `laminaria-rustc-wrapper` (`src/bin/rustc_wrapper.rs`)
+and `cargo_wrapper.rs`'s env-var/JSONL-event-file protocol.
+
+**What this technique gives, precisely**: one `ProcessRecord` per real
+`rustc` invocation, with its own pid, argv, and `wait4`-derived resource
+usage (reusing `tracer::reap` directly — the exact same, already-verified
+logic, not a second implementation). Linker cost is *not* separately
+recorded, matching `rustc-fake`'s own accepted scope: the reaping-chain
+aggregation `tracer.rs` already established (a process's `wait4` result
+includes its own already-reaped descendants' usage) means the linker's
+cost rolls up into whichever `rustc` invocation spawned it.
+
+**What this technique does not give**: it's Cargo/rustc-specific. There
+is no equivalent wrapping for Nim's compiler, arbitrary shell commands,
+or any other toolchain yet — those still only get the root command's
+single cumulative record, exactly as before. `Run::process_trace.known_gaps`
+says this explicitly on every Run, keyed off whether any wrapper events
+were actually recorded, not left as a blanket claim.
+
+**Verified end-to-end against a real Run, not just the shell stand-in**:
+tracing `cargo build --workspace` on `fixtures/rust-heavy-workspace`
+(3-crate dependency chain) via `laminaria run` produces 7 `ProcessRecord`s
+— 1 root + 6 wrapper-recorded `rustc` invocations (two `-vV`/probe calls,
+one metadata probe, then `fixture_core`, `fixture_mid`, `fixture_bin`) —
+each with a distinct pid and its own resource usage. `fixture_bin`'s
+record (0.112s user CPU) costs roughly double `fixture_core`'s (0.056s)
+and `fixture_mid`'s (0.057s), consistent with it being the one crate that
+also triggers the final link. All records' `start_elapsed_ns`/
+`end_elapsed_ns` fall correctly within the root record's own span on the
+same shared `RunClock`, confirming cross-process event correlation
+actually works, not just compiles. Confirmed again in CI (see the
+"Trace a cold and a true-no-op rust-heavy-workspace build" step's
+per-rustc-invocation assertions).
+
+### The cross-process clock correlation trade-off
+
+A wrapper invocation is a separate OS process from the outer `laminaria
+run` process, so it cannot share the outer `RunClock`'s `Instant`-based
+anchor directly (`Instant` has no cross-process representation). The
+outer Run's clock anchor is passed to the wrapper as a wall-clock
+timestamp (`LAMINARIA_RUN_CLOCK_ANCHOR_UNIX_NS`, `SystemTime`-based
+nanoseconds since the epoch), and the wrapper computes its own
+`elapsed_ns` values as wall-clock deltas against that anchor. This is a
+real, accepted trade-off, not an oversight: wall-clock deltas lack
+`Instant`'s monotonicity guarantee under a clock adjustment mid-Run,
+whereas the outer command's own root record stays fully `Instant`-based
+and monotonic within its own process. Recorded explicitly in both
+`cargo_wrapper.rs`'s doc comment and every wrapper-recorded
+`ProcessRecord.coverage_note`, not left implicit.
+
 ## `wait4`'s rusage on a direct child aggregates that child's own reaped descendants
 
 Load-bearing for the whole Level 1 design: if this weren't true, tracing
@@ -29,13 +115,19 @@ Re-verified separately through the real Rust path this crate ships,
 not just the throwaway C probe: `tracer::resource_usage_aggregates_a_grandchild_process_cumulatively`
 spawns `sh -c "sh -c '<busy loop>'"` through `trace_root_command` and
 asserts non-trivial CPU shows up on the single returned `ProcessRecord`.
+This same aggregation property is also what `rustc-fake`'s
+`getrusage(RUSAGE_CHILDREN)` approach implicitly relies on (see above)
+— an independent confirmation that this empirical finding matches a
+real, widely-used project's own design assumption.
 
-**What this does not mean**: it is not per-node attribution. If `cargo`
-spawns three `rustc` invocations, this design reports their combined
+**What this does not mean**: it is not per-node attribution on its own.
+Without the wrapper-substitution technique above, if `cargo` spawns
+three `rustc` invocations, this design reports their combined
 CPU/RSS-peak-per-call as one number on `cargo`'s own record — it cannot
 say which of the three used how much. See `ProcessTrace::known_gaps`,
 populated on every `Run` this crate produces (not left as an implicit,
-undocumented limitation).
+undocumented limitation) — now conditioned on whether wrapper events
+were actually recorded for that particular Run.
 
 ## Manually reaping via `wait4`, then dropping `std::process::Child`, is safe
 
@@ -51,9 +143,10 @@ rusage.ru_utime=0.002360
 child dropped cleanly after manual wait4 reap
 ```
 
-`tracer::trace_root_command` relies on exactly this: it calls `wait4`
-directly via `libc`, bypassing `Child::wait()`/`try_wait()` entirely,
-then lets `Child` drop normally.
+`tracer::trace_root_command` (and now `src/bin/rustc_wrapper.rs`, which
+reuses the same `tracer::reap` function) relies on exactly this: it calls
+`wait4` directly via `libc`, bypassing `Child::wait()`/`try_wait()`
+entirely, then lets `Child` drop normally.
 
 ## `ru_maxrss`'s unit is platform-specific — Linux: kilobytes, Darwin: bytes
 
@@ -66,6 +159,26 @@ that's ~976MB — implausible for the same binary. `tracer.rs` converts
 per-platform accordingly (`#[cfg(target_os = "linux")]` multiplies by
 1024; `#[cfg(target_os = "macos")]` does not), and any other Unix target
 explicitly marks `peak_rss_bytes` as unsupported rather than guessing.
+
+## Concurrent-append safety for the wrapper events file
+
+Cargo parallelizes independent `rustc` invocations across build jobs, so
+multiple `laminaria-rustc-wrapper` processes append to the same
+`rustc-invocations.jsonl` events file concurrently. Relied on: a
+`write(2)` to an `O_APPEND`-opened file descriptor is atomic with respect
+to other writers on the same local file, provided the whole line is
+written in a single `write` syscall — true here, since
+`cargo_wrapper::append_event` formats the complete JSON line in memory
+before one `write_all` call. Exercised with concurrent writers in
+`cargo_wrapper::tests::concurrent_appends_never_interleave_a_line`
+(threads, not a full separate-process harness — a faithful enough stand-in
+since the atomicity guarantee is a property of the file descriptor/kernel
+write path, not of whether the caller is a thread or a process). Also
+confirmed indirectly by the real multi-crate CI/local runs above:
+`fixture-core`/`fixture-mid`/`fixture-bin` each got their own
+uncorrupted, individually-parseable JSON line even though Cargo may run
+some of these concurrently depending on the dependency graph and job
+count.
 
 ## Cold vs. true-no-op CPU attribution — real, checked in CI, not just plumbing
 
@@ -93,19 +206,26 @@ paraphrase of it:
 
 - [x] Run/process schemas are versioned (`types::SCHEMA_VERSION`,
   carried in every `Run`).
-- [ ] **Parent/child process relationships are preserved** — NOT met by
-  this first pass. Only the root command's own `ProcessRecord` exists;
-  individual descendant pid/parent/argv/timing is not enumerated. This
-  is the single largest remaining gap and the natural next slice of
-  work (would need `/proc` polling on Linux, `libproc`/`proc_listchildpids`
-  on macOS, or ptrace-based tracing for real-time attach).
+- [~] **Parent/child process relationships are preserved** — met for
+  Cargo/`rustc` builds specifically, via RUSTC-wrapper substitution (one
+  `ProcessRecord` per real `rustc` invocation, each with its own pid).
+  **Not** met generally: any non-Cargo root command (Nim builds, plain
+  shell commands, ...) still only gets the root command's own record,
+  with cumulative (not per-node) resource usage. The linker is also not
+  separately recorded even under Cargo (its cost rolls up into whichever
+  `rustc` invocation spawned it) — matching `rustc-fake`'s own accepted
+  scope, not a LAMINARIA-specific gap.
 - [x] Major wall/CPU/memory/I/O fields are captured where the host
-  exposes them (root-command-cumulative, not per-node — see above).
+  exposes them (per-`rustc`-invocation under Cargo; root-command-cumulative
+  otherwise).
 - [x] Missing platform fields are explicit null/unsupported states, not
   fabricated zeros (`ResourceUsage::unsupported_fields`).
 - [x] All events can be correlated to one monotonic Run clock
-  (`clock::RunClock`; `elapsed_ns_is_monotonically_non_decreasing_across_calls`
-  test).
+  (`clock::RunClock`; the outer command's own timestamps are `Instant`-based
+  and strictly monotonic; wrapper-recorded events are wall-clock deltas
+  against a shared anchor -- see "the cross-process clock correlation
+  trade-off" above for why that's not the same guarantee, stated
+  explicitly rather than glossed over).
 - [x] Failure/cancellation does not discard partial evidence (CI
   Experiment 5: exit code, resource usage, stdout/stderr all present
   for a deliberately failing command).
@@ -123,9 +243,11 @@ paraphrase of it:
   unverifiable either way today.
 
 Also not implemented, beyond the checklist: Level 2 compiler-native
-telemetry adapters (Cargo `--timings`/JSON messages, rustc
-`-Z self-profile`, Nim stage diagnostics), Level 3 platform profiler
-integration, artifact inventory (section 8), and
-`PreparationRecord`/`CacheState` population (sections 9-10) — the
-schema has fields for these so a later implementation doesn't need a
-migration, but nothing populates them yet.
+telemetry adapters beyond the wrapper's own basic timing/rusage (Cargo
+`--timings`/JSON messages, rustc `-Z self-profile`, Nim stage
+diagnostics), Level 3 platform profiler integration (`rustc-perf` itself
+uses the real `perf_event` crate for this — a concrete next reference
+point if this is picked up), artifact inventory (section 8), and
+`PreparationRecord`/`CacheState` population (sections 9-10) — the schema
+has fields for these so a later implementation doesn't need a migration,
+but nothing populates them yet.

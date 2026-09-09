@@ -95,8 +95,15 @@ fn resolve_executable(program: &str) -> Option<PathBuf> {
     })
 }
 
+/// Reaps `pid` via `wait4`, returning its exit status and (on Unix)
+/// cumulative resource usage. `pub` rather than crate-private so
+/// `src/bin/rustc_wrapper.rs` (the per-rustc-invocation wrapper substituted
+/// via Cargo's `RUSTC` env var -- see `crate::cargo_wrapper` and
+/// `NOTES.md`'s "wrapper substitution, not process-tree walking" section)
+/// can reuse the exact same, already-verified reap logic instead of a
+/// second, divergent implementation.
 #[cfg(unix)]
-fn reap(pid: u32) -> io::Result<(ExitStatusRecord, ResourceUsage)> {
+pub fn reap(pid: u32) -> io::Result<(ExitStatusRecord, ResourceUsage)> {
     let mut status: libc::c_int = 0;
     let mut rusage: libc::rusage = unsafe { std::mem::zeroed() };
     let ret = unsafe { libc::wait4(pid as libc::pid_t, &mut status, 0, &mut rusage) };
