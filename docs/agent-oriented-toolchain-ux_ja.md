@@ -102,7 +102,7 @@ compiler version、backend route、LTO、linker等を直接constraintする。
 
 `recommended` profileは「最初に試す候補」というだけではない。
 
-它はMeasurement Spineで検証されたbundle集合であり、agentに対して次を与える。
+それはMeasurement Spineで検証されたbundle集合であり、agentに対して次を与える。
 
 - exact resolved bundle;
 - qualification scope;
@@ -229,9 +229,9 @@ whether execution/probe is still required
 
 - fully validated candidateがある場合はunvalidated candidateを自動試行しない;
 - known-incompatible candidateをprocess executionしない;
--同一reasonで失敗したequivalent candidateをまとめてpruneする;
+- 同一reasonで失敗したequivalent candidateをまとめてpruneする;
 - fallbackは明示されたpolicyに従う;
--探索budget超過時は「さらに試行」ではなく未解決constraintと次の選択肢を返す。
+- 探索budget超過時は「さらに試行」ではなく未解決constraintと次の選択肢を返す。
 
 研究modeでは広範囲探索を許可できるが、通常UXとは別modeとする。
 
@@ -272,7 +272,7 @@ UXを目的とする以上、成功を主観だけで評価しない。
 - fallback回数;
 - validated profileからの成功率;
 - custom/preview pathでのfailure分類率;
--同一問題を別sessionで再探索した回数。
+- 同一問題を別sessionで再探索した回数。
 
 目標は「solverが高速」だけではなく、**不要なexternal compilation attemptsを減らすこと**である。
 
@@ -301,5 +301,5 @@ LAMINARIAのUX研究は、CLIが短いことだけを意味しない。
 3. validated profile、constraints、negative knowledgeによりexecution前に大半の無効候補をpruneできる;
 4. resolverが選択・棄却理由をmachine-readableに説明できる;
 5. expert userは必要なら全dimensionへ降りられる;
-6.探索を絞ることが未知の研究組合せを禁止することにはならない;
+6. 探索を絞ることが未知の研究組合せを禁止することにはならない;
 7. UX metricsでfailed attempt、time-to-plan、pruned variants、log/context量を継続評価できる。
