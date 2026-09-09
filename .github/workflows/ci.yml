@@ -573,6 +573,20 @@ jobs:
           cd fixtures/rust-nim-llvm-lto-compatibility
           ./build.sh
 
+      # Issue #25's first experiment (docs/llvm-rediscovery-research.md):
+      # trace a minimal semantic contract (see fixtures/
+      # llvm-rediscovery-semantic-workload/CONTRACT.md) through Rust's and
+      # Nim's own compiler stages independently, starting from source --
+      # not from the already-merged .ll files #17's fixture (above)
+      # produces. Separate fixture, separate concern: #17 asks "can these
+      # two languages' LLVM IR be merged," #25 asks "what does each
+      # compiler's own stage-by-stage lowering reveal about semantic
+      # facts/policies neither language's source explicitly requested."
+      - name: Trace the add() semantic workload through Rust and Nim independently (issue #25)
+        run: |
+          cd fixtures/llvm-rediscovery-semantic-workload
+          ./trace.sh
+
   # Exercises the "container" EnvironmentFingerprint class from a clean,
   # native (non-Rosetta) environment — see docker/bootstrap.Dockerfile for
   # why this is a bootstrap/correctness check, not a performance baseline.

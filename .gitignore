@@ -39,6 +39,9 @@ runs/
 # LAMINARIA's own, never committed. See .reference/README.md.
 .reference/
 
+# Fixture build output (fixtures/llvm-rediscovery-semantic-workload/trace.sh)
+fixtures/llvm-rediscovery-semantic-workload/trace-out/
+
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
