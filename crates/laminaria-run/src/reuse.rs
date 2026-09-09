@@ -231,6 +231,25 @@ pub fn decide_reuse(
 mod tests {
     use super::*;
 
+    /// Portable recursive directory copy for
+    /// `reuse_decision_matches_real_fixture_behavior_across_cold_noop_and_edits`
+    /// -- deliberately not `std::process::Command::new("cp")`; see that
+    /// test's own comment for why.
+    fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(dst)?;
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            let dst_path = dst.join(entry.file_name());
+            if file_type.is_dir() {
+                copy_dir_recursive(&entry.path(), &dst_path)?;
+            } else if file_type.is_file() {
+                std::fs::copy(entry.path(), dst_path)?;
+            }
+        }
+        Ok(())
+    }
+
     fn tmp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "laminaria-run-reuse-test-{name}-{}",
@@ -367,20 +386,16 @@ mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&workdir);
-        std::fs::create_dir_all(&workdir).unwrap();
-        let status = std::process::Command::new("cp")
-            .args([
-                "-r",
-                real_fixture.to_str().unwrap(),
-                workdir.to_str().unwrap(),
-            ])
-            .status()
-            .unwrap();
-        assert!(
-            status.success(),
-            "failed to copy the fixture to a throwaway location"
-        );
         let fixture = workdir.join("rust-heavy-workspace");
+        // A portable Rust copy, not `cp -r`: shelling out hit exactly the
+        // same class of Windows-path-quoting bug this session already
+        // fixed once (a Windows PathBuf's backslashes, or here also
+        // `canonicalize()`'s `\\?\` extended-path prefix, mis-handled by
+        // an MSYS-built `cp` reading its own argv) -- verified failing in
+        // CI, not reproduced locally on macOS. A few lines of `std::fs`
+        // sidesteps the whole class of issue instead of chasing another
+        // one-off escaping fix.
+        copy_dir_recursive(&real_fixture, &fixture).unwrap();
 
         let manifest_path = fixture.join("Cargo.toml");
         let target_dir = fixture.join("target");

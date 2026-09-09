@@ -87,10 +87,22 @@ fn cargo_root(manifest_path: &Path) -> RootCommand {
     }
 }
 
+/// `path.display()`, with backslashes normalized to forward slashes.
+/// `rm -rf`/`touch` below both resolve to MSYS-built coreutils on
+/// Windows (native `cmd.exe` has neither), and MSYS's own C runtime
+/// reinterprets backslashes in argv as escape sequences on the way in --
+/// a real bug this crate's own CI caught (a Windows `PathBuf`'s
+/// backslashes passed straight to `rm`/`cp`/`touch`, corrupted before
+/// the program ever saw the intended path). Forward slashes are a
+/// harmless no-op on Unix and are what MSYS itself actually expects.
+fn portable_arg_path(path: &Path) -> String {
+    path.display().to_string().replace('\\', "/")
+}
+
 fn rm_rf(path: &Path) -> RootCommand {
     RootCommand {
         program: "rm".to_string(),
-        args: vec!["-rf".to_string(), path.display().to_string()],
+        args: vec!["-rf".to_string(), portable_arg_path(path)],
         cwd: None,
         env_overrides: Default::default(),
     }
@@ -99,7 +111,7 @@ fn rm_rf(path: &Path) -> RootCommand {
 fn touch(path: &Path) -> RootCommand {
     RootCommand {
         program: "touch".to_string(),
-        args: vec![path.display().to_string()],
+        args: vec![portable_arg_path(path)],
         cwd: None,
         env_overrides: Default::default(),
     }
