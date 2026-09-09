@@ -274,6 +274,81 @@ attributing `rustc`/linker descendant work to the traced root command,
 not just measuring `cargo`'s own dispatch overhead (which is what the
 no-op number alone represents).
 
+## Level 2 compiler telemetry for Nim — no JSON stream exists, so Nim's own hint output is parsed instead
+
+`docs/measurement-foundation.md` section 7's "Nim / Nimony" adapter
+explicitly anticipates this case: *"do not assume Nim 2 and Nimony
+expose the same adapter/capability set"* as Cargo. Searched Nim's real
+compiler source (`.reference/Nim/compiler/`) for a `--message-format=
+json`-equivalent stream before writing anything, the same way as the
+Cargo adapter. There isn't one.
+
+`nim dump --dump.format:json` exists (`compiler/main.nim`'s `cmdDump`
+handling) but is a **separate command** dumping static configuration
+(version, search paths, defined symbols, enabled hints/warnings) —
+confirmed by reading its actual field list, not assumed from the name.
+It has nothing to do with per-build compile-stage telemetry.
+
+What Nim does expose natively, unconditionally, is its human-oriented
+hint stream (`compiler/lineinfos.nim`'s hint category table:
+`hintCC = "CC"` → `"CC: $1"` per module reaching C-codegen, `hintLinking`,
+and the final `hintSuccessX` summary line, format string
+`"$build\n$loc lines; ${sec}s; $mem; proj: $project; out: $output"`).
+This is exactly the *"use ... wrappers when native telemetry is
+insufficient"* fallback the design doc names — `nim_telemetry.rs`
+parses this stream instead of a structured JSON one.
+
+### A confirmed difference from the Cargo adapter — stdout vs. stderr
+
+Captured `nim c`'s stdout and stderr to separate files and found stdout
+**empty** — Nim's entire hint stream, including the final summary line,
+goes to stderr. `cargo_telemetry::parse_cargo_json_messages` reads
+`stdout.log`; `nim_telemetry::parse_nim_hint_stream` reads `stderr.log`.
+Not assumed to match Cargo's convention; checked directly.
+
+### A materially weaker reliability claim, stated explicitly rather than glossed over
+
+`--message-format=json` is Cargo's documented, stable machine interface.
+Nim's hint text carries no such contract — nothing prevents a future Nim
+release from rewording `"CC: $1"` or the `hintSuccessX` format string.
+`types::NimCompilerTelemetry`'s own doc comment states this difference
+explicitly, and every `Run`'s `known_gaps` repeats it when Nim telemetry
+was captured, rather than presenting Cargo- and Nim-sourced telemetry as
+equally trustworthy.
+
+### Peak-memory byte conversion — reversing Nim's own formatting function, checked against its doctests
+
+The summary line reports memory as e.g. `"38.184MiB peakmem"` —
+human-formatted by `strutils.formatSize` (binary, 1024-based IEC
+prefixes: B/KiB/MiB/GiB). `nim_telemetry::extract_peak_mem_bytes`
+reverses this back to a plain byte count. The unit set and base (1024,
+not 1000) were confirmed against `formatSize`'s own doctests in
+`.reference/Nim/lib/pure/strutils.nim`
+(`doAssert formatSize((1'i64 shl 31) + (300'i64 shl 20)) == "2.293GiB"`),
+not assumed from the field name alone.
+
+### Verified end-to-end on the real fixture, then in CI on both platforms
+
+```
+nim-heavy-workspace cold build: 8 modules reaching C-codegen, linked=true,
+  29436 lines compiled, ~40MB peak memory (local, arm64 macOS)
+```
+
+Confirmed in CI (run `34350673357`) on both platforms, with genuinely
+different numbers reflecting each platform's own compile path — not
+identical copies:
+
+```
+ubuntu-latest: 8 modules, linked=true, 26773 lines, 33271316 peak_mem_bytes
+macos-latest:  8 modules, linked=true, 29436 lines, 40009465 peak_mem_bytes
+```
+
+The differing `lines_compiled` between platforms (26773 vs 29436) is
+itself informative, not a bug: Nim's stdlib module set compiled in
+differs slightly by platform (different `system`/`os`-conditional code
+paths), so a genuinely different line count is the *correct*, expected
+result — not something to normalize away.
+
 ## Level 2 compiler telemetry for Cargo — Cargo's own JSON messages, studied from Cargo's real source
 
 `docs/measurement-foundation.md` section 7 names "Cargo JSON messages may
