@@ -176,6 +176,23 @@ jobs:
             exit 1
           }
           echo "per-C-compiler-invocation records: $NIM_PROCESS_COUNT total, $NIM_DISTINCT_PIDS distinct pids, 0 missing resource usage"
+          # Level 2 compiler telemetry via Nim's own hint stream
+          # (crates/laminaria-run/src/nim_telemetry.rs, parsed from
+          # stderr -- see NOTES.md). nim-heavy-workspace's own modules
+          # (primes, geometry, fixture) plus stdlib modules should show up
+          # as processed_modules, and the build should report linked=true.
+          NIM_MODULE_COUNT=$(jq '.compiler_telemetry.processed_modules | length' /tmp/nim-run.json)
+          [ "$NIM_MODULE_COUNT" -ge 3 ] || {
+            echo "expected at least 3 processed modules (primes, geometry, fixture), got $NIM_MODULE_COUNT"
+            exit 1
+          }
+          NIM_LINKED=$(jq -r '.compiler_telemetry.linked' /tmp/nim-run.json)
+          [ "$NIM_LINKED" = "true" ] || { echo "expected compiler_telemetry.linked == true, got $NIM_LINKED"; exit 1; }
+          NIM_LINES=$(jq -r '.compiler_telemetry.lines_compiled' /tmp/nim-run.json)
+          [ "$NIM_LINES" != "null" ] || { echo "expected compiler_telemetry.lines_compiled to be populated"; exit 1; }
+          NIM_PEAK_MEM=$(jq -r '.compiler_telemetry.peak_mem_bytes' /tmp/nim-run.json)
+          [ "$NIM_PEAK_MEM" != "null" ] || { echo "expected compiler_telemetry.peak_mem_bytes to be populated"; exit 1; }
+          echo "Level 2 Nim telemetry: $NIM_MODULE_COUNT modules, linked=$NIM_LINKED, $NIM_LINES lines, $NIM_PEAK_MEM peak_mem_bytes"
 
       # Issue #19 Experiment 5: a failed child process must not discard
       # partial evidence. Checked here rather than only in laminaria-run's
