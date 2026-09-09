@@ -27,7 +27,15 @@ echo "=== Substrate: unit tests (representation/evaluator/inliner self-checks) =
 
 echo "=== Substrate: LLVM-IR backend projection (LLVM 22, matching this repo's pinned version) ==="
 substrate/target/debug/substrate emit-ir > "$OUT_DIR/substrate.ll"
-"$LLC_BIN" -filetype=obj "$OUT_DIR/substrate.ll" -o "$OUT_DIR/substrate.o"
+# -relocation-model=pic: llc's default is non-PIC object code, which a
+# modern Linux system cc/ld (PIE executables by default on Ubuntu 22.04+)
+# refuses to link ("relocation R_X86_64_32 ... can not be used when making
+# a PIE object") -- a real failure this fixture's first CI run hit, not
+# reproduced locally on macOS (ld64 tolerates it there). Requesting PIC
+# unconditionally is correct on every platform this fixture runs on, not
+# just Linux -- it doesn't change any test input's output, since the
+# grammar this emitter covers has no absolute-address-dependent behavior.
+"$LLC_BIN" -relocation-model=pic -filetype=obj "$OUT_DIR/substrate.ll" -o "$OUT_DIR/substrate.o"
 cc "$OUT_DIR/substrate.o" -o "$OUT_DIR/substrate-ir-binary"
 "$OUT_DIR/substrate-ir-binary" | tee "$OUT_DIR/substrate-ir.out"
 
