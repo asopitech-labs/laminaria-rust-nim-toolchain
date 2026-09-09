@@ -241,6 +241,20 @@ statistical claim — sufficient to demonstrate the comparison is now
 *possible and produces a real number*, not sufficient as a final,
 citable overhead figure.
 
+**CI confirms the comparison runs cleanly on both platforms (run
+`34347389399`), and also confirms why a single sample isn't trustworthy**:
+a single paired level0/level1 run of the same `rust-heavy-workspace` true
+no-op rebuild gave `ubuntu-latest: level0=0.0491s level1=0.0751s`
+(~53% higher) and `macos-latest: level0=0.0919s level1=0.1105s` (~20%
+higher) — both a much larger relative gap than this dev machine's
+steady-state 3-5-sample average (~1-3%). Recorded as-is rather than
+discarded as inconvenient: shared CI runners carry more scheduling
+noise than a quiet dev machine, and one sample per platform cannot
+distinguish real overhead from that noise. This is itself evidence for,
+not against, section 11's repeated-sampling requirement — the CI step
+demonstrates the comparison *mechanism* works on both platforms; it does
+not by itself produce a trustworthy overhead figure, and isn't claimed to.
+
 ## Cold vs. true-no-op CPU attribution — real, checked in CI, not just plumbing
 
 The point of Level 1 tracing is to actually *distinguish* scenarios, not
