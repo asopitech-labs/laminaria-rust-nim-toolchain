@@ -97,3 +97,38 @@ That is the actual claim under test, confirmed: Rust's and Nim's LLVM
 IR share one optimization domain once merged, genuinely prior to native
 codegen — not two native objects glued together by a linker's symbol
 table.
+
+## Ownership note
+
+Issue #4's own acceptance criteria explicitly delegate this class of
+experiment: "Shared LLVM/LTO experiments are delegated to #17 and feed
+their compatibility findings back into this contract." This fixture is
+committed under #11 (it's on that issue's own Core Workloads list) but
+its findings are #17's ("Evaluate shared LLVM IR and LTO convergence
+for Rust, Nim 2, and Nimony") research subject — reported there
+directly rather than only left implicit here.
+
+## From IR inspection to a real executed artifact
+
+The result above (merged+optimized IR, `rust_add` present as a `define`
+inside the merged module) only satisfies "inspect the artifact," not
+#17's stronger acceptance criterion: "at least one Rust+Nim-origin LLVM
+link experiment produces and executes a final artifact." Extended
+`build.sh` to go the rest of the way — `llc -filetype=obj` on the
+merged+optimized bitcode, linked with the system `cc` driver, and run:
+
+```
+$ ./build.sh
+...
+--- run the fully-merged, natively-compiled binary ---
+nim_calls_rust_add result=7
+```
+
+One real hazard surfaced doing this, worth recording: `llc`'s default
+relocation model doesn't automatically honor the module's own `PIC
+Level` flag (present in rustc's emitted IR) — linking failed first with
+`relocation R_X86_64_32S against .rodata can not be used when making a
+PIE object`, fixed by passing `-relocation-model=pic` to `llc`
+explicitly. `rustc`/`clang`'s own backend invocations set this
+correctly by default for a PIE-default target (Ubuntu); driving `llc`
+directly does not inherit that default.
