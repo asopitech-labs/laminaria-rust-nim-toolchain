@@ -18,7 +18,7 @@ cd "$(dirname "$0")"
 : "${LLVM_DIS_BIN:?LLVM_DIS_BIN must point at a matching-version llvm-dis}"
 : "${LLC_BIN:?LLC_BIN must point at a matching-version llc}"
 
-rm -f rust-src/rust.ll nim-src/main.ll merged.bc merged-opt.bc merged-opt.ll merged-opt.o merged-native
+rm -f rust-src/rust.ll nim-src/main.ll merged.bc merged-opt.bc merged-opt.ll merged-opt.o merged-native remarks.yaml
 
 echo "--- rustc: emit LLVM IR (no native codegen) ---"
 rustc --crate-type=staticlib --emit=llvm-ir -O -o rust-src/rust.ll rust-src/lib.rs
@@ -38,8 +38,23 @@ echo "nim LLVM IR at: $NIM_LL"
 echo "--- llvm-link: merge both modules into one, before native codegen ---"
 "$LLVM_LINK_BIN" "$NIM_LL" rust-src/rust.ll -o merged.bc
 
-echo "--- opt: run LLVM's own optimizer on the merged module ---"
-"$OPT_BIN" -O2 merged.bc -o merged-opt.bc
+echo "--- opt: run LLVM's own optimizer on the merged module, capturing its own internal optimization-remarks instrumentation ---"
+# White-box evidence, not black-box process observation: opt's own pass
+# manager reports every inlining/optimization decision it makes, as
+# structured YAML, with real cost/threshold numbers -- this answers
+# "did cross-language inlining/optimization actually happen" directly
+# from LLVM's own internals, replacing/backing up manual disassembled-IR
+# reading with the same real evidence a human would otherwise have to
+# infer by eye. Verified locally first (a synthetic two-function Rust
+# case, unrelated to this fixture) that --pass-remarks-output produces
+# real, non-empty YAML with actual inlining cost/threshold data before
+# relying on it here -- see NOTES.md.
+"$OPT_BIN" -O2 merged.bc -o merged-opt.bc \
+  --pass-remarks='.*' --pass-remarks-missed='.*' --pass-remarks-analysis='.*' \
+  --pass-remarks-output=remarks.yaml
+
+echo "--- optimization remarks mentioning rust_add (LLVM's own record of what it decided, not our inference) ---"
+grep -B3 -A8 "rust_add" remarks.yaml || echo "(rust_add did not appear in any remark -- see full remarks.yaml)"
 
 echo "--- llvm-dis: inspect the result ---"
 "$LLVM_DIS_BIN" merged-opt.bc -o merged-opt.ll
