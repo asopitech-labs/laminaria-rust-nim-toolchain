@@ -72,6 +72,11 @@ jobs:
           cargo test --workspace
           cargo run -q -p fixture-bin
 
+      - name: Build mixed-rust-nim-executable fixture
+        run: |
+          cd fixtures/mixed-rust-nim-executable/rust-bin
+          cargo run
+
   # Exercises the "container" EnvironmentFingerprint class from a clean,
   # native (non-Rosetta) environment — see docker/bootstrap.Dockerfile for
   # why this is a bootstrap/correctness check, not a performance baseline.

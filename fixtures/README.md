@@ -53,20 +53,30 @@ LAMINARIA itself.
   parallelism, which is exactly what future critical-path/queue-wait
   measurement (#19, #21) needs a fixture to exercise.
 
-All five are built (not just version-checked) as part of CI — natively on
+- `mixed-rust-nim-executable/` — the "mixed Rust/Nim native executable"
+  workload: unlike `rust-nim-c-abi-baseline` (deliberately scalar-only),
+  both languages contribute real algorithmic work over a shared array
+  buffer crossing the boundary by pointer + length. Rust generates
+  deterministic data and computes its own checksum, Nim reads the same
+  buffer for statistics (`nim_array_stats`) and then mutates it in place
+  (`nim_array_scale_evens`), and Rust re-checksums the mutated buffer —
+  every stage's result is asserted against a committed reference constant.
+  Exercises the everyday array-marshaling FFI pattern that #4's baseline
+  deliberately avoids.
+
+All six are built (not just version-checked) as part of CI — natively on
 `ubuntu-latest`/`macos-latest`, and inside `docker/bootstrap.Dockerfile`'s
 container environment — which is the actual evidence for #18's fixture
 reproduction criterion.
 
 ## Still open (per #11's full "Core workloads" list)
 
-Mixed Rust/Nim native executable (Rust and Nim linked into one binary
-without the fixture-per-language split above), direct native-link workload,
-backend-route variant workload, backend checkpoint-economics workload, LLVM
-pass/pipeline observation workload, ThinLTO/DTLTO dynamic backend-job
-workload, boundary-heavy workload, incremental semantic edit, unchanged/no-op
-workspace, worktree reuse, mixed-language WASM workload, Wasm
-link/post-link/component invalidation workload, Rust/Nim 2/Nimony shared
-LLVM/LTO compatibility workload, compiler/backend-work-elimination fixture.
-Most of these need the Run/scenario machinery from #19-21 to be meaningful,
-not just a buildable workspace.
+Direct native-link workload, backend-route variant workload, backend
+checkpoint-economics workload, LLVM pass/pipeline observation workload,
+ThinLTO/DTLTO dynamic backend-job workload, boundary-heavy workload,
+incremental semantic edit, unchanged/no-op workspace, worktree reuse,
+mixed-language WASM workload, Wasm link/post-link/component invalidation
+workload, Rust/Nim 2/Nimony shared LLVM/LTO compatibility workload,
+compiler/backend-work-elimination fixture. Most of these need the
+Run/scenario machinery from #19-21 to be meaningful, not just a buildable
+workspace.

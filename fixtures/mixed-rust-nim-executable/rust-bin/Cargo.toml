@@ -1,0 +1,11 @@
+[workspace]
+
+[package]
+name = "mixed-rust-nim-executable"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "mixed-rust-nim-executable"
+path = "src/main.rs"
