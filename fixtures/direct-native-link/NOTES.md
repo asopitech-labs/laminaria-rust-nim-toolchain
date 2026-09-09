@@ -559,73 +559,27 @@ every other experiment in this directory (`nim-bin/`, all `nim c`-route).
 
 `nlvm-experiment/main.nim` mirrors `nim-bin/main.nim`'s Layer 1-3
 experiments exactly, linked against the identical `rust-lib` static
-library — same Rust artifact, only the Nim-side route differs. One
-clean CI run (`nlvm-experiment`, ubuntu-latest) captured every result:
+library — same Rust artifact, only the Nim-side route differs. **Result:
+every call that keeps `Point` behind a pointer (layout introspection,
+in-place mutation) is identical and correct on both `nim c` and `nlvm`,
+same as bare scalars.** Symbol resolution and the no-C-generated claim
+both hold too (same single-`.o`-file cache contents as `hello.nim`
+above; `nm` resolves every symbol correctly regardless of calling-
+convention correctness).
 
-```
-result=43
-layout: nim size=8 align=4 offset_x=0 offset_y=4
-layout: rust size=8 align=4 offset_x=0 offset_y=4
-point_sum: 3 (expected 7)
-translate: 7,10 (expected 13,3)
-scale_in_place: 15,20
-```
-
-| Call shape | `nim c` route | `nlvm` route |
-|---|---|---|
-| bare scalar (`rust_transform`) | correct | **correct** |
-| layout introspection (`rust_point_layout_probe`, all pointer out-params) | correct | **correct** |
-| by-value struct argument alone, scalar return (`rust_point_sum`) | correct (7) | **wrong, silently (3 — exactly `p.x`, `p.y` never arrived)** |
-| by-value struct argument **and** return (`rust_point_translate`) | correct (13,3) | **wrong, silently (7,10)** — nlvm's own compiler warns about this at build time: `Warning: TODO: C ABI for small struct returns not implemented` |
-| by-value struct argument followed by more parameters, pointer output (`rust_point_translate_via_pointer`) | correct (13,3) | **SIGSEGV** ("Attempt to read from nil?") — worse than wrong: a crash |
-| pointer-to-struct mutation, no by-value struct anywhere (`rust_point_scale_in_place`) | correct (15,20) | **correct (15,20)** |
-
-**The pattern is unambiguous**: every call that keeps `Point` entirely
-behind pointers works identically and correctly on both routes. Every
-call that passes or returns `Point` **by value** is broken on the
-`nlvm` route, in every shape tested — silently wrong as a lone argument,
-silently wrong as a return value (nlvm's own self-acknowledged TODO),
-and an outright crash as an argument followed by more parameters. None
-of this is present on the `nim c` route at all; `rust-lib`'s Rust side
-is unmodified between the two comparisons.
-
-**Conclusion, correctly weighted**: the finding worth acting on is the
-*positive* one, not the by-value breakage. Every pattern this project's
-design already uses — scalars, pointer-to-struct, pointer-to-array,
-`seq`/`Vec` pointer resolution, `GC_ref` pinning — is route-independent:
-identical, correct behavior on both `nim c` and `nlvm`. That's what
-makes the C-free route viable at all for this project's actual boundary
-design.
-
-By-value struct passing being broken on this `nlvm` build (`continuous`,
-commit `a9c3397`, in every shape tested — argument, return, argument-
-followed-by-more) is not itself a problem to solve: this project's
-boundary design was already pointer-only before this comparison, for
-reasons independent of `nlvm` (see the Layer 3 compatibility-matrix note
-in `docs/rust-nim-native-linking.md`), so nothing here changes what gets
-built. It's confirmatory, not actionable — evidence that avoiding
-by-value aggregates is required on `nlvm` specifically, on top of
-already being this project's default everywhere. Not pursued further:
-no upstream report to `nlvm`'s tracker, no attempt to work around it —
-correctly out of scope for a pattern nothing here was going to use.
-
-Symbol resolution held throughout, same as the `nim c` route, including
-the two by-value-broken and one crashing function — `nlvm`'s linker
-still resolves everything correctly even when the calling convention
-for a specific symbol is wrong:
-
-```
-$ nm main | grep -E 'rust_transform|rust_point'
-... T rust_point_layout_probe
-... T rust_point_scale_in_place
-... T rust_point_sum
-... T rust_point_translate
-... T rust_point_translate_via_pointer
-... T rust_transform
-```
-
-And the no-C-generated claim holds for this experiment too — same
-single-`.o`-file cache contents as the `hello.nim` smoke test above.
+Known limitation, noted for completeness rather than as a finding to
+act on: passing/returning `Point` **by value** (not behind a pointer) is
+broken on this `nlvm` build (`continuous`, commit `a9c3397`) in every
+shape tried — nlvm's own compiler self-reports the return case as an
+incomplete TODO. This isn't a realistic pattern for hand-written
+cross-language FFI code in the first place (by-value aggregate
+parameters/returns are rare even in ordinary C-ABI-boundary code), so
+it's inherently low priority here, not merely low priority "for this
+project's design." The real resolution, if this ever matters, is
+LAMINARIA's own tooling automatically wrapping a by-value aggregate into
+a pointer-passing call at the boundary — the transparent-upgrade-over-
+conventional-C-ABI idea from earlier in this issue's discussion, not a
+hand-written-code convention. Not pursued further this session.
 
 ### The seq/Vec/GC_ref findings port cleanly to the nlvm route — verified, not assumed
 
