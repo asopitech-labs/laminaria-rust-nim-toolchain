@@ -15,6 +15,19 @@
 //! builds its deeper Layer 1-6 experiments on top of; it is not that
 //! research itself.
 
+/// Layer 4 focal question, previously entirely untested: what actually
+/// happens when this function panics while called from Nim across the
+/// FFI boundary -- observed directly (see `../panic-experiment/`)
+/// rather than assumed from Rust's own documentation about unwinding
+/// across `extern "C"` boundaries.
+#[no_mangle]
+pub extern "C" fn rust_panics(trigger: i32) -> i32 {
+    if trigger != 0 {
+        panic!("deliberate panic for issue #4 Layer 4 testing");
+    }
+    42
+}
+
 #[no_mangle]
 pub extern "C" fn rust_transform(x: i32) -> i32 {
     x.wrapping_mul(2).wrapping_add(1)
@@ -196,6 +209,22 @@ mod tests {
     fn transform_known_value() {
         assert_eq!(rust_transform(21), 43);
     }
+
+    #[test]
+    fn panics_returns_normally_when_not_triggered() {
+        assert_eq!(rust_panics(0), 42);
+    }
+
+    // Deliberately no #[should_panic] test here: it wouldn't work, and
+    // that failure *is* the finding. A plain `extern "C" fn` is treated
+    // as a "cannot unwind" boundary since Rust made this the default
+    // behavior for the C ABI -- verified directly, not assumed from
+    // docs: an earlier #[should_panic] version of this test aborted
+    // the whole test process ("thread caused non-unwinding panic.
+    // aborting.", SIGABRT) instead of being caught by the test
+    // harness's own catch_unwind, even though nothing here crosses
+    // into Nim yet -- the extern "C" boundary alone is what triggers
+    // it. See ../panic-experiment/ for the cross-language confirmation.
 
     #[test]
     fn sum_via_pointer_known_value() {

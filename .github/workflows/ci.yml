@@ -107,6 +107,28 @@ jobs:
           cargo test --manifest-path rust-lib/Cargo.toml
           ./build.sh
 
+      # Issue #4 Layer 4, previously entirely untested: what happens
+      # when a Rust function panics while called from Nim? Expected,
+      # deterministic outcome verified below: SIGABRT (134) -- a plain
+      # `extern "C" fn` is a "cannot unwind" boundary, confirmed by
+      # rust-lib's own unit tests too. See panic-experiment/main.nim
+      # and fixtures/direct-native-link/NOTES.md.
+      - name: Build and run the direct-native-link panic-boundary experiment
+        run: |
+          cd fixtures/direct-native-link/panic-experiment
+          cargo build --release --manifest-path ../rust-lib/Cargo.toml
+          nim c --nimcache:nimcache --passL:"-L../rust-lib/target/release -lrustlib" -o:main main.nim
+          set +e
+          ./main
+          STATUS=$?
+          set -e
+          if [ "$STATUS" -eq 134 ]; then
+            echo "main aborted via SIGABRT (134) -- the expected, deterministic panic-across-extern-C-boundary behavior"
+          else
+            echo "main exited with unexpected status $STATUS -- expected SIGABRT (134), investigate"
+            exit 1
+          fi
+
   # Issue #4's genuinely-open question, not #11's: every fixture above
   # uses `nim c`, which always produces native code via a generated-C
   # intermediate -- even with no header file, that route's ABI/symbol
@@ -204,6 +226,26 @@ jobs:
           find ~/.cache/nim/main_d -type f
           echo "--- symbol resolution trail, same methodology as NOTES.md's nim-bin evidence ---"
           nm main | grep -E 'rust_transform|rust_point' || true
+
+      # Cross-route confirmation of the panic-boundary finding above --
+      # this is a Rust-side unwind-ABI behavior, not expected to be
+      # route-dependent, but checked directly rather than assumed given
+      # how many other things turned out to differ on nlvm today.
+      - name: Build and run the panic-boundary experiment via nlvm
+        run: |
+          rm -rf ~/.cache/nim/main_d
+          cd fixtures/direct-native-link/panic-experiment
+          "$NLVM_BIN" c --passL:"-L../rust-lib/target/release -lrustlib" main.nim
+          set +e
+          ./main
+          STATUS=$?
+          set -e
+          if [ "$STATUS" -eq 134 ]; then
+            echo "main aborted via SIGABRT (134) on the nlvm route too -- matches the nim c route"
+          else
+            echo "main exited with unexpected status $STATUS on the nlvm route -- expected SIGABRT (134), investigate"
+            exit 1
+          fi
 
       # #11's own fixture (not #4's investigation, though it reuses this
       # job's nlvm download): does Rust's own LLVM IR and Nim's own LLVM

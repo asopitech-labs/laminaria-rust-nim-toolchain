@@ -427,6 +427,71 @@ Nim proc (not raw `GC_unref`, which isn't itself `exportc`-friendly
 across the boundary as used here) to release it — a small, concrete,
 buildable next increment, not attempted in this session.
 
+## Layer 4: what happens when Rust panics across the boundary (`panic-experiment/`)
+
+Previously entirely untested — flagged only as "undefined behavior, not
+merely untested" below. Checked directly instead of leaving it there.
+
+`rust-lib`'s own unit tests found the first half of this by accident:
+an earlier `#[should_panic]` test calling `rust_panics(1)` (a plain
+`extern "C" fn` that panics when triggered) didn't get caught by the
+test harness's own `catch_unwind` — it aborted the whole test process:
+
+```
+thread caused non-unwinding panic. aborting.
+```
+
+This happens with **no Nim involved at all** — Rust calling its own
+`extern "C" fn` from its own test harness. Reason: a plain
+`extern "C" fn` is a "cannot unwind" boundary by Rust's own current
+default ABI semantics; a panic that tries to propagate out of one
+doesn't unwind, it calls `panic_cannot_unwind` and aborts immediately.
+
+`panic-experiment/main.nim` confirms this holds identically when the
+caller is genuinely Nim, on both the `nim c` and `nlvm` routes:
+
+```
+$ ./main
+normal (non-panicking) call result=42
+about to call rust_panics(1) -- expect the process to abort here, not return
+...
+panicked at src/lib.rs:26:9:
+deliberate panic for issue #4 Layer 4 testing
+...
+panicked at .../core/src/panicking.rs:225:5:
+panic in a function that cannot unwind
+...
+   19:        0x1024d16c8 - _rust_panics
+   20:        0x1024d137c - _NimMainModule
+   21:        0x1024d1224 - _NimMainInner
+   22:        0x1024d1434 - _NimMain
+   23:        0x1024d1480 - _main
+thread caused non-unwinding panic. aborting.
+SIGABRT: Abnormal termination.
+```
+
+**Result, and why it's actually good news**: this is not undefined
+behavior — it's a clean, deterministic `SIGABRT` (exit `134`), with
+Rust's own diagnostic message, and a backtrace that shows the exact
+call chain (`_main → _NimMain → ... → _rust_panics → panic_cannot_unwind
+→ abort`). Nim's own runtime never gets a chance to run any cleanup —
+the process simply ends — but "always aborts, deterministically, with a
+diagnosable message" is a real, well-defined contract a caller can plan
+around, not the silent-corruption failure mode the doc's non-goals
+worry about. The practical implication for anything built on this
+fixture's pattern: a Rust function exposed across this boundary must
+either be genuinely panic-free (provably, or by construction — pure
+arithmetic, no indexing/unwrap/allocation-failure paths) or wrap its
+body in `std::panic::catch_unwind` itself and translate the caught
+panic into an explicit error return value before it ever reaches the
+`extern "C"` boundary — there is no partial-failure/graceful-unwind
+option once execution has entered Rust code exported this way.
+
+Not tested: the reverse direction (a Nim exception raised while Rust
+code is on the stack, e.g. Rust calling back into a Nim callback that
+raises) — no experiment in this fixture has Rust call into Nim yet,
+every call here goes Nim → Rust only.
+
 ## Explicitly not attempted, and why (Layer 3/4 scope)
 
 Per `docs/rust-nim-native-linking.md`'s own required "compatibility
@@ -451,12 +516,14 @@ container's own representation never crosses the boundary.
   closures are monomorphized or trait-object-boxed with no compatible
   ABI. Only plain `proc`/`fn` pointers (no captured environment) are
   usable across this boundary.
-- **Exceptions/panics**: Nim's exception propagation and Rust's
-  panic/unwind mechanism are different unwind implementations; letting
-  either cross the boundary uncaught is undefined behavior, not merely
-  untested. Every function exported in this fixture is either
-  `noexcept`-shaped by construction (pure arithmetic) or would need an
-  explicit catch-and-translate adapter at the boundary — not attempted.
+- **Nim exceptions crossing into Rust**: the reverse direction of the
+  now-tested Rust-panics-into-Nim case above (see the dedicated Layer 4
+  section) — no experiment here has Rust call into Nim yet, so a Nim
+  exception raised while Rust is on the stack (e.g. via a Nim-provided
+  callback) remains untested. Rust's panic case turned out to be a
+  clean, deterministic abort rather than true undefined behavior; the
+  Nim-exception direction is not assumed to behave the same way without
+  being checked.
 - **Holding a resolved pointer across multiple FFI calls**: every
   pointer-resolution experiment above re-derives its pointer immediately
   before use and never holds one across a call boundary where the other
