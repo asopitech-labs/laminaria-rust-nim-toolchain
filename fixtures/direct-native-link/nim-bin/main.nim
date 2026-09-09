@@ -98,35 +98,48 @@ block nimSeqPointerIntoRust:
   doAssert buf == @[20.cint, 40, 60, 80, 100],
     "in-place mutation via pointer into a Nim-owned seq drifted from the committed reference value"
 
-block nimSeqGrowthInvalidatesPointer:
+block nimSeqGrowthAddressObservation:
   ## The caveat half of direction 1: a pointer into a Nim `seq`'s buffer
-  ## is only valid until the `seq` next reallocates. This never
-  ## dereferences the stale address after growth -- only compares it as
-  ## a plain integer -- so the point is made without actually invoking
-  ## undefined behavior.
+  ## is only valid until the `seq` next reallocates -- a documented API
+  ## contract (`setLen`/`add` "may reallocate"), not something this
+  ## block can prove by observation alone. Whether the address actually
+  ## changes on a given run is an allocator implementation detail: a
+  ## small allocation early in a process may legitimately be grown
+  ## in place if free space happens to follow it (glibc's malloc can do
+  ## exactly this -- see rustVecGrowthAddressObservation below, where it
+  ## was observed doing so on ubuntu-latest/x86_64/glibc in this
+  ## project's own CI, in the Rust-owned direction). So this reports the
+  ## observation without asserting a specific outcome, and never
+  ## dereferences the stale address either way -- only compares it as a
+  ## plain integer.
   var buf: seq[cint] = @[10.cint, 20, 30, 40, 50]
   let addrBefore = cast[int](addr buf[0])
-  buf.setLen(buf.len + 1000) # force reallocation well past original capacity
+  buf.setLen(buf.len + 1000) # large growth, to make in-place extension least likely
   let addrAfter = cast[int](addr buf[0])
   echo "nim seq buffer address before growth=", addrBefore, " after growth=", addrAfter,
-    " changed=", addrBefore != addrAfter
-  doAssert addrBefore != addrAfter,
-    "expected seq growth to reallocate on this run -- if it didn't, the caveat this block exists " &
-    "to demonstrate wasn't actually exercised (not itself proof the caveat is false in general)"
+    " changed=", addrBefore != addrAfter, " (allocator-dependent; both outcomes are valid)"
+  doAssert buf.len == 1005, "seq length after setLen drifted from the committed reference value"
 
-block rustVecGrowthInvalidatesPointer:
+block rustVecGrowthAddressObservation:
   ## Direction 2, the symmetric reverse: Rust owns a growable `Vec`,
   ## forces its own internal reallocation, and reports both buffer
   ## addresses as plain integers -- Nim never receives, and therefore
-  ## never risks dereferencing, an invalidated pointer. This is what
-  ## would go stale if a caller captured the "before" pointer via a
-  ## variant of this API and kept using it past a growing call.
+  ## never risks dereferencing, a possibly-invalidated pointer.
+  ##
+  ## Observed result on this project's own CI: on macOS/arm64 the
+  ## address reliably changed; on ubuntu-latest/x86_64 (glibc) it did
+  ## NOT change for this exact growth (5 -> 1010 elements) -- glibc's
+  ## allocator extended the small initial allocation in place. That is
+  ## a genuine, useful finding in its own right: **the absence of an
+  ## address change is not evidence of safety**, only a report of what
+  ## one allocator happened to do for one allocation size on one run.
+  ## The documented API contract ("growth may reallocate"), not
+  ## observed behavior, is what any caller must design against -- which
+  ## is exactly why this block only reports the outcome instead of
+  ## asserting one.
   var addrBefore, addrAfter: clong
   var lenAfter: cint
   rust_vec_growth_probe(5, addr addrBefore, addr addrAfter, addr lenAfter)
   echo "rust vec buffer address before growth=", addrBefore, " after growth=", addrAfter,
-    " len_after=", lenAfter, " changed=", addrBefore != addrAfter
+    " len_after=", lenAfter, " changed=", addrBefore != addrAfter, " (allocator-dependent; both outcomes are valid)"
   doAssert lenAfter == 1010, "rust_vec_growth_probe's reported post-growth length drifted"
-  doAssert addrBefore != addrAfter,
-    "expected Vec growth to reallocate on this run -- if it didn't, the caveat this block exists " &
-    "to demonstrate wasn't actually exercised (not itself proof the caveat is false in general)"

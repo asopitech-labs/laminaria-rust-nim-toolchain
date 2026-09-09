@@ -190,43 +190,62 @@ The general shape of this direction was already proven safe by
 it through a pointer within a single call). What that fixture didn't
 test is the caveat below, which applies identically in this direction.
 
-### The caveat, proven empirically in both directions: growth invalidates the pointer
+### The caveat: growth *may* invalidate the pointer — and CI proved why "may" is the right word
 
 A pointer into a `seq`'s or `Vec`'s buffer is only valid **until that
-container next reallocates** — exactly the same mtime-vs-content-identity
-class of pitfall as `fixtures/STATE-CONTRACTS.md` found in Cargo's
-fingerprinting, but here the cost of getting it wrong is memory safety,
-not just an extra recompile. Both blocks below only ever compare the
-before/after address as a plain integer — **neither dereferences the
-stale pointer** — so the caveat is demonstrated without committing the
-undefined behavior it's warning about:
+container next reallocates** — a documented API contract
+(`setLen`/`add`/`extend`/`reserve` all say "may reallocate"), not a
+guarantee that every reallocation is observable by comparing addresses.
+Both blocks below only ever compare the before/after address as a plain
+integer — **neither dereferences the stale pointer** — so the point is
+made without committing the undefined behavior it's about:
 
 ```
-$ ./build.sh
+$ ./build.sh   # macOS/arm64
 ...
-nim seq buffer address before growth=4372713544 after growth=4372721736 changed=true
-rust vec buffer address before growth=4373848176 after growth=4373850032 len_after=1010 changed=true
+nim seq buffer address before growth=4369780808 after growth=4369789000 changed=true
+rust vec buffer address before growth=4378747616 after growth=4378748752 len_after=1010 changed=true
 ```
 
-`nimSeqGrowthInvalidatesPointer` forces the reallocation with
-`buf.setLen(buf.len + 1000)` on the Nim side; `rust_vec_growth_probe`
-forces it with `Vec::extend` on the Rust side, and deliberately reports
-both addresses as `i64`/`clong` integers rather than pointers, so Nim
-never even receives a value of a type it could be tempted to
-dereference. Both addresses changed on this run, on both platforms CI
-exercises — the reallocation genuinely happened, not just theoretically
-could.
+An earlier version of this fixture hard-asserted `changed == true` for
+both, on the (wrong) assumption that a large-enough growth always moves
+the buffer. **CI's ubuntu-latest job caught this being false**:
+
+```
+rust vec buffer address before growth=94099226362544 after growth=94099226362544 len_after=1010 changed=false
+```
+
+On `ubuntu-latest`/`x86_64` with glibc, growing the `Vec` from 5 to 1010
+elements did **not** move the buffer — glibc's allocator extended the
+small initial allocation in place, because free heap space happened to
+follow it early in the process. The Nim-side `seq` growth changed
+address on every platform observed so far, but nothing here proves it
+always will either.
+
+**This is the actual finding, and it's more useful than "reallocation
+always moves the buffer"**: whether an address changes after growth is
+an allocator implementation detail, not something a caller can rely on
+observing. Code that captured a pointer, grew the container, and then
+kept using the old pointer *because the address happened not to
+change* would be exhibiting exactly the false sense of safety this
+caveat warns about — the bug wouldn't reproduce on every platform, which
+is worse than reproducing on all of them. `NOTES.md`'s original claim
+("both addresses changed... the reallocation genuinely happened, not
+just theoretically could") was itself an overclaim corrected by this
+run — left here, struck through in spirit, as its own small case study
+in verifying evidence rather than trusting a single platform's run.
 
 **Conclusion for this focal question**: pointer resolution into
-GC-managed/growable memory works, symmetrically, in both directions,
-*for the duration of one FFI call* — but the moment either side's
-container reallocates (Nim `seq` growth, Rust `Vec` growth), any pointer
-captured before that point is stale. A future direct-native-link design
-that wants to hold such a pointer across multiple calls — rather than
-re-deriving it fresh each time, as every experiment here does — needs an
-explicit contract for that (e.g. pinning the buffer, or the growable
-side notifying the other of reallocation) that does not yet exist and
-was not attempted.
+GC-managed/growable memory works, symmetrically, in both directions, for
+the duration of one FFI call — but nothing about *whether the address
+visibly changes* on any given reallocation is part of the contract a
+caller can build on. A future direct-native-link design that wants to
+hold such a pointer across multiple calls — rather than re-deriving it
+fresh each time, as every experiment here does — needs an explicit
+contract for that (e.g. pinning the buffer, or the growable side
+notifying the other of reallocation) that does not yet exist and was not
+attempted; it cannot lean on "we didn't observe the address move" as
+evidence of safety.
 
 ## Explicitly not attempted, and why (Layer 3/4 scope)
 
