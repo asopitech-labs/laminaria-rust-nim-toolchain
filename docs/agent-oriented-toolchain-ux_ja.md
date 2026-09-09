@@ -12,6 +12,8 @@ Rust/Nim compiler version、backend、target、linker、LTO、WASM composition�
 
 LAMINARIAの価値は「組合せをたくさん試せること」ではなく、既知の制約、検証済みprofile、compatibility evidence、negative knowledgeを使って**実行前に探索空間を縮め、最も妥当なplanを直接提示できること**にある。
 
+本方針を評価可能な研究仮説・探索budget・UX metrics・失敗条件へ落とした正式なResearch Contractは `toolchain-ux-research-contract_ja.md` を参照する。
+
 ## 1. UXを独立した成功条件として扱う
 
 通常のbuild toolでは、内部機能が正しくてもユーザーが大量のflag、compiler version、linker、target設定を手で組み合わせなければ使えない場合がある。
