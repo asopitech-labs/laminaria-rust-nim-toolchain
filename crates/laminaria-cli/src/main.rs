@@ -1,6 +1,31 @@
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+
+/// CLI-facing mirror of `laminaria_run::types::ProbeLevel`'s two
+/// implemented variants. A separate enum (not a re-export) so clap's
+/// `ValueEnum` derive stays in this crate rather than requiring `clap` as
+/// a dependency of `laminaria-run` just for its CLI string spelling.
+#[derive(Clone, Copy, ValueEnum)]
+enum ProbeLevelArg {
+    /// Portable lifecycle tracing only: exit status and wall timestamps,
+    /// no resource accounting, no Cargo/Nim wrapper substitution -- the
+    /// minimal-wrapper baseline to compare Level 1's own overhead against
+    /// (docs/measurement-foundation.md section 12, issue #19 Experiment 6).
+    Level0,
+    /// Full `wait4`-based resource accounting plus Cargo/Nim wrapper
+    /// substitution where applicable. The default.
+    Level1,
+}
+
+impl From<ProbeLevelArg> for laminaria_run::types::ProbeLevel {
+    fn from(value: ProbeLevelArg) -> Self {
+        match value {
+            ProbeLevelArg::Level0 => laminaria_run::types::ProbeLevel::Level0Lifecycle,
+            ProbeLevelArg::Level1 => laminaria_run::types::ProbeLevel::Level1ProcessResource,
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(
@@ -59,6 +84,12 @@ enum Commands {
         /// human-readable summary.
         #[arg(long)]
         json: bool,
+        /// Tracing depth: `level1` (default, full resource accounting plus
+        /// Cargo/Nim wrapper substitution) or `level0` (portable lifecycle
+        /// only -- the minimal-wrapper baseline to compare level1's own
+        /// overhead against, issue #19 Experiment 6).
+        #[arg(long, value_enum, default_value_t = ProbeLevelArg::Level1)]
+        probe_level: ProbeLevelArg,
         /// The root command to trace, e.g. `-- cargo build --release`.
         #[arg(required = true, num_args = 1.., last = true)]
         command: Vec<String>,
@@ -88,6 +119,7 @@ fn main() {
             lock,
             repo_root,
             json,
+            probe_level,
             command,
         } => run_command(
             workload_id,
@@ -97,6 +129,7 @@ fn main() {
             lock,
             repo_root,
             json,
+            probe_level,
             command,
         ),
         Commands::RegenerateSummary { runs_root, run_id } => {
@@ -115,6 +148,7 @@ fn run_command(
     lock: PathBuf,
     repo_root: PathBuf,
     json: bool,
+    probe_level: ProbeLevelArg,
     command: Vec<String>,
 ) -> i32 {
     let program = command[0].clone();
@@ -134,6 +168,7 @@ fn run_command(
         &lock,
         &repo_root,
         root,
+        probe_level.into(),
     ) {
         Ok(result) => result,
         Err(err) => {

@@ -31,15 +31,16 @@ pub const COVERAGE_NOTE: &str = "resource_usage is cumulative over the root proc
     descendant processes (their own pid/parent/argv/timing) are not separately recorded by this \
     tracer -- see ProcessTrace::known_gaps";
 
-/// Spawns `root`, redirecting stdout/stderr to `stdout_path`/`stderr_path`,
-/// waits for it to exit, and returns its `ProcessRecord`. All timestamps
-/// are relative to `clock`.
-pub fn trace_root_command(
-    clock: &RunClock,
+pub const LEVEL0_COVERAGE_NOTE: &str = "Level 0 lifecycle-only tracing: exit status and wall \
+    timestamps only, no resource accounting (no wait4 call at all) -- deliberately, this is the \
+    minimal-wrapper baseline docs/measurement-foundation.md section 12 and issue #19 Experiment 6 \
+    ask for, to measure Level 1's own observer overhead against";
+
+fn build_command(
     root: &RootCommand,
     stdout_path: &Path,
     stderr_path: &Path,
-) -> io::Result<ProcessRecord> {
+) -> io::Result<Command> {
     let stdout_file = File::create(stdout_path)?;
     let stderr_file = File::create(stderr_path)?;
 
@@ -53,6 +54,28 @@ pub fn trace_root_command(
     }
     command.stdout(stdout_file);
     command.stderr(stderr_file);
+    Ok(command)
+}
+
+fn root_argv(root: &RootCommand) -> Vec<String> {
+    std::iter::once(root.program.clone())
+        .chain(root.args.iter().cloned())
+        .collect()
+}
+
+/// Spawns `root`, redirecting stdout/stderr to `stdout_path`/`stderr_path`,
+/// waits for it to exit, and returns its `ProcessRecord`. All timestamps
+/// are relative to `clock`. Level 1: captures `wait4`-derived resource
+/// usage (see this module's doc comment). For the Level 0 lifecycle-only
+/// counterpart used to measure this level's own observer overhead, see
+/// `trace_root_command_level0`.
+pub fn trace_root_command(
+    clock: &RunClock,
+    root: &RootCommand,
+    stdout_path: &Path,
+    stderr_path: &Path,
+) -> io::Result<ProcessRecord> {
+    let mut command = build_command(root, stdout_path, stderr_path)?;
 
     let start_elapsed_ns = clock.elapsed_ns();
     let child = command.spawn()?;
@@ -71,9 +94,7 @@ pub fn trace_root_command(
         pid: Some(pid),
         parent_pid: Some(std::process::id()),
         executable: resolve_executable(&root.program),
-        argv: std::iter::once(root.program.clone())
-            .chain(root.args.iter().cloned())
-            .collect(),
+        argv: root_argv(root),
         cwd: root.cwd.clone(),
         start_elapsed_ns,
         end_elapsed_ns: Some(end_elapsed_ns),
@@ -81,6 +102,73 @@ pub fn trace_root_command(
         resource_usage,
         probe_level: ProbeLevel::Level1ProcessResource,
         coverage_note: COVERAGE_NOTE.to_string(),
+    })
+}
+
+/// The Level 0 counterpart to `trace_root_command`: portable lifecycle
+/// tracing only (`std::process::Child::wait`, no `wait4`/`libc` at all) --
+/// the "minimal wrapper" baseline `docs/measurement-foundation.md` section
+/// 12 and issue #19 Experiment 6 ask every heavier probe level to be
+/// measured against. `resource_usage` is always all-`None`, with every
+/// field explicitly listed in `unsupported_fields` -- not because the
+/// platform lacks the data, but because this probe level deliberately
+/// never asks for it, which is a different, more specific claim than "the
+/// data was unavailable" (see `types::ResourceUsage`'s own doc comment on
+/// that distinction).
+pub fn trace_root_command_level0(
+    clock: &RunClock,
+    root: &RootCommand,
+    stdout_path: &Path,
+    stderr_path: &Path,
+) -> io::Result<ProcessRecord> {
+    let mut command = build_command(root, stdout_path, stderr_path)?;
+
+    let start_elapsed_ns = clock.elapsed_ns();
+    let mut child = command.spawn()?;
+    let pid = child.id();
+
+    let status = child.wait()?;
+    let end_elapsed_ns = clock.elapsed_ns();
+
+    let exit_status = ExitStatusRecord {
+        success: status.success(),
+        code: status.code(),
+        #[cfg(unix)]
+        signal: {
+            use std::os::unix::process::ExitStatusExt;
+            status.signal()
+        },
+        #[cfg(not(unix))]
+        signal: None,
+    };
+
+    let unsupported_fields = vec![
+        "user_cpu_seconds".to_string(),
+        "system_cpu_seconds".to_string(),
+        "peak_rss_bytes".to_string(),
+        "block_input_ops".to_string(),
+        "block_output_ops".to_string(),
+        "minor_faults".to_string(),
+        "major_faults".to_string(),
+        "voluntary_context_switches".to_string(),
+        "involuntary_context_switches".to_string(),
+    ];
+
+    Ok(ProcessRecord {
+        pid: Some(pid),
+        parent_pid: Some(std::process::id()),
+        executable: resolve_executable(&root.program),
+        argv: root_argv(root),
+        cwd: root.cwd.clone(),
+        start_elapsed_ns,
+        end_elapsed_ns: Some(end_elapsed_ns),
+        exit_status: Some(exit_status),
+        resource_usage: ResourceUsage {
+            unsupported_fields,
+            ..ResourceUsage::default()
+        },
+        probe_level: ProbeLevel::Level0Lifecycle,
+        coverage_note: LEVEL0_COVERAGE_NOTE.to_string(),
     })
 }
 
@@ -237,6 +325,53 @@ mod tests {
         assert!(record.resource_usage.user_cpu_seconds.is_some());
         assert!(record.resource_usage.unsupported_fields.is_empty());
         assert_eq!(std::fs::read_to_string(&stdout_path).unwrap().trim(), "hi");
+    }
+
+    #[test]
+    fn level0_traces_a_successful_command_with_no_resource_usage() {
+        let clock = RunClock::start();
+        let (stdout_path, stderr_path) = tmp_paths("level0-success");
+        let root = RootCommand {
+            program: "sh".to_string(),
+            args: vec!["-c".to_string(), "echo hi; exit 0".to_string()],
+            cwd: None,
+            env_overrides: BTreeMap::new(),
+        };
+        let record = trace_root_command_level0(&clock, &root, &stdout_path, &stderr_path).unwrap();
+
+        assert_eq!(record.probe_level, ProbeLevel::Level0Lifecycle);
+        let status = record.exit_status.as_ref().unwrap();
+        assert!(status.success);
+        assert_eq!(status.code, Some(0));
+        assert!(record.end_elapsed_ns.unwrap() >= record.start_elapsed_ns);
+        // The defining difference from Level 1: no resource accounting at
+        // all, every field explicitly marked unsupported rather than left
+        // as an unexplained None.
+        assert!(record.resource_usage.user_cpu_seconds.is_none());
+        assert!(record.resource_usage.peak_rss_bytes.is_none());
+        assert_eq!(record.resource_usage.unsupported_fields.len(), 9);
+        assert_eq!(std::fs::read_to_string(&stdout_path).unwrap().trim(), "hi");
+    }
+
+    #[test]
+    fn level0_traces_a_failing_command_without_losing_evidence() {
+        let clock = RunClock::start();
+        let (stdout_path, stderr_path) = tmp_paths("level0-failure");
+        let root = RootCommand {
+            program: "sh".to_string(),
+            args: vec!["-c".to_string(), "echo oops 1>&2; exit 3".to_string()],
+            cwd: None,
+            env_overrides: BTreeMap::new(),
+        };
+        let record = trace_root_command_level0(&clock, &root, &stdout_path, &stderr_path).unwrap();
+
+        let status = record.exit_status.as_ref().unwrap();
+        assert!(!status.success);
+        assert_eq!(status.code, Some(3));
+        assert_eq!(
+            std::fs::read_to_string(&stderr_path).unwrap().trim(),
+            "oops"
+        );
     }
 
     #[test]

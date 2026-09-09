@@ -196,6 +196,51 @@ uncorrupted, individually-parseable JSON line even though Cargo may run
 some of these concurrently depending on the dependency graph and job
 count.
 
+## Level 0 (minimal wrapper) vs. Level 1 (resource tracing) overhead — measured, not asserted
+
+Issue #19 Experiment 6 and `docs/measurement-foundation.md` section 12
+both ask for observer overhead to be measured, not just implemented
+around. `tracer::trace_root_command_level0` (`std::process::Child::wait`,
+no `wait4`/`libc` at all) is the "minimal wrapper" baseline; `laminaria
+run --probe-level {level0,level1}` selects it or the existing Level 1
+tracer. At Level 0, Cargo/Nim wrapper substitution is skipped entirely
+too (it's itself extra instrumentation the baseline shouldn't carry).
+
+Measured directly, both sides of the comparison from real CLI
+invocations (`measurement_overhead.tracer_overhead_seconds`, this
+crate's own wall time around spawn/wait-or-reap/record-building — which
+includes the traced command's real work too, so the comparison that
+isolates overhead is the *delta between paired runs of the identical
+command*, not either number in isolation):
+
+Trivial command (`sh -c "echo hi"`, 5 runs each, local arm64 macOS):
+
+```
+level0: 0.00319, 0.00321, 0.00329, 0.00319, 0.00327  (mean ~0.00323s)
+level1: 0.00327, 0.00326, 0.00342, 0.00327, 0.00338  (mean ~0.00332s)
+```
+
+Real fixture (`cargo build --workspace` on `rust-heavy-workspace`, true
+no-op state, 3 runs each — first run of each set excluded as a cold-cache
+outlier, ~2.4s/0.76s respectively, clearly not steady-state):
+
+```
+level0 (steady state): 0.034684, 0.034570  (mean ~0.03463s)
+level1 (steady state): 0.034736, 0.035079  (mean ~0.03491s)
+```
+
+**Result**: Level 1's `wait4`-based resource accounting adds roughly
+1-3% wall-time overhead over Level 0's lifecycle-only tracing, on both a
+trivial command and a real no-op Cargo rebuild, on this platform. Not
+zero, but small relative to a single extra syscall's noise floor at this
+sample size — a genuine measurement, not a claim that the overhead is
+negligible by design. `docs/measurement-foundation.md` section 11's own
+guidance (store every raw sample, don't trust one wall-clock number)
+applies here too: this is 3-5 samples on one machine, not a rigorous
+statistical claim — sufficient to demonstrate the comparison is now
+*possible and produces a real number*, not sufficient as a final,
+citable overhead figure.
+
 ## Cold vs. true-no-op CPU attribution — real, checked in CI, not just plumbing
 
 The point of Level 1 tracing is to actually *distinguish* scenarios, not
@@ -310,11 +355,16 @@ paraphrase of it:
 - [x] Failure/cancellation does not discard partial evidence (CI
   Experiment 5: exit code, resource usage, stdout/stderr all present
   for a deliberately failing command).
-- [ ] **Minimal and resource-traced modes can be compared for observer
-  overhead** — NOT implemented. There is only one tracer path
-  (Level 1); no Level-0-only mode exists to diff against, so
-  `MeasurementOverhead.tracer_overhead_seconds` records this crate's
-  own bookkeeping cost but not a cross-level delta.
+- [x] **Minimal and resource-traced modes can be compared for observer
+  overhead** — `laminaria run --probe-level {level0,level1}` selects
+  between `tracer::trace_root_command_level0` (portable, no `wait4`, no
+  Cargo/Nim wrapper substitution) and the existing Level 1 tracer. Real
+  overhead measured, not just made theoretically comparable: ~1-3% wall
+  time for Level 1 over Level 0, on both a trivial command and a real
+  no-op Cargo rebuild (see "Level 0 (minimal wrapper) vs. Level 1
+  (resource tracing) overhead" above) — a small sample on one machine,
+  not yet a rigorous statistical claim, but the comparison itself now
+  produces a real, reproducible number rather than being unimplemented.
 - [x] Raw evidence can regenerate `summary.json` without rerunning the
   workload (`store::regenerate_summary_from_disk`, exercised as a real
   disk round trip both in unit tests and in CI against genuine

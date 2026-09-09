@@ -162,6 +162,15 @@ pub fn generate_run_id() -> String {
 /// traces the command via `tracer::trace_root_command`, assembles a `Run`,
 /// and writes it to `runs_root/<run-id>/` via `store::write_run`.
 ///
+/// `probe_level` selects `ProbeLevel::Level1ProcessResource` (the default,
+/// full `wait4`-based resource accounting plus Cargo/Nim wrapper
+/// substitution where applicable) or `ProbeLevel::Level0Lifecycle` (the
+/// minimal-wrapper baseline `docs/measurement-foundation.md` section 12
+/// and issue #19 Experiment 6 ask every heavier probe level to be
+/// measured against -- no resource accounting, no wrapper substitution,
+/// portable `Child::wait` only). Any other `ProbeLevel` falls back to
+/// Level 1 -- Level 2/3 are not implemented by this crate yet.
+///
 /// Returns the written `Run` and the directory it was written to.
 #[allow(clippy::too_many_arguments)]
 pub fn run_and_record(
@@ -172,6 +181,7 @@ pub fn run_and_record(
     lock_path: &Path,
     repo_root: &Path,
     root: RootCommand,
+    probe_level: ProbeLevel,
 ) -> std::io::Result<(Run, PathBuf)> {
     let clock = RunClock::start();
     let run_id = generate_run_id();
@@ -184,6 +194,8 @@ pub fn run_and_record(
     let stderr_path = run_dir.join("stderr.log");
     let wrapper_events_path = run_dir.join("wrapper-invocations.jsonl");
 
+    let is_level0 = matches!(probe_level, ProbeLevel::Level0Lifecycle);
+
     // Per-compiler-invocation granularity via wrapper substitution --
     // *not* OS-level process-tree walking. Cargo/rustc: Cargo's RUSTC env
     // var, modeled on rustc-perf's real `rustc-fake` (see cargo_wrapper's
@@ -192,11 +204,15 @@ pub fn run_and_record(
     // compiler/extccomp.nim source (see nim_wrapper's module doc). At
     // most one applies per Run, since a root command is either Cargo or
     // Nim, never both. A resolution failure only adds a known_gaps note;
-    // it never fails the traced command itself.
+    // it never fails the traced command itself. Skipped entirely at
+    // Level 0 -- wrapper substitution is itself extra instrumentation,
+    // and the whole point of Level 0 is to measure a baseline with none.
     let mut effective_root = root.clone();
     let mut wrapping_note: Option<String> = None;
     let mut wrapping_kind: Option<&'static str> = None;
-    if is_cargo_command(&root) {
+    if is_level0 {
+        // no-op: Level 0 never wraps
+    } else if is_cargo_command(&root) {
         match prepare_cargo_wrapping(&wrapper_events_path, clock.anchor_unix_ns()) {
             Ok(env_vars) => {
                 for (key, value) in env_vars {
@@ -236,8 +252,11 @@ pub fn run_and_record(
     }
 
     let tracer_wall_start = std::time::Instant::now();
-    let process_record =
-        tracer::trace_root_command(&clock, &effective_root, &stdout_path, &stderr_path)?;
+    let process_record = if is_level0 {
+        tracer::trace_root_command_level0(&clock, &effective_root, &stdout_path, &stderr_path)?
+    } else {
+        tracer::trace_root_command(&clock, &effective_root, &stdout_path, &stderr_path)?
+    };
     let tracer_overhead_seconds = tracer_wall_start.elapsed().as_secs_f64();
 
     let wrapper_invocation_records = read_events(&wrapper_events_path).unwrap_or_default();
@@ -277,33 +296,44 @@ pub fn run_and_record(
             processes.extend(wrapper_invocation_records);
 
             let mut known_gaps = Vec::new();
-            match wrapping_kind {
-                Some("rustc") if wrapper_invocation_count > 0 => known_gaps.push(format!(
-                    "{wrapper_invocation_count} individual rustc invocation(s) were recorded via \
-                     RUSTC-wrapper substitution (see laminaria_run::cargo_wrapper); the linker is \
-                     not separately recorded -- its cost rolls up into whichever rustc invocation \
-                     spawned it, matching rustc-fake's own accepted scope"
-                )),
-                Some("cc") if wrapper_invocation_count > 0 => known_gaps.push(format!(
-                    "{wrapper_invocation_count} individual C/C++ compiler invocation(s) (compile \
-                     and link, both) were recorded via CC-wrapper substitution (see \
-                     laminaria_run::nim_wrapper) for this nim c/cpp build"
-                )),
-                _ => known_gaps.push(
-                    "individual descendant process enumeration (per-node pid/parent/argv/timing) \
-                     is not implemented for this Run; resource_usage on the root record is \
-                     cumulative over its entire reaped subtree via wait4"
+            if is_level0 {
+                known_gaps.push(
+                    "this Run used Level 0 (lifecycle-only) tracing deliberately -- the \
+                     minimal-wrapper baseline docs/measurement-foundation.md section 12 and \
+                     issue #19 Experiment 6 ask for, to measure heavier probe levels' own \
+                     observer overhead against; no resource_usage or wrapper substitution was \
+                     even attempted, not merely unavailable"
                         .to_string(),
-                ),
-            }
-            known_gaps.push(
-                "per-invocation wrapper substitution exists only for Cargo/rustc and nim c/cpp \
-                 root commands; any other command still only has the root record's cumulative \
-                 resource_usage"
-                    .to_string(),
-            );
-            if let Some(note) = wrapping_note {
-                known_gaps.push(note);
+                );
+            } else {
+                match wrapping_kind {
+                    Some("rustc") if wrapper_invocation_count > 0 => known_gaps.push(format!(
+                        "{wrapper_invocation_count} individual rustc invocation(s) were recorded via \
+                         RUSTC-wrapper substitution (see laminaria_run::cargo_wrapper); the linker is \
+                         not separately recorded -- its cost rolls up into whichever rustc invocation \
+                         spawned it, matching rustc-fake's own accepted scope"
+                    )),
+                    Some("cc") if wrapper_invocation_count > 0 => known_gaps.push(format!(
+                        "{wrapper_invocation_count} individual C/C++ compiler invocation(s) (compile \
+                         and link, both) were recorded via CC-wrapper substitution (see \
+                         laminaria_run::nim_wrapper) for this nim c/cpp build"
+                    )),
+                    _ => known_gaps.push(
+                        "individual descendant process enumeration (per-node pid/parent/argv/timing) \
+                         is not implemented for this Run; resource_usage on the root record is \
+                         cumulative over its entire reaped subtree via wait4"
+                            .to_string(),
+                    ),
+                }
+                known_gaps.push(
+                    "per-invocation wrapper substitution exists only for Cargo/rustc and nim c/cpp \
+                     root commands; any other command still only has the root record's cumulative \
+                     resource_usage"
+                        .to_string(),
+                );
+                if let Some(note) = wrapping_note {
+                    known_gaps.push(note);
+                }
             }
             known_gaps.push(
                 "Level 2 compiler-native telemetry and Level 3 platform profiler data are not \
@@ -323,14 +353,21 @@ pub fn run_and_record(
         compiler_telemetry: None,
         artifact_delta: None,
         measurement_overhead: Some(MeasurementOverhead {
-            probe_level: ProbeLevel::Level1ProcessResource,
+            probe_level,
             tracer_overhead_seconds: Some(tracer_overhead_seconds),
-            notes: vec![
+            notes: vec![if is_level0 {
+                "tracer_overhead_seconds is this crate's own wall time around spawn/wait/\
+                 record-building at Level 0 -- compare against a Level 1 Run of the identical \
+                 root command (same program/args/cwd/env) to get the actual Level 1 observer \
+                 overhead delta section 12 asks for; this crate does not yet automate that \
+                 comparison, only makes both sides measurable"
+                    .to_string()
+            } else {
                 "tracer_overhead_seconds is this crate's own wall time around spawn/reap/\
-                 record-building, not a delta against a Level 0-only baseline -- section 12's \
-                 cross-probe-level overhead comparison is not yet implemented"
-                    .to_string(),
-            ],
+                 record-building at Level 1 -- compare against a Level 0 Run of the identical \
+                 root command to get the actual observer overhead delta"
+                    .to_string()
+            }],
         }),
     };
 
