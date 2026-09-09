@@ -5,6 +5,7 @@
 //! design in `docs/measurement-foundation.md` and
 //! `docs/multi-version-toolchains.md`.
 
+pub mod comparability;
 pub mod doctor;
 pub mod env;
 pub mod exec;
