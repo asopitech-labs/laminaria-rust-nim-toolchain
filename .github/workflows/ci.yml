@@ -120,7 +120,7 @@ jobs:
   # host's, and bootstraps its own Nim from C sources -- a large, risky
   # time investment for this session, versus this job's already-working
   # Linux binary).
-  nlvm-smoke-test:
+  nlvm-experiment:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -159,6 +159,33 @@ jobs:
           echo "no .c files found in nlvm's build cache for hello.nim (expected)"
           echo "cache contents for reference:"
           find ~/.cache/nim/hello_d -type f
+
+      # The actual apples-to-apples comparison the smoke test above set
+      # up for: the same rust-lib static library nim-bin/main.nim links
+      # against (rust_transform, Point layout probe, by-value round
+      # trip, pointer mutation), this time linked from Nim compiled via
+      # nlvm instead of `nim c` -- same Rust artifact, different Nim
+      # route, so any difference in outcome is attributable to the
+      # Nim-side route alone.
+      - name: Build rust-lib for the nlvm <-> Rust experiment
+        run: cargo build --release --manifest-path fixtures/direct-native-link/rust-lib/Cargo.toml
+
+      - name: Compile and run the nlvm <-> Rust direct-link experiment
+        run: |
+          rm -rf ~/.cache/nim/main_d
+          cd fixtures/direct-native-link/nlvm-experiment
+          "$NLVM_BIN" c --passL:"-L../rust-lib/target/release -lrustlib" main.nim
+          ./main
+          echo "--- confirming no .c file in nlvm's build cache for THIS project ---"
+          if [ -n "$(find ~/.cache/nim/main_d -iname '*.c' 2>/dev/null)" ]; then
+            echo "found .c file(s) -- contradicts the C-free claim"
+            find ~/.cache/nim/main_d -iname '*.c'
+            exit 1
+          fi
+          echo "no .c files found (expected)"
+          find ~/.cache/nim/main_d -type f
+          echo "--- symbol resolution trail, same methodology as NOTES.md's nim-bin evidence ---"
+          nm main | grep -E 'rust_transform|rust_point' || true
 
   # Exercises the "container" EnvironmentFingerprint class from a clean,
   # native (non-Rosetta) environment — see docker/bootstrap.Dockerfile for
