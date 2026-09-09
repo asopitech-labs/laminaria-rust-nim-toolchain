@@ -75,7 +75,19 @@ LAMINARIA itself.
   comparison point; both final accumulators are asserted equal to each
   other and to a committed reference constant.
 
-All seven are built (not just version-checked) as part of CI — natively on
+- `unchanged-noop-workspace/` — the "unchanged/no-op workspace" workload:
+  deliberately the smallest, simplest fixture here — a single crate, one
+  real unit-tested checksum, no cross-crate or cross-language structure.
+  Its point isn't the computation; it's the *scenario* built on top once
+  a Run harness exists (#19, #21): build once, then rebuild with the
+  source completely unchanged, and characterize the metadata/hash/I/O/
+  process-launch overhead a correct build system still pays on a full
+  no-op, without that cost being confounded by graph shape the way it
+  would be on any of the other fixtures. `cargo build` immediately after
+  `cargo test`/`cargo run` with no source changes already demonstrates
+  the no-op (`Finished ... in 0.00s`, nothing recompiled).
+
+All eight are built (not just version-checked) as part of CI — natively on
 `ubuntu-latest`/`macos-latest`, and inside `docker/bootstrap.Dockerfile`'s
 container environment — which is the actual evidence for #18's fixture
 reproduction criterion.
@@ -85,8 +97,8 @@ reproduction criterion.
 Direct native-link workload, backend-route variant workload, backend
 checkpoint-economics workload, LLVM pass/pipeline observation workload,
 ThinLTO/DTLTO dynamic backend-job workload, incremental semantic edit,
-unchanged/no-op workspace, worktree reuse, mixed-language WASM workload,
-Wasm link/post-link/component invalidation workload, Rust/Nim 2/Nimony
-shared LLVM/LTO compatibility workload, compiler/backend-work-elimination
-fixture. Most of these need the Run/scenario machinery from #19-21 to be
-meaningful, not just a buildable workspace.
+worktree reuse, mixed-language WASM workload, Wasm link/post-link/component
+invalidation workload, Rust/Nim 2/Nimony shared LLVM/LTO compatibility
+workload, compiler/backend-work-elimination fixture. Most of these need the
+Run/scenario machinery from #19-21 to be meaningful, not just a buildable
+workspace.

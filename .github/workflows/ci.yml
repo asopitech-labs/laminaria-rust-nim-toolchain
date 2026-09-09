@@ -82,6 +82,13 @@ jobs:
           cd fixtures/boundary-heavy-workload/rust-bin
           cargo run
 
+      - name: Build unchanged-noop-workspace fixture
+        run: |
+          cd fixtures/unchanged-noop-workspace
+          cargo test
+          cargo run
+          cargo build
+
   # Exercises the "container" EnvironmentFingerprint class from a clean,
   # native (non-Rosetta) environment — see docker/bootstrap.Dockerfile for
   # why this is a bootstrap/correctness check, not a performance baseline.
