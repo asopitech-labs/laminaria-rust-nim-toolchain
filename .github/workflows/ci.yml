@@ -50,7 +50,7 @@ jobs:
       - name: Build nim-heavy-workspace fixture
         run: |
           cd fixtures/nim-heavy-workspace
-          nim c -o:fixture_out src/fixture.nim
+          nim c --nimcache:nimcache -o:fixture_out src/fixture.nim
           ./fixture_out
 
       - name: Build rust-nim-c-abi-baseline fixture

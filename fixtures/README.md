@@ -13,6 +13,13 @@ part of LAMINARIA's own `Cargo.toml` workspace, so it can be built with
 whatever toolchain a scenario selects rather than whichever one builds
 LAMINARIA itself.
 
+See [`STATE-CONTRACTS.md`](STATE-CONTRACTS.md) for this issue's "cold/
+warm/no-op have explicit reproducible state contracts" acceptance
+criterion — precise, verified definitions of those three states for
+every fixture below, including two non-obvious pitfalls found while
+verifying them (a content-identical file copy is not a cache no-op;
+Nim's default cache lives outside the repo entirely).
+
 ## Committed so far
 
 - `rust-heavy-workspace/` — a 3-crate Cargo workspace (`fixture-core` →
