@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Schema version of the fingerprint records emitted by this crate.
 /// Bump whenever a field is added, renamed, or removed so stored Runs remain
@@ -14,18 +14,18 @@ pub const SCHEMA_VERSION: &str = "0.1.0";
 
 /// Identity of an on-disk executable: where it was resolved from and a
 /// content digest, so "which exact binary ran" survives a PATH change.
-#[derive(Debug, Clone, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ExecutableIdentity {
     pub path: Option<PathBuf>,
     pub digest_sha256: Option<String>,
 }
 
 /// A single named Rust toolchain resolved against `toolchains.lock.toml`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RustToolchainFingerprint {
     pub logical_name: String,
     pub requested_selector: Option<String>,
-    pub compiler_family: &'static str,
+    pub compiler_family: String,
     pub resolved_version: Option<String>,
     pub resolved_commit_hash: Option<String>,
     pub resolved_commit_date: Option<String>,
@@ -44,16 +44,16 @@ pub struct RustToolchainFingerprint {
     pub cargo: ExecutableIdentity,
     pub sysroot: Option<PathBuf>,
     pub components: Vec<String>,
-    pub adapter_version: &'static str,
+    pub adapter_version: String,
     pub resolution_notes: Vec<String>,
 }
 
 /// A single named Nim toolchain resolved against `toolchains.lock.toml`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NimToolchainFingerprint {
     pub logical_name: String,
     pub requested_selector: Option<String>,
-    pub compiler_family: &'static str,
+    pub compiler_family: String,
     pub resolved_version: Option<String>,
     /// Requested exact source revision (Nimony/Nim 3, nlvm, ...), from the
     /// lock entry's `revision` field. Recorded explicitly rather than
@@ -67,13 +67,13 @@ pub struct NimToolchainFingerprint {
     pub nim: ExecutableIdentity,
     pub nimble_version: Option<String>,
     pub nimble: ExecutableIdentity,
-    pub adapter_version: &'static str,
+    pub adapter_version: String,
     pub resolution_notes: Vec<String>,
 }
 
 /// Any other backend/tool referenced by `toolchains.lock.toml`
 /// (LLVM/Clang/LLD, `wasm-ld`, Binaryen, `wasm-tools`, ...).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExternalToolFingerprint {
     pub logical_name: String,
     pub requested_selector: Option<String>,
@@ -87,14 +87,14 @@ pub struct ExternalToolFingerprint {
 /// the physical host CPU architecture (e.g. an x86_64 Homebrew rustc running
 /// under Rosetta 2 on an Apple Silicon Mac). Left `None` when they match, so
 /// this never has to be inferred by comparing two other fields by hand.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArchitectureNotice {
     pub host_architecture: String,
     pub toolchain_host_triple: String,
     pub explanation: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepositoryState {
     pub commit: Option<String>,
     pub dirty: Option<bool>,
@@ -102,7 +102,7 @@ pub struct RepositoryState {
 
 /// Environment-level fingerprint, independent of any single toolchain.
 /// Field set follows `docs/measurement-foundation.md` section 4.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnvironmentFingerprint {
     pub schema_version: String,
     pub captured_at_unix: u64,
@@ -139,7 +139,7 @@ pub struct EnvironmentFingerprint {
     pub unobserved_fields: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolchainReport {
     pub environment: EnvironmentFingerprint,
     pub rust_toolchains: Vec<RustToolchainFingerprint>,

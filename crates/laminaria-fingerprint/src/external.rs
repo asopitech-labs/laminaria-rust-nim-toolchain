@@ -178,7 +178,7 @@ mod tests {
         let incomplete = RustToolchainFingerprint {
             logical_name: "no_sysroot".to_string(),
             requested_selector: None,
-            compiler_family: "rust",
+            compiler_family: "rust".to_string(),
             resolved_version: None,
             resolved_commit_hash: None,
             resolved_commit_date: None,
@@ -190,7 +190,7 @@ mod tests {
             cargo: ExecutableIdentity::default(),
             sysroot: None,
             components: Vec::new(),
-            adapter_version: "0.0.0",
+            adapter_version: "0.0.0".to_string(),
             resolution_notes: Vec::new(),
         };
         assert_eq!(

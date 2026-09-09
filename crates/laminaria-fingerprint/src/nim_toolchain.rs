@@ -71,7 +71,7 @@ pub fn resolve(logical_name: &str, selector: &NimToolchainSelector) -> NimToolch
     NimToolchainFingerprint {
         logical_name: logical_name.to_string(),
         requested_selector: Some(selector.selector.clone()),
-        compiler_family: "nim",
+        compiler_family: "nim".to_string(),
         resolved_version,
         requested_source_revision: selector.revision.clone(),
         target_os,
@@ -86,7 +86,7 @@ pub fn resolve(logical_name: &str, selector: &NimToolchainSelector) -> NimToolch
             digest_sha256: nimble_path.as_deref().and_then(sha256_file),
             path: nimble_path,
         },
-        adapter_version: ADAPTER_VERSION,
+        adapter_version: ADAPTER_VERSION.to_string(),
         resolution_notes: notes,
     }
 }

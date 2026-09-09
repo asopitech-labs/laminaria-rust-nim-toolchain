@@ -98,7 +98,7 @@ pub fn resolve(logical_name: &str, selector: &RustToolchainSelector) -> RustTool
     RustToolchainFingerprint {
         logical_name: logical_name.to_string(),
         requested_selector: Some(selector.selector.clone()),
-        compiler_family: "rust",
+        compiler_family: "rust".to_string(),
         resolved_version: fields.get("release").cloned(),
         resolved_commit_hash: fields.get("commit-hash").cloned(),
         resolved_commit_date: fields.get("commit-date").cloned(),
@@ -116,7 +116,7 @@ pub fn resolve(logical_name: &str, selector: &RustToolchainSelector) -> RustTool
         },
         sysroot,
         components,
-        adapter_version: ADAPTER_VERSION,
+        adapter_version: ADAPTER_VERSION.to_string(),
         resolution_notes: notes,
     }
 }

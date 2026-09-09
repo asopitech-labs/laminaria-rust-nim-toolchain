@@ -10,11 +10,11 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::types::RustToolchainFingerprint;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RustPackageRequirement {
     pub package_name: String,
     pub manifest_path: PathBuf,
@@ -24,7 +24,7 @@ pub struct RustPackageRequirement {
     pub edition: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RustRequirementEvaluation {
     pub package_name: String,
     pub toolchain_logical_name: String,
@@ -190,7 +190,7 @@ mod tests {
         RustToolchainFingerprint {
             logical_name: "system_stable".to_string(),
             requested_selector: Some("stable".to_string()),
-            compiler_family: "rust",
+            compiler_family: "rust".to_string(),
             resolved_version: Some(version.to_string()),
             resolved_commit_hash: None,
             resolved_commit_date: None,
@@ -202,7 +202,7 @@ mod tests {
             cargo: crate::types::ExecutableIdentity::default(),
             sysroot: None,
             components: Vec::new(),
-            adapter_version: "0.0.0",
+            adapter_version: "0.0.0".to_string(),
             resolution_notes: Vec::new(),
         }
     }
