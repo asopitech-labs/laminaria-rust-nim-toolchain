@@ -87,16 +87,73 @@ Two things this shows directly, not by inference:
 2. **`rust_add` sits in the merged module as a `define` with a real
    body, not a `declare`** — LLVM's optimizer had full visibility into
    Rust's function while optimizing Nim's caller, in the same pass, in
-   the same module. It chose not to inline this specific call (a cost-
-   heuristic decision, not a capability limit — the call is a plain
-   `call i32 @rust_add(...)` sitting directly inside the already-merged
-   `@main`, with nothing opaque or external between the two languages'
-   code).
+   the same module.
 
 That is the actual claim under test, confirmed: Rust's and Nim's LLVM
 IR share one optimization domain once merged, genuinely prior to native
 codegen — not two native objects glued together by a linker's symbol
 table.
+
+### Correction: why `rust_add` wasn't inlined — a real, verified answer, not an inference from reading IR text
+
+The paragraph above originally made a specific wrong claim, quoted here
+in full rather than silently edited away, as a record of the actual
+mistake: *"It chose not to inline this specific call (a cost-
+heuristic decision, not a capability limit — the call is a plain
+`call i32 @rust_add(...)` sitting directly inside the already-merged
+`@main`, with nothing opaque or external between the two languages'
+code)."*
+
+**This was wrong**, caught by switching from reading the disassembled IR
+by eye (a black-box inference from the artifact's shape) to LLVM's own
+internal pass-manager instrumentation (`opt --pass-remarks='.*'
+--pass-remarks-missed='.*' --pass-remarks-analysis='.*'
+--pass-remarks-output=remarks.yaml` — white-box evidence, LLVM's own
+record of what it decided and why, not this project's inference from
+reading text). The real remark, from CI (`34352962347`):
+
+```
+remark: <unknown>:0:0: 'rust_add' not inlined into '.main.init.0' because
+  it should never be inlined (cost=never): conflicting attributes
+remark: <unknown>:0:0: 'rust_add' not inlined into 'main' because it
+  should never be inlined (cost=never): conflicting attributes
+```
+
+`(cost=never)` is not a cost-heuristic outcome — it is LLVM's inliner
+refusing categorically, before any cost computation, because the
+callee's and caller's function attributes are incompatible. From the
+disassembled IR's own attribute lists:
+
+```llvm
+define noundef i32 @rust_add(i32 noundef %a, i32 noundef %b) local_unnamed_addr #21 { ... }
+attributes #21 = { mustprogress nofree norecurse nosync nounwind nonlazybind
+  willreturn memory(none) uwtable "probe-stack"="inline-asm" "target-cpu"="x86-64" }
+
+define hidden noundef i32 @main(...) local_unnamed_addr personality ptr @nlvmEHPersonality { ... }
+```
+
+`main` (Nim's, via `nlvm`) carries **no** attribute group at all; `rust_add`
+carries a full rustc-assigned set including `"probe-stack"="inline-asm"`
+(rustc's default stack-overflow-guard mechanism on this target) and
+`nonlazybind`. Leading hypothesis, stated as a hypothesis rather than a
+verified certainty this session actually confirmed against LLVM's own
+inliner source (`.reference/` does not include an LLVM clone; this was
+not independently proven the way the `probe-stack` presence/absence
+mismatch itself was directly observed): `"probe-stack"`'s presence on
+one side and total absence on the other is what LLVM's inliner's
+attribute-compatibility check rejects — stack-probing is a caller-frame
+property that can't silently change across an inlined call boundary.
+Not yet confirmed by, for example, recompiling `rust_add` with stack
+probes disabled and checking whether the remark's reason changes.
+
+The corrected, load-bearing conclusion: cross-language inlining across
+this merged module is blocked here by a **specific, attribute-level
+incompatibility** between rustc's and `nlvm`'s default codegen
+attributes — not a cost/size judgment call, and not proof that LLVM's
+optimizer "chose" anything discretionary about this particular call
+site. Whether this is fixable (e.g. by aligning the relevant attribute
+between both sides before merging) is an open question this fixture
+does not yet answer.
 
 ## Ownership note
 
