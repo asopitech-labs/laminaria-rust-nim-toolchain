@@ -133,4 +133,5 @@ pub struct ToolchainReport {
     pub rust_toolchains: Vec<RustToolchainFingerprint>,
     pub nim_toolchains: Vec<NimToolchainFingerprint>,
     pub external_tools: Vec<ExternalToolFingerprint>,
+    pub rust_requirement_evaluations: Vec<crate::rust_requirements::RustRequirementEvaluation>,
 }

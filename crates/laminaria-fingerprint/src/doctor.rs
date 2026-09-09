@@ -9,6 +9,7 @@ use crate::env;
 use crate::external;
 use crate::lock::{self, LockLoadError};
 use crate::nim_toolchain;
+use crate::rust_requirements;
 use crate::rust_toolchain;
 use crate::types::ToolchainReport;
 
@@ -69,12 +70,23 @@ pub fn build(lock_path: &Path, repo_root: &Path) -> DoctorRun {
         })
         .unwrap_or_default();
 
+    let requirements = rust_requirements::discover_workspace_requirements(repo_root);
+    let rust_requirement_evaluations: Vec<_> = requirements
+        .iter()
+        .flat_map(|req| {
+            rust_toolchains
+                .iter()
+                .map(move |toolchain| rust_requirements::evaluate(req, toolchain))
+        })
+        .collect();
+
     DoctorRun {
         report: ToolchainReport {
             environment,
             rust_toolchains,
             nim_toolchains,
             external_tools,
+            rust_requirement_evaluations,
         },
         lock_path: lock_path.to_path_buf(),
         lock_load_error,
@@ -244,6 +256,33 @@ fn print_human(doctor_run: &DoctorRun) {
             t.resolved_version.as_deref().unwrap_or("?"),
         );
         for note in &t.notes {
+            println!("      ! {note}");
+        }
+    }
+    println!();
+
+    println!("Cargo rust-version / edition requirements");
+    if report.rust_requirement_evaluations.is_empty() {
+        println!(
+            "  (no workspace packages with a Cargo.toml declaring rust-version/edition found)"
+        );
+    }
+    for e in &report.rust_requirement_evaluations {
+        let msrv_status = match e.rust_version_satisfied {
+            Some(true) => "OK",
+            Some(false) => "VIOLATED",
+            None => "n/a",
+        };
+        println!(
+            "  {} vs [{}]: rust-version={} (resolved {}) edition={} -> {}",
+            e.package_name,
+            e.toolchain_logical_name,
+            e.rust_version.as_deref().unwrap_or("(none)"),
+            e.resolved_compiler_version.as_deref().unwrap_or("?"),
+            e.edition.as_deref().unwrap_or("(none)"),
+            msrv_status,
+        );
+        for note in &e.notes {
             println!("      ! {note}");
         }
     }

@@ -11,6 +11,7 @@ pub mod exec;
 pub mod external;
 pub mod lock;
 pub mod nim_toolchain;
+pub mod rust_requirements;
 pub mod rust_toolchain;
 pub mod types;
 
