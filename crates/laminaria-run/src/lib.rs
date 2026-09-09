@@ -847,13 +847,18 @@ mod tests {
         std::fs::create_dir_all(&observed).unwrap();
         std::fs::write(&lock, "").unwrap();
 
-        let r = root(
-            "sh",
-            &[
-                "-c",
-                &format!("echo hi > {}/created.txt", observed.display()),
-            ],
-        );
+        // The target path is passed as a genuine argv entry ($1), not
+        // interpolated into the shell script string, and normalized to
+        // forward slashes -- a Windows PathBuf's backslashes embedded
+        // directly into a double-quoted sh -c script are not portable (MSYS
+        // sh's own escaping rules apply to the script text, not to an argv
+        // value), which is exactly what broke this test on the `windows`
+        // CI job the first time this test was added.
+        let created_path = observed
+            .join("created.txt")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let r = root("sh", &["-c", "printf hi > \"$1\"", "sh", &created_path]);
         let (run, _dir) = run_and_record(
             &tmp,
             "test-workload",
