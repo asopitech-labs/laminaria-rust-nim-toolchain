@@ -39,6 +39,8 @@ Process a declared Rust/Nim source subset through owned semantic analysis, IR, l
 
 The stage inventory below remains a reference/information-loss study, not a dependency order that postpones the core track. #4 integration and #18–#24 measurement/UX supply the relevant support in parallel.
 
+The plan to preserve semantics before low-level lowering and to compare and rediscover polyhedral transformation, algorithm/schedule separation, specialization, and autotuning is defined in [Upstream Performance Optimization Research](upstream-performance-optimization-research.md).
+
 ## Track A — Compiler pipeline decomposition
 
 ### Question

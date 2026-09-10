@@ -39,6 +39,8 @@ LAMINARIAでは最適化を原則として次の順で優先する。
 
 #3の以下のstage inventoryは比較・情報損失調査として残すが、研究中核を後回しにする依存順序ではない。#4の統合や#18–#24の計測・UXは必要部分を並行して支える。
 
+独自IRで低水準化前の意味を保持し、polyhedral変換、algorithm/schedule分離、specialization、autotuning等を比較・再発見する計画は、[LLVM上流の性能最適化研究](upstream-performance-optimization-research_ja.md)に定義する。
+
 ## 研究トラックA — Compiler Pipeline Decomposition
 
 RustとNimのcompiler pipelineのどこまでを、安定した入力・出力・invalidation関係を持つgraph nodeとして外部から扱えるかを調査する。

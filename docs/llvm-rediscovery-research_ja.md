@@ -20,6 +20,8 @@ LAMINARIAは、RustとNimを一つの計算システムとして扱うという�
 
 ## 研究上の出発点
 
+低水準IRへloweringする前のshape、alias、effect、iteration、reduction、specialization等を使う具体的な性能研究は、[LLVM上流の性能最適化研究](upstream-performance-optimization-research_ja.md)で扱う。
+
 異なるcompiler frontendは、同じ意味の処理や同じC ABI surfaceを与えられても、同じIR、同じbitcode、同じmachine code、同じoptimization opportunityを生成するとは仮定しない。
 
 Rust/rustc、Nim 2、Nimony/Nim 3、Clang等は、それぞれ異なるlanguage semantics、internal representation、lowering policy、runtime obligation、attribute/metadata policyを持つ。

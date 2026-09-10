@@ -20,6 +20,8 @@ Arriving at an LLVM-like architecture is acceptable. Arriving at a different arc
 
 ## Starting assumption
 
+Concrete performance research using shape, alias, effect, iteration, reduction, specialization, and other facts before low-level lowering is defined in [Upstream Performance Optimization Research](upstream-performance-optimization-research.md).
+
 Different compiler frontends are not assumed to produce the same IR, bitcode, machine code, or optimization opportunities from semantically corresponding programs or even from equivalent C ABI surfaces.
 
 Rust/rustc, Nim 2, Nimony/Nim 3, Clang, and other compilers carry different language semantics, internal representations, lowering policies, runtime obligations, and attribute/metadata policies.
