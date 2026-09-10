@@ -1428,3 +1428,54 @@ clean. Both fixes were manually re-verified through the real CLI binary
 in addition to their dedicated tests, matching this file's own repeated
 lesson about not trusting an in-process/already-warm-environment
 reproduction alone.
+
+## Eighth review pass: channel-selector verification (issues #8/#6)
+
+A fifth external review, filed after the seventh pass's own CI run went
+green end to end. One P2, an existing gap the review's own framing was
+careful to note as pre-existing rather than a regression from this
+session's other fixes:
+
+- **A non-numeric selector was accepted unconditionally, regardless of
+  what actually resolved.** `selector_matches_resolved`'s "not purely
+  numeric" branch returned `true` outright, on the (unstated) assumption
+  that a channel name like `"stable"`/`"nightly"` has no fixed version
+  to compare against and therefore can't be usefully checked. Reproduced
+  directly without `rustup` on `PATH`: `rust_toolchain::resolve`'s own
+  fallback path resolves whatever `rustc`/`cargo` happen to be active on
+  `PATH`, completely ignoring the requested selector -- so requesting
+  `"nightly"` while only a `"stable"` toolchain was actually on `PATH`
+  still "verified" successfully and self-build proceeded to compile with
+  it. Fixed by checking a recognized channel name (`"stable"`/`"beta"`/
+  `"nightly"`, exactly) against the resolved `channel` field
+  (`RustToolchainFingerprint`'s own, already-derived from
+  `resolved_version` by issue #18's `rust_toolchain.rs`) instead of
+  accepting it unconditionally, and by rejecting any *other* non-numeric
+  selector outright (a dated nightly like `"nightly-2024-01-15"`, a
+  custom toolchain name, ...) as unverifiable rather than silently
+  treating "not purely numeric" as "no constraint" -- the review's own
+  explicit ask: fail closed on what can't actually be checked. Nim has
+  no channel concept at all (`NimToolchainFingerprint` carries no
+  `channel` field), so `selector_matches_resolved` is called with
+  `resolved_channel: None` for it, meaning a non-numeric Nim selector can
+  never match either -- correct, since `toolchains.lock.toml` never
+  actually declares one today.
+
+Six new unit tests cover the full decision table directly (channel
+match, the exact "nightly requested, stable resolved" repro, an
+unverifiable dated selector, no-channel-for-Nim, empty selector,
+numeric-with-no-resolved-version) -- an end-to-end
+`resolve_verified_toolchain`-level reproduction was deliberately not
+attempted for the channel-mismatch case specifically, since it would
+depend on whether a `nightly` rustup toolchain happens to already be
+installed on whatever machine runs the test, making it environment-
+fragile in a way the deterministic unit tests aren't.
+
+`cargo test --workspace`: 157 passed (up from 154). Clippy and fmt
+clean. The real, already-resolved `"stable"` toolchain on this dev
+machine (and every self-build integration test that depends on it) was
+re-verified to still pass after this change -- confirmed directly via
+`laminaria doctor --json` that its `channel` field really is
+`"stable"`, matching its own `"stable"` selector, before trusting that
+the fix doesn't newly break the one toolchain configuration this project
+actually uses.

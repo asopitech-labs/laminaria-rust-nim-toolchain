@@ -404,3 +404,18 @@ All of the following are automated tests, not just described behavior:
   covers this end-to-end through the real CLI binary (in-process calls
   to `run_generation` can't exercise wrapper substitution at all, since
   it only engages next to the actually-running executable).
+- **A non-numeric selector is actually verified, not accepted
+  unconditionally**: a fifth external review reproduced this directly
+  without `rustup` on `PATH` (`rust_toolchain::resolve`'s own fallback
+  path resolves whatever `rustc`/`cargo` are active on `PATH`, ignoring
+  the requested selector entirely): requesting `"nightly"` while only a
+  `"stable"` toolchain was actually on `PATH` still "verified"
+  successfully. `selector_matches_resolved` now checks a recognized
+  channel name (`"stable"`/`"beta"`/`"nightly"`, exactly) against the
+  resolved `channel` field, and rejects any other non-numeric selector
+  outright (a dated nightly, a custom toolchain name, ...) as
+  unverifiable rather than treating "not purely numeric" as "no
+  constraint." Nim has no channel concept at all (`resolved_channel` is
+  always `None` for it), so a non-numeric Nim selector can never match
+  either -- correct, since this project's own lock file never actually
+  uses one.

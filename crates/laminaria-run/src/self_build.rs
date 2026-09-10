@@ -339,43 +339,65 @@ struct VerifiedToolchain {
     nim: PathBuf,
 }
 
-/// Whether `resolved_version` is consistent with a requested `selector`.
-/// An empty selector, or a non-numeric channel name (`"stable"`/
-/// `"beta"`/`"nightly"`, which has no single fixed version to compare
-/// against), always matches. A numeric-looking selector (`"2.2.10"`,
-/// `"2.2"`) must match the resolved version component-by-component
-/// (split on `.`), for as many components as the selector itself
-/// specifies -- *not* a raw string-prefix check. A second external
-/// review caught the difference directly: `"2.2.10".starts_with("2.2.1")`
-/// is `true` as plain strings (`"2.2.1"` really is a character-for-
-/// character prefix of `"2.2.10"`), so a lock pinning the exact patch
-/// version `"2.2.1"` silently accepted the real, already-installed
-/// `"2.2.10"` -- a materially different release. Comparing dot-separated
-/// components instead (`["2","2","1"]` vs `["2","2","10"]`) correctly
-/// rejects that case at the third component, while a shorter, less
-/// specific selector like `"2.2"` (`["2","2"]`) still matches any
-/// resolved version sharing that major/minor prefix, `"2.2.10"`
-/// included -- matching how a partial version pin is actually meant to
-/// behave.
-fn selector_matches_resolved(selector: &str, resolved_version: Option<&str>) -> bool {
+/// Whether `resolved_version`/`resolved_channel` is consistent with a
+/// requested `selector`. Four cases, in order:
+/// - An empty selector: no constraint was requested, always matches.
+/// - A numeric-looking selector (`"2.2.10"`, `"2.2"`): must match the
+///   resolved version component-by-component (split on `.`), for as
+///   many components as the selector itself specifies -- *not* a raw
+///   string-prefix check. A second external review caught the
+///   difference directly: `"2.2.10".starts_with("2.2.1")` is `true` as
+///   plain strings (`"2.2.1"` really is a character-for-character
+///   prefix of `"2.2.10"`), so a lock pinning the exact patch version
+///   `"2.2.1"` silently accepted the real, already-installed `"2.2.10"`
+///   -- a materially different release. Comparing dot-separated
+///   components instead (`["2","2","1"]` vs `["2","2","10"]`) correctly
+///   rejects that case at the third component, while a shorter, less
+///   specific selector like `"2.2"` (`["2","2"]`) still matches any
+///   resolved version sharing that major/minor prefix.
+/// - A recognized Rust channel name (exactly `"stable"`/`"beta"`/
+///   `"nightly"`): verified against `resolved_channel`, not accepted
+///   unconditionally -- a fourth external review caught this gap
+///   directly: without `rustup` on `PATH`,
+///   `rust_toolchain::resolve` falls back to whatever `rustc`/`cargo`
+///   are active on `PATH` regardless of the requested selector, so
+///   requesting `"nightly"` while only a `"stable"` toolchain was
+///   actually on `PATH` still resolved (and this function previously
+///   accepted it unconditionally, since "non-numeric" used to mean
+///   "assume it's an unverifiable channel name, let it through").
+///   `resolved_channel` is `None` for Nim (which has no channel
+///   concept), so a Nim selector can never match this branch.
+/// - Anything else non-numeric (a dated nightly like
+///   `"nightly-2024-01-15"`, a custom toolchain name, ...): this
+///   function has no way to actually verify it against what was
+///   resolved, so it is rejected outright rather than silently trusted
+///   -- "cannot verify" fails closed, per the same review's explicit
+///   ask, and is not treated as "no constraint" just because it isn't
+///   purely numeric.
+fn selector_matches_resolved(
+    selector: &str,
+    resolved_version: Option<&str>,
+    resolved_channel: Option<&str>,
+) -> bool {
     if selector.is_empty() {
         return true;
     }
-    if !selector.chars().next().is_some_and(|c| c.is_ascii_digit()) {
-        return true;
+    if selector.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        let Some(resolved) = resolved_version else {
+            return false;
+        };
+        let selector_parts: Vec<&str> = selector.split('.').collect();
+        let resolved_parts: Vec<&str> = resolved.split('.').collect();
+        return resolved_parts.len() >= selector_parts.len()
+            && selector_parts
+                .iter()
+                .zip(resolved_parts.iter())
+                .all(|(s, r)| s == r);
     }
-    let Some(resolved) = resolved_version else {
-        return false;
-    };
-    let selector_parts: Vec<&str> = selector.split('.').collect();
-    let resolved_parts: Vec<&str> = resolved.split('.').collect();
-    if resolved_parts.len() < selector_parts.len() {
-        return false;
+    if matches!(selector, "stable" | "beta" | "nightly") {
+        return resolved_channel == Some(selector);
     }
-    selector_parts
-        .iter()
-        .zip(resolved_parts.iter())
-        .all(|(s, r)| s == r)
+    false
 }
 
 /// Loads `lock_path`, and requires it to resolve at least one Rust
@@ -442,20 +464,28 @@ fn resolve_verified_toolchain(
     })?;
 
     let rust_selector = rust_toolchain.requested_selector.as_deref().unwrap_or("");
-    if !selector_matches_resolved(rust_selector, rust_toolchain.resolved_version.as_deref()) {
+    if !selector_matches_resolved(
+        rust_selector,
+        rust_toolchain.resolved_version.as_deref(),
+        rust_toolchain.channel.as_deref(),
+    ) {
         return Err(SelfBuildError::ToolchainUnresolved(format!(
             "Rust toolchain '{}' requested selector '{rust_selector}' but resolved version is \
-             {:?} -- refusing to build with a toolchain that does not match what the lock file \
-             actually pinned",
-            rust_toolchain.logical_name, rust_toolchain.resolved_version
+             {:?} (channel {:?}) -- refusing to build with a toolchain that does not match, or \
+             cannot be verified against, what the lock file actually pinned",
+            rust_toolchain.logical_name, rust_toolchain.resolved_version, rust_toolchain.channel
         )));
     }
     let nim_selector = nim_toolchain.requested_selector.as_deref().unwrap_or("");
-    if !selector_matches_resolved(nim_selector, nim_toolchain.resolved_version.as_deref()) {
+    if !selector_matches_resolved(
+        nim_selector,
+        nim_toolchain.resolved_version.as_deref(),
+        None,
+    ) {
         return Err(SelfBuildError::ToolchainUnresolved(format!(
             "Nim toolchain '{}' requested selector '{nim_selector}' but resolved version is \
-             {:?} -- refusing to build with a toolchain that does not match what the lock file \
-             actually pinned",
+             {:?} -- refusing to build with a toolchain that does not match, or cannot be \
+             verified against, what the lock file actually pinned",
             nim_toolchain.logical_name, nim_toolchain.resolved_version
         )));
     }
@@ -1055,8 +1085,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&runs_root);
     }
 
-    /// The other half of the same external review's fault-injection: a
-    /// resolved executable path alone was previously accepted as
     /// The exact bug a fourth external review caught: naive
     /// `str::starts_with` treats `"2.2.1"` as a match for `"2.2.10"`
     /// because it really is a character-for-character string prefix of
@@ -1065,12 +1093,12 @@ mod tests {
     /// accept the real, already-installed `"2.2.10"`.
     #[test]
     fn selector_matches_resolved_rejects_a_string_prefix_that_is_not_a_real_version_match() {
-        assert!(!selector_matches_resolved("2.2.1", Some("2.2.10")));
+        assert!(!selector_matches_resolved("2.2.1", Some("2.2.10"), None));
     }
 
     #[test]
     fn selector_matches_resolved_accepts_an_exact_full_version_match() {
-        assert!(selector_matches_resolved("2.2.10", Some("2.2.10")));
+        assert!(selector_matches_resolved("2.2.10", Some("2.2.10"), None));
     }
 
     /// A shorter, less specific selector (major.minor only) is still
@@ -1079,27 +1107,71 @@ mod tests {
     /// full equality unconditionally.
     #[test]
     fn selector_matches_resolved_accepts_a_partial_major_minor_selector() {
-        assert!(selector_matches_resolved("2.2", Some("2.2.10")));
+        assert!(selector_matches_resolved("2.2", Some("2.2.10"), None));
     }
 
     #[test]
     fn selector_matches_resolved_rejects_a_completely_different_version() {
-        assert!(!selector_matches_resolved("999.0.0", Some("2.2.10")));
+        assert!(!selector_matches_resolved("999.0.0", Some("2.2.10"), None));
     }
 
     #[test]
-    fn selector_matches_resolved_always_matches_a_channel_name_selector() {
-        assert!(selector_matches_resolved("stable", Some("1.97.1")));
+    fn selector_matches_resolved_accepts_a_channel_name_that_matches_the_resolved_channel() {
+        assert!(selector_matches_resolved(
+            "stable",
+            Some("1.97.1"),
+            Some("stable")
+        ));
+    }
+
+    /// The exact bug a fifth external review caught: a non-numeric
+    /// selector used to be accepted unconditionally, regardless of what
+    /// actually resolved -- reproduced directly without `rustup` on
+    /// `PATH` (`rust_toolchain::resolve`'s own fallback path resolves
+    /// whatever `rustc`/`cargo` are active on `PATH`, ignoring the
+    /// requested selector entirely): requesting `"nightly"` while only a
+    /// `"stable"` toolchain was actually on `PATH` still "verified"
+    /// successfully and self-build proceeded to compile with it.
+    #[test]
+    fn selector_matches_resolved_rejects_a_channel_name_that_does_not_match_the_resolved_channel() {
+        assert!(!selector_matches_resolved(
+            "nightly",
+            Some("1.97.1"),
+            Some("stable")
+        ));
+    }
+
+    /// The same review's explicit ask: a selector this function cannot
+    /// actually verify (a dated nightly, here) must fail closed, not be
+    /// silently treated as "no constraint" just because it isn't purely
+    /// numeric.
+    #[test]
+    fn selector_matches_resolved_rejects_an_unverifiable_dated_selector() {
+        assert!(!selector_matches_resolved(
+            "nightly-2024-01-15",
+            Some("1.97.1"),
+            Some("nightly")
+        ));
+    }
+
+    /// Nim has no channel concept at all (`resolved_channel` is always
+    /// `None` for it) -- a non-numeric Nim selector can therefore never
+    /// match, which is the intended fail-closed behavior: this project's
+    /// own `toolchains.lock.toml` never actually uses one today.
+    #[test]
+    fn selector_matches_resolved_rejects_any_non_numeric_selector_when_there_is_no_channel_to_check_against(
+    ) {
+        assert!(!selector_matches_resolved("devel", Some("2.2.10"), None));
     }
 
     #[test]
     fn selector_matches_resolved_always_matches_an_empty_selector() {
-        assert!(selector_matches_resolved("", Some("anything")));
+        assert!(selector_matches_resolved("", Some("anything"), None));
     }
 
     #[test]
     fn selector_matches_resolved_rejects_a_numeric_selector_with_no_resolved_version() {
-        assert!(!selector_matches_resolved("2.2.10", None));
+        assert!(!selector_matches_resolved("2.2.10", None, None));
     }
 
     /// "verified" regardless of whether its *version* actually matched
