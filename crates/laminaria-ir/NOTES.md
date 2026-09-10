@@ -244,3 +244,141 @@ re-running its new test before restoring the fix -- all three failed with
 the exact wrong value/behavior predicted, not a hypothetical concern.
 
 `cargo test --workspace`: 216 passed (up from 211). Clippy and fmt clean.
+
+## Third pass: composition safety and stricter acceptance, 8 more bugs
+
+A review of the second pass's own fixes -- using additional inputs the
+existing 29 tests didn't cover -- found four confirmed-broken behaviors
+plus four further residual gaps in the same round, all fixed here:
+
+1. **P1: composing an already-transformed callee could numerically
+   collide with its own embedded locals.** Both transforms only
+   considered the *caller's* pre-existing `LocalId`s when picking safe new
+   ids (or, for `checked_inline`, considered none at all, since it
+   introduces no fresh ids of its own) -- neither accounted for a callee
+   body that *itself* already contains embedded `Let`s from an earlier
+   inlining pass. Reproduced directly: `add(x,y)=x+y`, `g(x)=add(1,x)`,
+   `f()=g(10)`; inlining `add` into `g` gives `g` two internal `Let`s
+   (ids 0, 1, its own fresh numbering); inlining `g` into `f` then picked
+   a fresh id *also* starting at 0 (since `f` itself has no pre-existing
+   locals), colliding with `g`'s own embedded id 0 and computing `2`
+   instead of the correct `11`. Fixed with a real alpha-rename pass
+   (`transform::alpha_rename_callee_body`, used by both candidates via
+   `prepare_callee_body_for_grafting`): every `Let` the callee body itself
+   already contains is renamed to a fresh id, starting above *both* the
+   caller's own maximum id and the callee body's own maximum id, before
+   either candidate does anything else with it -- provably disjoint from
+   anything already meaningful at the graft site, regardless of how many
+   prior transformations either side has been through. Confirmed to
+   matter by reverting to the narrower (caller-only) fix and re-running
+   the new regression test: it reproduced the exact same `2` instead of
+   `11`.
+2. **P1: a callee's own internal effects were recorded with a
+   per-call-relative `order_index`, not a globally monotonic one.**
+   `eval_function` creates a fresh `EvalState` per call, whose effect
+   trace starts counting from 0 for that call alone; splicing it into the
+   caller's own trace without renumbering produced duplicate/out-of-order
+   indices (`[0, 1, 0, 1]` in the constructed regression test, matching
+   the review's own `[0, 0, 2, 0]`-shaped report) whenever the callee's
+   own body made more than one call and the caller already had earlier
+   effects recorded -- a shape the existing
+   `nested_effects_are_recorded_in_real_execution_order` test never
+   exercised (there, the nested call is an *argument*, evaluated through
+   the same shared state, never through a fresh one). Fixed by
+   renumbering a callee's spliced-in effects to continue from the
+   caller's own current trace length. Confirmed via revert.
+3. **P1: Nim's new same-indent trailing-statement check missed same-line
+   and deeper-indent leftovers.** The check added in the second pass only
+   compared against `Some(cur_indent)` exactly, so (a) unsupported
+   trailing syntax on the *same source line* as the tail (`x div 2`,
+   where `div` isn't a supported operator: `parse_expr` on `x` silently
+   returns just `x`, leaving ` div 2` unconsumed as continuation tokens,
+   `indent: None`, which never equals `Some(cur_indent)`) and (b) content
+   left at a *deeper* indent (`Some(c) if c > cur_indent`) both slipped
+   through undetected. Replaced with a genuine block-boundary check: the
+   only tokens that legitimately follow a block's tail are EOF or a
+   token starting a new line at strictly *less* indentation (a
+   sibling/enclosing construct correctly dedenting out); anything else
+   (a continuation token, or a token at this block's own indent or
+   deeper) is unconsumed content.
+4. **P2 (Rust): `async`, `unsafe`, `extern`, generic parameters, and
+   non-doc attributes on a requested function were silently ignored.** A
+   generic function whose parameter/return types happen to be `i32`
+   (`fn identity<T>(x: i32) -> i32 { x }`) previously slipped through
+   entirely -- the *existing* generic-rejection test only ever caught
+   `identity<T>(x: T)` by accident, via the unrelated "parameter type
+   other than i32" check on `T`, never a genuine generics check. Fixed
+   with explicit checks on `sig.asyncness`/`unsafety`/`abi`/
+   `generics.params`/`generics.where_clause`, and rejecting any function
+   attribute that isn't `#[doc = ...]` (what a `///` comment desugars to,
+   allowed through since it has no semantic effect).
+5. **P2 (Rust): a bare `!=`/`==` was accepted as a general, `i32`-valued
+   expression.** `fn f(x: i32) -> i32 { x != 0 }` lowered successfully,
+   even though real Rust rejects it outright (`x != 0` has type `bool`,
+   not `i32`, and cannot be returned from an `i32`-declared function).
+   The general expression-lowering arm that constructed `NotEqZero` from
+   a bare comparison has been removed entirely; `NotEqZero` is now only
+   ever reachable through `lower_condition`, called from `lower_if`'s
+   condition position -- the one place this subset actually has a
+   boolean-shaped value to consume.
+6. **P2 (Rust): calling a name shadowed by a local silently resolved to
+   the differently-scoped function instead of being rejected.** Real Rust
+   would reject `let double = a; double(a)` outright (calling a plain
+   `i32` local is a type error; this subset has no function-valued locals
+   at all), but the call-lowering code only ever checked
+   `declared_functions`, never whether the callee name is *also* bound as
+   a local/parameter in scope. Fixed by checking `ctx.locals`/`ctx.params`
+   before `declared_functions` and rejecting the shadowed case explicitly.
+7. **P2 (Rust): the unary-negation path skipped the integer-suffix check,
+   and separately rejected the valid `i32::MIN` literal.**
+   `syn::LitInt::base10_parse::<i32>()` only inspects the digits, never
+   the suffix, so `-1u64` (an unsigned 64-bit literal, a different type
+   entirely) silently became `IntLit(-1, I32)` through the negation arm,
+   while the *non-negated* literal path already correctly checked the
+   suffix. Separately, `-2147483648` (`i32::MIN`) was rejected outright:
+   Rust's surface syntax has no single "negative literal" token -- `-N`
+   is unary negation of the separately-tokenized *positive* digits
+   `2147483648`, which do not themselves fit `i32` (`i32::MAX` is
+   `2147483647`), so parsing the pre-negation digits directly as `i32`
+   failed before negation could bring the value back into range. Both
+   literal-parsing call sites now go through one `parse_i32_literal`
+   helper: parse the digits as `i64` (wide enough for any value the
+   literal could name), negate in `i64` if applicable, *then*
+   range-check the final value against `i32::MIN..=i32::MAX` -- correctly
+   accepting `-2147483648` while still rejecting `-1u64` and a genuinely
+   out-of-range value.
+8. **P2 (Nim): an `'i32`-suffixed literal outside `i32`'s actual range was
+   accepted as-is.** `lex_number` parses the digit sequence into `i64`
+   (wide enough to hold values far beyond `i32`), but nothing checked the
+   *result* actually fits `i32` even when the suffix explicitly claims it
+   does. Fixed with an explicit range check once the suffix is confirmed
+   to be `i32`.
+
+Fourteen new regression tests (two in `transform/mod.rs`, one in
+`interpreter.rs`, two in `nim_frontend.rs`'s trailing-content coverage,
+one more Nim range test plus its `i32::MIN`-acceptance mirror, and eight
+in `rust_frontend.rs` covering attributes/generics/async/unsafe, the
+bool-vs-i32 type check, name-shadowing, and both integer-literal fixes).
+The three most structurally involved fixes (composition/alpha-rename,
+effect-order renumbering, Nim trailing-content) were each confirmed to
+actually matter by reverting the fix and re-running its new test before
+restoring it -- all three reproduced the exact wrong value/behavior the
+review reported, not a hypothetical concern.
+
+`cargo test --workspace`: 231 passed (up from 216). Clippy and fmt clean.
+
+## Known residual scope, not yet addressed
+
+Explicitly out of scope for this round, named rather than silently
+dropped -- a genuinely exhaustive Rust/Nim subset frontend (full
+name-resolution scoping beyond simple shadowing-in-call-position, a real
+type system beyond "everything is i32," complete input-consumption
+verification for every grammar production rather than the specific gaps
+this round closed) is not this task's goal; the task is a narrow, honest
+slice proving the source-derived-IR/effect-model/transform-comparison
+pipeline end to end, not a production-grade compiler frontend. Further
+gaps of the same general character (type/shape/consumption checks this
+declared subset doesn't yet enforce) should be expected and fixed
+incrementally as they're found, the same way this round's were, rather
+than treated as a one-time completeness gate before proceeding to Task 2
+(#6/#8 planner/scheduler integration).

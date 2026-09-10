@@ -167,12 +167,92 @@ fn type_is_i32(ty: &Type) -> bool {
     matches!(ty, Type::Path(p) if p.path.is_ident("i32"))
 }
 
+/// Parses an integer literal into a value guaranteed to fit `i32`,
+/// fixing two bugs a review reproduced:
+///
+/// - **The unary-minus path skipped the suffix check entirely** --
+///   `syn::LitInt::base10_parse::<i32>()` only looks at the digits, never
+///   the suffix, so `-1u64` (a `u64`-typed literal, a completely
+///   different, unsigned 64-bit type) silently parsed as `IntLit(-1,
+///   I32)` through the unary-negation arm, while the *non-negated*
+///   literal path already correctly rejected a non-`i32` suffix. Both
+///   paths now go through this one function.
+/// - **`i32::MIN` (`-2147483648`) was rejected outright.** Rust's own
+///   surface syntax has no single "negative literal" token -- `-N` is
+///   always unary negation of a separately-tokenized *positive* digit
+///   sequence, and `2147483648` alone does not fit in `i32`
+///   (`i32::MAX` is `2147483647`), so parsing the pre-negation digits
+///   directly as `i32` failed before negation could ever bring the value
+///   back into range. Fixed by parsing the digits as `i64` first (wide
+///   enough for any value this literal could name), negating in `i64`,
+///   *then* range-checking the final value against `i32::MIN..=i32::MAX`
+///   -- correctly accepting `-2147483648` while still rejecting a
+///   genuinely out-of-range value like `-2147483649`.
+fn parse_i32_literal(
+    lit: &syn::LitInt,
+    negate: bool,
+    span: Span,
+) -> Result<i64, Vec<LoweringError>> {
+    if !lit.suffix().is_empty() && lit.suffix() != "i32" {
+        return Err(vec![unsupported(
+            "integer literal suffix other than i32",
+            span,
+        )]);
+    }
+    let digits: i64 = lit
+        .base10_parse::<i64>()
+        .map_err(|e| vec![unsupported_shape(format!("integer literal: {e}"), span)])?;
+    let value = if negate { -digits } else { digits };
+    if value < i32::MIN as i64 || value > i32::MAX as i64 {
+        return Err(vec![unsupported_shape(
+            format!("integer literal {value} does not fit in i32"),
+            span,
+        )]);
+    }
+    Ok(value)
+}
+
 fn lower_item_fn(
     source_file: &Path,
     item_fn: &ItemFn,
     declared_functions: &std::collections::BTreeSet<String>,
 ) -> Result<FnFact, Vec<LoweringError>> {
     let mut errors = Vec::new();
+
+    // A review caught that these were silently ignored rather than
+    // rejected: an `async fn`, a generic `fn f<T>(...)`, or a
+    // `#[cfg(...)]`-style attribute on a requested function all lowered
+    // as if they were ordinary, unconditional `i32`-only functions --
+    // e.g. `fn identity<T>(x: T) -> T { x }` slipped past the *existing*
+    // generic-rejection test only by accident (its parameter type `T`
+    // happens to fail the unrelated `i32`-only type check first), so a
+    // generic function whose parameters/return type *do* happen to be
+    // `i32` was never actually rejected for being generic at all.
+    // Checked explicitly here instead of relying on an unrelated check to
+    // coincidentally catch it. Doc-comment attributes (`#[doc = ...]`,
+    // what a `///` comment desugars to) are allowed through, since they
+    // carry no semantic effect on the function itself.
+    if item_fn.sig.asyncness.is_some() {
+        errors.push(unsupported("async fn", item_fn.sig.span()));
+    }
+    if item_fn.sig.unsafety.is_some() {
+        errors.push(unsupported("unsafe fn", item_fn.sig.span()));
+    }
+    if item_fn.sig.abi.is_some() {
+        errors.push(unsupported("extern fn", item_fn.sig.span()));
+    }
+    if !item_fn.sig.generics.params.is_empty() {
+        errors.push(unsupported("generic function", item_fn.sig.generics.span()));
+    }
+    if let Some(where_clause) = &item_fn.sig.generics.where_clause {
+        errors.push(unsupported("where clause", where_clause.span()));
+    }
+    for attr in &item_fn.attrs {
+        if !attr.path().is_ident("doc") {
+            errors.push(unsupported("attribute", attr.span()));
+        }
+    }
+
     let mut params = Vec::new();
     let mut param_index = BTreeMap::new();
 
@@ -449,15 +529,7 @@ fn lower_expr(expr: &SynExpr, ctx: &mut Ctx) -> Result<Expr, Vec<LoweringError>>
         SynExpr::Group(g) => lower_expr(&g.expr, ctx),
         SynExpr::Lit(l) => match &l.lit {
             Lit::Int(i) => {
-                if !i.suffix().is_empty() && i.suffix() != "i32" {
-                    return Err(vec![unsupported(
-                        "integer literal suffix other than i32",
-                        l.span(),
-                    )]);
-                }
-                let value: i64 = i.base10_parse::<i32>().map_err(|e| {
-                    vec![unsupported_shape(format!("integer literal: {e}"), l.span())]
-                })? as i64;
+                let value = parse_i32_literal(i, false, l.span())?;
                 Ok(Expr::IntLit(
                     value,
                     IntWidth::I32,
@@ -472,11 +544,9 @@ fn lower_expr(expr: &SynExpr, ctx: &mut Ctx) -> Result<Expr, Vec<LoweringError>>
             // negation operator in the IR).
             if let SynExpr::Lit(l) = u.expr.as_ref() {
                 if let Lit::Int(i) = &l.lit {
-                    let value = i.base10_parse::<i32>().map_err(|e| {
-                        vec![unsupported_shape(format!("integer literal: {e}"), l.span())]
-                    })?;
+                    let value = parse_i32_literal(i, true, u.span())?;
                     return Ok(Expr::IntLit(
-                        (-value) as i64,
+                        value,
                         IntWidth::I32,
                         to_provenance(ctx.source_file, u.span()),
                     ));
@@ -529,17 +599,19 @@ fn lower_expr(expr: &SynExpr, ctx: &mut Ctx) -> Result<Expr, Vec<LoweringError>>
                 _ => Expr::WrappingMul(Box::new(receiver), Box::new(arg), provenance),
             })
         }
-        SynExpr::Binary(bin) if matches!(bin.op, BinOp::Ne(_) | BinOp::Eq(_)) => {
-            let (e, swap) = lower_condition(expr, ctx)?;
-            if swap {
-                return Err(vec![unsupported_shape(
-                    "'== 0' is only supported as an if condition, not a general value expression \
-                     (this IR has no standalone boolean negation)",
-                    bin.span(),
-                )]);
-            }
-            Ok(e)
-        }
+        // A review caught a real type-consistency bug: an earlier arm
+        // here accepted `!=`/`==` as a *general*, `i32`-valued expression
+        // (via `lower_condition`), so `fn f(x: i32) -> i32 { x != 0 }`
+        // lowered successfully even though real Rust rejects it outright
+        // -- `x != 0` has type `bool`, not `i32`, and cannot be returned
+        // from a function declared to return `i32`. `NotEqZero` is only
+        // ever constructed by `lower_condition`, called directly from
+        // `lower_if`'s condition position (the one place this subset
+        // actually has a boolean-shaped value to consume) -- never
+        // through this general, `i32`-typed-value path; that arm has been
+        // removed, so a bare `!=`/`==` reaching this match now falls
+        // through to the generic `unsupported` case below, matching real
+        // Rust's own type error.
         SynExpr::Call(c) => {
             let SynExpr::Path(p) = c.func.as_ref() else {
                 return Err(vec![unsupported(
@@ -551,6 +623,26 @@ fn lower_expr(expr: &SynExpr, ctx: &mut Ctx) -> Result<Expr, Vec<LoweringError>>
                 return Err(vec![unsupported("call to a qualified path", c.span())]);
             };
             let name = ident.to_string();
+            // A review caught a real name-resolution gap: this only ever
+            // checked `declared_functions`, never whether `name` is *also*
+            // bound as a local/parameter in scope at the call site. Real
+            // Rust would reject calling a plain `i32` local even when a
+            // function of the same name exists elsewhere (`let double =
+            // 5; double(x)` is a type error: `i32` isn't callable) --
+            // this subset has no callable local values at all (no
+            // closures/fn pointers), so a local/parameter shadowing a
+            // function name in call position is never valid here either,
+            // and must not silently fall through to calling the
+            // differently-scoped function of the same name instead.
+            if ctx.locals.contains_key(&name) || ctx.params.contains_key(&name) {
+                return Err(vec![unsupported_shape(
+                    format!(
+                        "'{name}' is a local/parameter here, not a callable value -- this subset \
+                         has no function-valued locals"
+                    ),
+                    c.span(),
+                )]);
+            }
             if !ctx.declared_functions.contains(&name) {
                 return Err(vec![unsupported_shape(
                     format!("call to '{name}', which is not in this lowering request"),
@@ -730,6 +822,119 @@ mod tests {
         // unsupported item elsewhere in the file (matches this module's
         // "only inspect requested functions" contract).
         assert!(lower_rust_source(&path(), source, &["f"]).is_ok());
+    }
+
+    /// Regression test for the exact bug a review reproduced: a generic
+    /// function whose parameters/return type *happen* to be `i32` used to
+    /// slip through, because the previous test's own `identity<T>(x: T)`
+    /// only got caught by the unrelated "parameter type other than i32"
+    /// check (`T != i32`), not a genuine generic-parameter check.
+    #[test]
+    fn rejects_a_generic_function_even_when_its_types_are_all_i32() {
+        let source = "fn identity<T>(x: i32) -> i32 { x }";
+        let result = lower_rust_source(&path(), source, &["identity"]);
+        assert!(
+            result.is_err(),
+            "a generic function must be rejected regardless of its types"
+        );
+    }
+
+    #[test]
+    fn rejects_an_async_function() {
+        let source = "async fn f(x: i32) -> i32 { x }";
+        let result = lower_rust_source(&path(), source, &["f"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_an_unsafe_function() {
+        let source = "unsafe fn f(x: i32) -> i32 { x }";
+        let result = lower_rust_source(&path(), source, &["f"]);
+        assert!(result.is_err());
+    }
+
+    /// A `#[cfg(...)]`-style attribute could silently select between
+    /// different bodies depending on a build configuration this frontend
+    /// never inspects -- must be rejected, not ignored.
+    #[test]
+    fn rejects_a_cfg_attribute() {
+        let source = "#[cfg(target_os = \"linux\")]\nfn f(x: i32) -> i32 { x }";
+        let result = lower_rust_source(&path(), source, &["f"]);
+        assert!(result.is_err());
+    }
+
+    /// A plain doc comment carries no semantic effect and must still be
+    /// accepted (it lowers to a harmless `#[doc = ...]` attribute).
+    #[test]
+    fn accepts_a_plain_doc_comment() {
+        let source = "/// A doc comment.\nfn f(x: i32) -> i32 { x }";
+        let result = lower_rust_source(&path(), source, &["f"]);
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    /// Regression test for the exact type-consistency bug a review
+    /// reproduced: `x != 0` has type `bool` in real Rust, not `i32`, and
+    /// cannot be returned from a function declared to return `i32` --
+    /// real `rustc` rejects this outright. `NotEqZero` must only be
+    /// reachable through an `if` condition, never as a general value.
+    #[test]
+    fn rejects_a_bool_expression_used_as_an_i32_value() {
+        let source = "fn f(x: i32) -> i32 { x != 0 }";
+        let result = lower_rust_source(&path(), source, &["f"]);
+        assert!(
+            result.is_err(),
+            "a bool-typed expression must not be accepted where an i32 value is expected"
+        );
+    }
+
+    /// Regression test for the exact name-resolution bug a review
+    /// reproduced: a local shadowing a declared function's name must not
+    /// silently resolve a call to the *other-scope* function instead --
+    /// real Rust would reject calling a plain `i32` local outright.
+    #[test]
+    fn rejects_calling_a_local_that_shadows_a_declared_functions_name() {
+        let source = r#"
+            fn double(x: i32) -> i32 { x.wrapping_add(x) }
+            fn f(a: i32) -> i32 {
+                let double = a;
+                double(a)
+            }
+        "#;
+        let result = lower_rust_source(&path(), source, &["double", "f"]);
+        assert!(
+            result.is_err(),
+            "calling a name shadowed by a local must be rejected, not silently resolved to the \
+             differently-scoped function"
+        );
+    }
+
+    /// Regression test for the exact bug a review reproduced: the
+    /// unary-negation path parsed only the literal's *digits*, never
+    /// checking its suffix -- so `-1u64` (an unsigned 64-bit literal, a
+    /// completely different type) silently became `IntLit(-1, I32)`.
+    #[test]
+    fn rejects_a_negative_literal_with_a_non_i32_suffix() {
+        let source = "fn f() -> i32 { -1i64 }";
+        let result = lower_rust_source(&path(), source, &["f"]);
+        assert!(
+            result.is_err(),
+            "a non-i32-suffixed negative literal must be rejected"
+        );
+    }
+
+    /// Regression test for the exact bug a review reproduced: Rust has no
+    /// single "negative literal" token -- `-2147483648` is unary negation
+    /// of the separately-tokenized positive digits `2147483648`, which do
+    /// not themselves fit in `i32` (`i32::MAX` is `2147483647`), so
+    /// parsing the pre-negation digits directly as `i32` rejected the
+    /// literal even though the final, negated value is exactly `i32::MIN`
+    /// and perfectly valid.
+    #[test]
+    fn accepts_i32_min_as_a_negative_literal() {
+        let source = "fn f() -> i32 { -2147483648 }";
+        let program = lower_rust_source(&path(), source, &["f"]).unwrap();
+        let outcome = eval_function(&program, "f", &[]).unwrap();
+        assert_eq!(outcome.value as i32, i32::MIN);
     }
 
     #[test]

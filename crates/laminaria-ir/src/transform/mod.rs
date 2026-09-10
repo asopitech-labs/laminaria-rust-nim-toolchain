@@ -73,6 +73,105 @@ fn as_simple_return_expr(fact: &FnFact) -> Option<&Expr> {
     }
 }
 
+/// Alpha-renames every `LocalId` bound by a `Let` inside `expr` (and every
+/// `Local` reference to it) to a fresh id starting from `*next_local`,
+/// which is advanced past whatever it allocates. Applied to a callee's
+/// body *before* either candidate substitutes/wraps it into a caller,
+/// closing a real composition bug a review reproduced: once a callee's own
+/// body already contains embedded `Let`s (because it was itself produced
+/// by an earlier inlining pass), grafting that body verbatim into a
+/// *different* function can numerically collide with `LocalId`s already
+/// meaningful there -- either the caller's own pre-existing locals, or
+/// (for `checked_inline`, which introduces no fresh ids of its own) a
+/// `Local` reference embedded in one of the *arguments* being substituted
+/// in. When a nested scope reusing the same id sits between where such a
+/// reference is evaluated and where it's actually read, it silently
+/// resolves to the wrong binding instead. Reproduced directly with
+/// `add(x,y)=x+y`, `g(x)=add(1,x)`, `f()=g(10)`: inlining `add` into `g`
+/// first (giving `g` two internal `Let`s starting at id 0), then inlining
+/// `g` into `f` without this rename, computed `2` instead of the correct
+/// `11`. Starting the caller-side fresh-id counter *for this whole
+/// operation* above both the caller's own maximum id and the (now-renamed)
+/// callee body's maximum id makes every id introduced or carried in by
+/// this one splice provably distinct from anything already in scope at
+/// the graft site, regardless of how many prior transformations either
+/// side has already been through.
+fn alpha_rename_callee_body(
+    expr: &Expr,
+    remap: &mut std::collections::BTreeMap<LocalId, LocalId>,
+    next_local: &mut u32,
+) -> Expr {
+    match expr {
+        Expr::IntLit(..) | Expr::Param(..) => expr.clone(),
+        Expr::Local(id, p) => {
+            let renamed = remap.get(id).copied().unwrap_or(*id);
+            Expr::Local(renamed, p.clone())
+        }
+        Expr::WrappingAdd(a, b, p) => Expr::WrappingAdd(
+            Box::new(alpha_rename_callee_body(a, remap, next_local)),
+            Box::new(alpha_rename_callee_body(b, remap, next_local)),
+            p.clone(),
+        ),
+        Expr::WrappingSub(a, b, p) => Expr::WrappingSub(
+            Box::new(alpha_rename_callee_body(a, remap, next_local)),
+            Box::new(alpha_rename_callee_body(b, remap, next_local)),
+            p.clone(),
+        ),
+        Expr::WrappingMul(a, b, p) => Expr::WrappingMul(
+            Box::new(alpha_rename_callee_body(a, remap, next_local)),
+            Box::new(alpha_rename_callee_body(b, remap, next_local)),
+            p.clone(),
+        ),
+        Expr::NotEqZero(inner, p) => Expr::NotEqZero(
+            Box::new(alpha_rename_callee_body(inner, remap, next_local)),
+            p.clone(),
+        ),
+        Expr::Call(name, args, p) => Expr::Call(
+            name.clone(),
+            args.iter()
+                .map(|a| alpha_rename_callee_body(a, remap, next_local))
+                .collect(),
+            p.clone(),
+        ),
+        Expr::Let {
+            local,
+            value,
+            body,
+            provenance,
+        } => {
+            // `value` is renamed under the remap as it stood *before* this
+            // Let's own binder is added -- a well-formed `let` initializer
+            // never references its own binder.
+            let renamed_value = alpha_rename_callee_body(value, remap, next_local);
+            let new_id = LocalId(*next_local);
+            *next_local += 1;
+            remap.insert(*local, new_id);
+            let renamed_body = alpha_rename_callee_body(body, remap, next_local);
+            Expr::Let {
+                local: new_id,
+                value: Box::new(renamed_value),
+                body: Box::new(renamed_body),
+                provenance: provenance.clone(),
+            }
+        }
+    }
+}
+
+/// Prepares a callee body for grafting into `caller_body`: alpha-renames
+/// the callee's own embedded `Let`s (see [`alpha_rename_callee_body`]) and
+/// returns both the renamed body and the counter value the caller should
+/// continue from for any *additional* fresh ids it still needs to
+/// introduce itself (only `anf_insert` does; `checked_inline` doesn't, but
+/// still needs the rename).
+fn prepare_callee_body_for_grafting(caller_body: &Stmt, callee_body: &Expr) -> (Expr, u32) {
+    let mut next_local = crate::types::max_local_id_in_stmt(caller_body)
+        .map(|m| m + 1)
+        .unwrap_or(0);
+    let mut remap = std::collections::BTreeMap::new();
+    let renamed = alpha_rename_callee_body(callee_body, &mut remap, &mut next_local);
+    (renamed, next_local)
+}
+
 fn count_param_occurrences(expr: &Expr, target: usize) -> usize {
     match expr {
         Expr::Param(i, _) => usize::from(*i == target),
@@ -638,6 +737,58 @@ mod tests {
             11,
             "a second, sequential anf_insert call must not collide with the first call's own \
              introduced locals"
+        );
+    }
+
+    /// Regression test for the exact composition bug a review reproduced:
+    /// `add(x,y)=x+y`, `g(x)=add(1,x)`, `f()=g(10)`. Inlining `add` into
+    /// `g` first gives `g`'s body two embedded `Let`s (ids 0 and 1, its
+    /// own fresh numbering). Inlining `g` into `f` *without* alpha-
+    /// renaming those embedded ids collides with the fresh id this second
+    /// call introduces for hoisting `f`'s own argument (both started
+    /// counting from 0, since `f` itself has no pre-existing locals) --
+    /// computing `2` instead of the correct `11`. `checked_inline` gets
+    /// the mirror case: it introduces no fresh ids, so the collision
+    /// instead happens between `g`'s embedded ids and nothing in this
+    /// particular repro, but the same rename is exercised at the second
+    /// inlining step regardless of which candidate performs it.
+    #[test]
+    fn composing_an_already_transformed_callee_does_not_collide_with_its_embedded_locals() {
+        let source = "proc add(x, y: int32): int32 =\n  x +% y\n\nproc g(x: int32): int32 =\n  add(1'i32, x)\n\nproc f(): int32 =\n  g(10'i32)\n";
+        let program = crate::nim_frontend::lower_nim_source(
+            &PathBuf::from("test.nim"),
+            source,
+            &["add", "g", "f"],
+        )
+        .unwrap();
+
+        let baseline = eval_function(&program, "f", &[]).unwrap();
+        assert_eq!(baseline.value, 11, "f() = g(10) = add(1, 10) = 11");
+
+        // anf_insert into g, then anf_insert the now-transformed g into f.
+        let after_g = anf_insert(&program, "g", "add").unwrap();
+        let g_body_has_embedded_lets = matches!(&after_g.functions["g"].body, crate::types::Stmt::Return(e, _) if matches!(e, Expr::Let { .. }));
+        assert!(
+            g_body_has_embedded_lets,
+            "expected g's body to now contain an embedded Let"
+        );
+
+        let after_f = anf_insert(&after_g, "f", "g").unwrap();
+        assert_eq!(
+            eval_function(&after_f, "f", &[]).unwrap().value,
+            11,
+            "composing an already-ANF-transformed callee must not silently corrupt the result"
+        );
+
+        // Mirror through checked_inline for the second step: g's body is
+        // still a simple Return(expr) shape (now containing embedded
+        // Lets), so checked_inline can still attempt it.
+        let after_f_checked = checked_inline(&after_g, "f", "g").unwrap();
+        assert_eq!(
+            eval_function(&after_f_checked, "f", &[]).unwrap().value,
+            11,
+            "checked_inline composing an already-ANF-transformed callee must also not corrupt \
+             the result"
         );
     }
 }

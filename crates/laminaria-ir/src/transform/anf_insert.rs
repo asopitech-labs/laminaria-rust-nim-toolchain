@@ -14,7 +14,8 @@
 use crate::types::{Expr, LocalId, Program, Provenance};
 
 use super::{
-    as_simple_return_expr, rewrite_calls_in_stmt, substitute_params_with_locals, TransformError,
+    as_simple_return_expr, prepare_callee_body_for_grafting, rewrite_calls_in_stmt,
+    substitute_params_with_locals, TransformError,
 };
 
 /// Inlines every call to `callee_name` inside `caller_name`'s body via
@@ -31,7 +32,7 @@ pub fn anf_insert(
         .functions
         .get(callee_name)
         .ok_or_else(|| TransformError::UnknownCallee(callee_name.to_string()))?;
-    let callee_body = as_simple_return_expr(callee_fact)
+    let raw_callee_body = as_simple_return_expr(callee_fact)
         .ok_or_else(|| TransformError::UnsupportedCalleeShape {
             callee: callee_name.to_string(),
         })?
@@ -43,26 +44,17 @@ pub fn anf_insert(
         .get(caller_name)
         .ok_or_else(|| TransformError::UnknownCaller(caller_name.to_string()))?;
 
-    // Starts *above* every `LocalId` already used anywhere in the
-    // caller's body, not at 0 -- a review caught a real bug here: an id
-    // starting at 0 collides with a pre-existing local (e.g. a real
-    // source-level `let`), and because the interpreter's `Let`-scoping
-    // restores "whatever was bound before" by numeric id, a colliding
-    // fresh binding can silently capture -- and then, once its own scope
-    // ends, leave overwritten -- a same-numbered outer variable a later
-    // hoisted argument still needed to read. Reproduced directly: with
-    // `caller() = combine(b, a)` inlined where `a`/`b` are pre-existing
-    // locals whose ids happen to equal the two fresh ids this transform
-    // would otherwise pick, the second hoisted argument's own value
-    // expression (`Local` referencing the outer `a`) read back the
-    // *already-rebound* slot from the first hoisted argument instead of
-    // `a`'s real value, computing the wrong result silently. Starting
-    // above the caller's own maximum in-scope id makes every fresh
-    // binding this transform introduces provably distinct from anything
-    // it could otherwise shadow.
-    let mut next_local = crate::types::max_local_id_in_stmt(&caller_fact.body)
-        .map(|m| m + 1)
-        .unwrap_or(0);
+    // Alpha-renames the callee body's own embedded `Let`s (if it has any,
+    // from an earlier inlining pass) and returns a starting counter for
+    // this call's *own* fresh per-argument bindings that continues past
+    // both the caller's existing ids and the (now-renamed) callee body's
+    // own -- see `prepare_callee_body_for_grafting`'s doc comment for the
+    // composition bug this closes, and the doc comment on the earlier,
+    // narrower fix this replaces (considering only the caller's own
+    // pre-existing locals was not enough once a callee's body can itself
+    // already contain embedded `Let`s from a prior transformation).
+    let (callee_body, mut next_local) =
+        prepare_callee_body_for_grafting(&caller_fact.body, &raw_callee_body);
 
     let new_body = rewrite_calls_in_stmt(
         &caller_fact.body,

@@ -655,26 +655,42 @@ fn parse_body_block(p: &mut Parser) -> PResult<Stmt> {
         }]);
     };
 
-    // A review caught a real bug here: once the tail form (an `if` or a
-    // plain expression) was successfully parsed, this function returned
-    // immediately without checking whether *another* statement follows at
-    // the same indentation -- so a genuinely malformed body like two
-    // same-indent tail-shaped lines in a row silently lowered using only
-    // the *first* line, with the rest left unconsumed. Those leftover
-    // tokens were then simply skipped by `lower_nim_source`'s top-level
-    // "not a proc declaration" loop (since they don't start a new `proc`
-    // at column 1), so the whole file still reported success -- a
-    // genuinely broken proc body was read only part way through and
-    // treated as valid. `rust_frontend::lower_block` already rejects this
-    // shape explicitly (`if tail.is_some() { return Err(...) }`); this
-    // mirrors that check for the indentation-based grammar.
+    // A review caught two real bugs here, both now covered by one check:
+    // once the tail form (an `if` or a plain expression) was successfully
+    // parsed, this function returned immediately without verifying it had
+    // actually reached a genuine block boundary. The first fix only
+    // checked for *another statement at the same indentation* -- but a
+    // review reproduced two gaps that check still missed: (1) leftover
+    // tokens on the *same source line* as the tail (e.g. a body of `x div
+    // 2`, where `div` isn't a supported operator: `parse_expr` silently
+    // returns just `x`, leaving ` div 2` unconsumed on that same line --
+    // a continuation token, `indent: None`, which never equals
+    // `Some(cur_indent)` and so slipped past the same-indent-only check
+    // entirely); (2) leftover content at a *deeper* indent than this
+    // block's own (`Some(c) if c > cur_indent`), also never equal to
+    // `Some(cur_indent)`. The real fix is a genuine block-boundary check,
+    // not "same indent specifically": after the tail, the only tokens
+    // that legitimately follow are EOF, or a token starting a new line at
+    // *less* indentation than this block's own (a sibling/enclosing
+    // construct correctly dedenting out of this block). A continuation
+    // token (same line, `indent: None`) or anything at this block's own
+    // indent or deeper is unconsumed content this parse silently dropped.
     let result = match result {
-        Ok(_) if p.same_indent() => Err(vec![LoweringError::UnsupportedShape {
-            detail: "a statement follows this block's tail form; only a let-prefix followed by \
-                     exactly one tail expression/if is supported"
-                .to_string(),
-            span: p.span_here(),
-        }]),
+        Ok(stmt) => {
+            let at_a_real_boundary = matches!(p.tok().kind, TokenKind::Eof)
+                || matches!(p.tok().indent, Some(c) if c < p.cur_indent);
+            if at_a_real_boundary {
+                Ok(stmt)
+            } else {
+                Err(vec![LoweringError::UnsupportedShape {
+                    detail: "unconsumed content follows this block's tail form (either on the \
+                             same line, or at this block's own indentation or deeper) -- only a \
+                             let-prefix followed by exactly one tail expression/if is supported"
+                        .to_string(),
+                    span: p.span_here(),
+                }])
+            }
+        }
         other => other,
     };
     p.cur_indent = old_indent;
@@ -833,6 +849,19 @@ fn parse_atom_expr(p: &mut Parser) -> PResult<Expr> {
                     }]);
                 }
             }
+            // A review caught a real gap here: `lex_number` parses the
+            // digit sequence into `i64` (wide enough to represent any
+            // value the digits could name), but nothing checked the
+            // *result* actually fits `int32` even when the `'i32` suffix
+            // explicitly claims it does -- so e.g. `9999999999'i32` (well
+            // outside `i32`'s range) was accepted as-is, which real Nim
+            // would reject.
+            if !(i32::MIN as i64..=i32::MAX as i64).contains(&value) {
+                return Err(vec![LoweringError::UnsupportedShape {
+                    detail: format!("integer literal {value} does not fit in int32"),
+                    span: p.span_here(),
+                }]);
+            }
             p.bump();
             Ok(Expr::IntLit(value, IntWidth::I32, provenance))
         }
@@ -963,6 +992,29 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// Regression test for the exact bug a review reproduced: the `'i32`
+    /// suffix was checked for its *name*, but nothing verified the
+    /// literal's actual *value* fits `int32` -- so a literal well outside
+    /// `int32`'s range, despite explicitly claiming to be one, was
+    /// accepted as-is.
+    #[test]
+    fn rejects_an_int32_literal_outside_int32_range() {
+        let source = "proc f(): int32 =\n  9999999999'i32\n";
+        let result = lower_nim_source(&path(), source, &["f"]);
+        assert!(
+            result.is_err(),
+            "an out-of-range int32 literal must be rejected"
+        );
+    }
+
+    #[test]
+    fn accepts_int32_min_as_a_literal() {
+        let source = "proc f(): int32 =\n  -2147483648'i32\n";
+        let program = lower_nim_source(&path(), source, &["f"]).unwrap();
+        let outcome = eval_function(&program, "f", &[]).unwrap();
+        assert_eq!(outcome.value as i32, i32::MIN);
+    }
+
     #[test]
     fn rejects_an_if_with_no_else() {
         let source = "proc f(x: int32): int32 =\n  if x != 0'i32:\n    x\n";
@@ -1029,6 +1081,38 @@ mod tests {
         assert!(
             result.is_err(),
             "a second same-indent line after the tail must be rejected, not silently dropped"
+        );
+    }
+
+    /// Regression test for the exact bug a review reproduced: `div` isn't
+    /// a supported operator, so `parse_expr` on `x div 2` silently
+    /// returned just `x`, leaving ` div 2` unconsumed *on the same
+    /// source line* -- a continuation token (`indent: None`), which the
+    /// first, same-indent-only trailing check never compared against
+    /// (`None != Some(cur_indent)`), so this was accepted, returning only
+    /// `x` (`8` for input `8`, silently discarding `div 2` entirely).
+    #[test]
+    fn rejects_unsupported_trailing_syntax_on_the_same_line_as_the_tail() {
+        let source = "proc f(x: int32): int32 =\n  x div 2'i32\n";
+        let result = lower_nim_source(&path(), source, &["f"]);
+        assert!(
+            result.is_err(),
+            "unsupported trailing syntax on the same line as the tail must be rejected, not \
+             silently truncated"
+        );
+    }
+
+    /// Regression test for the second gap in the same review comment:
+    /// content left at a *deeper* indent than the block's own is also
+    /// never equal to `Some(cur_indent)`, so the first, same-indent-only
+    /// check missed it too.
+    #[test]
+    fn rejects_unconsumed_content_at_a_deeper_indent_than_the_tail() {
+        let source = "proc f(x: int32): int32 =\n  x +% 1'i32\n    x +% 2'i32\n";
+        let result = lower_nim_source(&path(), source, &["f"]);
+        assert!(
+            result.is_err(),
+            "content left at a deeper indent than the tail must be rejected"
         );
     }
 }

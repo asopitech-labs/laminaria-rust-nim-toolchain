@@ -148,7 +148,24 @@ fn eval_expr(expr: &Expr, state: &mut EvalState) -> Result<i64, EvalError> {
                 order_index,
             });
             let outcome = eval_function(state.program, name, &evaluated)?;
-            state.effects.extend(outcome.effects);
+            // `outcome.effects` was built by `eval_function`'s own fresh
+            // `EvalState`, whose `order_index` values count from 0 within
+            // *that* call alone -- not globally across the whole
+            // evaluation. A review caught the real consequence directly:
+            // splicing them in as-is produces duplicate/out-of-order
+            // indices (e.g. `[0, 0, 2, 0]`) whenever the callee's own body
+            // makes more than one call and the caller already has earlier
+            // effects recorded. Renumbered here to continue from this
+            // call's own position in the *caller's* trace, so the final
+            // `order_index` sequence is globally monotonic regardless of
+            // call nesting depth.
+            let base = state.effects.len();
+            state
+                .effects
+                .extend(outcome.effects.into_iter().enumerate().map(|(i, mut e)| {
+                    e.order_index = base + i;
+                    e
+                }));
             Ok(outcome.value)
         }
         Expr::Let {
@@ -305,6 +322,97 @@ mod tests {
             outcome.effects.len(),
             1,
             "expected exactly one effect event, got {:?}",
+            outcome.effects
+        );
+    }
+
+    /// Regression test for the exact bug a review reproduced: a callee's
+    /// own internal effects are recorded via a *fresh* `EvalState`
+    /// (`eval_function` creates one per call), whose `order_index`
+    /// numbering starts at 0 for that call alone. Splicing those events
+    /// into the caller's own trace without renumbering produced
+    /// duplicate/out-of-order indices whenever the caller already had
+    /// earlier effects recorded and the callee's own body made more than
+    /// one call. `caller() = mark(0) +% inner(5)`, where `inner(x) =
+    /// mark(x) +% mark(x +% 1)` makes two calls of its own inside its
+    /// body (reached through `eval_function`'s fresh state, not as
+    /// `inner`'s own arguments) -- exactly the shape the simpler
+    /// `nested_effects_are_recorded_in_real_execution_order` test above
+    /// does not exercise (there, the nested call is an *argument*,
+    /// evaluated through the *same* shared state, never through a fresh
+    /// one).
+    #[test]
+    fn effect_order_index_is_globally_monotonic_across_nested_function_bodies() {
+        let mut program = Program::default();
+        program.insert(mark_fact());
+        // inner(x) = mark(x) +% mark(x +% 1)
+        program.insert(FnFact {
+            name: "inner".to_string(),
+            params: vec![("x".to_string(), crate::types::IntWidth::I32)],
+            return_width: crate::types::IntWidth::I32,
+            provenance: prov(),
+            body: Stmt::Return(
+                Expr::WrappingAdd(
+                    Box::new(Expr::Call(
+                        FnId("mark".to_string()),
+                        vec![Expr::Param(0, prov())],
+                        prov(),
+                    )),
+                    Box::new(Expr::Call(
+                        FnId("mark".to_string()),
+                        vec![Expr::WrappingAdd(
+                            Box::new(Expr::Param(0, prov())),
+                            Box::new(Expr::IntLit(1, crate::types::IntWidth::I32, prov())),
+                            prov(),
+                        )],
+                        prov(),
+                    )),
+                    prov(),
+                ),
+                prov(),
+            ),
+        });
+        // caller() = mark(0) +% inner(5)
+        program.insert(FnFact {
+            name: "caller".to_string(),
+            params: vec![],
+            return_width: crate::types::IntWidth::I32,
+            provenance: prov(),
+            body: Stmt::Return(
+                Expr::WrappingAdd(
+                    Box::new(Expr::Call(
+                        FnId("mark".to_string()),
+                        vec![Expr::IntLit(0, crate::types::IntWidth::I32, prov())],
+                        prov(),
+                    )),
+                    Box::new(Expr::Call(
+                        FnId("inner".to_string()),
+                        vec![Expr::IntLit(5, crate::types::IntWidth::I32, prov())],
+                        prov(),
+                    )),
+                    prov(),
+                ),
+                prov(),
+            ),
+        });
+
+        fn mark_fact() -> FnFact {
+            FnFact {
+                name: "mark".to_string(),
+                params: vec![("v".to_string(), crate::types::IntWidth::I32)],
+                return_width: crate::types::IntWidth::I32,
+                provenance: prov(),
+                body: Stmt::Return(Expr::Param(0, prov()), prov()),
+            }
+        }
+
+        let outcome = eval_function(&program, "caller", &[]).unwrap();
+        let indices: Vec<usize> = outcome.effects.iter().map(|e| e.order_index).collect();
+        let expected: Vec<usize> = (0..outcome.effects.len()).collect();
+        assert_eq!(
+            indices, expected,
+            "order_index must be a globally monotonic 0..N sequence, got {indices:?} for \
+             effects {:?}",
             outcome.effects
         );
     }

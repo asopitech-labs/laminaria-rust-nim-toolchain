@@ -8,8 +8,9 @@
 use crate::types::{expr_contains_call, Program};
 
 use super::{
-    as_simple_return_expr, count_param_occurrences, param_evaluation_order, rewrite_calls_in_stmt,
-    substitute_params_verbatim, TransformError,
+    as_simple_return_expr, count_param_occurrences, param_evaluation_order,
+    prepare_callee_body_for_grafting, rewrite_calls_in_stmt, substitute_params_verbatim,
+    TransformError,
 };
 
 /// Inlines every call to `callee_name` inside `caller_name`'s body,
@@ -27,7 +28,7 @@ pub fn checked_inline(
         .functions
         .get(callee_name)
         .ok_or_else(|| TransformError::UnknownCallee(callee_name.to_string()))?;
-    let callee_body = as_simple_return_expr(callee_fact)
+    let raw_callee_body = as_simple_return_expr(callee_fact)
         .ok_or_else(|| TransformError::UnsupportedCalleeShape {
             callee: callee_name.to_string(),
         })?
@@ -38,6 +39,13 @@ pub fn checked_inline(
         .functions
         .get(caller_name)
         .ok_or_else(|| TransformError::UnknownCaller(caller_name.to_string()))?;
+
+    // Alpha-rename the callee body's own embedded `Let`s (if it has any,
+    // from an earlier inlining pass) before doing anything else with it --
+    // see `prepare_callee_body_for_grafting`'s own doc comment for the
+    // composition bug this closes. `checked_inline` never introduces
+    // fresh ids of its own, so the returned counter is unused here.
+    let (callee_body, _) = prepare_callee_body_for_grafting(&caller_fact.body, &raw_callee_body);
 
     let new_body = rewrite_calls_in_stmt(&caller_fact.body, callee_name, &mut |args, _prov| {
         if args.len() != param_count {
