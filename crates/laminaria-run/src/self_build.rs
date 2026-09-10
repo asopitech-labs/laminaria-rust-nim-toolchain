@@ -709,22 +709,43 @@ mod tests {
     /// (>= 2.0.0)`, even though the installed `nim --version` genuinely
     /// satisfies it) -- `nim c` sidesteps nimble's dependency resolution
     /// entirely, matching production's own `nim_build_root`.
+    ///
+    /// Builds exactly once per test binary process via `OnceLock`: three
+    /// tests in this module call this on their own thread by default,
+    /// and on a fresh checkout (no binary on disk yet) they used to race
+    /// `nim c`'s write to the *same* output path -- the same class of bug
+    /// `laminaria-plan`'s own `real_planner_binary` test helper had (see
+    /// its doc comment), caught here independently by the same CI run.
     #[cfg(unix)]
-    fn build_stage0_planner(repo_root: &Path) {
-        let status = std::process::Command::new("nim")
-            .args([
-                "c",
-                "--path:src",
-                "-o:bin/laminaria-planner",
-                "src/laminaria_planner.nim",
-            ])
-            .current_dir(repo_root.join("nim-planner"))
-            .status()
-            .expect("failed to invoke nim -- is Nim installed?");
-        assert!(
-            status.success(),
-            "stage0 nim c build of laminaria-planner failed"
-        );
+    fn build_stage0_planner(repo_root: &Path) -> PathBuf {
+        static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        BUILT
+            .get_or_init(|| {
+                let status = std::process::Command::new("nim")
+                    .args([
+                        "c",
+                        "--path:src",
+                        "-o:bin/laminaria-planner",
+                        "src/laminaria_planner.nim",
+                    ])
+                    .current_dir(repo_root.join("nim-planner"))
+                    .status()
+                    .expect("failed to invoke nim -- is Nim installed?");
+                assert!(
+                    status.success(),
+                    "stage0 nim c build of laminaria-planner failed"
+                );
+                let bin = repo_root
+                    .join("nim-planner/bin")
+                    .join(binary_name(PLANNER_BINARY_NAME));
+                assert!(
+                    bin.is_file(),
+                    "expected {} to exist after building it",
+                    bin.display()
+                );
+                bin
+            })
+            .clone()
     }
 
     fn tmp_dir(name: &str) -> PathBuf {
@@ -777,7 +798,7 @@ mod tests {
 
         // stage0: an ordinary, external-tool build -- deliberately not
         // going through run_generation/the Nim planner at all.
-        build_stage0_planner(&repo_root);
+        let stage0_planner = build_stage0_planner(&repo_root);
         let cargo_status = std::process::Command::new("cargo")
             .args(["build", "--workspace", "--release"])
             .current_dir(&repo_root)
@@ -785,9 +806,6 @@ mod tests {
             .expect("failed to invoke cargo");
         assert!(cargo_status.success(), "stage0 cargo build failed");
 
-        let stage0_planner = repo_root
-            .join("nim-planner/bin")
-            .join(binary_name(PLANNER_BINARY_NAME));
         assert!(stage0_planner.is_file());
 
         let generation_root = tmp_dir("stage1-gen");
@@ -891,12 +909,7 @@ mod tests {
     #[cfg(unix)]
     fn a_compile_failure_aborts_the_generation_without_producing_a_stage_output() {
         let repo_root = repo_root();
-        let stage0_planner = repo_root
-            .join("nim-planner/bin")
-            .join(binary_name(PLANNER_BINARY_NAME));
-        if !stage0_planner.is_file() {
-            build_stage0_planner(&repo_root);
-        }
+        let stage0_planner = build_stage0_planner(&repo_root);
 
         let broken_repo = tmp_dir("broken-repo");
         copy_workspace_sources(&repo_root, &broken_repo);
@@ -945,9 +958,20 @@ mod tests {
         let _ = std::fs::remove_dir_all(&runs_root);
     }
 
+    /// A test bug an external review's own CI run caught: `/tmp/...` is
+    /// *not* `Path::is_absolute()` on Windows at all (it has no drive
+    /// letter/UNC prefix), so this test's original hardcoded Unix-style
+    /// literal silently exercised the *relative* branch there instead of
+    /// the one it claimed to test. Uses this process's own real, always-
+    /// genuinely-absolute current directory instead of a
+    /// platform-specific literal.
     #[test]
     fn absolute_path_leaves_an_already_absolute_path_untouched() {
-        let abs = PathBuf::from("/tmp/already-absolute-example");
+        let abs = std::env::current_dir().unwrap();
+        assert!(
+            abs.is_absolute(),
+            "current_dir() must be absolute on every platform"
+        );
         assert_eq!(absolute_path(&abs).unwrap(), abs);
     }
 
@@ -975,16 +999,13 @@ mod tests {
     #[cfg(unix)]
     fn run_generation_with_a_relative_generation_root_still_produces_a_working_generation() {
         let repo_root = repo_root();
-        build_stage0_planner(&repo_root);
+        let stage0_planner = build_stage0_planner(&repo_root);
         let cargo_status = std::process::Command::new("cargo")
             .args(["build", "--workspace", "--release"])
             .current_dir(&repo_root)
             .status()
             .expect("failed to invoke cargo");
         assert!(cargo_status.success(), "stage0 cargo build failed");
-        let stage0_planner = repo_root
-            .join("nim-planner/bin")
-            .join(binary_name(PLANNER_BINARY_NAME));
 
         // Relative to *this test process's own* current directory, not
         // to `repo_root` or `repo_root/nim-planner` -- the exact
@@ -1035,7 +1056,16 @@ mod tests {
     /// `"999.0.0"` while leaving its `bin_dir` pointed at the real,
     /// already-installed `2.2.10` still resolved successfully, with no
     /// mismatch reported at all.
+    ///
+    /// `#[cfg(unix)]`, matching every other real-toolchain test in this
+    /// module: this needs `nim2_pinned`'s `bin_dir` to actually resolve
+    /// to a real `nim`, which the `windows` CI job never provisions at
+    /// all (kept deliberately lean) -- without it, this test would just
+    /// exercise the *earlier* "no resolved nim executable" rejection
+    /// path instead of the version-mismatch one it actually names,
+    /// caught directly by CI failing on the wrong assertion message.
     #[test]
+    #[cfg(unix)]
     fn resolve_verified_toolchain_rejects_a_version_that_does_not_match_the_requested_selector() {
         let repo_root = repo_root();
         let real_lock = std::fs::read_to_string(repo_root.join("toolchains.lock.toml")).unwrap();

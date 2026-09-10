@@ -154,33 +154,51 @@ mod tests {
     /// `nimble` (v0.22.2) exits `0` even after printing a build-failure
     /// message on a genuine compile error, so `nim c`'s own reliable
     /// exit code is used here too, for the same reason.
+    ///
+    /// Builds exactly once per test binary process via `OnceLock`, not a
+    /// bare `if !bin.is_file()` check -- a real race an external review's
+    /// own CI run caught on a fresh checkout: this crate's two real-
+    /// binary tests run on separate threads by default, and both saw the
+    /// binary missing and raced to `nim c` the *same* output path
+    /// simultaneously, so one test's `spawn()` of the half-written
+    /// result hit `PermissionDenied`. `OnceLock::get_or_init` guarantees
+    /// the build runs exactly once regardless of how many threads call
+    /// this concurrently -- callers after the first block until it
+    /// finishes, they don't race it. Never observed locally because this
+    /// dev machine's binary was already built and cached from earlier in
+    /// the same session -- see `crates/laminaria-run/NOTES.md`'s own
+    /// "verify on a genuinely fresh environment" lesson, now caught
+    /// twice.
     #[cfg(unix)]
     fn real_planner_binary() -> PathBuf {
-        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .canonicalize()
-            .unwrap();
-        let nim_planner_dir = repo_root.join("nim-planner");
-        let bin = nim_planner_dir.join("bin/laminaria-planner");
-        if !bin.is_file() {
-            let status = Command::new("nim")
-                .args([
-                    "c",
-                    "--path:src",
-                    "-o:bin/laminaria-planner",
-                    "src/laminaria_planner.nim",
-                ])
-                .current_dir(&nim_planner_dir)
-                .status()
-                .expect("failed to invoke nim -- is Nim installed?");
-            assert!(status.success(), "nim c failed to build laminaria-planner");
-        }
-        assert!(
-            bin.is_file(),
-            "expected {} to exist after building it",
-            bin.display()
-        );
-        bin
+        static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        BUILT
+            .get_or_init(|| {
+                let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../..")
+                    .canonicalize()
+                    .unwrap();
+                let nim_planner_dir = repo_root.join("nim-planner");
+                let bin = nim_planner_dir.join("bin/laminaria-planner");
+                let status = Command::new("nim")
+                    .args([
+                        "c",
+                        "--path:src",
+                        "-o:bin/laminaria-planner",
+                        "src/laminaria_planner.nim",
+                    ])
+                    .current_dir(&nim_planner_dir)
+                    .status()
+                    .expect("failed to invoke nim -- is Nim installed?");
+                assert!(status.success(), "nim c failed to build laminaria-planner");
+                assert!(
+                    bin.is_file(),
+                    "expected {} to exist after building it",
+                    bin.display()
+                );
+                bin
+            })
+            .clone()
     }
 
     fn sample_input() -> PlanningInput {

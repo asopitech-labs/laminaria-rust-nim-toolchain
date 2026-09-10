@@ -1330,3 +1330,43 @@ not just the library-level test), and every fix has a dedicated test.
 CI's actual green/red status for this pass is confirmed by the next
 push's own workflow run, not by local reproduction alone -- see this
 file's revision history / the corresponding commit for whether it held.
+
+That push's own CI run confirmed the sixth pass's own real fixes worked
+(choosenim install succeeded, clippy passed, stage0 built) but surfaced
+two more bugs on a genuinely fresh checkout, neither visible on this
+already-warm dev machine:
+
+- **A real race**: `laminaria-plan`'s two real-planner-binary tests, and
+  `laminaria-run`'s three real-stage0-binary tests, each independently
+  used a bare `if !bin.is_file() { build it }` guard. On a fresh
+  checkout with no binary yet, multiple tests on separate threads (Rust
+  test binaries default to one thread per core) raced to `nim c` the
+  *same* output path simultaneously; one test's `spawn()` of the
+  half-written result hit `PermissionDenied`. Fixed in both places with
+  `std::sync::OnceLock`, which guarantees the build closure runs exactly
+  once regardless of how many threads call it concurrently -- the same
+  "build once, cache the result" intent the old guard had, just actually
+  race-free.
+- **Two test bugs, not production bugs, caught only on the `windows`
+  runner**: `absolute_path_leaves_an_already_absolute_path_untouched`
+  hardcoded a Unix-style `/tmp/...` literal as "already absolute," but
+  `Path::is_absolute()` on Windows requires a drive-letter/UNC prefix --
+  the test silently exercised the *relative* branch there instead of the
+  one it named. Fixed by using `std::env::current_dir()` itself (always
+  genuinely absolute on every platform) instead of a platform-specific
+  literal. Separately, `resolve_verified_toolchain_rejects_a_version_
+  that_does_not_match_the_requested_selector` needs a real, resolvable
+  Nim toolchain to reach the version-mismatch code path it actually
+  tests -- the `windows` CI job never installs Nim at all (kept
+  deliberately lean), so it hit the *earlier* "no resolved nim
+  executable" rejection instead and failed on the wrong message. Fixed
+  by `#[cfg(unix)]`-gating it, matching every other real-toolchain test
+  in this module.
+
+`cargo test --workspace`: still 145 passed locally (no new tests, two
+fixed and one re-scoped). Verified from a genuinely clean state this
+time (`rm -rf nim-planner/bin` first, `-- --test-threads=8`), not just
+re-run on an already-warm binary -- confirmed via each fix's own build
+log showing exactly one `nim c`/`SuccessX` line despite multiple
+concurrent callers, where a race would have shown more than one racing
+attempt or a mid-build failure.
