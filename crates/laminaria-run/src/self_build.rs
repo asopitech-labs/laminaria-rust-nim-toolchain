@@ -628,42 +628,18 @@ mod tests {
     /// satisfies it) -- `nim c` sidesteps nimble's dependency resolution
     /// entirely, matching production's own `nim_build_root`.
     ///
-    /// Builds exactly once per test binary process via `OnceLock`: three
-    /// tests in this module call this on their own thread by default,
-    /// and on a fresh checkout (no binary on disk yet) they used to race
-    /// `nim c`'s write to the *same* output path -- the same class of bug
-    /// `laminaria-plan`'s own `real_planner_binary` test helper had (see
-    /// its doc comment), caught here independently by the same CI run.
+    /// Delegates to `crate::test_support::real_planner_binary`, shared
+    /// across every module in this crate that needs the real binary --
+    /// three tests in *this* module alone used to race `nim c`'s write
+    /// to the same output path via a `OnceLock` private to this module,
+    /// and (a review caught directly via CI) that per-module `OnceLock`
+    /// didn't guard against `project_build.rs`'s and
+    /// `compiler_work_executor.rs`'s own, *separate* `OnceLock`s doing
+    /// the exact same build concurrently -- see `test_support`'s own doc
+    /// comment for the full "across modules, not just within one" story.
     #[cfg(unix)]
     fn build_stage0_planner(repo_root: &Path) -> PathBuf {
-        static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-        BUILT
-            .get_or_init(|| {
-                let status = std::process::Command::new("nim")
-                    .args([
-                        "c",
-                        "--path:src",
-                        "-o:bin/laminaria-planner",
-                        "src/laminaria_planner.nim",
-                    ])
-                    .current_dir(repo_root.join("nim-planner"))
-                    .status()
-                    .expect("failed to invoke nim -- is Nim installed?");
-                assert!(
-                    status.success(),
-                    "stage0 nim c build of laminaria-planner failed"
-                );
-                let bin = repo_root
-                    .join("nim-planner/bin")
-                    .join(binary_name(PLANNER_BINARY_NAME));
-                assert!(
-                    bin.is_file(),
-                    "expected {} to exist after building it",
-                    bin.display()
-                );
-                bin
-            })
-            .clone()
+        crate::test_support::real_planner_binary(repo_root)
     }
 
     fn tmp_dir(name: &str) -> PathBuf {

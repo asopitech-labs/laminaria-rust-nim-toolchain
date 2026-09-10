@@ -60,6 +60,8 @@ pub mod reuse;
 pub mod scenario;
 pub mod self_build;
 pub mod store;
+#[cfg(test)]
+mod test_support;
 pub mod toolchain_resolve;
 pub mod tracer;
 pub mod types;

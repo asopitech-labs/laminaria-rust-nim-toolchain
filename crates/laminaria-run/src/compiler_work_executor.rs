@@ -27,9 +27,10 @@
 //! executorが黙って実行してはならない" is enforced here by an actual
 //! executor, not merely documented as an intention.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::Path;
+use std::sync::{Condvar, Mutex};
 
 use laminaria_ir::diagnostics::Diagnostic;
 use laminaria_ir::interpreter::{eval_function, EvalOutcome};
@@ -40,7 +41,7 @@ use laminaria_ir::transform::checked_inline::checked_inline;
 use laminaria_ir::types::Program;
 use laminaria_ir::validate::{validate_program, ProgramValidationError, ValidatedProgram};
 use laminaria_plan::compiler_work::{CompilerWorkDescriptor, TransformKind};
-use laminaria_plan::{Action, ActionKind, ExecutionPlan};
+use laminaria_plan::{Action, ActionKind, ArtifactRef, ExecutionPlan};
 
 #[derive(Debug)]
 pub enum CompilerWorkExecutionError {
@@ -273,34 +274,309 @@ impl ArtifactStore {
     }
 }
 
-/// Dispatches every action in `plan.ordered_actions`, in order --
-/// sequential for this first slice (issue #27 stage C's own concurrency/
-/// resource-accounting/cancellation work is a separate, later PR, not
-/// this one). `plan` should already have passed
-/// `laminaria_plan::validate::validate` (which itself calls
-/// `validate_compiler_work_action` on every action) -- this function does
-/// not re-validate the plan's own structural/contract well-formedness,
-/// only ever reads artifacts through [`ArtifactStore`]'s own typed
-/// accessors, so it cannot silently substitute an unvalidated `Program`
-/// where a validated one is required regardless.
+/// [`ArtifactStore`] behind a single [`Mutex`], with accessors that hold
+/// the lock only long enough to clone an input out or insert a result --
+/// never across the actual `laminaria_ir` computation itself (lowering/
+/// validating/transforming/evaluating). `Program`/`ValidatedProgram`/
+/// `EvalOutcome` are all cheap, allocation-owning `Clone` types with no
+/// interior mutability, so cloning one out of the lock is exactly the
+/// standard "shrink the critical section" pattern -- without it, every
+/// concurrent dispatch would serialize on this one lock for its entire
+/// runtime, defeating the point of a CPU budget greater than one.
+struct SharedStore(Mutex<ArtifactStore>);
+
+impl SharedStore {
+    #[cfg(test)]
+    fn new(store: ArtifactStore) -> Self {
+        SharedStore(Mutex::new(store))
+    }
+
+    fn candidate(&self, artifact_id: &str) -> Option<Program> {
+        self.0.lock().unwrap().candidates.get(artifact_id).cloned()
+    }
+
+    fn validated(&self, artifact_id: &str) -> Option<ValidatedProgram> {
+        self.0.lock().unwrap().validated.get(artifact_id).cloned()
+    }
+
+    fn insert_candidate(&self, artifact_id: String, program: Program) {
+        self.0
+            .lock()
+            .unwrap()
+            .candidates
+            .insert(artifact_id, program);
+    }
+
+    fn insert_validated(&self, artifact_id: String, validated: ValidatedProgram) {
+        self.0
+            .lock()
+            .unwrap()
+            .validated
+            .insert(artifact_id, validated);
+    }
+
+    fn insert_evidence(&self, artifact_id: String, outcomes: Vec<EvalOutcome>) {
+        self.0
+            .lock()
+            .unwrap()
+            .evidence
+            .insert(artifact_id, outcomes);
+    }
+}
+
+/// The static (never changes once computed from `plan`) dependency
+/// bookkeeping the scheduler in [`run_compiler_work_plan`] needs: how
+/// many not-yet-resolved producers each action still waits on, and which
+/// actions become candidates for readiness once a given action resolves.
+/// Derived the same way `laminaria_plan::validate`'s own `producer_index`
+/// is -- matching `Declared` inputs against declared outputs -- since
+/// `plan` has already passed `validate()` and is trusted to have exactly
+/// one producer per declared artifact.
+fn dependency_graph(
+    plan: &ExecutionPlan,
+) -> (HashMap<String, usize>, HashMap<String, Vec<String>>) {
+    let mut producer_of: HashMap<&str, &str> = HashMap::new();
+    for (id, action) in &plan.actions {
+        for output in &action.outputs {
+            if let ArtifactRef::Declared { artifact_id } = output {
+                producer_of.insert(artifact_id.as_str(), id.as_str());
+            }
+        }
+    }
+
+    let mut remaining_deps: HashMap<String, usize> = HashMap::new();
+    let mut dependents: HashMap<String, Vec<String>> = HashMap::new();
+    for id in plan.actions.keys() {
+        remaining_deps.entry(id.clone()).or_insert(0);
+        dependents.entry(id.clone()).or_default();
+    }
+    for (id, action) in &plan.actions {
+        for input in &action.inputs {
+            let ArtifactRef::Declared { artifact_id } = input else {
+                continue;
+            };
+            let Some(&producer_id) = producer_of.get(artifact_id.as_str()) else {
+                continue; // validate() already guarantees this can't happen
+            };
+            *remaining_deps.get_mut(id).expect("seeded above") += 1;
+            dependents
+                .get_mut(producer_id)
+                .expect("seeded above")
+                .push(id.clone());
+        }
+    }
+    (remaining_deps, dependents)
+}
+
+/// Mutex-guarded scheduler bookkeeping, shared across every worker
+/// thread in [`run_compiler_work_plan`].
+struct SchedulerState {
+    ready: VecDeque<String>,
+    remaining_deps: HashMap<String, usize>,
+    /// Every action id that will never run again: it either already
+    /// succeeded, already failed, or was poisoned (a transitive
+    /// dependent of a failed action, which can now never reach
+    /// `remaining_deps == 0`). The scheduler is done exactly when this
+    /// covers every action in the plan.
+    resolved: HashSet<String>,
+    errors: BTreeMap<String, CompilerWorkExecutionError>,
+}
+
+/// Per-action `(action_id, dispatch start, dispatch end)` timestamps,
+/// recorded only when a caller opts in via
+/// [`run_compiler_work_plan_traced`] -- production dispatch
+/// (`run_compiler_work_plan`) always passes `None`, so this costs
+/// nothing beyond a branch on that path. Exists so a test can prove two
+/// actions' real `laminaria_ir` computations genuinely overlapped in
+/// wall-clock time, without depending on an aggregate-duration
+/// comparison that a loaded CI runner's own contention can make flaky.
+type ActivityLog = Mutex<Vec<(String, std::time::Instant, std::time::Instant)>>;
+
+/// One worker's share of [`run_compiler_work_plan`]'s dependency-ready
+/// dispatch loop: repeatedly take a ready action id, dispatch it, and
+/// update the shared schedule -- exits once every action is resolved
+/// (see [`SchedulerState::resolved`]), which a `Condvar` wakeup around
+/// every state change makes every idle worker re-check.
+fn worker_loop(
+    plan: &ExecutionPlan,
+    dependents: &HashMap<String, Vec<String>>,
+    total: usize,
+    scheduler: &Mutex<SchedulerState>,
+    ready_or_done: &Condvar,
+    store: &SharedStore,
+    activity_log: Option<&ActivityLog>,
+) {
+    loop {
+        let action_id = {
+            let mut state = scheduler.lock().unwrap();
+            loop {
+                if let Some(id) = state.ready.pop_front() {
+                    break Some(id);
+                }
+                if state.resolved.len() >= total {
+                    break None;
+                }
+                state = ready_or_done.wait(state).unwrap();
+            }
+        };
+        let Some(action_id) = action_id else {
+            return;
+        };
+
+        // The actual `laminaria_ir` computation -- lowering/validating/
+        // transforming/evaluating -- runs here, entirely outside any
+        // lock, which is what lets a CPU budget greater than one
+        // actually overlap real work rather than merely interleave
+        // acquisitions of one shared lock.
+        let action = &plan.actions[&action_id];
+        let started = std::time::Instant::now();
+        let result = dispatch_action(action, store);
+        if let Some(log) = activity_log {
+            log.lock()
+                .unwrap()
+                .push((action_id.clone(), started, std::time::Instant::now()));
+        }
+
+        let mut state = scheduler.lock().unwrap();
+        state.resolved.insert(action_id.clone());
+        match result {
+            Ok(()) => {
+                for dependent in dependents.get(&action_id).into_iter().flatten() {
+                    if state.resolved.contains(dependent) {
+                        continue;
+                    }
+                    let remaining = state
+                        .remaining_deps
+                        .get_mut(dependent)
+                        .expect("seeded for every action");
+                    *remaining -= 1;
+                    if *remaining == 0 {
+                        state.ready.push_back(dependent.clone());
+                    }
+                }
+            }
+            Err(e) => {
+                state.errors.insert(action_id.clone(), e);
+                // A failed producer's consumer must never start (issue
+                // #27's own "producer失敗時にはconsumerを開始しない"):
+                // poison every transitive dependent so it is counted
+                // resolved -- and therefore never queued -- without ever
+                // having `remaining_deps` reach zero via a real
+                // completion.
+                let mut queue: Vec<String> =
+                    dependents.get(&action_id).cloned().unwrap_or_default();
+                while let Some(poisoned) = queue.pop() {
+                    if state.resolved.insert(poisoned.clone()) {
+                        if let Some(further) = dependents.get(&poisoned) {
+                            queue.extend(further.iter().cloned());
+                        }
+                    }
+                }
+            }
+        }
+        drop(state);
+        ready_or_done.notify_all();
+    }
+}
+
+/// Dispatches every action in `plan.actions`, in dependency-ready order
+/// under a bound of at most `cpu_budget` actions running at once --
+/// issue #27's own "依存ready実行とCPU予算": an action starts as soon as
+/// every producer its `Declared` inputs name has *successfully*
+/// resolved and a CPU slot is free, never in `ordered_actions`'
+/// sequential order for its own sake. A failed producer's consumer is
+/// never started (see [`worker_loop`]'s own poisoning). `plan` should
+/// already have passed `laminaria_plan::validate::validate` (which
+/// itself calls `validate_compiler_work_action` on every action) -- this
+/// function does not re-validate the plan's own structural/contract
+/// well-formedness, only ever reads artifacts through [`SharedStore`]'s
+/// own typed accessors, so it cannot silently substitute an unvalidated
+/// `Program` where a validated one is required regardless.
+///
+/// The same scheduling algorithm runs at every `cpu_budget` -- `1`
+/// degenerates to one worker draining the ready queue as it's produced,
+/// never two actions' `laminaria_ir` computations actually overlapping,
+/// while a larger budget lets independent chains' computations run
+/// concurrently for real. Because every action's own output is a pure
+/// function of its declared inputs (never of scheduling order or wall-
+/// clock timing), the *values* two different budgets produce are
+/// identical -- only how much of the work happens concurrently differs.
 pub fn run_compiler_work_plan(
     plan: &ExecutionPlan,
     store: &mut ArtifactStore,
+    cpu_budget: usize,
 ) -> Result<(), CompilerWorkExecutionError> {
-    for action_id in &plan.ordered_actions {
-        let action = plan
-            .actions
-            .get(action_id)
-            .expect("validate() already checked every ordered_actions id exists");
-        dispatch_action(action, store)?;
+    run_compiler_work_plan_inner(plan, store, cpu_budget, None)
+}
+
+/// Test-only entry point that also records every dispatch's real
+/// wall-clock interval into `activity_log`, so a concurrency test can
+/// directly confirm two independent actions' dispatches genuinely
+/// overlapped -- see [`ActivityLog`]'s own doc comment for why this
+/// exists instead of comparing aggregate run durations.
+#[cfg(test)]
+fn run_compiler_work_plan_traced(
+    plan: &ExecutionPlan,
+    store: &mut ArtifactStore,
+    cpu_budget: usize,
+    activity_log: &ActivityLog,
+) -> Result<(), CompilerWorkExecutionError> {
+    run_compiler_work_plan_inner(plan, store, cpu_budget, Some(activity_log))
+}
+
+fn run_compiler_work_plan_inner(
+    plan: &ExecutionPlan,
+    store: &mut ArtifactStore,
+    cpu_budget: usize,
+    activity_log: Option<&ActivityLog>,
+) -> Result<(), CompilerWorkExecutionError> {
+    let cpu_budget = cpu_budget.max(1);
+    let total = plan.actions.len();
+    let (remaining_deps, dependents) = dependency_graph(plan);
+
+    let ready: VecDeque<String> = remaining_deps
+        .iter()
+        .filter(|(_, &count)| count == 0)
+        .map(|(id, _)| id.clone())
+        .collect();
+
+    let scheduler = Mutex::new(SchedulerState {
+        ready,
+        remaining_deps,
+        resolved: HashSet::new(),
+        errors: BTreeMap::new(),
+    });
+    let ready_or_done = Condvar::new();
+    let shared_store = SharedStore(Mutex::new(std::mem::take(store)));
+
+    std::thread::scope(|scope| {
+        for _ in 0..cpu_budget {
+            scope.spawn(|| {
+                worker_loop(
+                    plan,
+                    &dependents,
+                    total,
+                    &scheduler,
+                    &ready_or_done,
+                    &shared_store,
+                    activity_log,
+                )
+            });
+        }
+    });
+
+    *store = shared_store.0.into_inner().unwrap();
+
+    // Deterministic regardless of which worker happened to fail first or
+    // how many actions failed: always the smallest failing action id's
+    // own error, the same choice at every `cpu_budget`.
+    if let Some((_, error)) = scheduler.into_inner().unwrap().errors.into_iter().next() {
+        return Err(error);
     }
     Ok(())
 }
 
-fn dispatch_action(
-    action: &Action,
-    store: &mut ArtifactStore,
-) -> Result<(), CompilerWorkExecutionError> {
+fn dispatch_action(action: &Action, store: &SharedStore) -> Result<(), CompilerWorkExecutionError> {
     // Kind checked *before* descriptor presence: a legacy delegated-build
     // action correctly has no `compiler_work` at all by design (that's
     // its normal, well-formed state -- `self_build`'s/`project_build`'s
@@ -339,7 +615,7 @@ fn dispatch_action(
 fn dispatch_lower_source(
     action: &Action,
     descriptor: &CompilerWorkDescriptor,
-    store: &mut ArtifactStore,
+    store: &SharedStore,
 ) -> Result<(), CompilerWorkExecutionError> {
     let source_provenance = descriptor.source_provenance.as_ref().ok_or_else(|| {
         CompilerWorkExecutionError::MissingSourceProvenance {
@@ -391,14 +667,14 @@ fn dispatch_lower_source(
         action_id: action.id.clone(),
         diagnostics,
     })?;
-    store.candidates.insert(action.id.clone(), program);
+    store.insert_candidate(action.id.clone(), program);
     Ok(())
 }
 
 fn dispatch_validate_ir(
     action: &Action,
     descriptor: &CompilerWorkDescriptor,
-    store: &mut ArtifactStore,
+    store: &SharedStore,
 ) -> Result<(), CompilerWorkExecutionError> {
     let input_id = descriptor
         .semantic_input_artifact_ids
@@ -406,25 +682,25 @@ fn dispatch_validate_ir(
         .ok_or_else(|| CompilerWorkExecutionError::MissingSemanticInput {
             action_id: action.id.clone(),
         })?;
-    let candidate = store.candidates.get(input_id).ok_or_else(|| {
+    let candidate = store.candidate(input_id).ok_or_else(|| {
         CompilerWorkExecutionError::MissingCandidateInput {
             action_id: action.id.clone(),
             artifact_id: input_id.clone(),
         }
     })?;
     let validated =
-        validate_program(candidate).map_err(|e| CompilerWorkExecutionError::ValidationFailed {
+        validate_program(&candidate).map_err(|e| CompilerWorkExecutionError::ValidationFailed {
             action_id: action.id.clone(),
             detail: e,
         })?;
-    store.validated.insert(action.id.clone(), validated);
+    store.insert_validated(action.id.clone(), validated);
     Ok(())
 }
 
 fn dispatch_transform_function(
     action: &Action,
     descriptor: &CompilerWorkDescriptor,
-    store: &mut ArtifactStore,
+    store: &SharedStore,
 ) -> Result<(), CompilerWorkExecutionError> {
     let input_id = descriptor
         .semantic_input_artifact_ids
@@ -434,7 +710,7 @@ fn dispatch_transform_function(
         })?;
     // Read exclusively from the *validated* store -- see this module's
     // own top-level doc comment.
-    let validated = store.validated.get(input_id).ok_or_else(|| {
+    let validated = store.validated(input_id).ok_or_else(|| {
         CompilerWorkExecutionError::MissingValidatedInput {
             action_id: action.id.clone(),
             artifact_id: input_id.clone(),
@@ -454,14 +730,14 @@ fn dispatch_transform_function(
         action_id: action.id.clone(),
         detail: format!("{e:?}"),
     })?;
-    store.candidates.insert(action.id.clone(), transformed);
+    store.insert_candidate(action.id.clone(), transformed);
     Ok(())
 }
 
 fn dispatch_evaluate_evidence(
     action: &Action,
     descriptor: &CompilerWorkDescriptor,
-    store: &mut ArtifactStore,
+    store: &SharedStore,
 ) -> Result<(), CompilerWorkExecutionError> {
     let input_id = descriptor
         .semantic_input_artifact_ids
@@ -471,7 +747,7 @@ fn dispatch_evaluate_evidence(
         })?;
     // Read exclusively from the *validated* store -- see this module's
     // own top-level doc comment.
-    let validated = store.validated.get(input_id).ok_or_else(|| {
+    let validated = store.validated(input_id).ok_or_else(|| {
         CompilerWorkExecutionError::MissingValidatedInput {
             action_id: action.id.clone(),
             artifact_id: input_id.clone(),
@@ -502,7 +778,7 @@ fn dispatch_evaluate_evidence(
         })?;
         outcomes.push(outcome);
     }
-    store.evidence.insert(action.id.clone(), outcomes);
+    store.insert_evidence(action.id.clone(), outcomes);
     Ok(())
 }
 
@@ -544,32 +820,16 @@ mod tests {
             .unwrap()
     }
 
-    /// Builds (once per test binary process) the real `laminaria-planner`
-    /// Nim binary via `nim c` directly -- the same pattern (and the same
-    /// `OnceLock`-guarded-race reasoning) `self_build.rs`'s and
-    /// `laminaria-plan`'s own test modules already use independently; see
-    /// either one's doc comment for the concurrent-build race this
-    /// guards against.
+    /// Delegates to `crate::test_support::real_planner_binary`, shared
+    /// across every module in this crate that needs the real binary --
+    /// this module used to guard its own build with its own private
+    /// `OnceLock`, which a review caught (via a real CI failure) could
+    /// still race `self_build.rs`'s and `project_build.rs`'s own,
+    /// *separate* `OnceLock`s targeting the exact same output path. See
+    /// `test_support`'s own doc comment.
     #[cfg(unix)]
     fn real_planner_binary() -> PathBuf {
-        static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-        BUILT
-            .get_or_init(|| {
-                let nim_planner_dir = repo_root().join("nim-planner");
-                let status = std::process::Command::new("nim")
-                    .args([
-                        "c",
-                        "--path:src",
-                        "-o:bin/laminaria-planner",
-                        "src/laminaria_planner.nim",
-                    ])
-                    .current_dir(&nim_planner_dir)
-                    .status()
-                    .expect("failed to invoke nim -- is Nim installed?");
-                assert!(status.success(), "nim c failed to build laminaria-planner");
-                nim_planner_dir.join("bin/laminaria-planner")
-            })
-            .clone()
+        crate::test_support::real_planner_binary(&repo_root())
     }
 
     /// Issue #27 stage C's own first-slice acceptance: the *real*, full
@@ -779,7 +1039,11 @@ mod tests {
         validate(&plan, &input).expect("a well-formed compiler-work plan must validate");
 
         let mut store = ArtifactStore::new();
-        run_compiler_work_plan(&plan, &mut store)
+        // A budget of 2 exercises the dependency-ready scheduler even
+        // though this particular chain is purely linear (no two actions
+        // are ever simultaneously ready) -- it must produce exactly the
+        // same result a sequential run would.
+        run_compiler_work_plan(&plan, &mut store, 2)
             .expect("the full vertical compiler-work path must run end to end");
 
         let outcomes = store
@@ -868,6 +1132,7 @@ mod tests {
         // Present only as an *unvalidated* candidate, deliberately never
         // promoted to `validated`.
         store.candidates.insert("prog-1".to_string(), program);
+        let store = SharedStore::new(store);
 
         let action = Action {
             id: "transform-1".to_string(),
@@ -895,7 +1160,7 @@ mod tests {
             }),
         };
 
-        let result = dispatch_action(&action, &mut store);
+        let result = dispatch_action(&action, &store);
         assert!(
             matches!(
                 result,
@@ -919,9 +1184,9 @@ mod tests {
             outputs: vec![],
             compiler_work: None,
         };
-        let mut store = ArtifactStore::new();
+        let store = SharedStore::new(ArtifactStore::new());
         assert!(matches!(
-            dispatch_action(&action, &mut store),
+            dispatch_action(&action, &store),
             Err(CompilerWorkExecutionError::UnsupportedActionKind { .. })
         ));
     }
@@ -938,9 +1203,9 @@ mod tests {
             outputs: vec![],
             compiler_work: None,
         };
-        let mut store = ArtifactStore::new();
+        let store = SharedStore::new(ArtifactStore::new());
         assert!(matches!(
-            dispatch_action(&action, &mut store),
+            dispatch_action(&action, &store),
             Err(CompilerWorkExecutionError::MissingDescriptor { .. })
         ));
     }
@@ -991,8 +1256,8 @@ mod tests {
             }),
         };
 
-        let mut store = ArtifactStore::new();
-        let result = dispatch_action(&action, &mut store);
+        let store = SharedStore::new(ArtifactStore::new());
+        let result = dispatch_action(&action, &store);
         std::fs::remove_dir_all(&dir).ok();
         assert!(
             matches!(
@@ -1000,6 +1265,316 @@ mod tests {
                 Err(CompilerWorkExecutionError::SourceSnapshotMismatch { .. })
             ),
             "expected SourceSnapshotMismatch, got {result:?}"
+        );
+    }
+
+    fn minimal_lower_source_action(id: &str, source_file: &str) -> Action {
+        Action {
+            id: id.to_string(),
+            kind: ActionKind::LowerSource,
+            command_identity: "lower_source".to_string(),
+            inputs: vec![ArtifactRef::source(source_file)],
+            outputs: vec![ArtifactRef::declared(id)],
+            compiler_work: Some(CompilerWorkDescriptor {
+                descriptor_schema_version: COMPILER_WORK_SCHEMA_VERSION.to_string(),
+                operation_version: "0.1.0".to_string(),
+                semantic_input_artifact_ids: vec![],
+                requested_functions: vec!["f".to_string()],
+                language: Some("nim".to_string()),
+                contract_version: Some("0.1.0".to_string()),
+                transform: None,
+                source_provenance: Some(laminaria_plan::compiler_work::SourceProvenanceRef {
+                    source_file: source_file.to_string(),
+                    source_snapshot_id: "irrelevant-since-this-read-fails".to_string(),
+                }),
+                test_inputs: vec![],
+                resource_request: ResourceRequest::minimal(),
+                budget_token: "budget-1".to_string(),
+            }),
+        }
+    }
+
+    fn minimal_validate_ir_action(id: &str, input_id: &str) -> Action {
+        Action {
+            id: id.to_string(),
+            kind: ActionKind::ValidateIr,
+            command_identity: "validate_ir".to_string(),
+            inputs: vec![ArtifactRef::declared(input_id)],
+            outputs: vec![ArtifactRef::declared(id)],
+            compiler_work: Some(CompilerWorkDescriptor {
+                descriptor_schema_version: COMPILER_WORK_SCHEMA_VERSION.to_string(),
+                operation_version: "0.1.0".to_string(),
+                semantic_input_artifact_ids: vec![input_id.to_string()],
+                requested_functions: vec![],
+                language: None,
+                contract_version: Some("0.1.0".to_string()),
+                transform: None,
+                source_provenance: None,
+                test_inputs: vec![],
+                resource_request: ResourceRequest::minimal(),
+                budget_token: "budget-1".to_string(),
+            }),
+        }
+    }
+
+    fn plan_of(actions: Vec<Action>) -> ExecutionPlan {
+        let ordered_actions: Vec<String> = actions.iter().map(|a| a.id.clone()).collect();
+        let actions: BTreeMap<String, Action> =
+            actions.into_iter().map(|a| (a.id.clone(), a)).collect();
+        ExecutionPlan {
+            schema_version: laminaria_plan::PLAN_SCHEMA_VERSION.to_string(),
+            produced_by: laminaria_plan::PRODUCED_BY.to_string(),
+            producer_version: laminaria_plan::PLAN_SCHEMA_VERSION.to_string(),
+            plan_id: "test".to_string(),
+            ordered_actions,
+            actions,
+        }
+    }
+
+    /// Issue #27's own "産出者失敗時にはconsumerを開始しない": a
+    /// `LowerSource` action that fails to even read its source file must
+    /// never let its `ValidateIr` consumer start, at every CPU budget --
+    /// the consumer's own `remaining_deps` can only ever reach zero via a
+    /// *successful* producer completion (see `worker_loop`'s own
+    /// poisoning), so it must stay permanently unresolved and never
+    /// appear in the store.
+    #[test]
+    fn a_failed_producer_leaves_its_consumer_unresolved_and_never_dispatched() {
+        let lower = minimal_lower_source_action("lower-fail", "/nonexistent/does-not-exist.nim");
+        let validate_consumer = minimal_validate_ir_action("validate-consumer", "lower-fail");
+        let plan = plan_of(vec![lower, validate_consumer]);
+
+        for cpu_budget in [1usize, 2usize] {
+            let mut store = ArtifactStore::new();
+            let result = run_compiler_work_plan(&plan, &mut store, cpu_budget);
+            assert!(
+                matches!(
+                    result,
+                    Err(CompilerWorkExecutionError::SourceReadFailed { .. })
+                ),
+                "cpu_budget {cpu_budget}: expected SourceReadFailed, got {result:?}"
+            );
+            assert!(
+                store.validated_program("validate-consumer").is_none(),
+                "cpu_budget {cpu_budget}: the consumer must never have been dispatched after \
+                 its producer failed"
+            );
+        }
+    }
+
+    /// Issue #27's own "依存ready実行とCPU予算" acceptance: two entirely
+    /// independent chains -- one Rust, one Nim -- planned and dispatched
+    /// together. Confirms, at both CPU budget 1 and 2: the evaluated
+    /// values and evidence are bit-for-bit identical (scheduling never
+    /// changes what a pure computation produces), and only the demanded
+    /// chains' six actions ever run (nothing extra). A separate timing
+    /// assertion below confirms budget 2 actually overlaps the two
+    /// chains' real work, not merely accepts the parameter.
+    #[test]
+    #[cfg(unix)]
+    fn independent_rust_and_nim_chains_agree_across_cpu_budgets_and_run_concurrently_under_budget_two(
+    ) {
+        use laminaria_plan::compiler_work::SourceProvenanceRef;
+
+        let dir = std::env::temp_dir().join(format!(
+            "laminaria-compiler-work-executor-concurrency-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let rust_path = dir.join("f.rs");
+        let rust_text = "fn f(x: i32) -> i32 { x }";
+        std::fs::write(&rust_path, rust_text).unwrap();
+        let rust_path_str = rust_path.to_str().unwrap().to_string();
+
+        let nim_path = dir.join("g.nim");
+        let nim_text = "proc g(x: int32): int32 =\n  x\n";
+        std::fs::write(&nim_path, nim_text).unwrap();
+        let nim_path_str = nim_path.to_str().unwrap().to_string();
+
+        // Many test inputs per chain -- enough real interpreter work
+        // (thousands of `eval_function` calls) that two independent
+        // chains running concurrently under a CPU budget of 2 finishes
+        // in meaningfully less wall-clock time than running them one
+        // after another, the same way the fixed function's real cost
+        // rather than an artificial delay proves genuine overlap.
+        let test_inputs: Vec<Vec<i64>> = (0..60_000i64).map(|n| vec![n]).collect();
+
+        fn chain(
+            language: &str,
+            source_path: &str,
+            source_text: &str,
+            function_name: &str,
+            test_inputs: &[Vec<i64>],
+        ) -> (Vec<Action>, String) {
+            let operation_version = "0.1.0";
+            let subset_version = "0.1.0";
+            let semantic_contract_version = "0.1.0";
+            let observation_contract_version = "0.1.0";
+            let snapshot_id = compute_source_snapshot_id(source_text);
+
+            let lower_id = laminaria_plan::lower_source_artifact_id(
+                operation_version,
+                language,
+                &snapshot_id,
+                &[function_name],
+                subset_version,
+            );
+            let lower_action = Action {
+                id: lower_id.clone(),
+                kind: ActionKind::LowerSource,
+                command_identity: "lower_source".to_string(),
+                inputs: vec![ArtifactRef::source(source_path)],
+                outputs: vec![ArtifactRef::declared(&lower_id)],
+                compiler_work: Some(CompilerWorkDescriptor {
+                    descriptor_schema_version: COMPILER_WORK_SCHEMA_VERSION.to_string(),
+                    operation_version: operation_version.to_string(),
+                    semantic_input_artifact_ids: vec![],
+                    requested_functions: vec![function_name.to_string()],
+                    language: Some(language.to_string()),
+                    contract_version: Some(subset_version.to_string()),
+                    transform: None,
+                    source_provenance: Some(SourceProvenanceRef {
+                        source_file: source_path.to_string(),
+                        source_snapshot_id: snapshot_id,
+                    }),
+                    test_inputs: vec![],
+                    resource_request: ResourceRequest::minimal(),
+                    budget_token: "budget-1".to_string(),
+                }),
+            };
+
+            let validate_id = laminaria_plan::validate_ir_artifact_id(
+                operation_version,
+                &lower_id,
+                semantic_contract_version,
+            );
+            let validate_action = Action {
+                id: validate_id.clone(),
+                kind: ActionKind::ValidateIr,
+                command_identity: "validate_ir".to_string(),
+                inputs: vec![ArtifactRef::declared(&lower_id)],
+                outputs: vec![ArtifactRef::declared(&validate_id)],
+                compiler_work: Some(CompilerWorkDescriptor {
+                    descriptor_schema_version: COMPILER_WORK_SCHEMA_VERSION.to_string(),
+                    operation_version: operation_version.to_string(),
+                    semantic_input_artifact_ids: vec![lower_id.clone()],
+                    requested_functions: vec![],
+                    language: None,
+                    contract_version: Some(semantic_contract_version.to_string()),
+                    transform: None,
+                    source_provenance: None,
+                    test_inputs: vec![],
+                    resource_request: ResourceRequest::minimal(),
+                    budget_token: "budget-1".to_string(),
+                }),
+            };
+
+            let evaluate_id = laminaria_plan::evaluate_evidence_artifact_id(
+                operation_version,
+                &validate_id,
+                function_name,
+                test_inputs,
+                observation_contract_version,
+            );
+            let evaluate_action = Action {
+                id: evaluate_id.clone(),
+                kind: ActionKind::EvaluateEvidence,
+                command_identity: "evaluate_evidence".to_string(),
+                inputs: vec![ArtifactRef::declared(&validate_id)],
+                outputs: vec![ArtifactRef::declared(&evaluate_id)],
+                compiler_work: Some(CompilerWorkDescriptor {
+                    descriptor_schema_version: COMPILER_WORK_SCHEMA_VERSION.to_string(),
+                    operation_version: operation_version.to_string(),
+                    semantic_input_artifact_ids: vec![validate_id.clone()],
+                    requested_functions: vec![function_name.to_string()],
+                    language: None,
+                    contract_version: Some(observation_contract_version.to_string()),
+                    transform: None,
+                    source_provenance: None,
+                    test_inputs: test_inputs.to_vec(),
+                    resource_request: ResourceRequest::minimal(),
+                    budget_token: "budget-1".to_string(),
+                }),
+            };
+
+            (
+                vec![lower_action, validate_action, evaluate_action],
+                evaluate_id,
+            )
+        }
+
+        let (rust_actions, rust_evidence_id) =
+            chain("rust", &rust_path_str, rust_text, "f", &test_inputs);
+        let (nim_actions, nim_evidence_id) =
+            chain("nim", &nim_path_str, nim_text, "g", &test_inputs);
+        let rust_action_ids: std::collections::HashSet<String> =
+            rust_actions.iter().map(|a| a.id.clone()).collect();
+        let nim_action_ids: std::collections::HashSet<String> =
+            nim_actions.iter().map(|a| a.id.clone()).collect();
+
+        let mut all_actions = rust_actions;
+        all_actions.extend(nim_actions);
+        let input = laminaria_plan::PlanningInput::new(
+            vec![rust_evidence_id.clone(), nim_evidence_id.clone()],
+            all_actions,
+        );
+
+        let bin = real_planner_binary();
+        let outcome = laminaria_plan::call_planner(&bin, &input).unwrap();
+        let plan = match outcome {
+            PlanOutcome::Planned(plan) => plan,
+            PlanOutcome::Rejected(r) => panic!("expected a plan, got a rejection: {r:?}"),
+        };
+        // Demand-closure pruning: exactly the six actions across both
+        // chains, nothing more.
+        assert_eq!(plan.actions.len(), 6);
+        validate(&plan, &input).expect("a well-formed compiler-work plan must validate");
+
+        let mut store_budget_1 = ArtifactStore::new();
+        run_compiler_work_plan(&plan, &mut store_budget_1, 1).expect("budget 1 must succeed");
+
+        let mut store_budget_2 = ArtifactStore::new();
+        let activity_log: ActivityLog = Mutex::new(Vec::new());
+        run_compiler_work_plan_traced(&plan, &mut store_budget_2, 2, &activity_log)
+            .expect("budget 2 must succeed");
+
+        std::fs::remove_dir_all(&dir).ok();
+
+        let evidence_1_rust = store_budget_1.evidence(&rust_evidence_id).unwrap();
+        let evidence_2_rust = store_budget_2.evidence(&rust_evidence_id).unwrap();
+        let evidence_1_nim = store_budget_1.evidence(&nim_evidence_id).unwrap();
+        let evidence_2_nim = store_budget_2.evidence(&nim_evidence_id).unwrap();
+        assert_eq!(
+            evidence_1_rust, evidence_2_rust,
+            "the Rust chain's evidence must be identical regardless of CPU budget"
+        );
+        assert_eq!(
+            evidence_1_nim, evidence_2_nim,
+            "the Nim chain's evidence must be identical regardless of CPU budget"
+        );
+        assert_eq!(evidence_1_rust.len(), test_inputs.len());
+        assert_eq!(evidence_1_nim.len(), test_inputs.len());
+
+        // Real overlap, proven directly rather than inferred from an
+        // aggregate-duration comparison (which a loaded CI runner's own
+        // contention can make flaky regardless of whether the scheduler
+        // is genuinely concurrent): under budget 2, some action from the
+        // Rust chain and some action from the Nim chain must have
+        // dispatches whose real wall-clock intervals actually overlap --
+        // impossible for a scheduler that ever serializes all dispatch
+        // behind one lock, however fast it runs.
+        let intervals = activity_log.into_inner().unwrap();
+        let overlaps = intervals.iter().any(|(id_a, start_a, end_a)| {
+            rust_action_ids.contains(id_a)
+                && intervals.iter().any(|(id_b, start_b, end_b)| {
+                    nim_action_ids.contains(id_b) && start_a < end_b && start_b < end_a
+                })
+        });
+        assert!(
+            overlaps,
+            "expected at least one Rust-chain action and one Nim-chain action to have \
+             genuinely overlapping dispatch intervals under a CPU budget of 2, got {intervals:#?}"
         );
     }
 }

@@ -797,33 +797,17 @@ mod tests {
         dir
     }
 
-    /// Builds `nim-planner/bin/laminaria-planner` via `nim c` directly,
-    /// exactly once per test binary process -- same `OnceLock` pattern
-    /// `self_build.rs`'s own `build_stage0_planner` uses, for the same
-    /// reason (a fresh checkout otherwise races multiple test threads'
-    /// `nim c` invocations against the same output path).
+    /// Delegates to `crate::test_support::real_planner_binary`, shared
+    /// across every module in this crate that needs the real binary --
+    /// this module's own comment used to (incorrectly) claim this was
+    /// "the same `OnceLock`" `self_build.rs` uses; it was actually a
+    /// *separate* `OnceLock` targeting the same output path, and a
+    /// review caught via CI that the two (plus a third in
+    /// `compiler_work_executor.rs`) could race each other. See
+    /// `test_support`'s own doc comment.
     #[cfg(unix)]
     fn stage0_planner(repo_root: &Path) -> PathBuf {
-        static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-        BUILT
-            .get_or_init(|| {
-                let status = std::process::Command::new("nim")
-                    .args([
-                        "c",
-                        "--path:src",
-                        "-o:bin/laminaria-planner",
-                        "src/laminaria_planner.nim",
-                    ])
-                    .current_dir(repo_root.join("nim-planner"))
-                    .status()
-                    .expect("failed to invoke nim -- is Nim installed?");
-                assert!(
-                    status.success(),
-                    "stage0 nim c build of laminaria-planner failed"
-                );
-                repo_root.join("nim-planner/bin/laminaria-planner")
-            })
-            .clone()
+        crate::test_support::real_planner_binary(repo_root)
     }
 
     #[test]

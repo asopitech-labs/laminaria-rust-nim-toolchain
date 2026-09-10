@@ -1846,3 +1846,113 @@ PathBuf;` import alone while keeping `repo_root`/`real_planner_binary`
 `cargo test -p laminaria-run`: 128 passed (was 124). Workspace total:
 320 (was 315). `cargo fmt --check` and `cargo clippy --workspace
 --all-targets -- -D warnings` both clean.
+
+## Sixth pass: dependency-ready concurrent dispatch under a CPU budget
+
+Issue #27's own explicitly-named next step, now that the demand-selection
+fix (see `laminaria-plan/NOTES.md`'s own "Sixth pass") makes a plan only
+ever contain what's actually needed: `run_compiler_work_plan`'s strictly
+sequential `for action_id in &plan.ordered_actions` loop is replaced with
+a real dependency-ready scheduler bounded by a `cpu_budget: usize`
+parameter -- an action starts as soon as every producer its `Declared`
+inputs name has *successfully* resolved and a worker slot is free, never
+in `ordered_actions`' own sequential order for its own sake.
+
+`ArtifactStore` (unchanged, `HashMap<String, Program/ValidatedProgram/
+Vec<EvalOutcome>>`) is wrapped in a new private `SharedStore(Mutex<..>)`
+whose accessors hold the lock only long enough to `clone()` an input out
+or insert a result -- never across the actual `laminaria_ir` computation
+itself. `Program`/`ValidatedProgram`/`EvalOutcome` are all plain `Clone`
+types with no interior mutability, so this is the standard "shrink the
+critical section" pattern: without it, every concurrent dispatch would
+serialize on this one lock for its whole runtime, defeating a CPU budget
+greater than one entirely. All four `dispatch_*` functions changed from
+`&mut ArtifactStore` to `&SharedStore` accordingly.
+
+New `dependency_graph(plan)` derives `remaining_deps`/`dependents` the
+same way `laminaria_plan::validate`'s own `producer_index` does (matching
+`Declared` inputs against declared outputs) -- trusted here, since `plan`
+has already passed `validate()`. `run_compiler_work_plan` spawns exactly
+`cpu_budget` worker threads via `std::thread::scope` (letting them borrow
+`plan`/`store`/scheduler state directly, no `Arc` needed since scoped
+threads are guaranteed to join before the function returns); each
+`worker_loop` repeatedly takes a ready action id from a `Mutex`+`Condvar`-
+guarded queue, dispatches it entirely outside any lock, then updates the
+shared schedule.
+
+**Producer failure never starts a consumer** (issue #27's own
+"産出者失敗時にはconsumerを開始しない"): a failed action's error is
+recorded, and every transitive dependent is *poisoned* -- marked
+resolved (so the scheduler correctly terminates) without ever
+incrementing via a real completion, so its own `remaining_deps` can never
+reach zero and it is never queued. New test
+`a_failed_producer_leaves_its_consumer_unresolved_and_never_dispatched`
+confirms this at both budget 1 and 2: a `LowerSource` action reading a
+nonexistent file fails, and its `ValidateIr` consumer never appears in
+the store.
+
+**Budget-independence and real concurrency**, both confirmed empirically
+rather than argued: new test
+`independent_rust_and_nim_chains_agree_across_cpu_budgets_and_run_concurrently_under_budget_two`
+plans two entirely independent chains (one real Rust source, one real
+Nim source, each `LowerSource -> ValidateIr -> EvaluateEvidence` with
+60,000 test inputs) through the real Nim planner, demands both, and
+confirms: (1) demand-closure pruning keeps exactly the six actions
+needed, nothing more; (2) the evaluated evidence is bit-for-bit identical
+between a budget-1 run and a budget-2 run (a pure computation's own
+output never depends on scheduling); (3) under budget 2, some Rust-chain
+action and some Nim-chain action's dispatches genuinely overlap in real
+wall-clock time.
+
+That third point was **not** originally proven this way -- an earlier
+version compared aggregate run duration (budget 2 must beat budget 1 by
+some margin) and was caught flaky under `cargo test --workspace`'s own
+parallelism: the two chains, ~15-35ms each in isolation, could lose their
+measured speedup entirely once competing against `self_build.rs`'s own
+60-plus-second real-compiler tests running concurrently in the same test
+binary. Fixed by proving overlap *directly* instead of inferring it from
+timing: a new test-only `run_compiler_work_plan_traced` (delegating to
+the same `run_compiler_work_plan_inner` production code runs through, via
+a `activity_log: Option<&ActivityLog>` parameter production callers
+always pass `None` for) records each dispatch's real `(start, end)`
+`Instant` pair, and the test asserts at least one Rust-chain interval and
+one Nim-chain interval actually intersect -- true the instant the OS
+schedules both worker threads to make any progress at all concurrently,
+regardless of how loaded the machine is, unlike a margin over absolute
+wall-clock time.
+
+**A genuine, CI-caught, pre-existing bug found and fixed along the way**:
+this round's demand-selection-fix push failed CI's `rust (ubuntu-latest)`
+job with `ExecutableFileBusy`/"Text file busy" -- one test's `nim c
+-o:bin/laminaria-planner` truncated the binary file while another test's
+already-spawned process still had it open for execution. `self_build.rs`,
+`project_build.rs`, and this module's own tests each guarded their build
+of that exact same output path with a *separate* `OnceLock` -- each one
+correctly prevented a race *within* its own module, but not against the
+other two, since all three compile into this crate's one shared test
+binary and none of their `OnceLock`s knew about the others.
+`self_build.rs`'s own doc comment even claimed (incorrectly) this was
+"the same class of bug `laminaria-plan`'s own `real_planner_binary` test
+helper had" -- true of the *pattern*, but not the *lock instance*, which
+is exactly what let the three separately "fixed" call sites still race
+each other. Fixed by consolidating all three into one new
+`crate::test_support::real_planner_binary`, holding the one `OnceLock`
+all three modules now share.
+
+4 new tests. `cargo test -p laminaria-run`: 130 passed (was 128).
+Workspace total: 324 (was 320). `cargo fmt --check`/`cargo clippy
+--workspace --all-targets -- -D warnings` clean; the full workspace
+suite run 3 times back to back with no flakes.
+
+### What this slice still deliberately does not do
+
+- No resource accounting or admission control against `ResourceRequest`'s
+  own `cpu_slots`/`transient_memory_bytes_estimate` -- `cpu_budget` bounds
+  *how many actions* run at once, not how many CPU slots or how much
+  memory they collectively claim. Issue #27's own next, separate PR
+  ("メモリ会計・資源不足・取消の終了試験").
+- No cancellation.
+- No demand-based pruning *within* the executor itself -- this slice
+  relies entirely on the plan already being pruned (see
+  `laminaria-plan/NOTES.md`'s "Sixth pass"); the executor simply never
+  sees an undemanded action in the first place.
