@@ -1661,3 +1661,43 @@ binary before writing its fix, not just inferred from reading the review
 comment -- the `--compileOnly:on` repro in particular was verified
 directly (`nim c` really does exit 0 and skip linking) before assuming
 the review's description was exactly right.
+
+## Issue #26, third pass: the artifact-existence check itself regressed a real macOS build
+
+A review of the second pass's own fix (the artifact-existence check added
+for the `--compileOnly:on` bug) found one new P1: a genuinely successful
+macOS Cargo build under `[profile.release] debug = true` +
+`split-debuginfo = "packed"` was reported as `action_failed`. Reproduced
+directly before trusting the review's description: `cargo build --release
+--message-format=json` with that profile really does emit a
+`"compiler-artifact"` message whose `filenames` includes both the real
+executable and a `<name>.dSYM` path, and `<name>.dSYM` really is a
+directory (a macOS debug-info bundle), not a regular file --
+`produced_expected_artifacts`'s `p.is_file()` check (added in the second
+pass specifically to catch the *absence* of an artifact) rejected that
+directory outright and turned a real success into a false failure.
+
+The fix is a one-line change with the correct scope: `is_file()` ->
+`exists()`. Cargo's own `--message-format=json` telemetry is authoritative
+about what it actually produced (it is real evidence, not a guess this
+crate is making); this check's job is only to confirm those specific
+paths are real, not to additionally assert they're regular files rather
+than directories -- `--compileOnly:on`'s failure mode (nothing at the
+path at all) is still caught correctly by `exists()`, since a
+never-created path doesn't exist under either check. Two existing test
+assertions (`is_file()` on every returned artifact, in both
+`laminaria-run`'s and `laminaria-cli`'s test suites) were loosened to
+`exists()` to match, and two new regression tests were added -- one at
+the `run_project_generation` level, one through the real CLI binary --
+both reproducing the exact `debug = true` / `split-debuginfo = "packed"`
+profile and asserting a `.dSYM` directory is accepted among the reported
+artifacts alongside the real executable. Both new tests are
+`#[cfg(target_os = "macos")]`: `.dSYM` bundles are a Darwin-specific
+format, and this is a real regression only reproducible there -- not
+gated for portability's sake, gated because the bug itself doesn't exist
+on other platforms. Confirmed the new library-level test actually catches
+the regression by temporarily reverting the fix and re-running it before
+restoring the fix (it failed with the exact `ActionFailed` the review
+described, then passed again once restored).
+
+`cargo test --workspace`: 187 passed (up from 185). Clippy and fmt clean.

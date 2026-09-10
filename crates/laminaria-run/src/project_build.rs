@@ -547,8 +547,21 @@ fn run_project_traced_action(
     // was never created. Every candidate artifact path must exist on
     // disk, and there must be at least one, for the action to count as a
     // genuine success -- exit status alone is necessary, not sufficient.
+    //
+    // `exists()`, not `is_file()`: a review reproduced a real regression
+    // this stricter check introduced -- `[profile.release] debug = true`
+    // + `split-debuginfo = "packed"` on macOS makes a genuinely
+    // successful Cargo build's own `--message-format=json` telemetry
+    // report a `.dSYM` *directory* bundle alongside the real executable
+    // (confirmed directly: `filenames` contained both
+    // `.../release/dsymtest` and `.../release/dsymtest.dSYM`, the latter
+    // a directory), which `is_file()` rejected outright and turned a
+    // real success into a reported `ActionFailed`. Cargo's own telemetry
+    // is authoritative about what it produced; this check only needs to
+    // confirm those paths are real, not that they're specifically
+    // regular files.
     let produced_expected_artifacts =
-        !candidate_artifacts.is_empty() && candidate_artifacts.iter().all(|p| p.is_file());
+        !candidate_artifacts.is_empty() && candidate_artifacts.iter().all(|p| p.exists());
     let succeeded = exit_succeeded && produced_expected_artifacts;
     let artifacts = if succeeded {
         candidate_artifacts.clone()
@@ -1028,8 +1041,12 @@ mod tests {
             "expected at least one reported artifact"
         );
         for artifact in &action.artifacts {
+            // `exists()`, not `is_file()`: Cargo can legitimately report a
+            // directory artifact (e.g. a macOS `.dSYM` bundle under
+            // `split-debuginfo = "packed"`), covered directly by
+            // `run_project_generation_accepts_a_directory_artifact_like_a_macos_dsym_bundle`.
             assert!(
-                artifact.is_file(),
+                artifact.exists(),
                 "reported artifact {} does not exist",
                 artifact.display()
             );
@@ -1103,6 +1120,77 @@ mod tests {
             "the Rust toolchain family must never be resolved for a Nim-only project build"
         );
 
+        let _ = std::fs::remove_dir_all(&generation_root);
+        let _ = std::fs::remove_dir_all(&runs_root);
+    }
+
+    /// Regression test for the exact bug a review reproduced against the
+    /// artifact-existence check added for the `--compileOnly:on` fix:
+    /// `[profile.release] debug = true` + `split-debuginfo = "packed"`
+    /// makes a genuinely successful macOS Cargo build's own
+    /// `--message-format=json` telemetry report a `.dSYM` *directory*
+    /// bundle alongside the real executable (confirmed directly before
+    /// writing this test: `filenames` contains both the binary and a
+    /// `.dSYM` path, the latter a directory) -- `is_file()`-only
+    /// existence checking rejected that directory and turned a real
+    /// success into a false `ActionFailed`. `#[cfg(target_os = "macos")]`
+    /// since `.dSYM` bundles are a Darwin-specific debug-info format;
+    /// this is a real regression only reproducible there.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn run_project_generation_accepts_a_directory_artifact_like_a_macos_dsym_bundle() {
+        let repo_root = repo_root();
+        let planner = stage0_planner(&repo_root);
+        let project_root = tmp_dir("dsym-bundle-project");
+        std::fs::create_dir_all(project_root.join("src")).unwrap();
+        std::fs::write(
+            project_root.join("Cargo.toml"),
+            "[package]\nname = \"dsymtest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+             [profile.release]\ndebug = true\nsplit-debuginfo = \"packed\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project_root.join("src/main.rs"),
+            "fn main() { println!(\"hi\"); }\n",
+        )
+        .unwrap();
+
+        let generation_root = tmp_dir("dsym-bundle-gen");
+        let runs_root = tmp_dir("dsym-bundle-runs");
+        let lock_path = repo_root.join("toolchains.lock.toml");
+
+        let result = run_project_generation(
+            &project_root,
+            &generation_root,
+            &planner,
+            "dsym-bundle-test",
+            &runs_root,
+            &lock_path,
+            None,
+            None,
+        )
+        .expect(
+            "a build producing a .dSYM directory bundle alongside its binary must still succeed",
+        );
+
+        assert_eq!(result.actions.len(), 1);
+        let action = &result.actions[0];
+        assert!(action.succeeded);
+        assert!(
+            action
+                .artifacts
+                .iter()
+                .any(|p| p.is_dir() && p.extension().and_then(|e| e.to_str()) == Some("dSYM")),
+            "expected a .dSYM directory bundle among the reported artifacts, got {:?}",
+            action.artifacts
+        );
+        assert!(
+            action.artifacts.iter().any(|p| p.is_file()),
+            "expected the real executable among the reported artifacts too, got {:?}",
+            action.artifacts
+        );
+
+        let _ = std::fs::remove_dir_all(&project_root);
         let _ = std::fs::remove_dir_all(&generation_root);
         let _ = std::fs::remove_dir_all(&runs_root);
     }

@@ -155,6 +155,15 @@ the persisted `Run`'s own `result.success` is corrected to `false` to
 match, so the raw evidence on disk never disagrees with the reported
 outcome.
 
+This existence check uses `exists()`, not `is_file()`: a Cargo artifact
+can legitimately be a *directory* — e.g. a macOS `.dSYM` debug-info bundle
+under `[profile.release] debug = true` + `split-debuginfo = "packed"`,
+which really does appear in Cargo's own `filenames` telemetry alongside
+the real executable (confirmed directly). An `is_file()`-only check
+rejected that directory and turned a genuinely successful build into a
+false failure — Cargo's own telemetry is authoritative about what it
+produced; this check only needs to confirm those paths are real.
+
 ## Usage
 
 ```
@@ -217,6 +226,11 @@ just described behavior:
   is reported as a build failure, not a false success naming a
   nonexistent artifact; the persisted `Run`'s own `result.success` is
   corrected to match.
+- A macOS Cargo build under `debug = true` + `split-debuginfo = "packed"`
+  (which genuinely succeeds and reports a `.dSYM` *directory* bundle
+  alongside the real executable — confirmed directly) still succeeds; the
+  artifact-existence check above must accept a real directory, not just a
+  regular file.
 - `plan-build` and `build`, invoked with the same relative
   `--project-root` from the same working directory, compute the identical
   `plan_id`.
