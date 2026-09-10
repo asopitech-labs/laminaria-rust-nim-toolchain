@@ -213,6 +213,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "laminaria-plan"
+version = "0.1.0"
+dependencies = [
+ "laminaria-fingerprint",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "laminaria-run"
 version = "0.1.0"
 dependencies = [

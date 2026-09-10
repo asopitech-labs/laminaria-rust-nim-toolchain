@@ -1,0 +1,13 @@
+[package]
+name = "laminaria-plan"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "PlanningInput -> ExecutionPlan contract and Nim Planning Kernel subprocess client for LAMINARIA (issue #8)."
+
+[dependencies]
+laminaria-fingerprint = { path = "../laminaria-fingerprint" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
