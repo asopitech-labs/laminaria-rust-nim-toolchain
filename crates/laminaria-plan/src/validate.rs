@@ -12,11 +12,15 @@
 //! self-build.
 //!
 //! 1. **Correspondence with the original `PlanningInput`**: the plan
-//!    must declare exactly the same action ids the input asked for (not
-//!    fewer, not more), each with the same `kind`/`inputs`/`outputs` the
-//!    input actually declared for it, and every artifact in
-//!    `input.demanded_artifacts` must be produced by some action in the
-//!    plan.
+//!    must declare exactly the action ids needed to satisfy
+//!    `input.demanded_artifacts` -- its dependency closure (see
+//!    [`demand_closure`]), computed independently from `input` alone,
+//!    never fewer and never an action `input.actions` never declared --
+//!    each with the same `kind`/`inputs`/`outputs` the input actually
+//!    declared for it. A review caught that this used to require an
+//!    exact match against *every* action `input.actions` listed,
+//!    rejecting a legitimately demand-pruned plan outright; issue #27's
+//!    own "需要選択" fix is what [`demand_closure`] closes.
 //! 2. **Internal ordering consistency**: `ordered_actions` is a
 //!    permutation of `actions`, and every dependency (derived from
 //!    matching `Declared` inputs against declared outputs) is satisfied
@@ -159,6 +163,86 @@ impl std::fmt::Display for ValidationError {
 
 impl std::error::Error for ValidationError {}
 
+/// Builds an artifact-id -> producer-action-id index, rejecting outright
+/// the moment two different action ids claim the same declared output.
+/// Shared between [`demand_closure`]'s own walk (over
+/// `PlanningInput.actions`) and `validate`'s internal-consistency check
+/// (over `ExecutionPlan.actions`) so both independently reject a
+/// duplicate producer via the exact same rule, rather than two rules
+/// that merely happen to agree.
+fn producer_index<'a>(
+    actions: impl IntoIterator<Item = (&'a str, &'a [ArtifactRef])>,
+) -> Result<BTreeMap<&'a str, &'a str>, ValidationError> {
+    let mut producer_of: BTreeMap<&str, &str> = BTreeMap::new();
+    for (action_id, outputs) in actions {
+        for output in outputs {
+            if let ArtifactRef::Declared { artifact_id } = output {
+                if let Some(&existing) = producer_of.get(artifact_id.as_str()) {
+                    if existing != action_id {
+                        return Err(ValidationError::DuplicateProducer {
+                            artifact_id: artifact_id.clone(),
+                            first_producer: existing.to_string(),
+                            second_producer: action_id.to_string(),
+                        });
+                    }
+                }
+                producer_of.insert(artifact_id.as_str(), action_id);
+            }
+        }
+    }
+    Ok(producer_of)
+}
+
+/// The action ids actually needed to satisfy `input.demanded_artifacts`
+/// -- the backward dependency closure over `Declared` inputs, starting
+/// at each demanded artifact's own producer and following every
+/// producer's own `Declared` inputs transitively (Buck2's own
+/// demand-driven build: only an artifact's producing action, and
+/// everything *it* needs, ever runs -- `action.inputs()` is exactly what
+/// is waited on, `build_action_no_redirect`). Computed entirely from
+/// `input` -- never from the returned plan -- so this is what the plan
+/// is *expected* to contain, independent of what it actually does.
+fn demand_closure(input: &PlanningInput) -> Result<BTreeSet<&str>, ValidationError> {
+    let actions_by_id: BTreeMap<&str, &Action> =
+        input.actions.iter().map(|a| (a.id.as_str(), a)).collect();
+    let producer_of = producer_index(
+        input
+            .actions
+            .iter()
+            .map(|a| (a.id.as_str(), a.outputs.as_slice())),
+    )?;
+
+    let mut needed: BTreeSet<&str> = BTreeSet::new();
+    let mut queue: Vec<&str> = Vec::new();
+    for artifact_id in &input.demanded_artifacts {
+        let Some(&producer) = producer_of.get(artifact_id.as_str()) else {
+            return Err(ValidationError::UnmetDemand {
+                artifact_id: artifact_id.clone(),
+            });
+        };
+        if needed.insert(producer) {
+            queue.push(producer);
+        }
+    }
+    while let Some(action_id) = queue.pop() {
+        let action = actions_by_id[action_id];
+        for action_input in &action.inputs {
+            if let ArtifactRef::Declared { artifact_id } = action_input {
+                let Some(&producer) = producer_of.get(artifact_id.as_str()) else {
+                    return Err(ValidationError::UnknownProducer {
+                        action: action_id.to_string(),
+                        artifact_id: artifact_id.clone(),
+                    });
+                };
+                if needed.insert(producer) {
+                    queue.push(producer);
+                }
+            }
+        }
+    }
+    Ok(needed)
+}
+
 /// Validates `plan` structurally. Returns `Ok(())` only when the plan is
 /// safe to hand to an executor.
 pub fn validate(plan: &ExecutionPlan, input: &PlanningInput) -> Result<(), ValidationError> {
@@ -174,19 +258,23 @@ pub fn validate(plan: &ExecutionPlan, input: &PlanningInput) -> Result<(), Valid
     }
 
     // Correspondence with the original PlanningInput, checked before any
-    // internal-consistency check below: a plan that dropped every
-    // action (or fabricated one the input never asked for) must be
-    // rejected here, not accepted because the empty set trivially
-    // equals itself.
+    // internal-consistency check below: a plan that dropped an action
+    // its own demand closure actually needs (or fabricated one nothing
+    // needs) must be rejected here, not accepted because the empty set
+    // trivially equals itself. Issue #27's own demand-selection fix:
+    // this used to require the plan to declare *every* action
+    // `input.actions` listed, which rejected a legitimately pruned plan
+    // outright -- now it's the closure `demand_closure` computes from
+    // `input.demanded_artifacts` alone.
     let input_actions_by_id: BTreeMap<&str, &Action> =
         input.actions.iter().map(|a| (a.id.as_str(), a)).collect();
-    let input_action_ids: BTreeSet<&str> = input_actions_by_id.keys().copied().collect();
+    let needed_action_ids = demand_closure(input)?;
     let plan_action_ids: BTreeSet<&str> = plan.actions.keys().map(String::as_str).collect();
-    if input_action_ids != plan_action_ids {
+    if needed_action_ids != plan_action_ids {
         return Err(ValidationError::ActionSetMismatch {
             detail: format!(
-                "PlanningInput declared actions {input_action_ids:?} but ExecutionPlan.actions \
-                 declares {plan_action_ids:?}"
+                "PlanningInput's demand closure requires actions {needed_action_ids:?} but \
+                 ExecutionPlan.actions declares {plan_action_ids:?}"
             ),
         });
     }
@@ -243,35 +331,28 @@ pub fn validate(plan: &ExecutionPlan, input: &PlanningInput) -> Result<(), Valid
     }
 
     // The same producer-index derivation `nim-planner/src/planning_kernel.nim`
-    // does, recomputed independently here rather than trusted from the
-    // wire -- an `ExecutionPlan.actions` map could in principle have been
-    // corrupted/hand-edited in transit. Unlike a plain `BTreeMap::insert`,
-    // a second action claiming an already-claimed output artifact is
-    // rejected outright rather than silently overwriting the first
-    // producer -- the Nim kernel already rejects this case itself, but
-    // issue #8 asks Rust not to simply trust that it did.
-    let mut producer_of: BTreeMap<&str, &str> = BTreeMap::new();
-    for (action_id, action) in &plan.actions {
-        for output in &action.outputs {
-            if let ArtifactRef::Declared { artifact_id } = output {
-                if let Some(&existing) = producer_of.get(artifact_id.as_str()) {
-                    if existing != action_id.as_str() {
-                        return Err(ValidationError::DuplicateProducer {
-                            artifact_id: artifact_id.clone(),
-                            first_producer: existing.to_string(),
-                            second_producer: action_id.clone(),
-                        });
-                    }
-                }
-                producer_of.insert(artifact_id.as_str(), action_id.as_str());
-            }
-        }
-    }
+    // does, recomputed independently here (via the same `producer_index`
+    // helper `demand_closure` used above, but over the wire `plan.actions`
+    // this time) rather than trusted from the wire -- an
+    // `ExecutionPlan.actions` map could in principle have been
+    // corrupted/hand-edited in transit. A second action claiming an
+    // already-claimed output artifact is rejected outright rather than
+    // silently overwriting the first producer -- the Nim kernel already
+    // rejects this case itself, but issue #8 asks Rust not to simply
+    // trust that it did.
+    let producer_of = producer_index(
+        plan.actions
+            .iter()
+            .map(|(id, action)| (id.as_str(), action.outputs.as_slice())),
+    )?;
 
     // Every artifact the original PlanningInput actually demanded must
-    // be produced by some action in the plan -- the direct fix for "an
-    // internally consistent but unrelated plan (including an empty one)
-    // still validates."
+    // be produced by some action in the plan -- a secondary confirmation
+    // of what `demand_closure` (checked above, from `input` alone)
+    // already guarantees once the action-set/shape checks above pass;
+    // kept as a second, independent derivation over the wire plan itself
+    // rather than removed, per this function's own "don't just trust one
+    // side" stance elsewhere in this same check.
     for artifact_id in &input.demanded_artifacts {
         if !producer_of.contains_key(artifact_id.as_str()) {
             return Err(ValidationError::UnmetDemand {
@@ -335,12 +416,23 @@ mod tests {
         }
     }
 
+    /// "b" declares its own output ("out-b") rather than none, and demand
+    /// names only "out-b" -- "a" is pulled in transitively (via "b"'s own
+    /// declared input "out-a"), never demanded directly. A review's own
+    /// demand-selection fix means an action producing nothing can never
+    /// be part of any demand closure (nothing can ever name it), so this
+    /// base fixture -- deliberately exercised by most tests below -- has
+    /// to give every action a real output to stay reachable.
     fn valid_input() -> PlanningInput {
         PlanningInput::new(
-            vec!["out-a".to_string()],
+            vec!["out-b".to_string()],
             vec![
                 action("a", vec![], vec![ArtifactRef::declared("out-a")]),
-                action("b", vec![ArtifactRef::declared("out-a")], vec![]),
+                action(
+                    "b",
+                    vec![ArtifactRef::declared("out-a")],
+                    vec![ArtifactRef::declared("out-b")],
+                ),
             ],
         )
     }
@@ -353,7 +445,11 @@ mod tests {
         );
         actions.insert(
             "b".to_string(),
-            action("b", vec![ArtifactRef::declared("out-a")], vec![]),
+            action(
+                "b",
+                vec![ArtifactRef::declared("out-a")],
+                vec![ArtifactRef::declared("out-b")],
+            ),
         );
         ExecutionPlan {
             schema_version: PLAN_SCHEMA_VERSION.to_string(),
@@ -437,9 +533,19 @@ mod tests {
     fn an_input_naming_no_known_producer_is_rejected() {
         // "c" is declared identically on both sides (PlanningInput and
         // the plan agree on its shape) so this exercises UnknownProducer
-        // specifically, not ActionSetMismatch/ActionShapeMismatch.
-        let c = action("c", vec![ArtifactRef::declared("does-not-exist")], vec![]);
+        // specifically, not ActionSetMismatch/ActionShapeMismatch. It
+        // also needs its own output ("out-c") demanded directly:
+        // demand-closure pruning (this round's own fix) would otherwise
+        // prune "c" out before its dangling input is ever inspected,
+        // since nothing else in this fixture consumes anything "c"
+        // produces.
+        let c = action(
+            "c",
+            vec![ArtifactRef::declared("does-not-exist")],
+            vec![ArtifactRef::declared("out-c")],
+        );
         let mut input = valid_input();
+        input.demanded_artifacts.push("out-c".to_string());
         input.actions.push(c.clone());
         let mut plan = valid_plan();
         plan.actions.insert("c".to_string(), c);
@@ -496,8 +602,52 @@ mod tests {
         ));
     }
 
+    /// The exact fix this round makes: a plan that legitimately excludes
+    /// an action nothing in the demand closure needs must still validate
+    /// -- before this round, `validate` required the plan to declare
+    /// *every* action `input.actions` listed, which rejected this
+    /// correct, pruned plan outright.
+    #[test]
+    fn a_plan_that_legitimately_prunes_an_undemanded_action_validates() {
+        let mut input = valid_input();
+        // "c" produces "out-c", which nothing demands and nothing else
+        // consumes -- a legitimately prunable action.
+        input
+            .actions
+            .push(action("c", vec![], vec![ArtifactRef::declared("out-c")]));
+        // The plan correctly omits "c" entirely.
+        assert_eq!(validate(&valid_plan(), &input), Ok(()));
+    }
+
+    /// The flip side of the fix above: a plan that includes an action
+    /// *outside* the demand closure -- one nothing demands and nothing
+    /// else consumes -- is rejected too, not merely tolerated as "extra
+    /// work that happens to also get done."
+    #[test]
+    fn a_plan_that_includes_an_undemanded_action_is_rejected() {
+        let mut input = valid_input();
+        input
+            .actions
+            .push(action("c", vec![], vec![ArtifactRef::declared("out-c")]));
+        let mut plan = valid_plan();
+        plan.actions.insert(
+            "c".to_string(),
+            action("c", vec![], vec![ArtifactRef::declared("out-c")]),
+        );
+        plan.ordered_actions.push("c".to_string());
+        assert!(matches!(
+            validate(&plan, &input),
+            Err(ValidationError::ActionSetMismatch { .. })
+        ));
+    }
+
     #[test]
     fn two_actions_claiming_the_same_output_artifact_is_rejected() {
+        // Caught by `demand_closure`'s own `producer_index` call (over
+        // `input.actions`) before the demand walk even starts -- "c"
+        // itself is never demanded and produces nothing anything else
+        // consumes, but the duplicate-output conflict with "a" is a
+        // structural property of the whole input, independent of demand.
         let c = action("c", vec![], vec![ArtifactRef::declared("out-a")]);
         let mut input = valid_input();
         input.actions.push(c.clone());
@@ -557,6 +707,10 @@ mod tests {
         };
 
         let mut input = valid_input();
+        // Demand-closure pruning (this round's own fix) would otherwise
+        // exclude this action entirely: nothing else in the base fixture
+        // consumes its output, so it must be demanded directly.
+        input.demanded_artifacts.push(id.clone());
         input.actions.push(compiler_work_action.clone());
         let mut plan = valid_plan();
         plan.ordered_actions.push(id.clone());
@@ -627,6 +781,10 @@ mod tests {
         };
 
         let mut input = valid_input();
+        // Demand-closure pruning (this round's own fix) would otherwise
+        // exclude this action entirely: nothing else in the base fixture
+        // consumes its output, so it must be demanded directly.
+        input.demanded_artifacts.push(id.clone());
         input.actions.push(compiler_work_action.clone());
         let mut plan = valid_plan();
         plan.actions.insert(id.clone(), compiler_work_action);
@@ -677,6 +835,10 @@ mod tests {
         };
 
         let mut input = valid_input();
+        // Demand-closure pruning (this round's own fix) would otherwise
+        // exclude this action entirely: nothing else in the base fixture
+        // consumes its output, so it must be demanded directly.
+        input.demanded_artifacts.push("out-c".to_string());
         input.actions.push(compiler_work_action.clone());
         let mut plan = valid_plan();
         plan.actions

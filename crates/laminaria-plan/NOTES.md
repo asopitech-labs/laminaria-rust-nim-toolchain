@@ -246,3 +246,66 @@ Two more real findings, confirmed directly:
 `nim-planner/src/contract.nim`'s now-unused `testInputsDigest` field
 removed to match (never had independent identity meaning once
 `test_inputs` itself is hashed directly).
+
+## Sixth pass: demand-driven pruning, implemented for real on both sides
+
+A review's own explicit next step: `PlanningInput.demanded_artifacts`
+had existed on the wire since the very first B slice, but `validate()`
+required the returned plan to declare *exactly* the same action ids
+`input.actions` listed -- literally every action, regardless of demand
+-- and `nim-planner/src/planning_kernel.nim::plan` never read
+`demandedArtifacts` at all. A legitimately pruned plan (one that
+correctly omits an action nothing demanded reaches) was rejected
+outright, the review's own "正当な枝刈り結果も拒否してしまいます."
+
+Implemented the backward dependency closure -- Buck2's own demand-driven
+build model: only an artifact's producing action, and everything *it*
+needs (`action.inputs()`), ever runs (`build_action_no_redirect`) -- on
+**both** sides independently, mirroring how ordering consistency is
+already independently re-derived on the Rust side rather than trusted
+from Nim:
+
+- `nim-planner/src/planning_kernel.nim::plan`: after the existing
+  (unconditional, demand-independent) duplicate-producer check over the
+  *whole* input, walks backward from `input.demandedArtifacts` through
+  each producer's own `Declared` inputs, collecting only the actions
+  actually reached. An action `input.actions` lists but the closure
+  never reaches is simply excluded from the returned plan -- not an
+  error. A `Declared` input with no producer, discovered while walking,
+  is still `rrkMissingProducer` exactly as before, just now only checked
+  for actions the closure actually needs.
+- `crates/laminaria-plan/src/validate.rs`: new `demand_closure`,
+  computed entirely from `input` (never the returned plan), replaces the
+  old "`input` and plan declare the exact same action-id set" check with
+  "the plan declares exactly the closure's action-id set." New shared
+  `producer_index` helper (also used for the plan-side duplicate-producer
+  recheck, replacing its own duplicated loop) so both the closure walk
+  and the internal-consistency check reject a duplicate producer via the
+  identical rule.
+
+An action that produces nothing (no declared output at all) can now
+never be part of any demand closure -- nothing can ever name it to
+demand it. This is not a new restriction this slice invented: every real
+production `PlanningInput` builder in this workspace
+(`laminaria-run::self_build::self_build_planning_input`,
+`project_build::project_planning_input`) already gives every
+side-effecting action a real declared output for exactly this reason (a
+convention `docs/self-build.md`'s own "never a fabricated `Integrate`
+step" language already states) -- only a handful of test fixtures
+(`nim-planner`'s own `test_planning_kernel.nim`, `laminaria-plan`'s
+`nim_planner_client.rs::sample_input`/cycle-rejection test,
+`validate.rs`'s `valid_input`/`valid_plan`) had void terminal actions and
+empty demand as a leftover from before demand mattered; all fixed to
+give every action a real output and a real, reachable demand.
+
+Two new dedicated tests state the fix directly: a plan that legitimately
+prunes an undemanded action still validates, and a plan that *includes*
+an action outside the closure is rejected (the flip side -- pruning is
+not merely tolerated, it's required exactly). New Nim test: "an action
+nothing demands is pruned from the plan, not rejected" -- its dangling,
+unreachable input is never even inspected, since the closure walk never
+reaches it.
+
+`cargo test -p laminaria-plan`: 46 passed (was 44). Nim planner's own
+"planning_kernel.plan" suite: 8 tests (was 7). `cargo fmt --check`/
+`cargo clippy --workspace --all-targets -- -D warnings` clean.

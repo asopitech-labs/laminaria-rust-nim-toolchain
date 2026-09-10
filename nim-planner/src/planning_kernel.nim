@@ -22,7 +22,7 @@
 ##   "same input -> identical output" a structural guarantee rather than
 ##   an accident of table/hash iteration order.
 
-import std/[tables, algorithm, sequtils, strutils, hashes, json]
+import std/[tables, algorithm, strutils, hashes, json]
 import ./contract
 
 proc findCycle(actionIds: seq[string], deps: Table[string, seq[string]]): seq[string] =
@@ -124,8 +124,14 @@ proc plan*(input: PlanningInput): PlanOutcome =
   # build the producer index from every action's declared outputs,
   # following Buck2's `BuildArtifact` model (an output carries its
   # producer's identity) rather than a hand-declared `depends_on` list.
+  # Built over *every* action in `input.actions`, before any
+  # demand-based pruning below: two actions racing to produce the same
+  # artifact is a structural defect in the whole graph, independent of
+  # what's actually demanded.
   var producerOf = initTable[string, string]() # artifact_id -> action_id
+  var actionsById = initTable[string, Action]()
   for action in input.actions:
+    actionsById[action.id] = action
     for output in action.outputs:
       if output.kind == arkDeclared:
         if producerOf.hasKey(output.artifactId):
@@ -142,23 +148,58 @@ proc plan*(input: PlanningInput): PlanOutcome =
       return rejected(reject(rrkUnsupportedInput, "duplicate action id '" & action.id & "'"))
     seenIds[action.id] = true
 
-  # Step 3: resolve every action's inputs to a producer action id. A
-  # `Source` input is an external leaf (needs no producer, the same role
-  # `SourceArtifact` plays in Buck2/Bazel); a `Declared` input that
-  # matches no action's output is a structured `missing_producer`
-  # rejection naming the exact artifact id, not a generic failure.
-  let actionIds = input.actions.map_it(it.id)
-  var deps = initTable[string, seq[string]]() # action_id -> [action_id it depends on]
-  for action in input.actions:
-    var actionDeps: seq[string] = @[]
-    for inp in action.inputs:
+  # Step 3: issue #27's own demand-selection fix -- select only the
+  # backward dependency closure of `input.demandedArtifacts`, the same
+  # way Buck2 only ever runs an artifact's producing action and
+  # everything *it* needs (`action.inputs()`, `build_action_no_redirect`).
+  # An action `input.actions` lists but nothing demanded (directly or
+  # transitively) ever reaches is simply never planned -- not an error,
+  # just correctly pruned. A `Declared` input that matches no action's
+  # output, discovered while walking this closure, is a structured
+  # `missing_producer` rejection naming the exact artifact id, exactly
+  # as it always was -- just now only checked for actions the closure
+  # actually needs, not every action `input.actions` happens to list.
+  var neededIds = initTable[string, bool]()
+  var queue: seq[string] = @[]
+  for artifactId in input.demandedArtifacts:
+    if not producerOf.hasKey(artifactId):
+      return rejected(reject(
+        rrkMissingProducer,
+        "PlanningInput demands artifact '" & artifactId &
+          "' which no action declares as an output",
+      ))
+    let producerId = producerOf[artifactId]
+    if not neededIds.getOrDefault(producerId, false):
+      neededIds[producerId] = true
+      queue.add(producerId)
+  while queue.len > 0:
+    let id = queue.pop()
+    for inp in actionsById[id].inputs:
       if inp.kind == arkDeclared:
         if not producerOf.hasKey(inp.artifactId):
           return rejected(reject(
             rrkMissingProducer,
-            "action '" & action.id & "' requires artifact '" & inp.artifactId &
+            "action '" & id & "' requires artifact '" & inp.artifactId &
               "' which no action in this PlanningInput declares as an output",
           ))
+        let producerId = producerOf[inp.artifactId]
+        if not neededIds.getOrDefault(producerId, false):
+          neededIds[producerId] = true
+          queue.add(producerId)
+
+  var actionIds: seq[string] = @[]
+  for id in neededIds.keys:
+    actionIds.add(id)
+
+  # Step 4: resolve every *needed* action's inputs to a producer action
+  # id -- the same resolution the closure walk above already performed,
+  # recomputed here (over only the needed subset) so `deps` reflects
+  # exactly the actions actually being planned.
+  var deps = initTable[string, seq[string]]() # action_id -> [action_id it depends on]
+  for id in actionIds:
+    var actionDeps: seq[string] = @[]
+    for inp in actionsById[id].inputs:
+      if inp.kind == arkDeclared:
         let producerId = producerOf[inp.artifactId]
         # Deliberately *not* excluding `producerId == action.id`: an
         # action that consumes its own declared output is a genuine
@@ -170,9 +211,12 @@ proc plan*(input: PlanningInput): PlanOutcome =
         # this flat action graph has no such polymorphic re-entry case.
         if producerId notin actionDeps:
           actionDeps.add(producerId)
-    deps[action.id] = actionDeps
+    deps[id] = actionDeps
 
-  # Step 4: cycle check.
+  # Step 5: cycle check, restricted to the needed subgraph -- a cycle
+  # entirely among actions nothing demands is irrelevant to this
+  # request, the same way Buck2 never cares about a target you didn't
+  # ask to build.
   let cyclePath = findCycle(actionIds, deps)
   if cyclePath.len > 0:
     return rejected(reject(
@@ -181,12 +225,12 @@ proc plan*(input: PlanningInput): PlanOutcome =
       cyclePath,
     ))
 
-  # Step 5: deterministic topological order.
+  # Step 6: deterministic topological order over the needed subgraph.
   let ordered = topoSort(actionIds, deps)
 
-  var actionsById = initTable[string, Action]()
-  for action in input.actions:
-    actionsById[action.id] = action
+  var neededActionsById = initTable[string, Action]()
+  for id in actionIds:
+    neededActionsById[id] = actionsById[id]
 
   planned(ExecutionPlan(
     schemaVersion: PlanSchemaVersion,
@@ -194,7 +238,7 @@ proc plan*(input: PlanningInput): PlanOutcome =
     producerVersion: PlanSchemaVersion,
     planId: computePlanId(input),
     orderedActions: ordered,
-    actions: actionsById,
+    actions: neededActionsById,
   ))
 
 proc planFromJson*(root: JsonNode): PlanOutcome =

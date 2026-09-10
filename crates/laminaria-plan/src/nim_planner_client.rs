@@ -203,7 +203,13 @@ mod tests {
 
     fn sample_input() -> PlanningInput {
         PlanningInput::new(
-            vec!["host-bin".to_string()],
+            // "integrate" declares its own output ("generation-root")
+            // and demand names only it -- issue #27's own demand-
+            // selection fix means an action producing nothing can never
+            // be part of any demand closure (nothing can ever name it to
+            // demand it); "host-bin"/"planner-bin" are pulled in
+            // transitively via "integrate"'s own declared inputs.
+            vec!["generation-root".to_string()],
             vec![
                 Action {
                     id: "compile-rust-host".to_string(),
@@ -229,7 +235,7 @@ mod tests {
                         ArtifactRef::declared("host-bin"),
                         ArtifactRef::declared("planner-bin"),
                     ],
-                    outputs: vec![],
+                    outputs: vec![ArtifactRef::declared("generation-root")],
                     compiler_work: None,
                 },
             ],
@@ -278,8 +284,13 @@ mod tests {
     #[cfg(unix)]
     fn call_planner_reports_a_structured_cycle_rejection_from_the_real_binary() {
         let bin = real_planner_binary();
+        // Demand names "out-a" directly -- issue #27's own demand-
+        // selection fix means an empty demand would prune this whole
+        // (cyclic) graph away before the cycle is ever reached, silently
+        // returning an empty plan instead of the rejection this test
+        // means to exercise.
         let input = PlanningInput::new(
-            vec![],
+            vec!["out-a".to_string()],
             vec![
                 Action {
                     id: "a".to_string(),

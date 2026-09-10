@@ -11,16 +11,20 @@ import ../src/planning_kernel
 proc action(id: string, kind: ActionKind, inputs, outputs: seq[ArtifactRef]): Action =
   Action(id: id, kind: kind, commandIdentity: "cmd:" & id, inputs: inputs, outputs: outputs)
 
-proc input(actions: seq[Action]): PlanningInput =
-  PlanningInput(schemaVersion: PlanSchemaVersion, demandedArtifacts: @[], actions: actions)
+proc input(actions: seq[Action], demandedArtifacts: seq[string] = @[]): PlanningInput =
+  PlanningInput(schemaVersion: PlanSchemaVersion, demandedArtifacts: demandedArtifacts, actions: actions)
 
 suite "planning_kernel.plan":
   test "a linear chain plans in dependency order":
+    # "integrate" now declares its own output ("done") rather than none,
+    # and demand names only it -- issue #27's own demand-selection fix
+    # means an action producing nothing can never be part of any demand
+    # closure (nothing can ever name it to demand it).
     let i = input(@[
-      action("integrate", akIntegrate, @[declaredRef("planner-bin"), declaredRef("host-bin")], @[]),
+      action("integrate", akIntegrate, @[declaredRef("planner-bin"), declaredRef("host-bin")], @[declaredRef("done")]),
       action("compile-rust-host", akCargoBuild, @[], @[declaredRef("host-bin")]),
       action("compile-nim-planner", akNimBuild, @[], @[declaredRef("planner-bin")]),
-    ])
+    ], demandedArtifacts = @["done"])
     let outcome = plan(i)
     check outcome.isPlanned
     check outcome.plan.orderedActions == @["compile-nim-planner", "compile-rust-host", "integrate"]
@@ -29,10 +33,10 @@ suite "planning_kernel.plan":
 
   test "same input plans identically twice (determinism)":
     let i = input(@[
-      action("z", akIntegrate, @[declaredRef("o1"), declaredRef("o2")], @[]),
+      action("z", akIntegrate, @[declaredRef("o1"), declaredRef("o2")], @[declaredRef("done")]),
       action("y", akCargoBuild, @[], @[declaredRef("o1")]),
       action("x", akNimBuild, @[], @[declaredRef("o2")]),
-    ])
+    ], demandedArtifacts = @["done"])
     let first = plan(i)
     let second = plan(i)
     check first.isPlanned and second.isPlanned
@@ -43,7 +47,7 @@ suite "planning_kernel.plan":
     let i = input(@[
       action("a", akNimBuild, @[declaredRef("out-b")], @[declaredRef("out-a")]),
       action("b", akNimBuild, @[declaredRef("out-a")], @[declaredRef("out-b")]),
-    ])
+    ], demandedArtifacts = @["out-a"])
     let outcome = plan(i)
     check not outcome.isPlanned
     check outcome.rejection.reasonKind == rrkCycle
@@ -52,21 +56,28 @@ suite "planning_kernel.plan":
   test "a self-cycle is rejected":
     let i = input(@[
       action("a", akNimBuild, @[declaredRef("out-a")], @[declaredRef("out-a")]),
-    ])
+    ], demandedArtifacts = @["out-a"])
     let outcome = plan(i)
     check not outcome.isPlanned
     check outcome.rejection.reasonKind == rrkCycle
 
   test "an input naming no producer is a structured missing_producer rejection":
+    # "a" now declares an output ("out-a") so it can be demanded directly
+    # -- an action producing nothing can never be part of any demand
+    # closure.
     let i = input(@[
-      action("a", akNimBuild, @[declaredRef("nope")], @[]),
-    ])
+      action("a", akNimBuild, @[declaredRef("nope")], @[declaredRef("out-a")]),
+    ], demandedArtifacts = @["out-a"])
     let outcome = plan(i)
     check not outcome.isPlanned
     check outcome.rejection.reasonKind == rrkMissingProducer
     check "nope" in outcome.rejection.reasonDetail
 
   test "two actions declaring the same output artifact is a structured duplicate_producer rejection":
+    # Duplicate-producer detection runs over the *whole* input, before
+    # any demand-based pruning -- a structural defect in the graph,
+    # independent of what's actually demanded -- so this needs no demand
+    # at all to still be caught.
     let i = input(@[
       action("a", akNimBuild, @[], @[declaredRef("shared")]),
       action("b", akNimBuild, @[], @[declaredRef("shared")]),
@@ -78,10 +89,25 @@ suite "planning_kernel.plan":
   test "a Source input needs no producer and does not block planning":
     let i = input(@[
       action("a", akNimBuild, @[sourceRef("nim-planner/src")], @[declaredRef("planner-bin")]),
-    ])
+    ], demandedArtifacts = @["planner-bin"])
     let outcome = plan(i)
     check outcome.isPlanned
     check outcome.plan.orderedActions == @["a"]
+
+  test "an action nothing demands is pruned from the plan, not rejected":
+    # Issue #27's own demand-selection fix: an action `input.actions`
+    # lists but nothing in the demand closure reaches is simply excluded
+    # from the plan -- not an error, and its own dangling input ("nope",
+    # which no action produces) never even gets inspected, because the
+    # closure walk never reaches it.
+    let i = input(@[
+      action("a", akNimBuild, @[], @[declaredRef("out-a")]),
+      action("unreachable", akNimBuild, @[declaredRef("nope")], @[declaredRef("out-unreachable")]),
+    ], demandedArtifacts = @["out-a"])
+    let outcome = plan(i)
+    check outcome.isPlanned
+    check outcome.plan.orderedActions == @["a"]
+    check outcome.plan.actions.len == 1
 
 suite "planning_kernel.planFromJson (schema-version gate)":
   test "a mismatched schema_version is rejected before other fields are inspected":
@@ -101,8 +127,9 @@ suite "planning_kernel.planFromJson (schema-version gate)":
     # a future version bump can't leave this test silently testing a
     # stale, now-rejected version.
     let raw = parseJson("""
-      {"schema_version": "$1", "demanded_artifacts": [], "actions": [
-        {"id": "a", "kind": "nim_build", "command_identity": "x", "inputs": [], "outputs": []}
+      {"schema_version": "$1", "demanded_artifacts": ["out-a"], "actions": [
+        {"id": "a", "kind": "nim_build", "command_identity": "x", "inputs": [],
+         "outputs": [{"kind": "declared", "artifact_id": "out-a"}]}
       ]}
     """ % [PlanSchemaVersion])
     let outcome = planFromJson(raw)
