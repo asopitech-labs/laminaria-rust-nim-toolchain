@@ -61,6 +61,19 @@ jobs:
       - name: Install rustfmt/clippy
         run: rustup component add rustfmt clippy
 
+      # Moved ahead of `cargo test`: `laminaria-plan`'s own tests
+      # (issue #8) build and invoke a real `laminaria-planner` binary
+      # via `nim c`, so Nim must already be on PATH before `cargo test`
+      # runs, not only before the later Nim-fixture steps that used to
+      # be the only consumer of this step.
+      - name: Install Nim
+        run: |
+          if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+            sudo apt-get update && sudo apt-get install -y nim
+          else
+            brew install nim
+          fi
+
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
 
@@ -73,14 +86,6 @@ jobs:
       - name: doctor (environment fingerprint, informational)
         run: cargo run -p laminaria-cli -- doctor
         continue-on-error: true
-
-      - name: Install Nim
-        run: |
-          if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
-            sudo apt-get update && sudo apt-get install -y nim
-          else
-            brew install nim
-          fi
 
       # #11's first two committed "Core workloads" fixtures, built natively
       # on each runner as evidence for #18's acceptance criterion that these

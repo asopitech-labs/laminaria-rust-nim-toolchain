@@ -146,9 +146,14 @@ mod tests {
     use std::path::PathBuf;
 
     /// Locates (building first if necessary) the real `laminaria-planner`
-    /// binary produced by `nimble build` under `nim-planner/`, so these
-    /// tests exercise the actual Nim kernel via the real subprocess
-    /// boundary -- not a mocked stand-in for it.
+    /// binary under `nim-planner/`, so these tests exercise the actual
+    /// Nim kernel via the real subprocess boundary -- not a mocked
+    /// stand-in for it. Invokes `nim c` directly, not `nimble build`:
+    /// `crates/laminaria-run/src/self_build.rs` found that this repo's
+    /// `nimble` (v0.22.2) exits `0` even after printing a build-failure
+    /// message on a genuine compile error, so `nim c`'s own reliable
+    /// exit code is used here too, for the same reason.
+    #[cfg(unix)]
     fn real_planner_binary() -> PathBuf {
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
@@ -157,16 +162,21 @@ mod tests {
         let nim_planner_dir = repo_root.join("nim-planner");
         let bin = nim_planner_dir.join("bin/laminaria-planner");
         if !bin.is_file() {
-            let status = Command::new("nimble")
-                .args(["build", "-y"])
+            let status = Command::new("nim")
+                .args([
+                    "c",
+                    "--path:src",
+                    "-o:bin/laminaria-planner",
+                    "src/laminaria_planner.nim",
+                ])
                 .current_dir(&nim_planner_dir)
                 .status()
-                .expect("failed to invoke nimble -- is Nim installed?");
-            assert!(status.success(), "nimble build failed");
+                .expect("failed to invoke nim -- is Nim installed?");
+            assert!(status.success(), "nim c failed to build laminaria-planner");
         }
         assert!(
             bin.is_file(),
-            "expected {} to exist after nimble build",
+            "expected {} to exist after building it",
             bin.display()
         );
         bin
@@ -204,7 +214,15 @@ mod tests {
         )
     }
 
+    /// `#[cfg(unix)]`: needs a real, buildable `laminaria-planner`
+    /// binary (`real_planner_binary`), and this repo's CI deliberately
+    /// never installs Nim on its `windows` job (see that job's own doc
+    /// comment in `.github/workflows/ci.yml` -- kept lean/Unix-specific
+    /// on purpose), matching how `laminaria-run`'s own real-binary
+    /// tests (`self_build.rs`, `reuse.rs`) are gated for the same
+    /// reason.
     #[test]
+    #[cfg(unix)]
     fn call_planner_against_the_real_binary_produces_a_deterministic_plan() {
         let bin = real_planner_binary();
         let input = sample_input();
@@ -235,6 +253,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn call_planner_reports_a_structured_cycle_rejection_from_the_real_binary() {
         let bin = real_planner_binary();
         let input = PlanningInput::new(
