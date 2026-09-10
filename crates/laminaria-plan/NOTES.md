@@ -61,6 +61,63 @@ waiting for #3/#25's research to close. This adds the first real slice:
 three new tests for the descriptor's own encode/decode and an unknown-
 `ActionKind` rejection. Clippy/fmt clean workspace-wide.
 
+## Second pass: 2 real bugs + 1 gap a review found, all confirmed and closed
+
+A review, grounded in Buck2's own `build_action_no_redirect`
+(`action.inputs()` is exactly what gets staged/waited-on via
+`ensure_artifact_group_staged` before an action runs at all), found this
+first slice declared the right *fields* and computed artifact ids, but
+validated neither against the other:
+
+1. **Bug: `validate::validate`'s `ActionShapeMismatch` check compared
+   `kind`/`inputs`/`outputs` but never `compiler_work`.** A plan echoing
+   back a *mutated* descriptor (a different `caller`/`callee`, say) for an
+   otherwise-unchanged action id passed silently. Confirmed with a
+   dedicated test before fixing (added `compiler_work` to the comparison).
+2. **Bug: nothing recomputed or checked `Action.id` against the artifact
+   id its own descriptor's content implies.** This crate's own doc
+   comments claimed "the id is derived, not chosen," but nothing enforced
+   it -- an arbitrary hand-picked id, or a descriptor mutated *after* its
+   id was computed, passed through untouched. Closing this honestly also
+   surfaced a real gap the artifact-id functions themselves had:
+   `LowerSource` needs `language`/`subset_version` and `EvaluateEvidence`
+   needs `test_inputs_digest`/`observation_contract_version` to recompute
+   their own id, but the descriptor never stored them -- added
+   `language`, `contract_version` (one field, meaning depends on
+   operation), and `test_inputs_digest` to `CompilerWorkDescriptor` so
+   every operation's id is fully reconstructable from the descriptor
+   alone. New `recompute_work_id` + `validate_compiler_work_action`
+   (`compiler_work.rs`) close this, called from `validate::validate` for
+   every action in a plan.
+   - **A genuine bug was found and fixed *while adding these fields*:**
+     `nim-planner/src/contract.nim`'s `CompilerWorkDescriptor` object type
+     and `toJson`/`compilerWorkDescriptorFromJson` were never updated for
+     the three new fields, so `language`/`contract_version`/
+     `test_inputs_digest` silently round-tripped to `none` through the
+     real Nim binary regardless of what was sent -- caught directly by
+     the strengthened `nim_planner_client` integration test (which now
+     also calls `validate::validate` on the round-tripped plan, not only
+     comparing the descriptor by equality), not by inspection. Fixed on
+     both the type definition and the encode/decode functions, plus a
+     dedicated Nim-side round-trip test for exactly these three fields.
+3. **Gap: `semantic_input_artifact_ids` was declared but never checked
+   against `Action.inputs`.** Nothing stopped a work item from naming a
+   semantic input its own declared dependencies never cover -- the exact
+   "what's actually read must be covered by what's waited-on-for-
+   readiness" invariant Buck2's own input-preparation step enforces
+   structurally. `validate_compiler_work_action` now rejects any
+   `semantic_input_artifact_ids` entry absent from `Action.inputs`'s own
+   `Declared` set.
+
+Twelve new tests added across `compiler_work.rs` (presence-per-kind in
+both directions, missing-required-field, schema-version mismatch,
+descriptor-mutated-after-id-computed, arbitrary-hand-picked-id,
+undeclared-semantic-input) and `validate.rs` (the `ActionShapeMismatch`
+fix, a well-formed compiler-work action validating end-to-end, and
+`ValidationError::CompilerWork` propagation), plus one Nim-side test for
+the three newly-wired fields. `cargo test --workspace`: 259 passed (was
+246). Clippy/fmt clean; Nim suite green.
+
 ### What this slice deliberately does not do
 
 - **No planner/executor wiring.** No code anywhere constructs a

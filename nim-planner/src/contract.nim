@@ -89,8 +89,11 @@ type
     operationVersion*: string
     semanticInputArtifactIds*: seq[string]
     requestedFunctions*: seq[string]
+    language*: Option[string]
+    contractVersion*: Option[string]
     transform*: Option[TransformParameters]
     sourceProvenance*: Option[SourceProvenanceRef]
+    testInputsDigest*: Option[string]
     resourceRequest*: ResourceRequest
     budgetToken*: string
 
@@ -222,10 +225,16 @@ proc toJson*(d: CompilerWorkDescriptor): JsonNode =
   # entirely when empty, not emitted as `[]`.
   if d.requestedFunctions.len > 0:
     result["requested_functions"] = %d.requestedFunctions
+  if d.language.isSome:
+    result["language"] = %d.language.get
+  if d.contractVersion.isSome:
+    result["contract_version"] = %d.contractVersion.get
   if d.transform.isSome:
     result["transform"] = d.transform.get.toJson
   if d.sourceProvenance.isSome:
     result["source_provenance"] = d.sourceProvenance.get.toJson
+  if d.testInputsDigest.isSome:
+    result["test_inputs_digest"] = %d.testInputsDigest.get
 
 proc toJson*(a: Action): JsonNode =
   result = %*{
@@ -366,10 +375,16 @@ proc compilerWorkDescriptorFromJson(node: JsonNode): CompilerWorkDescriptor =
     result.requestedFunctions = node.getStrSeqField("requested_functions")
   else:
     result.requestedFunctions = @[]
+  if node.hasKey("language"):
+    result.language = some(node.getStrField("language"))
+  if node.hasKey("contract_version"):
+    result.contractVersion = some(node.getStrField("contract_version"))
   if node.hasKey("transform"):
     result.transform = some(node["transform"].transformParametersFromJson)
   if node.hasKey("source_provenance"):
     result.sourceProvenance = some(node["source_provenance"].sourceProvenanceRefFromJson)
+  if node.hasKey("test_inputs_digest"):
+    result.testInputsDigest = some(node.getStrField("test_inputs_digest"))
 
 proc actionFromJson*(node: JsonNode): Action =
   let kindStr = node.getStrField("kind")

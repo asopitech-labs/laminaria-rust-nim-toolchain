@@ -148,6 +148,33 @@ suite "planning_kernel.contract (issue #27 B: compiler-work descriptor)":
     check decoded.compilerWork.isSome
     check decoded.compilerWork.get == descriptor
 
+  test "language/contract_version/test_inputs_digest round-trip (previously declared but not wired into toJson/fromJson)":
+    let descriptor = CompilerWorkDescriptor(
+      descriptorSchemaVersion: CompilerWorkSchemaVersion,
+      operationVersion: "0.1.0",
+      semanticInputArtifactIds: @[],
+      requestedFunctions: @["f"],
+      language: some("rust"),
+      contractVersion: some("0.1.0"),
+      sourceProvenance: some(SourceProvenanceRef(
+        sourceFile: "src/f.rs",
+        sourceSnapshotId: "hash-1",
+      )),
+      testInputsDigest: some("digest-1"),
+      resourceRequest: ResourceRequest(cpuSlots: 1, transientMemoryBytesEstimate: 4096),
+      budgetToken: "budget-1",
+    )
+    var a = action("l", akLowerSource, @[], @[declaredRef("out")])
+    a.compilerWork = some(descriptor)
+
+    let json = a.toJson
+    check json["compiler_work"]["language"].getStr == "rust"
+    check json["compiler_work"]["contract_version"].getStr == "0.1.0"
+    check json["compiler_work"]["test_inputs_digest"].getStr == "digest-1"
+
+    let decoded = json.actionFromJson
+    check decoded.compilerWork.get == descriptor
+
   test "an unknown Action kind is a ContractError, not a silent default":
     let raw = parseJson("""
       {"id": "a", "kind": "not_a_real_kind", "command_identity": "x", "inputs": [], "outputs": []}

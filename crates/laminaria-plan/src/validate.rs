@@ -29,6 +29,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::compiler_work::{validate_compiler_work_action, CompilerWorkContractError};
 use crate::types::{
     Action, ArtifactRef, ExecutionPlan, PlanningInput, PLAN_SCHEMA_VERSION, PRODUCED_BY,
 };
@@ -84,6 +85,12 @@ pub enum ValidationError {
         action: String,
         artifact_id: String,
     },
+    /// One action's `compiler_work` descriptor fails its own contract
+    /// (issue #27 B) -- presence-per-kind, schema version, recomputed
+    /// identity, or semantic-dependency correspondence. See
+    /// [`CompilerWorkContractError`]'s own doc comment for what each
+    /// variant closes.
+    CompilerWork(CompilerWorkContractError),
 }
 
 impl std::fmt::Display for ValidationError {
@@ -145,6 +152,7 @@ impl std::fmt::Display for ValidationError {
                  this plan declares as an output -- the Nim kernel should never emit this; \
                  refusing to execute an internally inconsistent plan"
             ),
+            ValidationError::CompilerWork(e) => write!(f, "{e}"),
         }
     }
 }
@@ -184,24 +192,34 @@ pub fn validate(plan: &ExecutionPlan, input: &PlanningInput) -> Result<(), Valid
     }
     for (action_id, plan_action) in &plan.actions {
         let input_action = input_actions_by_id[action_id.as_str()];
+        // `compiler_work` is compared too -- a review caught that it
+        // previously was not, so a plan echoing back a *mutated*
+        // descriptor (a different `caller`/`callee`, a stripped
+        // `resource_request`, ...) for an otherwise-unchanged action id
+        // would silently pass this check.
         if plan_action.kind != input_action.kind
             || plan_action.inputs != input_action.inputs
             || plan_action.outputs != input_action.outputs
+            || plan_action.compiler_work != input_action.compiler_work
         {
             return Err(ValidationError::ActionShapeMismatch {
                 action_id: action_id.clone(),
                 detail: format!(
-                    "PlanningInput declared kind={:?} inputs={:?} outputs={:?}, but the plan's \
-                     action has kind={:?} inputs={:?} outputs={:?}",
+                    "PlanningInput declared kind={:?} inputs={:?} outputs={:?} \
+                     compiler_work={:?}, but the plan's action has kind={:?} inputs={:?} \
+                     outputs={:?} compiler_work={:?}",
                     input_action.kind,
                     input_action.inputs,
                     input_action.outputs,
+                    input_action.compiler_work,
                     plan_action.kind,
                     plan_action.inputs,
-                    plan_action.outputs
+                    plan_action.outputs,
+                    plan_action.compiler_work,
                 ),
             });
         }
+        validate_compiler_work_action(plan_action).map_err(ValidationError::CompilerWork)?;
     }
 
     let ordered_ids: BTreeSet<&str> = plan.ordered_actions.iter().map(String::as_str).collect();
@@ -489,6 +507,192 @@ mod tests {
         assert!(matches!(
             validate(&plan, &input),
             Err(ValidationError::DuplicateProducer { .. })
+        ));
+    }
+
+    /// A review caught that `ActionShapeMismatch` compared `kind`/
+    /// `inputs`/`outputs` but not `compiler_work` -- a plan echoing back
+    /// a *mutated* descriptor for an otherwise-unchanged action id would
+    /// previously pass this check silently.
+    #[test]
+    fn a_plan_that_alters_an_actions_compiler_work_descriptor_is_rejected() {
+        use crate::compiler_work::{
+            transform_function_artifact_id, CompilerWorkDescriptor, ResourceRequest, TransformKind,
+            TransformParameters, COMPILER_WORK_SCHEMA_VERSION,
+        };
+
+        let descriptor = CompilerWorkDescriptor {
+            descriptor_schema_version: COMPILER_WORK_SCHEMA_VERSION.to_string(),
+            operation_version: "0.1.0".to_string(),
+            semantic_input_artifact_ids: vec!["out-a".to_string()],
+            requested_functions: vec![],
+            language: None,
+            contract_version: None,
+            transform: Some(TransformParameters {
+                kind: TransformKind::Checked,
+                transform_version: "0.1.0".to_string(),
+                caller: "caller".to_string(),
+                callee: "callee".to_string(),
+            }),
+            source_provenance: None,
+            test_inputs_digest: None,
+            resource_request: ResourceRequest::minimal(),
+            budget_token: "budget-1".to_string(),
+        };
+        let id = transform_function_artifact_id(
+            "0.1.0",
+            "out-a",
+            "caller",
+            "callee",
+            TransformKind::Checked,
+            "0.1.0",
+        );
+        let compiler_work_action = Action {
+            id: id.clone(),
+            kind: ActionKind::TransformFunction,
+            command_identity: "transform_function".to_string(),
+            inputs: vec![ArtifactRef::declared("out-a")],
+            outputs: vec![ArtifactRef::declared("out-c")],
+            compiler_work: Some(descriptor.clone()),
+        };
+
+        let mut input = valid_input();
+        input.actions.push(compiler_work_action.clone());
+        let mut plan = valid_plan();
+        plan.ordered_actions.push(id.clone());
+
+        // The plan echoes back the *same* action id/inputs/outputs, but
+        // with `callee` mutated -- everything `ActionShapeMismatch`
+        // checked before this fix stays identical.
+        let mut tampered_action = compiler_work_action.clone();
+        tampered_action
+            .compiler_work
+            .as_mut()
+            .unwrap()
+            .transform
+            .as_mut()
+            .unwrap()
+            .callee = "a-different-callee".to_string();
+        plan.actions.insert(id, tampered_action);
+
+        assert!(matches!(
+            validate(&plan, &input),
+            Err(ValidationError::ActionShapeMismatch { .. })
+        ));
+    }
+
+    /// A well-formed compiler-work action, identical on both sides,
+    /// still validates end-to-end -- `validate()` itself, not only
+    /// `validate_compiler_work_action` in isolation.
+    #[test]
+    fn a_plan_with_a_well_formed_compiler_work_action_validates() {
+        use crate::compiler_work::{
+            transform_function_artifact_id, CompilerWorkDescriptor, ResourceRequest, TransformKind,
+            TransformParameters, COMPILER_WORK_SCHEMA_VERSION,
+        };
+
+        let descriptor = CompilerWorkDescriptor {
+            descriptor_schema_version: COMPILER_WORK_SCHEMA_VERSION.to_string(),
+            operation_version: "0.1.0".to_string(),
+            semantic_input_artifact_ids: vec!["out-a".to_string()],
+            requested_functions: vec![],
+            language: None,
+            contract_version: None,
+            transform: Some(TransformParameters {
+                kind: TransformKind::Checked,
+                transform_version: "0.1.0".to_string(),
+                caller: "caller".to_string(),
+                callee: "callee".to_string(),
+            }),
+            source_provenance: None,
+            test_inputs_digest: None,
+            resource_request: ResourceRequest::minimal(),
+            budget_token: "budget-1".to_string(),
+        };
+        let id = transform_function_artifact_id(
+            "0.1.0",
+            "out-a",
+            "caller",
+            "callee",
+            TransformKind::Checked,
+            "0.1.0",
+        );
+        let compiler_work_action = Action {
+            id: id.clone(),
+            kind: ActionKind::TransformFunction,
+            command_identity: "transform_function".to_string(),
+            inputs: vec![ArtifactRef::declared("out-a")],
+            outputs: vec![ArtifactRef::declared("out-c")],
+            compiler_work: Some(descriptor),
+        };
+
+        let mut input = valid_input();
+        input.actions.push(compiler_work_action.clone());
+        let mut plan = valid_plan();
+        plan.actions.insert(id.clone(), compiler_work_action);
+        plan.ordered_actions.push(id);
+
+        assert_eq!(validate(&plan, &input), Ok(()));
+    }
+
+    /// `validate()` itself propagates a `CompilerWorkContractError`
+    /// (wrapped as `ValidationError::CompilerWork`) for a compiler-work
+    /// action that is identical on both sides but internally invalid --
+    /// here, a `semantic_input_artifact_ids` entry the action's own
+    /// `inputs` never declares.
+    #[test]
+    fn validate_propagates_a_compiler_work_contract_violation() {
+        use crate::compiler_work::{
+            CompilerWorkContractError, CompilerWorkDescriptor, ResourceRequest, TransformKind,
+            TransformParameters, COMPILER_WORK_SCHEMA_VERSION,
+        };
+
+        let descriptor = CompilerWorkDescriptor {
+            descriptor_schema_version: COMPILER_WORK_SCHEMA_VERSION.to_string(),
+            operation_version: "0.1.0".to_string(),
+            // Names "out-a" as a semantic input, but this action's own
+            // `inputs` below never declares it.
+            semantic_input_artifact_ids: vec!["out-a".to_string()],
+            requested_functions: vec![],
+            language: None,
+            contract_version: None,
+            transform: Some(TransformParameters {
+                kind: TransformKind::Checked,
+                transform_version: "0.1.0".to_string(),
+                caller: "caller".to_string(),
+                callee: "callee".to_string(),
+            }),
+            source_provenance: None,
+            test_inputs_digest: None,
+            resource_request: ResourceRequest::minimal(),
+            budget_token: "budget-1".to_string(),
+        };
+        let compiler_work_action = Action {
+            id: "hand-picked-id".to_string(),
+            kind: ActionKind::TransformFunction,
+            command_identity: "transform_function".to_string(),
+            inputs: vec![], // does not declare "out-a"
+            outputs: vec![ArtifactRef::declared("out-c")],
+            compiler_work: Some(descriptor),
+        };
+
+        let mut input = valid_input();
+        input.actions.push(compiler_work_action.clone());
+        let mut plan = valid_plan();
+        plan.actions
+            .insert("hand-picked-id".to_string(), compiler_work_action);
+        plan.ordered_actions.push("hand-picked-id".to_string());
+
+        // Since `id` is hand-picked (not the recomputed artifact id),
+        // `WorkIdMismatch` fires before `UndeclaredSemanticInput` would --
+        // still proves `validate()` itself surfaces a real
+        // `CompilerWorkContractError`, not only `validate_compiler_work_action`
+        // called directly.
+        assert!(matches!(
+            validate(&plan, &input),
+            Err(ValidationError::CompilerWork(
+                CompilerWorkContractError::WorkIdMismatch { .. }
+            ))
         ));
     }
 }

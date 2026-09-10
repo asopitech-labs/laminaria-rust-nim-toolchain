@@ -328,16 +328,50 @@ mod tests {
     #[cfg(unix)]
     fn a_compiler_work_descriptor_round_trips_through_the_real_planner_binary() {
         use crate::compiler_work::{
-            CompilerWorkDescriptor, ResourceRequest, TransformKind, TransformParameters,
+            lower_source_artifact_id, transform_function_artifact_id, CompilerWorkDescriptor,
+            ResourceRequest, SourceProvenanceRef, TransformKind, TransformParameters,
             COMPILER_WORK_SCHEMA_VERSION,
         };
+        use crate::validate::validate;
 
         let bin = real_planner_binary();
-        let descriptor = CompilerWorkDescriptor {
+
+        // Both actions' ids are the *recomputed* artifact id, not an
+        // arbitrary label -- exercising `validate_compiler_work_action`'s
+        // identity check against a real round trip, not only against
+        // hand-constructed unit-test values.
+        let lower_id = lower_source_artifact_id("0.1.0", "rust", "hash-abc", &["f"], "0.1.0");
+        let lower_descriptor = CompilerWorkDescriptor {
             descriptor_schema_version: COMPILER_WORK_SCHEMA_VERSION.to_string(),
             operation_version: "0.1.0".to_string(),
-            semantic_input_artifact_ids: vec!["lowered-1".to_string()],
+            semantic_input_artifact_ids: vec![],
+            requested_functions: vec!["f".to_string()],
+            language: Some("rust".to_string()),
+            contract_version: Some("0.1.0".to_string()),
+            transform: None,
+            source_provenance: Some(SourceProvenanceRef {
+                source_file: "fixtures/f.rs".to_string(),
+                source_snapshot_id: "hash-abc".to_string(),
+            }),
+            test_inputs_digest: None,
+            resource_request: ResourceRequest::minimal(),
+            budget_token: "budget-1".to_string(),
+        };
+        let transform_id = transform_function_artifact_id(
+            "0.1.0",
+            &lower_id,
+            "caller",
+            "callee",
+            TransformKind::Checked,
+            "0.1.0",
+        );
+        let transform_descriptor = CompilerWorkDescriptor {
+            descriptor_schema_version: COMPILER_WORK_SCHEMA_VERSION.to_string(),
+            operation_version: "0.1.0".to_string(),
+            semantic_input_artifact_ids: vec![lower_id.clone()],
             requested_functions: vec![],
+            language: None,
+            contract_version: None,
             transform: Some(TransformParameters {
                 kind: TransformKind::Checked,
                 transform_version: "0.1.0".to_string(),
@@ -345,6 +379,7 @@ mod tests {
                 callee: "callee".to_string(),
             }),
             source_provenance: None,
+            test_inputs_digest: None,
             resource_request: ResourceRequest::minimal(),
             budget_token: "budget-1".to_string(),
         };
@@ -352,20 +387,20 @@ mod tests {
             vec!["transformed-1".to_string()],
             vec![
                 Action {
-                    id: "lower".to_string(),
+                    id: lower_id.clone(),
                     kind: ActionKind::LowerSource,
                     command_identity: "lower_source".to_string(),
                     inputs: vec![ArtifactRef::source("fixtures/f.rs")],
-                    outputs: vec![ArtifactRef::declared("lowered-1")],
-                    compiler_work: None,
+                    outputs: vec![ArtifactRef::declared(&lower_id)],
+                    compiler_work: Some(lower_descriptor),
                 },
                 Action {
-                    id: "transform".to_string(),
+                    id: transform_id.clone(),
                     kind: ActionKind::TransformFunction,
                     command_identity: "transform_function".to_string(),
-                    inputs: vec![ArtifactRef::declared("lowered-1")],
+                    inputs: vec![ArtifactRef::declared(&lower_id)],
                     outputs: vec![ArtifactRef::declared("transformed-1")],
-                    compiler_work: Some(descriptor.clone()),
+                    compiler_work: Some(transform_descriptor.clone()),
                 },
             ],
         );
@@ -375,18 +410,20 @@ mod tests {
             PlanOutcome::Planned(plan) => {
                 assert_eq!(
                     plan.ordered_actions,
-                    vec!["lower".to_string(), "transform".to_string()],
+                    vec![lower_id.clone(), transform_id.clone()],
                     "a compiler-work action's dependency must still order purely from \
                      inputs/outputs matching, same as a delegated-build action"
                 );
                 assert_eq!(
-                    plan.actions["transform"].compiler_work.as_ref(),
-                    Some(&descriptor),
+                    plan.actions[&transform_id].compiler_work.as_ref(),
+                    Some(&transform_descriptor),
                     "the descriptor must round-trip through the real Nim binary byte-for-byte"
                 );
                 assert!(
-                    plan.actions["lower"].compiler_work.is_none(),
-                    "an action with no descriptor must decode back to None, not a default"
+                    validate(&plan, &input).is_ok(),
+                    "a real, well-formed compiler-work plan must pass the full contract \
+                     (presence-per-kind, schema version, recomputed identity, semantic \
+                     dependency correspondence), not just structural round-tripping"
                 );
             }
             PlanOutcome::Rejected(r) => panic!("expected a plan, got a rejection: {r:?}"),
