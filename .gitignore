@@ -17,6 +17,10 @@ target
 nimcache/
 *.nimcache/
 
+# nim-planner build output (issue #8): `nimble build`'s compiled
+# laminaria-planner binary, rebuilt by stage0/CI, never committed.
+nim-planner/bin/
+
 # Fixture build outputs (fixtures/nim-heavy-workspace)
 fixture_out
 
