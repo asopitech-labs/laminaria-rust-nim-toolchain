@@ -94,6 +94,7 @@ type
     transform*: Option[TransformParameters]
     sourceProvenance*: Option[SourceProvenanceRef]
     testInputsDigest*: Option[string]
+    testInputs*: seq[seq[int64]]
     resourceRequest*: ResourceRequest
     budgetToken*: string
 
@@ -235,6 +236,8 @@ proc toJson*(d: CompilerWorkDescriptor): JsonNode =
     result["source_provenance"] = d.sourceProvenance.get.toJson
   if d.testInputsDigest.isSome:
     result["test_inputs_digest"] = %d.testInputsDigest.get
+  if d.testInputs.len > 0:
+    result["test_inputs"] = %d.testInputs
 
 proc toJson*(a: Action): JsonNode =
   result = %*{
@@ -385,6 +388,22 @@ proc compilerWorkDescriptorFromJson(node: JsonNode): CompilerWorkDescriptor =
     result.sourceProvenance = some(node["source_provenance"].sourceProvenanceRefFromJson)
   if node.hasKey("test_inputs_digest"):
     result.testInputsDigest = some(node.getStrField("test_inputs_digest"))
+  if node.hasKey("test_inputs"):
+    let field = node.expectField("test_inputs")
+    if field.kind != JArray:
+      raise newException(ContractError, "field 'test_inputs' must be an array")
+    result.testInputs = @[]
+    for row in field.elems:
+      if row.kind != JArray:
+        raise newException(ContractError, "field 'test_inputs' must be an array of arrays")
+      var parsedRow: seq[int64] = @[]
+      for v in row.elems:
+        if v.kind != JInt:
+          raise newException(ContractError, "field 'test_inputs' must contain only integers")
+        parsedRow.add(v.getBiggestInt().int64)
+      result.testInputs.add(parsedRow)
+  else:
+    result.testInputs = @[]
 
 proc actionFromJson*(node: JsonNode): Action =
   let kindStr = node.getStrField("kind")

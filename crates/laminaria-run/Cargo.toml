@@ -17,6 +17,7 @@ path = "src/bin/cc_wrapper.rs"
 
 [dependencies]
 laminaria-fingerprint = { path = "../laminaria-fingerprint" }
+laminaria-ir = { path = "../laminaria-ir" }
 laminaria-plan = { path = "../laminaria-plan" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

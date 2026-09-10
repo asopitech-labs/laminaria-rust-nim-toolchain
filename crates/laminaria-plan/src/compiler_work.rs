@@ -178,6 +178,17 @@ pub struct CompilerWorkDescriptor {
     /// alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test_inputs_digest: Option<String>,
+    /// `EvaluateEvidence`-only: the actual finite test-input tuples to run
+    /// -- one `Vec<i64>` per call, argument order matching the validated
+    /// function's own declared parameters. Kept separate from
+    /// `test_inputs_digest` (which alone identifies *which* inputs, for a
+    /// stable, compact artifact id) and *not* itself hashed into the
+    /// artifact id, matching `resource_request`/`budget_token`'s own
+    /// carry-along-but-not-identity role: an executor needs the literal
+    /// values to actually run evaluation with, not just an identity for
+    /// them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub test_inputs: Vec<Vec<i64>>,
     pub resource_request: ResourceRequest,
     /// Identifies which budget/cancellation scope this work belongs to.
     /// The actual admission-control and cancellation *mechanism* is issue
@@ -790,6 +801,7 @@ mod tests {
                 source_snapshot_id: "hash-1".to_string(),
             }),
             test_inputs_digest: Some("digest-1".to_string()),
+            test_inputs: vec![],
             resource_request: ResourceRequest::minimal(),
             budget_token: "budget-1".to_string(),
         };
@@ -852,6 +864,7 @@ mod tests {
                 }),
                 source_provenance: None,
                 test_inputs_digest: None,
+                test_inputs: vec![],
                 resource_request: ResourceRequest::minimal(),
                 budget_token: "budget-1".to_string(),
             };

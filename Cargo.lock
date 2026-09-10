@@ -235,6 +235,7 @@ name = "laminaria-run"
 version = "0.1.0"
 dependencies = [
  "laminaria-fingerprint",
+ "laminaria-ir",
  "laminaria-plan",
  "libc",
  "serde",

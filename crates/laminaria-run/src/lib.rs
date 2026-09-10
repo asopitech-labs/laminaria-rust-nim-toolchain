@@ -52,6 +52,7 @@ pub mod artifact_inventory;
 pub mod cargo_telemetry;
 pub mod cargo_wrapper;
 pub mod clock;
+pub mod compiler_work_executor;
 pub mod nim_telemetry;
 pub mod nim_wrapper;
 pub mod project_build;

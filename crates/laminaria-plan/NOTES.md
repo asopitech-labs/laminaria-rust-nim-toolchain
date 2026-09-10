@@ -193,3 +193,18 @@ identity still validates).
 `cargo test -p laminaria-plan`: 40 passed (was 38). Workspace total: 311
 (was 304, combined with the `laminaria-ir` fixes in the same round).
 Clippy/fmt clean; real-planner-binary round-trip test still green.
+
+## Fourth pass: `test_inputs` -- a real gap issue #27 stage C's first executor surfaced
+
+Building `laminaria-run::compiler_work_executor` (issue #27 stage C's
+first slice) found that `EvaluateEvidence`'s descriptor had no field
+actually carrying the finite test-input *values* to run -- only
+`test_inputs_digest`, an identity for *which* inputs, useful for a
+stable artifact id but useless for actually dispatching the evaluation.
+Added `test_inputs: Vec<Vec<i64>>`, deliberately kept separate from and
+*not* hashed into the artifact id (matching `resource_request`/
+`budget_token`'s own carry-along-but-not-identity role) -- the digest
+still owns identity, the new field owns what an executor actually runs.
+Mirrored in `nim-planner/src/contract.nim` by hand from the start this
+time (not forgotten the way the second pass's three fields were), with
+its own dedicated round-trip test.

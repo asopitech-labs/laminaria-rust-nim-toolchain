@@ -354,6 +354,7 @@ mod tests {
                 source_snapshot_id: "hash-abc".to_string(),
             }),
             test_inputs_digest: None,
+            test_inputs: vec![],
             resource_request: ResourceRequest::minimal(),
             budget_token: "budget-1".to_string(),
         };
@@ -380,6 +381,7 @@ mod tests {
             }),
             source_provenance: None,
             test_inputs_digest: None,
+            test_inputs: vec![],
             resource_request: ResourceRequest::minimal(),
             budget_token: "budget-1".to_string(),
         };

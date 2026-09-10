@@ -161,6 +161,7 @@ suite "planning_kernel.contract (issue #27 B: compiler-work descriptor)":
         sourceSnapshotId: "hash-1",
       )),
       testInputsDigest: some("digest-1"),
+      testInputs: @[@[1'i64, 2'i64], @[int64(low(int32)), int64(high(int32))]],
       resourceRequest: ResourceRequest(cpuSlots: 1, transientMemoryBytesEstimate: 4096),
       budgetToken: "budget-1",
     )
@@ -171,6 +172,7 @@ suite "planning_kernel.contract (issue #27 B: compiler-work descriptor)":
     check json["compiler_work"]["language"].getStr == "rust"
     check json["compiler_work"]["contract_version"].getStr == "0.1.0"
     check json["compiler_work"]["test_inputs_digest"].getStr == "digest-1"
+    check json["compiler_work"]["test_inputs"].len == 2
 
     let decoded = json.actionFromJson
     check decoded.compilerWork.get == descriptor

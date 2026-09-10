@@ -1706,3 +1706,85 @@ restoring the fix (it failed with the exact `ActionFailed` the review
 described, then passed again once restored).
 
 `cargo test --workspace`: 187 passed (up from 185). Clippy and fmt clean.
+
+## Issue #27 stage C, first slice: a real in-process compiler-work executor
+
+New `compiler_work_executor.rs`: the first actual connection of
+`laminaria-ir`'s own frontends/transforms/validator/interpreter to a
+production-Nim-planner-produced, Rust-validated `ExecutionPlan` --
+`LowerSource -> ValidateIr -> TransformFunction -> ValidateIr ->
+EvaluateEvidence`, dispatched sequentially in `ordered_actions` order.
+Deliberately a *first slice*: CPU-budget admission control, real
+concurrent execution, memory accounting, and cancellation are issue
+#27's own next, separate PR ("終了試験PR"), not attempted here -- this
+slice's own acceptance is the vertical path itself actually running end
+to end, judged only after issue #27's boundary-contract fixes
+(`laminaria_plan::compiler_work::validate_compiler_work_action`,
+`laminaria_ir::validate`) landed.
+
+- **`ArtifactStore`**: three separate maps (candidate `Program`,
+  `ValidatedProgram`, evaluation evidence), each keyed by its producing
+  action's own content-derived id -- issue #27 B's own "IR payloadは
+  初期sliceではRust側のin-memory storeで管理," never inspected by the
+  Nim planner.
+- **No external compiler fallback anywhere**: every dispatch arm calls
+  directly into `laminaria_ir`'s own owned logic
+  (`rust_frontend`/`nim_frontend`/`transform::{anf_insert,
+  checked_inline}`/`validate::validate_program`/`interpreter::
+  eval_function`); a failure is a hard `Err`, never a silent substitute
+  -- a genuinely different role from this crate's existing
+  `self_build`/`project_build`, which legitimately shell out to real
+  `cargo`/`nim` for *delegated*-build actions.
+- **`ValidatedProgram` required at the executor's own boundary, actually
+  enforced**: `TransformFunction`/`EvaluateEvidence` dispatch read their
+  input exclusively from the *validated* map -- confirmed with a
+  dedicated test that a same-id entry present only in the *candidate*
+  map (never promoted to validated) is still rejected with
+  `MissingValidatedInput`, not silently substituted. Issue #27 A2's own
+  "未検証IRをexecutorが黙って実行してはならない," enforced by a real
+  executor now, not merely documented as an intention.
+- **The full vertical path runs end to end for real**: a genuine Nim
+  source file on disk, lowered through the real `nim_frontend`,
+  ANF-inlined through the real `transform::anf_insert`, validated at
+  both ends, planned and ordered by the *real* `laminaria-planner`
+  binary, checked by `laminaria_plan::validate::validate`, and evaluated
+  through the real interpreter -- confirmed both by the correct wrapping-
+  i32 result values (`g(i32::MAX) = i32::MIN`) and by inspecting the
+  post-transform validated `Program` to confirm `add` was actually
+  inlined away, not a no-op copy.
+- Extended `CompilerWorkDescriptor` with `test_inputs: Vec<Vec<i64>>`
+  (the actual finite test-input tuples `EvaluateEvidence` runs, kept
+  separate from and not hashed into `test_inputs_digest`, which alone
+  identifies *which* inputs for a stable artifact id) -- a real
+  descriptor gap this slice's own dispatch surfaced (nothing could
+  actually *run* `EvaluateEvidence` without the literal values
+  somewhere). `EvaluateEvidence` also reuses `requested_functions`
+  (documented elsewhere as "LowerSource-only") to name which function to
+  evaluate -- a deliberate, named minimal reuse rather than a new field,
+  recorded here rather than silently assumed; a future contract version
+  may give it a dedicated field instead. `nim-planner/src/contract.nim`
+  mirrors `test_inputs` by hand, plus a dedicated round-trip test.
+
+4 new tests (the full pipeline, the validated-vs-candidate enforcement,
+a legacy delegated-build kind rejected not silently run, a
+compiler-work-kinded action with no descriptor rejected).
+
+`cargo test --workspace`: 315 passed (was 311). Clippy/fmt clean, Nim
+suite green.
+
+### What this slice deliberately does not do
+
+- No concurrency: `run_compiler_work_plan` dispatches
+  `ordered_actions` strictly sequentially. CPU-budget-1-vs-many result
+  equivalence and real concurrent execution are issue #27's own next PR.
+- No resource accounting or admission control: `ResourceRequest` is
+  carried on the wire but nothing here reads or enforces it.
+- No cancellation.
+- No demand-based pruning: `run_compiler_work_plan` dispatches every
+  action `ordered_actions` names, not only those a `demanded_artifacts`
+  closure would actually require.
+- **`source_snapshot_id` is not verified against the file on disk at
+  dispatch time** -- a real, open gap: a source file edited between
+  planning and dispatch would silently lower the *new* text under the
+  *old* snapshot id, named directly in `dispatch_lower_source`'s own
+  doc comment rather than glossed over.
