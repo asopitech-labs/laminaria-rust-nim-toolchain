@@ -70,7 +70,7 @@ pub fn self_build_planning_input() -> PlanningInput {
             Action {
                 id: ACTION_COMPILE_NIM_PLANNER.to_string(),
                 kind: ActionKind::NimBuild,
-                command_identity: "nimble build (nim-planner)".to_string(),
+                command_identity: "nim c src/laminaria_planner.nim (nim-planner)".to_string(),
                 inputs: vec![ArtifactRef::source("nim-planner")],
                 outputs: vec![ArtifactRef::declared(ARTIFACT_PLANNER_BIN)],
             },
@@ -258,10 +258,26 @@ struct ActionEvidence {
     generation_label: String,
 }
 
+/// Invokes `nim c` directly, *not* `nimble build`: a real bug this
+/// crate's own compile-failure test caught -- `nimble build`'s wrapper
+/// around `nim c` prints "Error: Build failed for the package" on a
+/// genuine compile error but still exits `0` (reproduced directly with
+/// this repo's own `nimble v0.22.2`), which would have silently treated
+/// a broken Nim source tree as a successful action. `nim c`'s own exit
+/// code correctly reflects compile success/failure. This also means the
+/// action is recognized by `is_nim_c_command` in this crate's own
+/// `lib.rs`, so it gets real CC-wrapper per-invocation tracing --
+/// `nimble build` would have hidden its internal `nim c` invocation from
+/// that tracer entirely, which `nimble build` would not have.
 fn nim_build_root(repo_root: &Path) -> RootCommand {
     RootCommand {
-        program: "nimble".to_string(),
-        args: vec!["build".to_string(), "-y".to_string()],
+        program: "nim".to_string(),
+        args: vec![
+            "c".to_string(),
+            "--path:src".to_string(),
+            format!("-o:bin/{}", binary_name(PLANNER_BINARY_NAME)),
+            "src/laminaria_planner.nim".to_string(),
+        ],
         cwd: Some(repo_root.join("nim-planner")),
         env_overrides: Default::default(),
     }
@@ -539,6 +555,115 @@ mod tests {
             }
         }
 
+        let _ = std::fs::remove_dir_all(&generation_root);
+        let _ = std::fs::remove_dir_all(&runs_root);
+    }
+
+    /// Portable recursive copy of just what a self-build needs
+    /// (`Cargo.toml`/`Cargo.lock`, `crates/`, `nim-planner/`), skipping
+    /// build-output directories (`target`, `bin`, `nimcache`, `.git`) --
+    /// never the tracked repo itself, so this test can break a source
+    /// file without ever leaving the real repo dirty. Same reasoning as
+    /// `reuse.rs`'s own `copy_dir_recursive` test helper: a plain
+    /// `std::fs` walk, not `cp -r`, to stay portable.
+    fn copy_workspace_sources(src_root: &Path, dst_root: &Path) {
+        std::fs::create_dir_all(dst_root).unwrap();
+        for name in ["Cargo.toml", "Cargo.lock", "toolchains.lock.toml"] {
+            let src = src_root.join(name);
+            if src.is_file() {
+                std::fs::copy(&src, dst_root.join(name)).unwrap();
+            }
+        }
+        copy_dir_filtered(&src_root.join("crates"), &dst_root.join("crates"));
+        copy_dir_filtered(&src_root.join("nim-planner"), &dst_root.join("nim-planner"));
+    }
+
+    fn copy_dir_filtered(src: &Path, dst: &Path) {
+        std::fs::create_dir_all(dst).unwrap();
+        for entry in std::fs::read_dir(src).unwrap() {
+            let entry = entry.unwrap();
+            let name = entry.file_name();
+            if matches!(
+                name.to_string_lossy().as_ref(),
+                "target" | "bin" | "nimcache" | ".git"
+            ) {
+                continue;
+            }
+            let dst_path = dst.join(&name);
+            if entry.file_type().unwrap().is_dir() {
+                copy_dir_filtered(&entry.path(), &dst_path);
+            } else {
+                std::fs::copy(entry.path(), dst_path).unwrap();
+            }
+        }
+    }
+
+    /// The other half of this slice's completion criterion (alongside
+    /// `stage0_produces_a_stage1_whose_own_planner_actually_works`):
+    /// "circular ... invalid input, and compile failures are not treated
+    /// as success." A genuine Nim compile error in a throwaway copy of
+    /// `nim-planner/` must abort the generation at exactly that action,
+    /// never run `integrate`, and never leave a stage output binary
+    /// behind.
+    #[test]
+    #[cfg(unix)]
+    fn a_compile_failure_aborts_the_generation_without_producing_a_stage_output() {
+        let repo_root = repo_root();
+        let stage0_planner = repo_root
+            .join("nim-planner/bin")
+            .join(binary_name(PLANNER_BINARY_NAME));
+        if !stage0_planner.is_file() {
+            let status = std::process::Command::new("nimble")
+                .args(["build", "-y"])
+                .current_dir(repo_root.join("nim-planner"))
+                .status()
+                .expect("failed to invoke nimble -- is Nim installed?");
+            assert!(status.success(), "stage0 nimble build failed");
+        }
+
+        let broken_repo = tmp_dir("broken-repo");
+        copy_workspace_sources(&repo_root, &broken_repo);
+
+        let kernel_path = broken_repo.join("nim-planner/src/planning_kernel.nim");
+        let mut content = std::fs::read_to_string(&kernel_path).unwrap();
+        content.push_str("\nthis is not valid Nim syntax (((\n");
+        std::fs::write(&kernel_path, content).unwrap();
+
+        let generation_root = tmp_dir("broken-compile-gen");
+        let runs_root = tmp_dir("broken-compile-runs");
+        let lock_path = broken_repo.join("toolchains.lock.toml");
+
+        let result = run_generation(
+            &broken_repo,
+            &generation_root,
+            &stage0_planner,
+            "broken-compile",
+            &runs_root,
+            &lock_path,
+        );
+
+        match result {
+            Err(SelfBuildError::ActionFailed { action_id, .. }) => {
+                assert_eq!(action_id, ACTION_COMPILE_NIM_PLANNER);
+            }
+            other => panic!(
+                "expected the broken nim-planner compile action to fail generation, got {other:?}"
+            ),
+        }
+        assert!(
+            !generation_root.join(binary_name("laminaria")).exists(),
+            "a compile failure must never produce a stage output binary -- integrate must not \
+             have run"
+        );
+        assert!(
+            !generation_root
+                .join(binary_name(PLANNER_BINARY_NAME))
+                .exists(),
+            "a compile failure in compile-nim-planner must leave no planner binary in the \
+             generation root either"
+        );
+
+        let _ = std::fs::remove_dir_all(&broken_repo);
         let _ = std::fs::remove_dir_all(&generation_root);
         let _ = std::fs::remove_dir_all(&runs_root);
     }
