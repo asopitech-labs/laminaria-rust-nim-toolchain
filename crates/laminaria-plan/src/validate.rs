@@ -313,6 +313,7 @@ mod tests {
             command_identity: id.to_string(),
             inputs,
             outputs,
+            compiler_work: None,
         }
     }
 

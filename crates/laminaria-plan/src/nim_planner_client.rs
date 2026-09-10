@@ -211,6 +211,7 @@ mod tests {
                     command_identity: "cargo build".to_string(),
                     inputs: vec![],
                     outputs: vec![ArtifactRef::declared("host-bin")],
+                    compiler_work: None,
                 },
                 Action {
                     id: "compile-nim-planner".to_string(),
@@ -218,6 +219,7 @@ mod tests {
                     command_identity: "nimble build".to_string(),
                     inputs: vec![],
                     outputs: vec![ArtifactRef::declared("planner-bin")],
+                    compiler_work: None,
                 },
                 Action {
                     id: "integrate".to_string(),
@@ -228,6 +230,7 @@ mod tests {
                         ArtifactRef::declared("planner-bin"),
                     ],
                     outputs: vec![],
+                    compiler_work: None,
                 },
             ],
         )
@@ -284,6 +287,7 @@ mod tests {
                     command_identity: "a".to_string(),
                     inputs: vec![ArtifactRef::declared("out-b")],
                     outputs: vec![ArtifactRef::declared("out-a")],
+                    compiler_work: None,
                 },
                 Action {
                     id: "b".to_string(),
@@ -291,6 +295,7 @@ mod tests {
                     command_identity: "b".to_string(),
                     inputs: vec![ArtifactRef::declared("out-a")],
                     outputs: vec![ArtifactRef::declared("out-b")],
+                    compiler_work: None,
                 },
             ],
         );
@@ -308,6 +313,83 @@ mod tests {
                 );
             }
             PlanOutcome::Planned(_) => panic!("expected the cycle to be rejected"),
+        }
+    }
+
+    /// Issue #27 B's own required alignment check: a `compiler_work`
+    /// descriptor sent to the *real* Nim planner binary must come back
+    /// byte-for-byte unchanged. The Nim kernel never inspects a
+    /// compiler-work action's descriptor contents beyond round-tripping
+    /// it -- dependency ordering still comes purely from `inputs`/
+    /// `outputs` matching, so mixing one compiler-work action with an
+    /// ordinary delegated-build action in the same request must still
+    /// order correctly.
+    #[test]
+    #[cfg(unix)]
+    fn a_compiler_work_descriptor_round_trips_through_the_real_planner_binary() {
+        use crate::compiler_work::{
+            CompilerWorkDescriptor, ResourceRequest, TransformKind, TransformParameters,
+            COMPILER_WORK_SCHEMA_VERSION,
+        };
+
+        let bin = real_planner_binary();
+        let descriptor = CompilerWorkDescriptor {
+            descriptor_schema_version: COMPILER_WORK_SCHEMA_VERSION.to_string(),
+            operation_version: "0.1.0".to_string(),
+            semantic_input_artifact_ids: vec!["lowered-1".to_string()],
+            requested_functions: vec![],
+            transform: Some(TransformParameters {
+                kind: TransformKind::Checked,
+                transform_version: "0.1.0".to_string(),
+                caller: "caller".to_string(),
+                callee: "callee".to_string(),
+            }),
+            source_provenance: None,
+            resource_request: ResourceRequest::minimal(),
+            budget_token: "budget-1".to_string(),
+        };
+        let input = PlanningInput::new(
+            vec!["transformed-1".to_string()],
+            vec![
+                Action {
+                    id: "lower".to_string(),
+                    kind: ActionKind::LowerSource,
+                    command_identity: "lower_source".to_string(),
+                    inputs: vec![ArtifactRef::source("fixtures/f.rs")],
+                    outputs: vec![ArtifactRef::declared("lowered-1")],
+                    compiler_work: None,
+                },
+                Action {
+                    id: "transform".to_string(),
+                    kind: ActionKind::TransformFunction,
+                    command_identity: "transform_function".to_string(),
+                    inputs: vec![ArtifactRef::declared("lowered-1")],
+                    outputs: vec![ArtifactRef::declared("transformed-1")],
+                    compiler_work: Some(descriptor.clone()),
+                },
+            ],
+        );
+
+        let outcome = call_planner(&bin, &input).unwrap();
+        match outcome {
+            PlanOutcome::Planned(plan) => {
+                assert_eq!(
+                    plan.ordered_actions,
+                    vec!["lower".to_string(), "transform".to_string()],
+                    "a compiler-work action's dependency must still order purely from \
+                     inputs/outputs matching, same as a delegated-build action"
+                );
+                assert_eq!(
+                    plan.actions["transform"].compiler_work.as_ref(),
+                    Some(&descriptor),
+                    "the descriptor must round-trip through the real Nim binary byte-for-byte"
+                );
+                assert!(
+                    plan.actions["lower"].compiler_work.is_none(),
+                    "an action with no descriptor must decode back to None, not a default"
+                );
+            }
+            PlanOutcome::Rejected(r) => panic!("expected a plan, got a rejection: {r:?}"),
         }
     }
 

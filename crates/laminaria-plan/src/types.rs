@@ -14,7 +14,18 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-pub const PLAN_SCHEMA_VERSION: &str = "0.1.0";
+use crate::compiler_work::CompilerWorkDescriptor;
+
+/// Bumped 0.1.0 -> 0.2.0 for issue #27's B: four new `ActionKind`
+/// variants and `Action`'s new optional `compiler_work` field. Backward
+/// compatible on the wire (every existing field/variant is unchanged, the
+/// new field is omitted entirely when absent -- see
+/// `compiler_work::tests::an_action_with_no_compiler_work_omits_the_field_entirely`),
+/// but bumped anyway so a producer/consumer pair that has not been
+/// updated together is still caught by the existing schema-version gate
+/// (`nim-planner/src/contract.nim`'s `planFromJson`) rather than silently
+/// running with a partially-understood contract.
+pub const PLAN_SCHEMA_VERSION: &str = "0.2.0";
 pub const PRODUCED_BY: &str = "laminaria-nim-planning-kernel";
 
 /// An external, pre-existing input (`Source`, a leaf with no producing
@@ -51,6 +62,16 @@ pub enum ActionKind {
     NimBuild,
     CargoBuild,
     Integrate,
+    /// Issue #27 B's own compiler-work kinds: LAMINARIA's owned pipeline
+    /// (`laminaria-ir::rust_frontend`/`nim_frontend`,
+    /// `laminaria-ir::transform`), not an existing compiler/backend
+    /// invocation -- carries a [`CompilerWorkDescriptor`] on `Action`.
+    /// `docs/compiler-ownership-contract.md` governs this: none of these
+    /// four ever shell out to `rustc`/`nim`/`llc`.
+    LowerSource,
+    ValidateIr,
+    TransformFunction,
+    EvaluateEvidence,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +81,13 @@ pub struct Action {
     pub command_identity: String,
     pub inputs: Vec<ArtifactRef>,
     pub outputs: Vec<ArtifactRef>,
+    /// Present only for `ActionKind::LowerSource`/`ValidateIr`/
+    /// `TransformFunction`/`EvaluateEvidence` -- `None` (and omitted from
+    /// the wire entirely, never emitted as a `null`) for every existing
+    /// delegated-build action kind, so this field's addition changes no
+    /// byte of the JSON `laminaria-planner` already produces for those.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compiler_work: Option<CompilerWorkDescriptor>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

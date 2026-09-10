@@ -18,10 +18,16 @@
 ## `outputs` as `ArtifactRef`s, and `planning_kernel.plan` derives the
 ## dependency graph itself by matching inputs against declared outputs.
 
-import std/[json, tables, sequtils]
+import std/[json, tables, sequtils, options]
 
-const PlanSchemaVersion* = "0.1.0"
+## `PlanSchemaVersion` bumped 0.1.0 -> 0.2.0 for issue #27's B: four new
+## `ActionKind` values plus `Action`'s new optional `compilerWork` field
+## mirror `crates/laminaria-plan/src/{types,compiler_work}.rs` exactly --
+## see that crate's own `PLAN_SCHEMA_VERSION` doc comment for why this is
+## bumped even though every existing field/variant is unchanged.
+const PlanSchemaVersion* = "0.2.0"
 const ProducedBy* = "laminaria-nim-planning-kernel"
+const CompilerWorkSchemaVersion* = "0.1.0"
 
 type
   ArtifactRefKind* = enum
@@ -47,6 +53,46 @@ type
     akNimBuild = "nim_build"
     akCargoBuild = "cargo_build"
     akIntegrate = "integrate"
+    ## Issue #27 B's own compiler-work kinds: LAMINARIA's owned pipeline
+    ## (`laminaria-ir`'s frontends/transforms), never an existing
+    ## compiler/backend invocation -- see
+    ## `crates/laminaria-plan/src/compiler_work.rs`'s own doc comment.
+    ## This kernel never constructs one of these itself, or inspects the
+    ## `compilerWork` descriptor's contents beyond round-tripping it --
+    ## dependency edges still come purely from `inputs`/`outputs`
+    ## matching, unchanged by which `ActionKind` an action has.
+    akLowerSource = "lower_source"
+    akValidateIr = "validate_ir"
+    akTransformFunction = "transform_function"
+    akEvaluateEvidence = "evaluate_evidence"
+
+  TransformKind* = enum
+    tkAnf = "anf"
+    tkChecked = "checked"
+
+  SourceProvenanceRef* = object
+    sourceFile*: string
+    sourceSnapshotId*: string
+
+  TransformParameters* = object
+    kind*: TransformKind
+    transformVersion*: string
+    caller*: string
+    callee*: string
+
+  ResourceRequest* = object
+    cpuSlots*: int
+    transientMemoryBytesEstimate*: int64
+
+  CompilerWorkDescriptor* = object
+    descriptorSchemaVersion*: string
+    operationVersion*: string
+    semanticInputArtifactIds*: seq[string]
+    requestedFunctions*: seq[string]
+    transform*: Option[TransformParameters]
+    sourceProvenance*: Option[SourceProvenanceRef]
+    resourceRequest*: ResourceRequest
+    budgetToken*: string
 
   Action* = object
     id*: string
@@ -57,6 +103,12 @@ type
       ## the literal argv the Rust executor ends up running.
     inputs*: seq[ArtifactRef]
     outputs*: seq[ArtifactRef]
+    compilerWork*: Option[CompilerWorkDescriptor]
+      ## Present only for the four compiler-work `ActionKind`s above --
+      ## `none` (and omitted from the JSON entirely, never emitted as
+      ## `null`) for every existing delegated-build action, matching
+      ## `crates/laminaria-plan/src/types.rs`'s own `Action.compiler_work`
+      ## exactly.
 
   PlanningInput* = object
     schemaVersion*: string
@@ -137,14 +189,58 @@ proc toJson*(a: ArtifactRef): JsonNode =
   of arkDeclared:
     %*{"kind": "declared", "artifact_id": a.artifactId}
 
-proc toJson*(a: Action): JsonNode =
+proc toJson*(t: TransformParameters): JsonNode =
   %*{
+    "kind": $t.kind,
+    "transform_version": t.transformVersion,
+    "caller": t.caller,
+    "callee": t.callee,
+  }
+
+proc toJson*(s: SourceProvenanceRef): JsonNode =
+  %*{
+    "source_file": s.sourceFile,
+    "source_snapshot_id": s.sourceSnapshotId,
+  }
+
+proc toJson*(r: ResourceRequest): JsonNode =
+  %*{
+    "cpu_slots": r.cpuSlots,
+    "transient_memory_bytes_estimate": r.transientMemoryBytesEstimate,
+  }
+
+proc toJson*(d: CompilerWorkDescriptor): JsonNode =
+  result = %*{
+    "descriptor_schema_version": d.descriptorSchemaVersion,
+    "operation_version": d.operationVersion,
+    "semantic_input_artifact_ids": d.semanticInputArtifactIds,
+    "resource_request": d.resourceRequest.toJson,
+    "budget_token": d.budgetToken,
+  }
+  # `requested_functions` mirrors Rust's own
+  # `#[serde(default, skip_serializing_if = "Vec::is_empty")]` -- omitted
+  # entirely when empty, not emitted as `[]`.
+  if d.requestedFunctions.len > 0:
+    result["requested_functions"] = %d.requestedFunctions
+  if d.transform.isSome:
+    result["transform"] = d.transform.get.toJson
+  if d.sourceProvenance.isSome:
+    result["source_provenance"] = d.sourceProvenance.get.toJson
+
+proc toJson*(a: Action): JsonNode =
+  result = %*{
     "id": a.id,
     "kind": $a.kind,
     "command_identity": a.commandIdentity,
     "inputs": a.inputs.map_it(it.toJson),
     "outputs": a.outputs.map_it(it.toJson),
   }
+  # Mirrors Rust's `#[serde(default, skip_serializing_if =
+  # "Option::is_none")]` on `Action.compiler_work` -- omitted entirely
+  # when absent, so this extension changes no byte of the JSON this
+  # kernel already emits for every existing delegated-build action.
+  if a.compilerWork.isSome:
+    result["compiler_work"] = a.compilerWork.get.toJson
 
 proc toJson*(i: PlanningInput): JsonNode =
   %*{
@@ -214,6 +310,12 @@ proc getStrSeqField(node: JsonNode, key: string): seq[string] =
       raise newException(ContractError, "field '" & key & "' must be an array of strings")
     result.add(item.getStr())
 
+proc getIntField(node: JsonNode, key: string): BiggestInt =
+  let field = node.expectField(key)
+  if field.kind != JInt:
+    raise newException(ContractError, "field '" & key & "' must be an integer")
+  field.getBiggestInt()
+
 proc artifactRefFromJson*(node: JsonNode): ArtifactRef =
   let kind = node.getStrField("kind")
   case kind
@@ -224,6 +326,51 @@ proc artifactRefFromJson*(node: JsonNode): ArtifactRef =
   else:
     raise newException(ContractError, "unknown ArtifactRef kind '" & kind & "'")
 
+proc transformKindFromJson(s: string): TransformKind =
+  case s
+  of "anf": tkAnf
+  of "checked": tkChecked
+  else: raise newException(ContractError, "unknown TransformKind '" & s & "'")
+
+proc transformParametersFromJson(node: JsonNode): TransformParameters =
+  TransformParameters(
+    kind: transformKindFromJson(node.getStrField("kind")),
+    transformVersion: node.getStrField("transform_version"),
+    caller: node.getStrField("caller"),
+    callee: node.getStrField("callee"),
+  )
+
+proc sourceProvenanceRefFromJson(node: JsonNode): SourceProvenanceRef =
+  SourceProvenanceRef(
+    sourceFile: node.getStrField("source_file"),
+    sourceSnapshotId: node.getStrField("source_snapshot_id"),
+  )
+
+proc resourceRequestFromJson(node: JsonNode): ResourceRequest =
+  ResourceRequest(
+    cpuSlots: node.getIntField("cpu_slots").int,
+    transientMemoryBytesEstimate: node.getIntField("transient_memory_bytes_estimate").int64,
+  )
+
+proc compilerWorkDescriptorFromJson(node: JsonNode): CompilerWorkDescriptor =
+  result = CompilerWorkDescriptor(
+    descriptorSchemaVersion: node.getStrField("descriptor_schema_version"),
+    operationVersion: node.getStrField("operation_version"),
+    semanticInputArtifactIds: node.getStrSeqField("semantic_input_artifact_ids"),
+    resourceRequest: node.expectField("resource_request").resourceRequestFromJson,
+    budgetToken: node.getStrField("budget_token"),
+  )
+  # `requested_functions` mirrors Rust's own `#[serde(default, ...)]` --
+  # absent means empty, not an error.
+  if node.hasKey("requested_functions"):
+    result.requestedFunctions = node.getStrSeqField("requested_functions")
+  else:
+    result.requestedFunctions = @[]
+  if node.hasKey("transform"):
+    result.transform = some(node["transform"].transformParametersFromJson)
+  if node.hasKey("source_provenance"):
+    result.sourceProvenance = some(node["source_provenance"].sourceProvenanceRefFromJson)
+
 proc actionFromJson*(node: JsonNode): Action =
   let kindStr = node.getStrField("kind")
   let kind =
@@ -231,18 +378,24 @@ proc actionFromJson*(node: JsonNode): Action =
     of "nim_build": akNimBuild
     of "cargo_build": akCargoBuild
     of "integrate": akIntegrate
+    of "lower_source": akLowerSource
+    of "validate_ir": akValidateIr
+    of "transform_function": akTransformFunction
+    of "evaluate_evidence": akEvaluateEvidence
     else: raise newException(ContractError, "unknown Action kind '" & kindStr & "'")
   let inputsNode = node.expectField("inputs")
   let outputsNode = node.expectField("outputs")
   if inputsNode.kind != JArray or outputsNode.kind != JArray:
     raise newException(ContractError, "'inputs'/'outputs' must be arrays")
-  Action(
+  result = Action(
     id: node.getStrField("id"),
     kind: kind,
     commandIdentity: node.getStrField("command_identity"),
     inputs: inputsNode.elems.map_it(it.artifactRefFromJson),
     outputs: outputsNode.elems.map_it(it.artifactRefFromJson),
   )
+  if node.hasKey("compiler_work"):
+    result.compilerWork = some(node["compiler_work"].compilerWorkDescriptorFromJson)
 
 proc planningInputFromJson*(node: JsonNode): PlanningInput =
   let actionsNode = node.expectField("actions")

@@ -276,6 +276,7 @@ pub fn project_planning_input(project_root: &Path, req: &ProjectRequirements) ->
             command_identity: "cargo build --release (target project)".to_string(),
             inputs: vec![ArtifactRef::source(project_root.display().to_string())],
             outputs: vec![ArtifactRef::declared(ARTIFACT_RUST_PROJECT)],
+            compiler_work: None,
         });
         demanded_artifacts.push(ARTIFACT_RUST_PROJECT.to_string());
     }
@@ -286,6 +287,7 @@ pub fn project_planning_input(project_root: &Path, req: &ProjectRequirements) ->
             command_identity: format!("nim c {} (target project)", entry.display()),
             inputs: vec![ArtifactRef::source(project_root.display().to_string())],
             outputs: vec![ArtifactRef::declared(ARTIFACT_NIM_PROJECT)],
+            compiler_work: None,
         });
         demanded_artifacts.push(ARTIFACT_NIM_PROJECT.to_string());
     }
@@ -731,6 +733,15 @@ pub fn run_project_generation(
             }
             ActionKind::Integrate => {
                 unreachable!("project_planning_input never emits an Integrate action")
+            }
+            ActionKind::LowerSource
+            | ActionKind::ValidateIr
+            | ActionKind::TransformFunction
+            | ActionKind::EvaluateEvidence => {
+                unreachable!(
+                    "project_planning_input never emits a compiler-work action -- issue #27 \
+                     owns their own in-process executor, a separate role from this one"
+                )
             }
         };
 

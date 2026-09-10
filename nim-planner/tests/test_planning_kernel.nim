@@ -4,7 +4,7 @@
 ## real `plan()`/`planFromJson()` functions, not against a synthetic
 ## re-implementation of them.
 
-import std/[unittest, json, tables, strutils]
+import std/[unittest, json, tables, strutils, options]
 import ../src/contract
 import ../src/planning_kernel
 
@@ -97,11 +97,60 @@ suite "planning_kernel.planFromJson (schema-version gate)":
     check outcome.rejection.reasonKind == rrkInvalidContractVersion
 
   test "a well-formed, current-version input plans successfully through planFromJson":
+    # `PlanSchemaVersion` interpolated rather than a hardcoded literal, so
+    # a future version bump can't leave this test silently testing a
+    # stale, now-rejected version.
     let raw = parseJson("""
-      {"schema_version": "0.1.0", "demanded_artifacts": [], "actions": [
+      {"schema_version": "$1", "demanded_artifacts": [], "actions": [
         {"id": "a", "kind": "nim_build", "command_identity": "x", "inputs": [], "outputs": []}
       ]}
-    """)
+    """ % [PlanSchemaVersion])
     let outcome = planFromJson(raw)
     check outcome.isPlanned
     check outcome.plan.orderedActions == @["a"]
+
+suite "planning_kernel.contract (issue #27 B: compiler-work descriptor)":
+  test "an action with no compiler_work omits the field entirely, round-tripped":
+    let a = action("a", akNimBuild, @[], @[])
+    let json = a.toJson
+    check not json.hasKey("compiler_work")
+    let decoded = json.actionFromJson
+    check decoded.compilerWork.isNone
+
+  test "a compiler-work action's descriptor round-trips through actionFromJson exactly":
+    let descriptor = CompilerWorkDescriptor(
+      descriptorSchemaVersion: CompilerWorkSchemaVersion,
+      operationVersion: "0.1.0",
+      semanticInputArtifactIds: @["prog-1"],
+      requestedFunctions: @["f", "g"],
+      transform: some(TransformParameters(
+        kind: tkChecked,
+        transformVersion: "0.1.0",
+        caller: "caller",
+        callee: "callee",
+      )),
+      sourceProvenance: some(SourceProvenanceRef(
+        sourceFile: "src/f.rs",
+        sourceSnapshotId: "hash-1",
+      )),
+      resourceRequest: ResourceRequest(cpuSlots: 1, transientMemoryBytesEstimate: 4096),
+      budgetToken: "budget-1",
+    )
+    var a = action("t", akTransformFunction, @[], @[declaredRef("out")])
+    a.compilerWork = some(descriptor)
+
+    let json = a.toJson
+    check json["kind"].getStr == "transform_function"
+    check json["compiler_work"]["transform"]["kind"].getStr == "checked"
+
+    let decoded = json.actionFromJson
+    check decoded.kind == akTransformFunction
+    check decoded.compilerWork.isSome
+    check decoded.compilerWork.get == descriptor
+
+  test "an unknown Action kind is a ContractError, not a silent default":
+    let raw = parseJson("""
+      {"id": "a", "kind": "not_a_real_kind", "command_identity": "x", "inputs": [], "outputs": []}
+    """)
+    expect(ContractError):
+      discard raw.actionFromJson

@@ -83,6 +83,7 @@ pub fn self_build_planning_input() -> PlanningInput {
                 command_identity: "nim c src/laminaria_planner.nim (nim-planner)".to_string(),
                 inputs: vec![ArtifactRef::source("nim-planner")],
                 outputs: vec![ArtifactRef::declared(ARTIFACT_PLANNER_BIN)],
+                compiler_work: None,
             },
             Action {
                 id: ACTION_COMPILE_RUST_HOST.to_string(),
@@ -93,6 +94,7 @@ pub fn self_build_planning_input() -> PlanningInput {
                     ArtifactRef::source("Cargo.toml"),
                 ],
                 outputs: vec![ArtifactRef::declared(ARTIFACT_HOST_BINS)],
+                compiler_work: None,
             },
             Action {
                 id: ACTION_INTEGRATE.to_string(),
@@ -103,6 +105,7 @@ pub fn self_build_planning_input() -> PlanningInput {
                     ArtifactRef::declared(ARTIFACT_HOST_BINS),
                 ],
                 outputs: vec![ArtifactRef::declared(ARTIFACT_GENERATION_ROOT)],
+                compiler_work: None,
             },
         ],
     )
@@ -286,6 +289,16 @@ pub fn run_generation(
                 vec![cargo_target_dir(generation_root).join("release")],
             ),
             ActionKind::Integrate => run_integrate_action(action, generation_root),
+            ActionKind::LowerSource
+            | ActionKind::ValidateIr
+            | ActionKind::TransformFunction
+            | ActionKind::EvaluateEvidence => Err(SelfBuildError::ActionFailed {
+                action_id: action.id.clone(),
+                detail: "compiler-work action kinds are not executable via this legacy \
+                         delegated-build self-build executor -- issue #27 owns their own \
+                         in-process executor, a separate role from this one"
+                    .to_string(),
+            }),
         };
 
         let outcome = result?;
