@@ -167,6 +167,42 @@ enum Commands {
         #[arg(long)]
         candidate: PathBuf,
     },
+    /// Gathers the self-build's PlanningInput, calls the real Nim
+    /// Planning Kernel, validates the returned ExecutionPlan, and
+    /// prints it (or the structured rejection) -- no execution
+    /// (issues #8/#6/#4's shared first slice).
+    PlanSelfBuild {
+        /// A specific `laminaria-planner` binary to call instead of the
+        /// one resolved next to this running `laminaria` executable
+        /// (`laminaria_plan::find_planner_binary`) -- e.g. to plan a
+        /// different generation's self-build with its own planner.
+        #[arg(long)]
+        planner: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Runs one self-build generation: plans (via the real Nim Planning
+    /// Kernel) and executes LAMINARIA's own Rust host + Nim planner
+    /// build from source, assembling the result into
+    /// `--generation-root` (issues #8/#6/#4's shared first slice).
+    SelfBuild {
+        #[arg(long)]
+        generation_root: PathBuf,
+        /// Human-readable lineage tag recorded into each action's Run
+        /// evidence (e.g. "stage0-to-stage1").
+        #[arg(long, default_value = "generation")]
+        generation_label: String,
+        #[arg(long)]
+        planner: Option<PathBuf>,
+        #[arg(long, default_value = "runs")]
+        runs_root: PathBuf,
+        #[arg(long, default_value = "toolchains.lock.toml")]
+        lock: PathBuf,
+        #[arg(long, default_value = ".")]
+        repo_root: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -262,6 +298,24 @@ fn main() {
             baseline,
             candidate,
         } => scenario_compare_command(baseline, candidate),
+        Commands::PlanSelfBuild { planner, json } => plan_self_build_command(planner, json),
+        Commands::SelfBuild {
+            generation_root,
+            generation_label,
+            planner,
+            runs_root,
+            lock,
+            repo_root,
+            json,
+        } => self_build_command(
+            generation_root,
+            generation_label,
+            planner,
+            runs_root,
+            lock,
+            repo_root,
+            json,
+        ),
     };
     std::process::exit(code);
 }
@@ -535,6 +589,146 @@ fn regenerate_summary_command(runs_root: PathBuf, run_id: String) -> i32 {
         }
         Err(err) => {
             eprintln!("laminaria regenerate-summary: failed: {err}");
+            2
+        }
+    }
+}
+
+/// Resolves the `laminaria-planner` binary to call: `--planner` if given,
+/// otherwise whatever `laminaria_plan::find_planner_binary` resolves
+/// next to this running executable. Never falls back to any other
+/// source of a plan (issue #8: "a Rust replacement planner... cannot
+/// satisfy this slice").
+fn resolve_planner_binary(explicit: Option<PathBuf>) -> Result<PathBuf, i32> {
+    if let Some(planner) = explicit {
+        return Ok(planner);
+    }
+    laminaria_plan::find_planner_binary().ok_or_else(|| {
+        eprintln!(
+            "laminaria: could not find the laminaria-planner binary next to this executable \
+             (expected it built alongside laminaria-cli from nim-planner/); pass --planner to \
+             name one explicitly"
+        );
+        2
+    })
+}
+
+fn plan_self_build_command(planner: Option<PathBuf>, json: bool) -> i32 {
+    let planner_binary = match resolve_planner_binary(planner) {
+        Ok(planner_binary) => planner_binary,
+        Err(code) => return code,
+    };
+
+    let input = laminaria_run::self_build::self_build_planning_input();
+    let outcome = match laminaria_plan::call_planner(&planner_binary, &input) {
+        Ok(outcome) => outcome,
+        Err(err) => {
+            eprintln!("laminaria plan-self-build: failed to call the Nim planner: {err}");
+            return 2;
+        }
+    };
+
+    if let laminaria_plan::PlanOutcome::Planned(plan) = &outcome {
+        if let Err(err) = laminaria_plan::validate(plan) {
+            eprintln!(
+                "laminaria plan-self-build: the returned ExecutionPlan failed validation: {err}"
+            );
+            return 2;
+        }
+    }
+
+    if json {
+        match serde_json::to_string_pretty(&outcome) {
+            Ok(text) => println!("{text}"),
+            Err(err) => {
+                eprintln!("laminaria plan-self-build: failed to serialize PlanOutcome: {err}");
+                return 2;
+            }
+        }
+    } else {
+        match &outcome {
+            laminaria_plan::PlanOutcome::Planned(plan) => {
+                println!("plan_id: {}", plan.plan_id);
+                println!("produced_by: {}", plan.produced_by);
+                println!("ordered_actions: {:?}", plan.ordered_actions);
+            }
+            laminaria_plan::PlanOutcome::Rejected(rejection) => {
+                println!(
+                    "rejected: {:?}: {}",
+                    rejection.reason_kind, rejection.reason_detail
+                );
+                if !rejection.cycle_path.is_empty() {
+                    println!("cycle_path: {}", rejection.cycle_path.join(" -> "));
+                }
+            }
+        }
+    }
+
+    match outcome {
+        laminaria_plan::PlanOutcome::Planned(_) => 0,
+        laminaria_plan::PlanOutcome::Rejected(_) => 1,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn self_build_command(
+    generation_root: PathBuf,
+    generation_label: String,
+    planner: Option<PathBuf>,
+    runs_root: PathBuf,
+    lock: PathBuf,
+    repo_root: PathBuf,
+    json: bool,
+) -> i32 {
+    let planner_binary = match resolve_planner_binary(planner) {
+        Ok(planner_binary) => planner_binary,
+        Err(code) => return code,
+    };
+
+    match laminaria_run::self_build::run_generation(
+        &repo_root,
+        &generation_root,
+        &planner_binary,
+        &generation_label,
+        &runs_root,
+        &lock,
+    ) {
+        Ok(generation) => {
+            if json {
+                let summary = serde_json::json!({
+                    "plan_id": generation.plan.plan_id,
+                    "generation_root": generation.generation_root,
+                    "ordered_actions": generation.plan.ordered_actions,
+                    "actions": generation.actions.iter().map(|a| serde_json::json!({
+                        "action_id": a.action_id,
+                        "succeeded": a.succeeded,
+                        "detail": a.detail,
+                        "run_id": a.run.as_ref().map(|r| r.run_id.clone()),
+                    })).collect::<Vec<_>>(),
+                });
+                match serde_json::to_string_pretty(&summary) {
+                    Ok(text) => println!("{text}"),
+                    Err(err) => {
+                        eprintln!("laminaria self-build: failed to serialize result: {err}");
+                        return 2;
+                    }
+                }
+            } else {
+                println!("plan_id: {}", generation.plan.plan_id);
+                println!("generation_root: {}", generation.generation_root.display());
+                for action in &generation.actions {
+                    println!(
+                        "  {} -> {} ({})",
+                        action.action_id,
+                        if action.succeeded { "ok" } else { "FAILED" },
+                        action.detail
+                    );
+                }
+            }
+            0
+        }
+        Err(err) => {
+            eprintln!("laminaria self-build: {err}");
             2
         }
     }

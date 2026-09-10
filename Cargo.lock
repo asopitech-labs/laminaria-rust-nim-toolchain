@@ -198,6 +198,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "laminaria-fingerprint",
+ "laminaria-plan",
  "laminaria-run",
  "serde_json",
 ]
