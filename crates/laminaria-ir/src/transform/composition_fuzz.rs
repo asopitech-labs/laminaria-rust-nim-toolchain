@@ -18,8 +18,9 @@
 //!   identically, or rejects the whole transform outright with one of its
 //!   own declared `TransformError` variants -- silently producing a wrong
 //!   value or a wrong effect order is the only outcome this battery treats
-//!   as a failure, matching A3's explicit "die zwar unbeweisbar konservativ
-//!   ablehnen" allowance ("最初は証明できない組合せを保守的に拒否してよい").
+//!   as a failure, matching A3's explicit allowance to conservatively
+//!   reject a combination it cannot yet prove safe
+//!   ("最初は証明できない組合せを保守的に拒否してよい").
 //!
 //! "Observed effects" means calls to `mark` specifically -- a shared,
 //! explicit instrumentation contract, not an ad-hoc per-test filter (A3's
