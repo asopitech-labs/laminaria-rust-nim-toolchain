@@ -1,5 +1,19 @@
 # Backend Pipeline White-boxing Research Direction
 
+## Ownership correction (2026-09-10)
+
+The [compiler ownership contract](compiler-ownership-contract.md) governs research objectives and acceptance.
+
+Existing LLVM, Nim, rustc, native-link and Wasm pipelines in this document are comparison/observation experiments. Their diagrams, adapter APIs and checkpoint criteria do not prescribe LAMINARIA's own compiler architecture. #25/#3 supply the independently implemented source/IR path; #5/#13 must demonstrate that path, not merely admit it as a future variant. An external-backend result cannot qualify independent compilation.
+
+## Required demonstration on the owned pipeline
+
+Connect #25/#3's source-derived IR and LAMINARIA analysis, transformations and target generation to #6/#8. Distinguish logical, observation, checkpoint and execution boundaries; evaluate at least one owned computation partition and checkpoint decision with semantic and resource evidence. Completing the LLVM/Wasm experiments below alone cannot satisfy this requirement.
+
+## Scope of existing-backend experiments below
+
+The provider examples, LLVM/ThinLTO/Wasm pipelines, external fallbacks and their completion criteria below are reference/observation work. Feed results into owned-compiler grouping and checkpoint economics without automatically adopting existing backends on the main path.
+
 ## Purpose
 
 LAMINARIA must not decompose Rust and Nim frontends and codegen units only to treat the selected backend, linker, or WebAssembly toolchain as another opaque action.

@@ -1,5 +1,10 @@
 # `incremental-semantic-edit` fixture
 
+## Evidence classification correction (2026-09-10)
+
+This file preserves historical fixture/measurement and implementation evidence, not the current research delivery order. Existing-compiler builds and driver self-builds recorded below are **reference/bootstrap/delegated-build baselines**, not proof of LAMINARIA compiler ownership or independent self-hosting. The [compiler ownership contract](../../docs/compiler-ownership-contract.md) governs current issue acceptance; historical checklists do not close the revised requirements.
+
+
 #11's "incremental semantic edit" Core workload: a workspace with one
 *designated* single-line semantic edit, a fixed expected pre/post value
 for it, and an explicit expected invalidation set — the shape a future

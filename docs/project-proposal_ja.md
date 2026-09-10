@@ -1,5 +1,11 @@
 # LAMINARIA
 
+## 責務の訂正（2026-09-10）
+
+[独自コンパイラの責務契約](compiler-ownership-contract_ja.md)を研究目的・完了判定の基準とする。
+
+独自コンパイラ・IR・スケジューラが本経路であり、任意の後続統合ではない。Cargo/Nim ecosystemは依存解決に利用できるが、以下に登場する既存コンパイル経路は比較・観測または外部bootstrapのbaselineであり、本ビルドの選択肢ではない。Action Graphは言語IRの代わりにならない。
+
 ## Rust Nim Unified Toolchain
 
 ### RustとNimのcompiler pipeline、依存関係、生成物、実行計画を単一の計算グラフとして扱う統合ツールチェーンの研究開発
@@ -60,62 +66,35 @@ LAMINARIAの中心的な問いは、RustとNimがそれぞれ独立して持つd
 
 ## 4. 研究ゴール
 
-### 4.1 Unified Program Graph
+### 4.1 Unified Program Graph と独自IR
 
-package dependencyだけでなく、compilerが認識するprogram structureを共通グラフへ統合する。対象にはpackage、crate、Nim module、target、feature、generic instance、generated source、codegen unit、FFI artifact、metadata、object、archiveを含む。RustとNimの内部表現を直接同一化するのではなく、各compilerからLAMINARIAの共通semantic modelへ写像する。
+LAMINARIA自身がRust/Nimソースを処理し、型、値、制御・データ依存、所有権、効果、overflow、runtime要件と由来を保持するIR群を研究・実装する。各既存compilerの出力を共通planning metadataへ写像するだけではない。packageやartifactの関係と、プログラムの意味を混同しない。
 
 ### 4.2 Compiler Pipeline Decomposition
 
-compiler invocationを一つのActionとして扱うのではなく、その内部pipelineを複数の計算段階としてモデル化する。
+既存rustc/Nimのstage mapは比較・情報損失の観測に使う。本経路は言語の意味から必要な解析・変換・無効化境界を独立に導出し、LAMINARIA自身で実装する。MIR、CGU、Nim-generated Cの境界を既定にしない。
 
 ```text
-Rust: Frontend → HIR / semantic representation → MIR → MIR transformation
-→ monomorphization collection → codegen units → backend lowering
-→ backend optimization → object generation → link
-
-Nim: Frontend → semantic representation → backend transformation
-→ generated C / C++ / Objective-C / JavaScript → native compiler
-→ object generation → link
+Rust source / Nim source / both
+  → LAMINARIA source processing + semantic facts
+  → LAMINARIA-owned IR(s) + provenance
+  → legal analysis / transformation / specialization
+  → demand-driven partition and resource plan
+  → LAMINARIA target lowering / code generation
+  → target artifacts + explicit runtime/link contract
 ```
-
-両者を共通Action Graph上へ展開する。
 
 ### 4.3 Backend-Agnostic Compilation Model
 
-LLVMをRust専用の固定backendとは扱わず、backendを独立したgraph primitiveとしてモデル化する。
-
-```text
-Language IR → Backend Action → Backend IR / Machine Artifact
-```
-
-RustではMIR / monomorphized programからLLVM、Cranelift、GCC backendを、Nimではsemantic programからC、C++、Objective-C、JavaScriptのbackend familyを扱う。backend selectionをvariant resolutionの対象とし、`language × target × optimization × backend × native compiler × linker` を共通のconstraint problemとして扱う。
+LAMINARIA自身のtarget loweringとコード生成を研究する。LLVM/Cranelift/GCCやNimのC/JS経路は比較用であり、それらの選択を本コンパイラの代替にしない。target・ABI・runtime・最適化契約を表現し、実装と証拠で採否を決める。
 
 ### 4.4 Unified Action Graph
 
-共通Actionには次を表現できる。
+独自の意味解析、解析依存の更新、合法性判定、変換、specialization、target生成、artifactの保持・転送・再計算を表現する。Actionは外部processである必要はなく、言語名ごとにqueueを分けない。順序付きcommand列だけをcompiler IRと呼ばない。
 
-```text
-RustFrontend / RustAnalysis / RustMIR / RustMonomorphization / RustCodegenUnit
-NimFrontend / NimAnalysis / NimBackendGeneration
-BackendLowering / BackendOptimization
-CCompile / CppCompile / ObjectGeneration
-BindingGeneration / Archive / Link / Test / CodeGeneration
-```
+### 4.5 Compiler-work Scheduling
 
-言語名はscheduler queueを分割する属性ではなく、そのActionの意味を説明するmetadataとなる。
-
-### 4.5 Codegen Unit Scheduling
-
-Rust compiler内部のcodegen unitと、Nimが生成したnative source compilationを同じscheduling problemとして扱えるかを研究する。
-
-```text
-Rust CGU A ─── LLVM ─────→ A.o
-Rust CGU B ─── Cranelift → B.o
-Nim C unit C ─ clang ────→ C.o
-Nim C unit D ─ clang ────→ D.o
-```
-
-目的は別々の並列性を最大化することではなく、最終artifactまでのcritical pathを最小化する並列実行である。
+独自IR上の計算をどこまで同一process・memory内で統合し、どこから並列・別nodeへ分割するかを研究する。意味依存、解析状態、critical path、core/cache/NUMA、memory帯域・容量、I/O/network費用を同時に扱う。既存Rust CGUとNim C unitのscheduleは比較baselineである。
 
 ### 4.6 Combinatorial Graph Resolution
 
@@ -129,7 +108,7 @@ dependencyをpackage同士のedgeだけでなく、次の形で扱う。
 Producer Action → Artifact → Consumer Action
 ```
 
-ArtifactにはRust metadata、MIR-related compiler metadata、object file、LLVM bitcode、generated C / C++、C header、static archive、dynamic library、executableなどがある。dependencyを理解するために必要なartifactと、machine codeを生成するために必要なartifactを区別する。
+本経路のartifactはLAMINARIAの意味・解析・変換・target表現とそのidentityを含む。比較経路ではRust metadata/MIR、LLVM bitcode、Nim-generated C等も記録するが、独自IRと互換とは仮定しない。
 
 ### 4.8 Semantic Build / Check Separation
 
@@ -195,28 +174,21 @@ graph construction、normalization、variant resolution、constraint solving、a
 
 ### Rust Runtime
 
-CLI、application logic、compiler/tool discovery、filesystem、process lifecycle、async execution、resource accounting、cache / CAS、daemon、IPC、sandbox execution、native process scheduling、diagnostics transportを担当する。Rust関連処理に閉じず、Nim compilerやLLVM等を含めたexecution infrastructureを管理する。
+CLI、OS interaction、resource accounting、storage、IPC、診断と独自コンパイラ計算の実行をRust runtimeが担う。比較・bootstrapの外部process実行は別の役割であり、本経路のcompile engineではない。
 
 ## 6. LAMINARIA Compiler Topology
 
 ```text
-Source Graph
-├─ Rust Frontend → Rust Semantic IR → MIR / Specialization ┐
-└─ Nim Frontend → Nim Semantic IR → Transformation ├→ Backend Graph
-│ ├─ LLVM
-│ ├─ Cranelift
-│ ├─ GCC
-│ ├─ C / C++
-│ └─ JS
-↓
-Artifact Graph
-↓
-Objects / Metadata / Archive / Link
-↓
-Final Artifact
+Rust source / Nim source / both
+  → LAMINARIA source processing + semantic facts
+  → LAMINARIA-owned IR(s) + provenance
+  → legal analysis / transformation / specialization
+  → demand-driven partition and resource plan
+  → LAMINARIA target lowering / code generation
+  → target artifacts + explicit runtime/link contract
 ```
 
-このgraph全体を一つのplannerとschedulerから扱う。
+この経路のコンパイラ計算をNim plannerとRust runtime schedulerが扱う。独自source/IR処理なしのbuild graphはbootstrap・比較用であり、Rust-only/Nim-onlyでも本経路の所有権を変えない。
 
 ## 7. 比較対象
 
@@ -236,9 +208,9 @@ LAMINARIAの特徴は、build systemの上位からcompilerを操作するだけ
 
 ## 8. 研究仮説
 
-- **仮説A:** package/task graphだけではcross-language optimizationには粗すぎ、compiler pipeline内部をAction Graphへ露出することで新しい並列性とcache reuseが得られる。
+- **仮説A:** package/task graphでは保持できない意味依存を独自IRで表し、解析・変換・再利用と並列性を導出できる。
 - **仮説B:** LLVMをRust専用backendとして固定せず、backend selectionをgraph上のvariantとして扱うことでcompiler/toolchain architectureを一般化できる。
-- **仮説C:** Rust codegen unitとNim generated-native-source compileを同じschedulerへ載せることで、nested parallelismより短いglobal critical pathを実現できる。
+- **仮説C:** 独自コンパイラ計算の垂直統合と水平分割を資源に応じて選び、既存compilerのnested scheduleより短いcritical pathまたは少ない資源使用を得られるかを検証する。
 - **仮説D:** semantic artifactとmachine artifactを分離することで、check、build、test等を異なるartifact demandとして統一できる。
 - **仮説E:** FFIをgraph primitiveとして扱うことで、言語境界のincremental invalidationを通常のdependency propagationへ統合できる。
 - **仮説F:** compiler stage単位のcontent identityにより、crate/package単位より細かいartifact reuseが成立する。
@@ -280,4 +252,4 @@ LAMINARIAが目指すのは、Rust build、Nim build、C compilation、LLVM code
 
 **LAMINARIA — Rust Nim Unified Toolchain**
 
-LAMINARIA researches and implements a unified computational model for Rust and Nim toolchains, decomposing language frontends, semantic stages, code generation, compiler backends, artifacts, caching, and execution into a single explainable action graph for cross-language planning and resource-aware scheduling.
+LAMINARIA researches and implements its own compiler, semantic IRs, transformations, target generation and resource-aware scheduler for Rust and Nim, ultimately compiling its own Rust + Nim implementation. Existing toolchains are separate reference/bootstrap tools, not the target compilation engines.

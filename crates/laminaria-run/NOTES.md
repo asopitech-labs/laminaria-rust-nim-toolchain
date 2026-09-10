@@ -1,5 +1,10 @@
 # `laminaria-run` — issue #19 findings and verification log
 
+## Evidence classification correction (2026-09-10)
+
+This file preserves historical fixture/measurement and implementation evidence, not the current research delivery order. Existing-compiler builds and driver self-builds recorded below are **reference/bootstrap/delegated-build baselines**, not proof of LAMINARIA compiler ownership or independent self-hosting. The [compiler ownership contract](../../docs/compiler-ownership-contract.md) governs current issue acceptance; historical checklists do not close the revised requirements.
+
+
 Implements a first, honest slice of `docs/measurement-foundation.md`'s
 Run schema and process/resource tracer. This file records the empirical
 checks the design leans on, and precisely what's covered vs. still open

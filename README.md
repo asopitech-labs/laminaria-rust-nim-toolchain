@@ -2,32 +2,21 @@
 
 **Rust Nim Unified Toolchain**
 
-LAMINARIA is a research and development project for a unified computational model and toolchain for Rust and Nim. It decomposes dependency resolution, compiler pipelines, backend selection and backend-internal pipelines, artifact production, linking, caching, and execution into a single explainable action graph.
+LAMINARIA researches and develops **its own compiler, IRs, and scheduler for Rust and Nim**. It is not an orchestrator whose compilation engine is Cargo/rustc, Nim, or LLVM. Rust-only, Nim-only and mixed source use the same LAMINARIA-owned compilation substrate.
 
-It does not treat Cargo, `rustc`, Nimble, Nim, LLVM, LTO, linkers, or WebAssembly tooling as opaque commands joined by an outer build script when finer boundaries are observable and useful. LAMINARIA models the path from source programs to executable actions:
+`Source + resolved dependencies → owned semantic analysis / IR → owned transformations and compiler-work planning → resource-aware execution → owned target generation`
 
-`Source Graph → Compiler Pipeline → Unified Program Graph → Variant / Artifact Graph → Backend Pipeline Graph → Action Graph → Nim Planning Kernel → Rust Runtime Scheduler`
+Cargo/Nim ecosystem tools may supply package/dependency resolution. Existing compilers and backends are separately identified reference/observation and external-bootstrap tools, not target-build fallbacks. LLVM is prior art whose design pressures are independently re-derived, not a fixed foundation or an optional route that substitutes for compiler ownership.
 
-Rust compiler stages—including HIR, MIR, monomorphization, codegen units, `rustc_codegen_ssa`, LLVM, Cranelift, GCC backends, LTO, object generation, and linking—are studied alongside Nim frontend and semantic processing, backend generation, generated native source, native compilation, object generation, and linking.
+LAMINARIA itself is implemented in Rust and Nim: the **Nim Planning Kernel** owns deterministic graph/constraint computation; the **Rust Runtime Scheduler** owns execution, OS effects and live resource accounting. The ultimate self-hosting goal is to compile this Rust + Nim implementation and its dependencies using LAMINARIA's own compiler.
 
-Compiler version is a first-class graph dimension rather than an ambient machine setting. LAMINARIA is designed to support multiple exact Rust toolchains as well as Nim 2 and Nim 3/Nimony, resolving package/workspace constraints into a selected toolchain while preserving the producing compiler/toolchain identity in Run, Action, Artifact, cache, and compatibility decisions. Cross-version compiler-semantic artifacts are not assumed compatible without explicit evidence.
+Vertical integration and horizontal distribution are joint research subjects: compiler work, analysis lifetime, memory/cache/NUMA, storage/network, persistence and heterogeneous host/target placement must be planned together. Single-language speedups are an evaluation opportunity, not a prerequisite or a claim of current performance.
 
-The internal variant space may be broad, but ordinary users should not need to solve exact Rust/Nim/backend/linker combinations manually. LAMINARIA exposes evidence-backed **Validated Toolchain Profiles** such as `recommended`, `latest-validated`, `long-term`, and `preview`, then progressively exposes intent presets, advanced overrides, and expert graph constraints. Profile aliases always resolve to immutable exact bundle revisions before execution; overrides re-evaluate qualification rather than inheriting a validation badge blindly.
+## Current implementation versus goal
 
-**Tool UX is itself a project objective.** LAMINARIA must not turn its combinatorial flexibility into a requirement for humans or coding agents to repeatedly edit configuration, run a build, parse a failure, and try another compiler/backend combination. The normal path is constraint resolution and pruning first, then a small ranked set of evidence-backed viable plans, then execution. Known incompatibilities and qualification failures are preserved as structured negative knowledge so equivalent failures do not need to be rediscovered across runs or agent sessions. Broad brute-force exploration remains available explicitly for research, not as the default UX.
+The current `build`/`plan-build` and `self-build` commands still schedule coarse Cargo/Nim actions sequentially. They are **delegated-build/bootstrap baselines**, not the intended compiler or independent self-hosting. The semantic-substrate fixture contains hand-authored IR, a limited evaluator/transform and an LLVM comparison projection; it is not a Rust/Nim source compiler.
 
-LLVM is neither excluded nor treated as the fixed foundation. LLVM, Cranelift, GCC, and other code-generation routes are selectable backend engines, and selected routes may expand into observable nested backend pipelines. WebAssembly is modeled as a target pipeline that can include code generation, `wasm-ld`, post-link optimization, WIT/adapters, and componentization rather than as a peer backend value to LLVM.
-
-Before LAMINARIA optimizes these paths, it establishes a permanent measurement spine that fingerprints the real environment/toolchains and records end-to-end process/resource traces, compiler-native telemetry, artifact deltas, scenario/cache state, and measurement overhead. The same evidence model is then reused by compiler, backend, scheduler, cache, profile qualification, agent-oriented UX, and WASM research.
-
-LAMINARIA is itself implemented in Rust and Nim:
-
-- **Nim Planning Kernel:** graph normalization, constraint solving, combinatorial resolution, artifact-demand propagation, pruning, critical-path analysis, and planning optimization.
-- **Rust Runtime Scheduler:** CLI, toolchain discovery, operating-system interaction, process execution, resource accounting, cache/CAS, daemon services, measurement/tracing infrastructure, and scheduling.
-
-The boundary is **computation and planning vs. execution and side effects**, not “Rust processing vs. Nim processing.”
-
-**Rust and Nim, as one computational graph.**
+See the [compiler ownership contract](docs/compiler-ownership-contract.md), [日本語の責務契約](docs/compiler-ownership-contract_ja.md), and [audit and corrected issue order](docs/research-intent-audit-2026-09-10.md). The next core slice is **#25 + #3 + #6 + #8**, with evidence infrastructure built alongside it. [Project-build](docs/project-build.md) and [self-build](docs/self-build.md) retain accurate instructions for the current baseline commands; this documentation correction does not change their behavior.
 
 ## Core concepts
 

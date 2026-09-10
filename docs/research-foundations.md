@@ -1,5 +1,11 @@
 # LAMINARIA Research Foundations
 
+## Ownership correction (2026-09-10)
+
+The [compiler ownership contract](compiler-ownership-contract.md) governs research objectives and acceptance.
+
+Own compiler/IR/scheduler development is the main path, not optional later integration. Cargo/Nim ecosystem tools may resolve dependencies; existing compilation routes below are reference/observation or external-bootstrap baselines, not target-build alternatives. The Action Graph is not a substitute for a language IR.
+
 ## Rust Nim Unified Toolchain
 
 ### Status
@@ -10,7 +16,7 @@ LAMINARIA studies whether Rust and Nim development can be represented as one exp
 
 The project statement is:
 
-> LAMINARIA researches and implements a unified computational model for Rust and Nim toolchains, decomposing language frontends, semantic stages, code generation, compiler backends, artifacts, caching, and execution into a single explainable action graph for cross-language planning and resource-aware scheduling.
+> LAMINARIA researches and implements its own compiler, semantic IRs, transformations, target generation and resource-aware scheduler for Rust and Nim, ultimately compiling its own Rust + Nim implementation. Existing toolchains are separate reference/bootstrap tools, not the target compilation engines.
 
 ## 1. Motivation
 
@@ -34,7 +40,7 @@ LAMINARIA treats this as an infrastructure problem rather than a collection of p
 
 LAMINARIA is not intended to be a thin command wrapper around `cargo build` and `nimble build`. An outer task runner cannot fully coordinate tools that each own an internal dependency graph, compiler pipeline, and parallel scheduler.
 
-The central thesis is that useful cross-language optimization requires progressively exposing the work hidden behind language-level build commands:
+The central thesis is that useful cross-language optimization requires owning semantic representations and compiler computations from source, so their dependencies and resource needs can be planned together:
 
 ```text
 Source Graph
@@ -66,10 +72,10 @@ This model separates five concerns that are often collapsed into a single build 
 
 LAMINARIA is organized around the following questions:
 
-1. Can Rust and Nim compiler pipelines be projected into a shared graph without discarding language-specific semantics?
+1. Can LAMINARIA process Rust/Nim source into owned IR and compiler computations without discarding language-specific semantics?
 2. What is the minimum stable contract between compiler analysis, artifact planning, and execution?
 3. Can backend choice be modeled as a graph variant rather than a fixed property of a language toolchain?
-4. Can Rust codegen units and Nim-generated native compilation participate in one resource-aware schedule?
+4. Which owned compiler computations should be grouped in memory or partitioned across cores/nodes under one resource-aware schedule?
 5. Can FFI generation and ABI validation become ordinary graph dependencies with precise invalidation?
 6. Can content identity be defined at compiler-stage and artifact boundaries so results can be reused across worktrees, CI checkouts, and machines?
 7. Can demand-driven expansion control the combinatorial space of targets, profiles, features, backends, host/target roles, artifact kinds, and FFI variants?
@@ -85,7 +91,7 @@ The Source Graph records packages, crates, Nim modules, local workspaces, genera
 
 ### 4.2 Compiler Pipeline Graph
 
-The Compiler Pipeline Graph models the transformations that a language tool performs. A compiler invocation may begin as an opaque action during bootstrap, but the research direction is to expose progressively finer boundaries where those boundaries are observable and useful.
+The Compiler Pipeline Graph represents owned semantic analysis, transformations and generation. The rustc/Nim routes below are reference observation maps, not a prescription conditioned on upstream API availability. Opaque invocations belong to separately recorded external-bootstrap/reference work.
 
 Conceptually, the Rust path includes:
 
@@ -117,7 +123,7 @@ These sequences are research maps. LAMINARIA must distinguish stable integration
 
 ### 4.3 Unified Program Graph
 
-The Unified Program Graph is the shared semantic planning layer. It does not attempt to make MIR and Nim's internal representations identical. Instead, each compiler projects relevant entities and relationships into a common contract:
+The Unified Program Graph relates LAMINARIA's source-derived semantic representations to planning. It is not an aggregation of existing compiler metadata. Owned IRs define semantics, transformations and analysis legality alongside the following planning entities.
 
 - logical program units;
 - dependency edges;
@@ -165,44 +171,31 @@ This makes `check`, `build`, and `test` different artifact demands rather than u
 The Action Graph contains executable work. Candidate action kinds include:
 
 ```text
-RustFrontend
-RustAnalysis
-RustMIR
-RustMonomorphization
-RustCodegenUnit
-NimFrontend
-NimAnalysis
-NimBackendGeneration
-BackendLowering
-BackendOptimization
-CCompile
-CppCompile
-BindingGeneration
-ObjectGeneration
-Archive
-Link
-Test
-CodeGeneration
-Custom
+ParseRustSource / ParseNimSource
+SemanticAnalysis / IRConstruction
+AnalysisUpdate / LegalTransformation / Specialization
+PartitionPlanning / TargetLowering / TargetGeneration
+ArtifactRetain / Materialize / Transfer / Recompute
+RuntimeBoundary / Archive / Link / Test / Diagnostics
 ```
 
 Language is metadata on an action, not a reason to place it in a separate scheduling universe.
 
 ## 5. Backend Graph
 
-LLVM is neither excluded nor treated as the fixed foundation of LAMINARIA. LLVM, Cranelift, GCC-based code generation, and future routes are modeled as selectable backend components where the source compiler permits such selection.
+The target path uses LAMINARIA-owned target lowering and code generation. LLVM, Cranelift, GCC and Nim C/C++/Objective-C/JS are separately represented reference routes. Backend choices exposed by an existing source compiler do not define LAMINARIA's architecture.
 
 ```text
-Language representation
-    → Backend selection
-    → Backend lowering
-    → Backend optimization
-    → Machine artifact
+Rust source / Nim source / both
+  → LAMINARIA source processing + semantic facts
+  → LAMINARIA-owned IR(s) + provenance
+  → legal analysis / transformation / specialization
+  → demand-driven partition and resource plan
+  → LAMINARIA target lowering / code generation
+  → target artifacts + explicit runtime/link contract
 ```
 
-For Nim, C, C++, Objective-C, and JavaScript generation are likewise backend-family choices with their own downstream artifact and execution requirements.
-
-The research problem is not merely choosing the fastest backend. It is expressing backend choice, toolchain compatibility, produced artifact types, diagnostic quality, cache identity, and downstream linking requirements as constraints in the same plan.
+Target, optimization, runtime/ABI, artifact, diagnostics, cache and link requirements are constraints. No fallback may cross the compiler-ownership role boundary.
 
 ## 6. FFI as a graph primitive
 
@@ -341,7 +334,7 @@ Incrementality is treated as three related layers:
 2. compiler-semantic and codegen invalidation; and
 3. artifact and action-cache reuse.
 
-The system must preserve correctness when a compiler exposes only coarser boundaries. Fine-grained integration is an optimization, not a prerequisite for a valid build.
+Coarse observations remain valid for reference compilers only. The independent compiler may deliberately group work in-process, but unavailable LAMINARIA semantics/code generation must fail explicitly; an external compiler is not a valid target-build fallback.
 
 ## 11. Agent-oriented explainability
 
@@ -367,39 +360,18 @@ Every important decision should have a structured explanation: selected variant,
 
 ## 12. Delivery strategy
 
-LAMINARIA should descend into compiler internals gradually.
+The delivery path is independent compiler development, supported by separately classified baseline and bootstrap work.
 
-### Phase 1: Unified interface
+1. **#25 + #3:** define a small Rust/Nim source-language contract and implement source processing into LAMINARIA-owned IR, with provenance, diagnostics and a legal/rejected transformation.
+2. **#6 + #8, concurrently:** make those compiler computations executable through the production Nim planning kernel and Rust resource-aware runtime. A topological order of Cargo/Nim invocations is baseline evidence, not this milestone.
+3. **Target generation:** implement a narrow LAMINARIA-owned target path with explicit runtime/link obligations; verify the produced artifact and absence of delegated compilation. An interpreter can validate IR earlier but is not code-generation completion.
+4. **#7 + #12:** measure controlled invalidation, reuse and work elimination within that compiler. Hardware-aware grouping, persistence and distribution shape the representation from the start and expand with measured evidence.
+5. **#26:** expose supported Rust-only, Nim-only and mixed inputs through this same substrate. Existing dependency resolvers may supply inputs, not compile them.
+6. **#2:** expand language/dependency coverage until the Rust + Nim implementation compiles itself through stage0 → stage1 → stage2 using LAMINARIA's own compiler.
 
-Provide one CLI for build, run, test, check, formatting, linting, graph inspection, cache status, and toolchain diagnostics. Existing ecosystem tools remain the execution engines.
+The necessary #10/#11/#18–#21 evidence is built alongside each slice. #4 runtime/ABI integration can proceed in parallel, but linking the planner does not replace the compiler milestone.
 
-### Phase 2: Unified package and target graph
-
-Normalize Cargo and Nimble metadata into a common workspace model. Add cross-language dependencies, affected analysis, and dependency explanations.
-
-### Phase 3: Planning IR and Nim kernel
-
-Stabilize `PlanningInput` and `ExecutionPlan`. Implement SCC analysis, constraint resolution, lazy variant expansion, pruning, and critical-path computation in Nim.
-
-See `docs/self-build.md` for the first implemented slice of this contract (issues #8/#6/#4): a production Nim Planning Kernel, a Rust subprocess client, and `laminaria self-build`'s stage0/stage1 protocol. Cycle detection, deterministic ordering, and structured rejection are implemented; SCC-based variant pruning and critical-path computation remain open.
-
-### Phase 4: Unified action scheduler
-
-Represent generated native compilation, bindings, archives, and linking as actions. Enforce global CPU and memory budgets from the Rust runtime.
-
-### Phase 5: Fine-grained compiler integration
-
-Experiment with compiler-stage, codegen-unit, semantic-artifact, and backend boundaries where stable or maintainable integration is possible.
-
-### Phase 6: Persistent and distributed execution
-
-Add a daemon, durable graph state, remote cache, sandbox execution, and an abstract remote executor without inventing a new distributed protocol prematurely.
-
-### Phase 7: Self-hosting
-
-Use LAMINARIA to build its own Rust host and Nim planning kernel. Compare successive-stage plans and artifacts to continuously exercise the mixed-language architecture.
-
-See `docs/self-build.md`: stage0 (built by an external tool) → stage1 (built by LAMINARIA's own plan+execute pipeline, with stage1's own planner independently verified to work) is implemented. stage1 → stage2 and generation comparison remain open.
+[Current self-build](self-build.md) documents the implemented external-compiler driver baseline. Its generation protocol is useful bootstrap evidence, not independent compiler self-hosting.
 
 ## 13. Evaluation plan
 
@@ -436,7 +408,7 @@ LAMINARIA will test the following hypotheses:
 
 - **H1:** A package/task graph is too coarse for meaningful cross-language optimization; exposing compiler-pipeline work enables additional parallelism and reuse.
 - **H2:** Backend selection can be represented as a constrained graph variant without making LLVM or any other backend the universal foundation.
-- **H3:** Rust codegen units and Nim-generated native compilation can share one scheduler and reduce nested parallelism and global critical-path length.
+- **H3:** One scheduler can group/partition owned IR analysis, transformations and target work, enabling measured critical-path and memory/I/O comparison against nested compiler baselines.
 - **H4:** Semantic and machine artifacts can be separated so `check`, `build`, and `test` become different artifact demands over one graph.
 - **H5:** Treating FFI as a graph primitive produces more precise regeneration and invalidation than external build scripts.
 - **H6:** Compiler-stage content identity enables reuse finer than package-level caching.
@@ -445,11 +417,11 @@ LAMINARIA will test the following hypotheses:
 
 ## 15. Non-goals and constraints
 
-LAMINARIA is initially specific to Rust and Nim. It is not intended to become a fully generic replacement for Bazel, Buck2, Cargo, Nimble, `rustc`, Nim, LLVM, or native compilers.
+LAMINARIA targets Rust and Nim semantics and develops its own compiler, IR and scheduler. It need not reproduce all rustc/Nim/LLVM APIs, support every language feature immediately, or replace package registries and mature dependency resolvers.
 
-The project should preserve existing manifests and lockfiles during adoption. It should reuse mature resolvers and compilers before attempting to replace their responsibilities. Fine-grained compiler integration must not make a correct coarse-grained build impossible.
+Preserve existing manifests and lockfiles where their semantics are supported. Reuse package resolution separately from compilation. Existing compilers are reference/observation and explicit external-bootstrap tools, not the execution engines of the target compiler.
 
-Hermeticity and remote execution are staged capabilities, not initial requirements. Local development must remain useful with existing host toolchains.
+Unsupported syntax, macro/build-script dependencies, runtime or target requirements must be diagnosed rather than delegated. Remote execution and complete language coverage can grow incrementally; compiler ownership cannot be an optional optimization.
 
 ## 16. Licensing direction
 
@@ -471,14 +443,14 @@ The next research decisions should focus on interfaces rather than implementatio
 
 1. What is the smallest useful `PlanningInput` and `ExecutionPlan` schema?
 2. Which artifact kinds require first-class identity in the initial implementation?
-3. Which Rust and Nim compiler boundaries are stable enough for adapters?
+3. What minimal contract preserves supported Rust/Nim source semantics in LAMINARIA-owned IR?
 4. How are dynamic dependencies incorporated without constant replanning?
 5. Which constraints belong in the Nim planner, and which remain runtime admission rules?
 6. How are toolchain identities normalized across machines?
 7. What is the minimum structured explanation schema for agents?
 8. How can self-hosting validate plan determinism and artifact reproducibility?
 
-The highest-priority deliverable is the planning contract between the Nim kernel and Rust runtime. Once that contract is stable, graph resolution, scheduling, caching, diagnostics, and future executor implementations can evolve independently around it.
+The highest-priority deliverable is a source-derived LAMINARIA IR/compiler slice connected to the Nim planner and Rust scheduler (#25/#3/#6/#8). Stabilize their contracts together; a process-planning contract alone is not the compiler substrate.
 
 
 

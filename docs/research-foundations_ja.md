@@ -1,5 +1,11 @@
 # LAMINARIA 研究基盤
 
+## 責務の訂正（2026-09-10）
+
+[独自コンパイラの責務契約](compiler-ownership-contract_ja.md)を研究目的・完了判定の基準とする。
+
+独自コンパイラ・IR・スケジューラが本経路であり、任意の後続統合ではない。Cargo/Nim ecosystemは依存解決に利用できるが、以下に登場する既存コンパイル経路は比較・観測または外部bootstrapのbaselineであり、本ビルドの選択肢ではない。Action Graphは言語IRの代わりにならない。
+
 ## Rust Nim Unified Toolchain
 
 ### 文書の位置づけ
@@ -10,7 +16,7 @@ LAMINARIA は、Rust と Nim の開発を、依存解決、コンパイラ段階
 
 プロジェクトステートメントは次のとおりである。
 
-> LAMINARIA は、Rust と Nim のツールチェーンを統合する計算モデルを研究・実装する。言語フロントエンド、意味解析、コード生成、コンパイラバックエンド、成果物、キャッシュ、実行を、言語横断の計画とリソース認識スケジューリングに利用できる、単一の説明可能な Action Graph へ分解する。
+> LAMINARIAはRust/Nimを対象に独自コンパイラ・意味IR・変換・target生成・資源認識schedulerを研究・実装し、最終的にRust + Nimで書かれた自身をコンパイルする。既存toolchainは比較・bootstrapに分離し、本コンパイルengineにはしない。
 
 ## 1. 動機
 
@@ -32,7 +38,7 @@ Rust と Nim を組み合わせるプロジェクトでは、次の基盤が繰�
 
 LAMINARIA は `cargo build` と `nimble build` を包むだけの薄い command wrapper を目指さない。内部に依存グラフ、コンパイラパイプライン、並列 scheduler を持つツール同士は、外側の task runner だけでは完全に協調できない。
 
-有効な言語横断最適化には、言語単位の build command の内側に隠れた作業を段階的に公開する必要がある。
+有効な言語横断最適化には、ソースからの意味表現とコンパイラ計算を自身で保持・実行し、その依存と資源要求を一緒に計画する必要がある。
 
 ```text
 Source Graph
@@ -64,10 +70,10 @@ Rust Runtime Scheduler
 
 LAMINARIA は次の問いを中心に構成する。
 
-1. Rust と Nim の compiler pipeline を、言語固有の意味を失わず shared graph へ投影できるか
+1. Rust/Nimソースから独自IRとcompiler計算を、言語固有の意味を失わず構築できるか
 2. compiler analysis、artifact planning、execution 間の最小かつ安定した契約は何か
 3. backend 選択を言語 toolchain の固定属性ではなく、制約付き graph variant として扱えるか
-4. Rust codegen unit と Nim 生成 native compilation を一つの resource-aware schedule に載せられるか
+4. 独自compiler計算のどこをmemory内で統合し、どこをcore/nodeへ分割して一つの資源認識scheduleにするか
 5. FFI generation と ABI validation を、正確な invalidation を持つ通常の graph dependency にできるか
 6. compiler stage と artifact 境界で content identity を定義し、worktree、CI checkout、machine 間で再利用できるか
 7. target、profile、feature、backend、host/target role、artifact kind、FFI variant の組合せ爆発を demand-driven expansion で制御できるか
@@ -83,7 +89,7 @@ Source Graph は package、crate、Nim module、local workspace、generated sour
 
 ### 4.2 Compiler Pipeline Graph
 
-Compiler Pipeline Graph は、言語ツールが実行する変換をモデル化する。bootstrap 段階では compiler invocation 全体を opaque action として扱ってもよいが、観測可能で有用な境界を段階的に細分化する。
+Compiler Pipeline Graphは独自コンパイラの意味解析・変換・生成を表す。以下のrustc/Nim経路は比較観測用の地図であり、公開APIの有無に本コンパイラの構造や対応範囲を委ねない。外部bootstrapのopaque invocationは別役割で記録する。
 
 Rust 側の概念的な経路は次のとおりである。
 
@@ -115,7 +121,7 @@ source
 
 ### 4.3 Unified Program Graph
 
-Unified Program Graph は共有の semantic planning layer である。MIR と Nim の内部表現を同一化するのではなく、各 compiler が計画に必要な entity と relationship を共通契約へ投影する。
+Unified Program GraphはLAMINARIA自身がソースから構築する意味表現と計画の関係を保持する。各compilerのmetadataを寄せ集めるだけではない。IR群には意味の保存・変換・解析の合法性を定義し、以下のplanning entityとの関係を持たせる。
 
 - logical program unit
 - dependency edge
@@ -161,42 +167,31 @@ artifact には semantic metadata、Rust metadata、generated C / C++、header�
 Action Graph は実行可能な作業を含む。候補となる action kind は次のとおりである。
 
 ```text
-RustFrontend
-RustAnalysis
-RustMIR
-RustMonomorphization
-RustCodegenUnit
-NimFrontend
-NimAnalysis
-NimBackendGeneration
-BackendLowering
-BackendOptimization
-CCompile
-CppCompile
-BindingGeneration
-ObjectGeneration
-Archive
-Link
-Test
-CodeGeneration
-Custom
+ParseRustSource / ParseNimSource
+SemanticAnalysis / IRConstruction
+AnalysisUpdate / LegalTransformation / Specialization
+PartitionPlanning / TargetLowering / TargetGeneration
+ArtifactRetain / Materialize / Transfer / Recompute
+RuntimeBoundary / Archive / Link / Test / Diagnostics
 ```
 
 言語は action の metadata であり、別々の scheduling universe に分離する理由ではない。
 
 ## 5. Backend Graph
 
-LLVM を排除することも、LAMINARIA の固定基盤とすることもしない。source compiler が選択を許す場合、LLVM、Cranelift、GCC 系 code generation、将来の経路を選択可能な backend component として扱う。
+本経路はLAMINARIA自身のtarget lowering・コード生成である。LLVM、Cranelift、GCC、Nim C/C++/Objective-C/JSは比較観測経路として別に表現する。既存source compilerが公開するbackend選択肢を独自コンパイラの構造としない。
 
 ```text
-Language representation
-    → Backend selection
-    → Backend lowering
-    → Backend optimization
-    → Machine artifact
+Rust source / Nim source / both
+  → LAMINARIA source processing + semantic facts
+  → LAMINARIA-owned IR(s) + provenance
+  → legal analysis / transformation / specialization
+  → demand-driven partition and resource plan
+  → LAMINARIA target lowering / code generation
+  → target artifacts + explicit runtime/link contract
 ```
 
-Nim の C、C++、Objective-C、JavaScript 生成も、それぞれ下流の artifact と execution requirement を持つ backend family の選択肢である。研究課題は最速 backend の選択だけではない。backend choice、toolchain compatibility、artifact type、diagnostic quality、cache identity、downstream linking requirement を同じ plan の制約として表現する。
+target、最適化、runtime/ABI、artifact、診断、cache、link要件を制約として扱う。役割を跨ぐfallbackは行わない。
 
 ## 6. Graph primitive としての FFI
 
@@ -333,7 +328,7 @@ incrementality は三つの関連層として扱う。
 2. compiler-semantic / codegen invalidation
 3. artifact / action-cache reuse
 
-compiler が粗い境界しか公開しない場合も correctness を保つ。fine-grained integration は最適化であり、正しい coarse-grained build の前提条件ではない。
+比較用compilerの粗い観測は保持できる。本コンパイラ内で計算を意図的にまとめることと、既存compilerへ委譲することは別である。LAMINARIAの意味処理・コード生成が未対応なら明示的に停止し、外部compilerで本ビルドを成立させない。
 
 ## 11. Agent-oriented explainability
 
@@ -357,39 +352,18 @@ laminaria explain-cache-miss
 
 ## 12. Delivery strategy
 
-compiler 内部への統合は段階的に進める。
+独自コンパイラを実装する本経路と、比較・bootstrapの補助経路を分離する。
 
-### Phase 1: Unified interface
+1. **#25 + #3:** 小さなRust/Nimソースの意味契約を定め、独自IRへの言語処理、由来・診断、合法／拒否する変換を実装する。
+2. **#6 + #8を並行:** そのコンパイラ計算を本番Nim plannerとRust資源認識runtimeから実行する。Cargo/Nim呼び出しのtopological sortはbaselineであり、この到達点ではない。
+3. **ターゲット生成:** 狭い範囲でもLAMINARIA独自の生成経路とruntime/link契約を実装し、成果物と外部コンパイル不使用を検証する。IR interpreterによる先行検証はコード生成完了ではない。
+4. **#7 + #12:** 同じコンパイラで制御変更、無効化、再利用、仕事の除去を測る。hardwareに合わせた計算の統合・永続化・分散は表現設計から考慮し、証拠とともに拡張する。
+5. **#26:** Rust-only・Nim-only・混成の対応入力を同じ基盤で処理する。既存resolverは入力を供給できるが、コンパイルはしない。
+6. **#2:** 言語・依存の対応範囲を自身のRust + Nim実装まで広げ、独自compilerでstage0 → stage1 → stage2を成立させる。
 
-build、run、test、check、format、lint、graph inspection、cache status、toolchain diagnostics を一つの CLI から提供する。既存 ecosystem tool は引き続き execution engine として利用する。
+必要な#10/#11/#18–#21の証拠は各スライスと並行して整える。#4のruntime/ABI統合も並行できるが、plannerのlinkをcompiler実装の代替にしない。
 
-### Phase 2: Unified package and target graph
-
-Cargo と Nimble の metadata を共通 workspace model へ正規化し、言語横断 dependency、affected analysis、dependency explanation を追加する。
-
-### Phase 3: Planning IR and Nim kernel
-
-`PlanningInput` と `ExecutionPlan` を安定化する。Nim で SCC analysis、constraint resolution、lazy variant expansion、pruning、critical-path computation を実装する。
-
-この契約の最初の実装スライス(issue #8/#6/#4)は `docs/self-build_ja.md` を参照: 本番Nim Planning Kernel、Rustサブプロセスクライアント、`laminaria self-build` の stage0/stage1 プロトコル。サイクル検出・決定的順序付け・構造化された却下は実装済み。SCCベースのvariant pruningとcritical-path computationは未着手。
-
-### Phase 4: Unified action scheduler
-
-generated native compilation、binding、archive、linking を action として表現し、Rust runtime が global CPU / memory budget を強制する。
-
-### Phase 5: Fine-grained compiler integration
-
-維持可能な範囲で compiler stage、codegen unit、semantic artifact、backend boundary を実験する。
-
-### Phase 6: Persistent and distributed execution
-
-新しい分散 protocol を早期に発明せず、daemon、durable graph state、remote cache、sandbox execution、abstract remote executor を追加する。
-
-### Phase 7: Self-hosting
-
-LAMINARIA 自身の Rust host と Nim planning kernel を LAMINARIA で build する。連続 stage の plan と artifact を比較し、mixed-language architecture を継続的に検証する。
-
-`docs/self-build_ja.md` を参照: stage0(外部ツールでビルド)→ stage1(LAMINARIA自身のplan+executeパイプラインでビルドし、stage1自身のプランナーが動作することを独立に検証済み)は実装済み。stage1 → stage2 と世代間比較は未着手。
+[現行self-build](self-build_ja.md)は外部コンパイラを呼ぶdriver baselineの実装記録である。世代プロトコルはbootstrapの証拠として有用だが、独自compiler self-hostingではない。
 
 ## 13. 評価計画
 
@@ -424,7 +398,7 @@ LAMINARIA 自身の Rust host と Nim planning kernel を LAMINARIA で build �
 
 - **H1:** package/task graph は言語横断最適化には粗すぎる。compiler-pipeline work の公開により、追加の並列性と再利用が可能になる。
 - **H2:** LLVM など特定 backend を普遍的基盤にせず、backend selection を constrained graph variant として表現できる。
-- **H3:** Rust codegen unit と Nim-generated native compilation は一つの scheduler を共有し、nested parallelism と global critical-path length を削減できる。
+- **H3:** 独自IRの解析・変換・target計算を一つのschedulerで統合・分割し、nested compilerのbaselineに対するcritical pathとmemory/I/Oの効果を検証できる。
 - **H4:** semantic artifact と machine artifact を分離し、`check`、`build`、`test` を一つの graph に対する異なる artifact demand として扱える。
 - **H5:** FFI を graph primitive として扱うことで、external build script より精密な regeneration と invalidation が可能になる。
 - **H6:** compiler-stage content identity により package-level cache より細粒度の再利用が可能になる。
@@ -433,9 +407,11 @@ LAMINARIA 自身の Rust host と Nim planning kernel を LAMINARIA で build �
 
 ## 15. Non-goals と制約
 
-LAMINARIA は当初 Rust と Nim に特化する。Bazel、Buck2、Cargo、Nimble、`rustc`、Nim、LLVM、native compiler をすべて置き換える汎用システムを目指さない。
+Rust/Nimの意味を対象に、独自コンパイラ・IR・schedulerを開発する。rustc/Nim/LLVMの全APIの再現、全言語機能の即時対応、package registryや成熟したdependency resolverの置換は必要ない。
 
-導入時には既存 manifest と lockfile を保持し、責務を置き換える前に成熟した resolver と compiler を再利用する。fine-grained compiler integration が、正しい coarse-grained build を不可能にしてはならない。hermeticity と remote execution は段階的機能であり、初期要件ではない。既存 host toolchain を用いた local development を有用なまま保つ。
+対応する意味の範囲で既存manifest/lockfileを保持し、package解決はコンパイルと分離して再利用する。既存compilerは比較・観測と明示的な外部bootstrapのためのツールであり、本compilerのexecution engineではない。
+
+未対応構文、macro/build-script依存、runtime、targetは診断し、外部compilerへ委譲しない。分散や言語対応は段階的に進められるが、compiler所有権は任意の最適化ではない。
 
 ## 16. ライセンス方針
 
@@ -455,14 +431,14 @@ third-party compiler、backend、library、generated support code、linked runti
 
 1. 最小で有用な `PlanningInput` / `ExecutionPlan` schema は何か
 2. 初期実装で first-class identity が必要な artifact kind は何か
-3. adapter に利用できる安定した Rust / Nim compiler boundary はどこか
+3. 対応Rust/Nimソースから独自IRへ意味を保持して処理する最小の契約は何か
 4. constant replanning なしで dynamic dependency をどう取り込むか
 5. Nim planner の constraint と runtime admission rule をどう分けるか
 6. machine 間で toolchain identity をどう正規化するか
 7. agent 向け structured explanation schema の最小形は何か
 8. self-hosting で plan determinism と artifact reproducibility をどう検証するか
 
-最優先の deliverable は Nim kernel と Rust runtime 間の planning contract である。この契約が安定すれば、graph resolution、scheduling、caching、diagnostics、将来の executor implementation を独立して発展させられる。
+最優先のdeliverableはソースから導出する独自IR・compilerの小さな実装をNim planner/Rust schedulerへ接続することである（#25/#3/#6/#8）。契約を共同で育てる。process計画の契約だけではcompiler基盤にならない。
 
 ## 18. 先行する scheduling 実験と reference benchmark
 

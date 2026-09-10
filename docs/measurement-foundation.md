@@ -1,5 +1,11 @@
 # Measurement Foundation Research Direction
 
+## Ownership correction (2026-09-10)
+
+The [compiler ownership contract](compiler-ownership-contract.md) governs research objectives and acceptance.
+
+Use one evidence infrastructure but separate independent-compilation, reference and bootstrap results. External process/native-telemetry experiments below remain useful baseline evidence. The independent path additionally needs source-to-IR provenance, IR/transform revision, in-process compiler work/analysis invalidation and scheduler ownership; a process trace alone cannot prove these. Implement the minimum evidence alongside #25/#3/#6/#8, not all measurement work as a serial prerequisite.
+
 ## Purpose
 
 Before LAMINARIA optimizes compiler pipelines, backends, LTO, linkers, or WebAssembly target pipelines, it needs a permanent measurement spine that can reproduce the same input under the same toolchain and execution state, then observe the whole path in terms of time, resources, artifacts, and compiler-native telemetry.
@@ -14,7 +20,7 @@ A Run should cover the real path from workspace preparation through frontend, co
 
 ## 1. First things to stabilize
 
-The repository is currently research-document centric and has no LAMINARIA runtime, CI harness, toolchain lock, or benchmark collector. This makes it possible to make measurement infrastructure the first permanent code.
+The initial plan began with a document-centric repository. The repository now contains lock/fingerprint, Run, CI, planner and delegated-build baseline code. The list below defines measurement responsibilities, not a requirement to finish all measurement before implementing the owned compiler.
 
 Stabilize first:
 

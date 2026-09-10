@@ -1,5 +1,10 @@
 # `rust-nim-llvm-lto-compatibility` fixture
 
+## Evidence classification correction (2026-09-10)
+
+This file preserves historical fixture/measurement and implementation evidence, not the current research delivery order. Existing-compiler builds and driver self-builds recorded below are **reference/bootstrap/delegated-build baselines**, not proof of LAMINARIA compiler ownership or independent self-hosting. The [compiler ownership contract](../../docs/compiler-ownership-contract.md) governs current issue acceptance; historical checklists do not close the revised requirements.
+
+
 #11's "Rust/Nim 2/Nimony shared LLVM/LTO compatibility workload" Core
 workload. `docs/research-program.md` Track J names three candidate
 paths from Rust/Nim source to LLVM IR/bitcode:

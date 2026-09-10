@@ -1,5 +1,11 @@
 # Rust–Nim Native Linking 研究計画
 
+## 責務の訂正（2026-09-10）
+
+[独自コンパイラの責務契約](compiler-ownership-contract_ja.md)を研究目的・完了判定の基準とする。
+
+本書のLLVM、Nim、rustc、native-link、Wasm経路は比較・観測実験である。図・adapter API・checkpoint条件をLAMINARIA独自コンパイラの規定にしない。#25/#3が独自実装するsource/IR経路を#5/#13で実証し、将来variantとして許容するだけにしない。外部backendによる成果は独自コンパイルの認定にならない。
+
 ## 目的
 
 LAMINARIAでは、RustとNimの両方を同一native artifact/link planへ参加させる際に、cross-language boundaryを必ず一度「C向けexport + header + C ABI」へ縮退させる必要があるのかを検証する。
@@ -89,7 +95,7 @@ LAMINARIAがuser-facing C exportとは独立したcross-language symbol identity
 
 adapterが必要なら、そのadapter自体をAction Graph上の明示的node/artifactとして扱う。
 
-**実証済みの知見(`fixtures/direct-native-link/NOTES.md`)**: fixed-layout recordは**ポインタ経由**であれば安全に共有できる — 独立に宣言したRustの`#[repr(C)] struct`とNimの`{.bycopy.} object`は、両者が実行時に自分自身のレイアウトを計算して相互比較する形で検証した結果、テスト済みの全Nim側ルート(`nim c`と`nlvm`)で一致した。したがってポインタ経由がこのmatrixにおけるこの型classの採用ベースラインとなる。同じ構造体を**値渡し**で共有するのは、少なくとも1つのルートで既知・低優先度の制限がある(`nlvm`ではテストした全形状で壊れているが`nim c`は影響なし) — これは対応すべき知見ではない。値渡しの集合体を引数・返り値に使うこと自体が、バックエンドを問わず手書きの言語間FFIコードとしては一般的でないパターンだからである。将来これに対応する必要が生じた場合の正しい形は、境界を越える値渡し集合体をLAMINARIA自身のツールが透過的にポインタ渡しへラップすることであり、手書きコードの作法として回避することではない。固定長整数・浮動小数点数・生ポインタ(Layer 1-2のスカラー)にはルート依存性が全く見られない。
+**比較経路での観測**（`fixtures/direct-native-link/NOTES.md`）: テストしたfixed-layout recordはポインタ経由で`nim c`/`nlvm`の対象経路で一致し、値渡しaggregateには経路依存の失敗があった。これは限定した外部ツールのABI観測であり、Rust/Nim全般の互換保証ではない。「手書きFFIでは一般的でない」ことは、独自コンパイラでの優先度を決める根拠にならない。#25/#3の対応ソース意味から値・所有権・layout・adapterの責務を導出し、未解決を不要扱いしない。
 
 ### 4. Runtime / Failure Semantics
 
@@ -181,7 +187,7 @@ C ABIを必須のarchitectural boundaryとする
 - runtime requirementを無視すること
 - unsafe transmutationをinterop designとすること
 - C shimを隠してABI-freeと表現すること
-- Rust/Nim frontendを置き換えること
+- このlinking Issue内でfrontend全体を実装すること（独自source/IR処理は#3/#25の責務であり、プロジェクトの非目標ではない）
 
 ## 成功条件
 

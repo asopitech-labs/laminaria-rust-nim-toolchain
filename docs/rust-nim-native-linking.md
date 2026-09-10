@@ -1,5 +1,11 @@
 # Rust–Nim Native Linking Research
 
+## Ownership correction (2026-09-10)
+
+The [compiler ownership contract](compiler-ownership-contract.md) governs research objectives and acceptance.
+
+Existing LLVM, Nim, rustc, native-link and Wasm pipelines in this document are comparison/observation experiments. Their diagrams, adapter APIs and checkpoint criteria do not prescribe LAMINARIA's own compiler architecture. #25/#3 supply the independently implemented source/IR path; #5/#13 must demonstrate that path, not merely admit it as a future variant. An external-backend result cannot qualify independent compilation.
+
 ## Objective
 
 LAMINARIA investigates a Rust/Nim integration path in which both languages participate in one native artifact and link plan without requiring the cross-language boundary to be expressed first as a conventional exported C ABI.
@@ -89,7 +95,7 @@ Candidate classes:
 
 For every accepted class, record size, alignment, field offsets, ownership, lifetime and mutation rules. If a class requires a generated adapter, the adapter becomes an explicit Action Graph node and artifact.
 
-**Working evidence, `fixtures/direct-native-link/NOTES.md`**: fixed-layout records/structs are safe to share **by pointer** — an independently-declared Rust `#[repr(C)] struct` and Nim `{.bycopy.} object` agree in size/alignment/field offsets, verified by both sides computing their own layout at runtime and cross-checking, on every Nim-side route tested (`nim c` and `nlvm`). By-pointer is therefore this matrix's accepted baseline for the class. Sharing the same struct **by value** is a known, low-priority gap on at least one route (broken in every shape tested on `nlvm`, `nim c` unaffected) — not itself evidence to act on, since by-value aggregate parameters/returns are an unusual pattern for hand-written cross-language FFI code regardless of backend. If this ever needs to be closed, the right shape is LAMINARIA's own tooling transparently wrapping a by-value aggregate into a pointer-passing call at the boundary, not a hand-written-code convention. Fixed-width integers, floats and raw pointers (Layer 1-2 scalars) show no route-dependence at all.
+**Observed reference evidence** (`fixtures/direct-native-link/NOTES.md`): the tested fixed-layout records agreed by pointer on the tested `nim c` and `nlvm` routes; by-value aggregates showed route-dependent failures. These are restricted external-tool ABI observations, not a general Rust/Nim compatibility guarantee. Whether hand-written FFI commonly uses a pattern does not decide its priority for an independent compiler. Derive value, ownership, layout and adapter obligations from #25/#3's supported source semantics; preserve unresolved cases instead of declaring them irrelevant.
 
 ### Layer 4 — Runtime and failure semantics
 
@@ -175,7 +181,7 @@ Every experiment must commit or reproducibly generate:
 - bypassing language runtime requirements;
 - treating unsafe transmutation as an interoperability design;
 - hiding C shims while describing the path as ABI-free;
-- replacing either compiler frontend.
+- implementing the whole frontend within this linking issue; owned source/IR processing is required by #3/#25, not a project non-goal.
 
 ## Success criteria
 

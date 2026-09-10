@@ -2,34 +2,21 @@
 
 This file maps the GitHub issue set to the research program. The GitHub issues are the execution tracker; this document preserves the intended research decomposition and dependency order.
 
-## Measurement foundation — execute first
+## Compiler ownership and execution order — corrected 2026-09-10
 
-LAMINARIA must measure the ordinary toolchain path before replacing or optimizing it. The permanent measurement spine is therefore an architectural dependency of the later compiler/backend/scheduler experiments.
+The [compiler ownership contract](compiler-ownership-contract.md) governs this plan. The goal is an independent Rust/Nim compiler, IR and scheduler that ultimately compile LAMINARIA itself. External-compiler orchestration/self-build is reference/bootstrap evidence, not the primary delivery milestone.
 
-1. Measurement spine, reference workloads and metrics harness — #11
-   - multi-version native measurement environments and exact toolchain fingerprints — #18
-   - versioned end-to-end Run envelope and process/resource tracer — #19
-   - artifact deltas and compiler-native telemetry — #20
-   - baseline scenarios, repetition/noise policy and regression comparison — #21
+1. **#25 + #3 + #6 + #8 together:** declare a supported source subset, derive and implement its semantic IR/transformations, connect compiler work to the production Nim planner/Rust runtime, and implement a narrow owned target-generation path.
+2. **#10/#11/#18–#21 in parallel:** minimum source/IR/producer/path/resource evidence, separate from external reference/bootstrap runs. Full measurement/profile coverage is not a serial gate.
+3. **#7/#12:** sound identity, invalidation, reuse and work elimination in the owned compiler; retain existing coarse experiments as baselines.
+4. **#26:** Rust-only/Nim-only/mixed public inputs all use that same owned path, never fall back to the respective existing compiler.
+5. **#2:** expand supported language/dependency coverage to compile the real Rust + Nim implementation through independent stage0 → stage1 → stage2 generations.
 
-Recommended order:
+#4 runtime/ABI integration supports delivery but is not a replacement for compiler development. #5/#13 define owned target routes and compiler-work boundaries; #14–#17 remain prior-art/comparison experiments feeding #25. #22–#24 distinguish owned compiler profiles from external reference/bootstrap matrices.
 
-```text
-#18 Environment / Multi-version Toolchain Identity
-  ├→ #22 Toolchain Version Variant / Compatibility Model
-  ↓
-#19 Run + Process/Resource Trace
-  ↓
-#20 Artifact + Version-aware Compiler Telemetry
-  ↓
-#21 Scenario + Comparison Discipline
-  ↓
-#23 Validated Profiles / Progressive Configuration
-  ↓
-#24 Agent-oriented Bounded Planning / UX
-  ↓
-#3/#7/#13–#17 and scheduler/cache research consume the same evidence spine
-```
+## Measurement foundation — supporting track
+
+#11 comprises #18 environment/fingerprints, #19 Run/lifecycle tracing, #20 artifact/compiler evidence and #21 scenario/comparison discipline. Respect dependencies within this track without postponing the small independent compiler slice. Retain historical measured results at their demonstrated scope.
 
 The detailed designs are documented in:
 
@@ -168,7 +155,7 @@ Broad brute-force exploration remains available explicitly for research mode.
 
 UX evaluation includes external build attempts avoided, failed toolchain attempts, time-to-first-viable-plan, explored/pruned/merged states, negative-knowledge reuse, fallback count, and agent log/context volume.
 
-## Toolchain profile rule
+## Toolchain profile rule — role-separated qualification
 
 LAMINARIA intentionally has two different surfaces:
 
@@ -193,7 +180,7 @@ Configuration is progressively disclosed:
 
 Any override must re-evaluate qualification status rather than inheriting the base profile's validation badge.
 
-## Multi-version toolchain rule
+## Multi-version toolchain rule — external reference/bootstrap matrices
 
 Compiler version is a graph dimension, not an ambient machine setting.
 

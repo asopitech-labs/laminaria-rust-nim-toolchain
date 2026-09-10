@@ -1,0 +1,78 @@
+# LAMINARIA 独自コンパイラ・IR・スケジューラの責務契約
+
+## 目的と位置付け
+
+LAMINARIAは、**RustとNimを対象とした独自コンパイラ、独自の中間表現、独自スケジューラを研究・開発するプロジェクト**である。Cargo/rustc、Nim compilerや既存backendを上手に運用することが目的ではない。[2026-09-10の監査](research-intent-audit-2026-09-10.md)で判明した曖昧さを訂正し、研究目的・Issueの依存関係・完了条件をこの契約で統一する。現在の実装が達成済みという意味ではない。
+
+LAMINARIA自身をRustとNimで実装し、最終的には同じ独自コンパイル経路で自身をコンパイルする。実装言語の分担は、Rust用ツールチェーンとNim用ツールチェーンを別々に動かす分担ではない。
+
+## 本コンパイル経路の責務
+
+必要なのは次の経路である。
+
+```text
+Rustソース / Nimソース / 両方 + 解決済み依存ソース
+  → LAMINARIA自身の言語処理・意味解析
+  → LAMINARIA独自IR群・意味情報・由来
+  → LAMINARIA自身の解析・変換・計算分割
+  → LAMINARIAの計画・資源認識スケジューリング
+  → LAMINARIA自身のターゲットlowering・コード生成
+  → runtime・assembly・link契約を明示したターゲット成果物
+```
+
+これは責務の契約であり、固定のpass順序ではない。計画・解析・実行は増分的に相互作用し得る。IRの数や形、SSA/CFGの採否、分割粒度、backend境界そのものが研究対象である。ビルドAction Graphや `PlanningInput -> ExecutionPlan` だけでは言語のIRにはならない。
+
+意味情報は対応するソース構文からLAMINARIAが導出する。既存コンパイラが作ったMIR、Nim生成C、merged LLVM IRを意味処理の必須入口にしない。コンパイラ内の計算単位をLAMINARIA自身が実装・実行できなければならず、他コンパイラの仕事にstage名を付けるだけでは足りない。
+
+## 既存ツールの役割を分離する
+
+| 役割 | 既存ツールを使う範囲 | 証明できること |
+| --- | --- | --- |
+| パッケージ管理・依存解決 | Cargo/Nim ecosystemのmetadata、manifest、lockfile、ソース取得と依存解決 | コンパイルへの入力 |
+| 比較・観測baseline | 明示的に選んだ実験で既存コンパイラ、LLVM、build systemを実行 | その比較条件での挙動・コスト |
+| 外部bootstrap | 最初の研究実行ファイルを既存ツールで作る | 開始点の用意のみ |
+| 外部委譲ビルドbaseline | 現行のCargo/Nim単位のproject-build/self-build実験 | planner・process連携と比較計測のみ |
+| 独自コンパイル | 意味解析・IR・変換・コード生成・内部計算のscheduleをLAMINARIAが担う | 本来の研究目標の候補証拠 |
+
+依存解決を口実にbuild script、procedural macro、plugin、推移的ツール呼び出しからコンパイルを隠れて実行してはならない。これらにはLAMINARIAで対応する明示的な実装契約が必要であり、未対応の構文や依存は診断して停止する。ソース取得の許可は、本成果物を `cargo build`、`rustc`、`nim c`、`nim cpp`、nlvm、Nimony、C/LLVM compilationへ委譲する許可ではない。
+
+LLVM/Cranelift/GCCへの投影は**比較実験**として研究できる。LLVMを任意backendにする、libraryとして呼び出す、upstream compilerを改造する、pass呼び出しを細かくする、というだけでは独自コンパイラの代わりにならない。アルゴリズムやlibraryの再利用は実際に保持する責務で判断する。全utilityの再発明を命じるものでも、backend委譲の例外を無条件で設けるものでもない。runtime・assembler・linkerの境界は設計と証拠を明示し、コンパイル委譲を隠さない。
+
+比較用コンパイラの出力は、未定義動作や未対応の言語契約に対する「正解」ではない。先に意味契約を定義し、不一致や不確実性を残す。
+
+## 単一言語プロジェクト
+
+Rust-only、Nim-only、混成のすべてで同じLAMINARIA独自コンパイラ・IR・planner・schedulerを使う。必要な言語機能と推移的依存から仕事を決め、dummy sourceや不要な言語コンパイラを要求しない。
+
+配布済みLAMINARIAは、対応済みRust-onlyソースのコンパイルにrustcを、対応済みNim-onlyソースのコンパイルにNim compilerを必要としない。入力言語がどちらでもLAMINARIA自身のNim planner/runtimeは使う。外部bootstrapで両ツールチェーンを要することとは別である。
+
+単一言語での高速化・省メモリ化は共通基盤の結果として評価する機会であり、保証でも混成研究の成立条件でもない。rustcだけを再開発するプロジェクトに変更しない。
+
+## self-buildの到達点を区別する
+
+1. 既存ツールでstage0を用意する。
+2. ビルドdriverが既存コンパイラを呼び、Rust hostとNim plannerを再構築する。stage2まで反復しても**bootstrap・外部委譲driverの証拠**である。
+3. 対応範囲を宣言したソースを独自IR・変換・scheduler・ターゲット生成まで通し、既存コンパイラなしで処理する。
+4. 対応範囲をRust + Nimで書かれたLAMINARIA自身と依存閉包へ広げる。stage0の独自コンパイラでstage1を作り、stage1自身の独自コンパイラでstage2を作る。
+
+本来のcompiler self-hostingは4で検証する。出力隔離、入力・依存・生成者identity、実際のコンパイル経路、適合性、正規化したplan/artifact比較を必要とする。コピーしたbinary、使われないNim component、外部コンパイラで作った世代では満たせない。未対応依存は対応範囲の欠落として明示する。
+
+現行CLIが `self-build` や `build` と名乗っていても分類は変わらない。CLIの改名・モード分離・実行制限は後続のコード変更が必要であり、文書訂正で実装済みとはしない。
+
+## 研究順序と完了判定
+
+**#25 + #3 + #6 + #8を一緒に着手する。** 小さく範囲を宣言したRust/Nimソース、その意味・独自IR契約、実行可能な変換を作り、LAMINARIA自身のコンパイラ計算を本番Nim planner/Rust runtimeに接続する。小さくても端から端まで実行できるスライスを作る。手書きIRのinterpreterは先行実験として有用だが、ソースのコンパイルやターゲット生成とは区別する。
+
+#10/#11/#18–#21の必要部分はidentity・意味・経路・資源の証拠として並行して整える。#7/#12は同じ経路で安全な再利用・無効化を研究する。#26は同じコンパイラのRust-only/Nim-only/混成入口を提供する。#4はruntime/ABI統合を研究するが、Nim plannerをlinkする作業をコンパイラ研究の代替の先行ゲートにしない。
+
+全言語機能、分散実行、LLVMの全概念、全profile行列の完成を小さな実験の前提にはしない。一方、独自コンパイルを任意の「深い統合」として先送りし、外部委譲ビルドを製品ゴールにしない。
+
+証拠は、ソースから導出したIRと手書きIR、合法・拒否した変換、論理依存と実行配置、プロセス観測と独自in-process compiler eventを区別する。既存コンパイラ呼び出し・自動fallbackを防ぐ否定テストを持ち、速度とは別に正しさと実行／省略した計算を検証する。
+
+## ハードウェア・永続化・異種ノード
+
+垂直統合と水平分割を初めから同じ設計問題として扱う。解析や中間状態をメモリ内で保持する利益と、分割・永続化・再利用・局所性・復旧・資源コストを比較する。
+
+単なるコア数でなく、物理／論理core、core種別、cache/NUMA、メモリ容量・帯域、storage/networkの遅延・帯域を研究する。「必ずdiskへ書く」「networkは常に速い」と固定しない。
+
+Windows、macOS、Linux/ラズパイの参加は、実行hostとコンパイルtarget、ISA/ABI、SDK/sysroot、runtime、target feature、信頼性を区別する。cross compileの同時実行は、生成nodeでtargetを実行・検証できることを意味しない。これらはIR・計算分割・永続化契約の設計条件である。[水平分散研究](horizontal-distribution-research_ja.md)も参照。

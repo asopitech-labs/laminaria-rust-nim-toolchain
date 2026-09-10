@@ -1,5 +1,21 @@
 # Validated Toolchain Profiles Research Direction
 
+## Ownership correction (2026-09-10)
+
+The [compiler ownership contract](compiler-ownership-contract.md) governs research objectives and acceptance.
+
+Normal target profiles select a LAMINARIA compiler revision, supported Rust/Nim language contracts, IR/transform revisions, target/runtime requirements and scheduler/resource policy. The existing-compiler version matrices and external build attempts below belong to explicitly separate reference/bootstrap profiles only. Success there must never promote a target-compilation profile. Missing LAMINARIA support stops with a diagnostic; it does not select rustc/Nim as fallback.
+
+## Main-path compiler profiles and acceptance
+
+The main candidate space is `LAMINARIA revision × Rust/Nim language contracts × IR/transform revision × target/runtime × resource policy`. Cargo/Nimble resolver identity is a separate dependency input. Main-path selection does not branch into existing compilers.
+
+Qualify Rust-only, Nim-only and mixed source through the same owned compiler. Reject unsupported syntax, targets and dependencies with structured diagnostics before external compilation. Test that reference/bootstrap qualification cannot promote a target profile and that profile/IR revision changes invalidate correctly. Full qualification matrices must not delay the small #25/#3/#6/#8 implementation.
+
+## Scope of the existing-tool matrix below: reference/bootstrap profiles
+
+The rustc/Nim/LLVM version, release and compatibility matrices, configuration examples, external build attempts and their success criteria below apply **only to reference/bootstrap profiles**. Reuse pruning, explanation and exploration-budget principles for owned-compiler profiles without promoting existing compilers to their execution engines. Examples are not a list of implemented or qualified profiles.
+
 ## Purpose
 
 LAMINARIA should accept a broad internal combination space across Rust/Nim compiler versions, backends, targets, linkers, post-link tools, and runtimes while exposing a much smaller set of known-good paths to ordinary users.

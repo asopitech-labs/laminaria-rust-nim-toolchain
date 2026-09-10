@@ -1,5 +1,11 @@
 # LAMINARIA 研究プログラム
 
+## 責務の訂正（2026-09-10）
+
+[独自コンパイラの責務契約](compiler-ownership-contract_ja.md)を研究目的・完了判定の基準とする。
+
+独自コンパイラ・IR・スケジューラが本経路であり、任意の後続統合ではない。Cargo/Nim ecosystemは依存解決に利用できるが、以下に登場する既存コンパイル経路は比較・観測または外部bootstrapのbaselineであり、本ビルドの選択肢ではない。Action Graphは言語IRの代わりにならない。
+
 ## 目的
 
 LAMINARIAは、RustとNimのコンパイル、依存解決、コード生成、成果物、リンク、キャッシュ、実行を一つの計算システムとして扱う研究開発プロジェクトである。
@@ -27,6 +33,12 @@ LAMINARIAでは最適化を原則として次の順で優先する。
 
 本来実行不要な処理を並列化して高速化しても、work eliminationの代替とはみなさない。
 
+## 研究中核 — 独自IR・コンパイラ・scheduler（#25/#3/#6/#8）
+
+対応範囲を宣言したRust/Nimソースを、独自の意味解析・IR・合法性を持つ変換・target生成まで通す。production Nim planner/Rust runtimeからそのコンパイラ計算を実行し、既存compilerが本経路で動かないことを否定テストで検証する。単一言語と混成は同じ基盤を使う。手書きIR、外部compiler trace、リンク成功は、それぞれ限定した実験証拠である。
+
+#3の以下のstage inventoryは比較・情報損失調査として残すが、研究中核を後回しにする依存順序ではない。#4の統合や#18–#24の計測・UXは必要部分を並行して支える。
+
 ## 研究トラックA — Compiler Pipeline Decomposition
 
 RustとNimのcompiler pipelineのどこまでを、安定した入力・出力・invalidation関係を持つgraph nodeとして外部から扱えるかを調査する。
@@ -42,7 +54,7 @@ Nimではfrontend、semantic processing、backend generation、generated C/C++�
 - experimental integration possible
 - opaque
 
-fine-grained integrationができない場合でも、正しく動くcoarse-grained実行経路は常に残す。
+既存compilerの粗い経路は比較用としてのみ保持する。本経路で未対応の意味処理は診断して停止し、既存compilerで代替しない。
 
 ## 研究トラックB — C ABIを必須境界としないRust/Nim Native Linking
 
@@ -53,6 +65,8 @@ RustとNimの生成物を、一度C ABI surfaceへ落とすことを必須とせ
 詳細は `rust-nim-native-linking.md` に定義する。
 
 ## 研究トラックC — Backend Route / Backend Pipeline Graph
+
+本経路は独自IRの最適化・target生成を実行する。以下のLLVM/Nim既存backend variantとpipeline投影は比較モデルであり、本コンパイラの選択肢として代替しない。
 
 backendを一つの抽象概念で済ませず、次の二段階を分離する。
 
@@ -93,7 +107,7 @@ cost = serialization + reload + hashing/I/O + process/IPC + lost analysis/locali
 
 ## 研究トラックD — Unified Action Graph / Scheduler
 
-Rust codegen work、Nim generated C/C++ compilation、backend jobs、binding/shim generation、object generation、archive、link、post-linkを同一schedulerへ載せる。
+LAMINARIA自身のsource/IR解析・変換・target生成・artifact計算を一つの資源認識schedulerで統合・分割する。既存compiler/backend jobは別に測定する比較対象であり、本経路の計算単位を決めるものではない。
 
 Cargo、Nim、LLVM/LTO等がそれぞれ独立にCPUを使い切るnested parallelismではなく、LAMINARIAが全体のCPU、memory、I/O budgetとcritical pathを見て実行順序を決める。
 

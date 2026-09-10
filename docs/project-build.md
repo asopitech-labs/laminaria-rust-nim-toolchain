@@ -1,31 +1,16 @@
-# Project build: single-language and minimally-declared mixed targets (issue #26)
+# Project build: single-language/mixed delegated baseline (#26 remains unmet)
 
-This document describes `laminaria build`/`plan-build`: the entry point for
-planning and building a **user's target project**, as opposed to
-`laminaria self-build` (`docs/self-build.md`), which plans and builds
-**LAMINARIA itself**. The distinction issue #26 asks to keep visible:
+## Ownership correction (2026-09-10)
 
-1. **LAMINARIA's own implementation** is Rust + Nim. A Rust-only target
-   build must still use the real, production Nim Planning Kernel to plan
-   it — this is not permission to substitute a Rust-computed plan.
-2. **Building LAMINARIA itself** (`self-build`) legitimately requires both
-   the Rust and Nim toolchains used to rebuild both of LAMINARIA's own
-   components.
-3. **Building a target project** requires only the toolchain(s) that
-   project's own demanded artifacts and dependency graph actually need —
-   never LAMINARIA's own implementation languages leaked onto an unrelated
-   target.
+The [compiler ownership contract](compiler-ownership-contract.md) governs research objectives and acceptance.
 
-`build`/`plan-build` reuse the exact same production Nim planner
-(`laminaria_plan::call_planner`) and Rust executor
-(`laminaria_run::run_and_record_with_doctor`) `self-build` uses — not a
-separate or duplicated code path. Investigation before implementing this
-confirmed the `PlanningInput -> ExecutionPlan` contract and the Nim kernel
-itself (`nim-planner/src/planning_kernel.nim`) never branch on how many
-`CargoBuild` vs `NimBuild` actions a plan contains, so no contract or
-Nim-kernel change was needed — everything language-specific lived entirely
-in `self_build.rs`'s hard-coded three-action shape and its unconditional
-both-toolchains resolution, neither of which `project_build.rs` inherits.
+This is an implementation record of the current **delegated-build baseline**, not acceptance of the intended independent compiler. The documented commands still invoke Cargo/rustc/Nim and execute coarse actions sequentially. Sharing the Nim planner/Rust executor does not establish shared language IR or compiler-work scheduling. The goal requires Rust-only, Nim-only and mixed inputs to use LAMINARIA's own compiler, including eventual compiler self-hosting. No CLI behavior was changed by this documentation correction.
+
+This document records the current `laminaria build`/`plan-build` delegated baseline for user projects, distinct from the `self-build` baseline that rebuilds LAMINARIA itself.
+
+Both input languages currently use the same Nim planner/Rust execution infrastructure, but Rust compilation uses Cargo/rustc and Nim compilation uses Nim's compiler. Avoiding the unused compiler is a verified limited behavior, not #26's requirement to use the same independent compiler. Toolchain requirements, PATH handling and build.rs examples below describe this baseline, not the target-path specification.
+
+Sharing `CargoBuild`/`NimBuild` plans does not establish a shared compiler IR. Owned source/IR/target processing and negative path tests remain implementation work in #25/#3/#6/#8/#26.
 
 ## Determining what a target project needs
 

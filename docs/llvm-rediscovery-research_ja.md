@@ -1,5 +1,11 @@
 # LAMINARIA — LLVM再発見研究
 
+## 責務の訂正（2026-09-10）
+
+[独自コンパイラの責務契約](compiler-ownership-contract_ja.md)を研究目的・完了判定の基準とする。
+
+独自コンパイラ・IR・スケジューラが本経路であり、任意の後続統合ではない。Cargo/Nim ecosystemは依存解決に利用できるが、以下に登場する既存コンパイル経路は比較・観測または外部bootstrapのbaselineであり、本ビルドの選択肢ではない。Action Graphは言語IRの代わりにならない。
+
 ## 位置付け
 
 LAMINARIAはLLVMを前提基盤として採用する研究ではない。
@@ -83,9 +89,9 @@ LLVMの判断を「正解」として採用しない。
 
 LLVM optimization remarksやpass instrumentationは、LLVMが何をしたかを知る証拠である。LAMINARIAが同じ判断をすべきことの証明ではない。
 
-### 3. Replaceable backend route
+### 3. 独自backendと比較用projection
 
-LAMINARIAのarchitectureはLLVMを取り外せる必要がある。LLVM、Cranelift、GCC系backend、将来のLAMINARIA-native backend pathを同じ研究空間で比較できることを目標とする。
+単にLLVMを取り外せるだけでは足りない。本経路は独自IR・変換・target lowering・コード生成を実装する。LLVM/Cranelift/GCCへの投影は比較実験として保持し、独自backendを「将来の任意候補」にしない。
 
 ## 再発見の研究方法
 
@@ -154,7 +160,8 @@ Optimization requirements / legality facts
   ↓
 Backend-specific projection
   ↓
-LLVM | Cranelift | GCC | future native route
+LAMINARIA-owned target lowering / code generation
+(comparison only: LLVM | Cranelift | GCC)
 ```
 
 LAMINARIAは既存language IRを一つの万能IRへ強制的に変換する必要があるとは仮定しない。複数IR、typed facts、graph relations、analysis databasesの組合せの方が適切な可能性も研究対象とする。
@@ -210,7 +217,7 @@ link可能性の確認は基礎実験である。異なるlanguage semanticsを�
 
 ### Backend Graph
 
-既存backend enumを選択するだけでなく、LAMINARIA-native optimization/backend substrateをcandidate routeとして将来追加できる構造にする。
+LAMINARIA独自の最適化・target生成を本経路として実行し、既存backendの比較経路と分類を分ける。将来の任意candidateにしない。
 
 ### LLVM White-boxing
 

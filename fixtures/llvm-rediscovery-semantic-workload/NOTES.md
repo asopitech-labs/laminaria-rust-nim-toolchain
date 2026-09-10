@@ -1,5 +1,10 @@
 # `llvm-rediscovery-semantic-workload` — issue #25's first experiment
 
+## Evidence classification correction (2026-09-10)
+
+This file preserves historical fixture/measurement and implementation evidence, not the current research delivery order. Existing-compiler builds and driver self-builds recorded below are **reference/bootstrap/delegated-build baselines**, not proof of LAMINARIA compiler ownership or independent self-hosting. The [compiler ownership contract](../../docs/compiler-ownership-contract.md) governs current issue acceptance; historical checklists do not close the revised requirements.
+
+
 **Status: not complete, not claimed complete.** This is the first
 experiment on issue #25's own required program (`docs/
 llvm-rediscovery-research.md`), covering exactly one paired workload

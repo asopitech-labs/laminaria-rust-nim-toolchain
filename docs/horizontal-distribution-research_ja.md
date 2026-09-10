@@ -1,5 +1,11 @@
 # LAMINARIA — 水平分散・分散compiler研究
 
+## 責務の訂正（2026-09-10）
+
+[独自コンパイラの責務契約](compiler-ownership-contract_ja.md)を研究目的・完了判定の基準とする。
+
+分散する対象はLAMINARIA自身のコンパイラ計算であり、installed compilerのremote呼び出しだけではない。メモリ内の垂直統合と水平分割をIR・schedulerの共同研究課題とする。以下のKbuild/LLVM/Cargo/Nim経路は比較baselineであり、local復旧も同じ独自コンパイラを使い、既存compilerへfallbackしない。入力言語の対応範囲、target、実行hostを分ける。
+
 ## 位置付け
 
 LAMINARIAでは、水平分散を後から付け足すdeployment featureではなく、compiler graphそのものの研究対象として扱う。
@@ -277,7 +283,7 @@ thin-link、index、backend job、final linkを観測する。exact job manifest
 
 ### Experiment 2 — Rust/Nim semantic partition candidate
 
-merged LLVM IRではなくsource contractからpaired Rust/Nim workloadを定義する。preserved-fact/provenance representation、partition manifestを試作し、少なくとも一つのpartitionをLLVMへ投影する。他backendへの余地を残す。
+Rust/Nimのsource契約から独自の意味・由来表現を構築し、partition manifestを導出してLAMINARIA自身のcompiler計算として実行する。LLVMへの投影は任意の比較実験として分離し、本経路の完成条件にはしない。
 
 ### Experiment 3 — Partition comparison
 

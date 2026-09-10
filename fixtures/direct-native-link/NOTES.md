@@ -1,5 +1,10 @@
 # `direct-native-link` fixture
 
+## Evidence classification correction (2026-09-10)
+
+This file preserves historical fixture/measurement and implementation evidence, not the current research delivery order. Existing-compiler builds and driver self-builds recorded below are **reference/bootstrap/delegated-build baselines**, not proof of LAMINARIA compiler ownership or independent self-hosting. The [compiler ownership contract](../../docs/compiler-ownership-contract.md) governs current issue acceptance; historical checklists do not close the revised requirements.
+
+
 #11's "direct native-link workload" Core workload: the minimal Layer 1
 proof from `docs/rust-nim-native-linking.md` — "one Rust-produced object
 and one Nim-produced object in the same link, with an intentionally

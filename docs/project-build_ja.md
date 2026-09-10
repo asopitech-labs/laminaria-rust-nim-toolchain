@@ -1,29 +1,16 @@
-# プロジェクトビルド: 単一言語および明示的最小宣言による混成対象 (issue #26)
+# Project build：単一言語・混成の外部委譲baseline（#26は未達）
 
-本ドキュメントは `laminaria build`/`plan-build` を説明する。これは
-**ユーザーの対象プロジェクト**を計画・ビルドするための入口であり、
-**LAMINARIA自身**を計画・ビルドする `laminaria self-build`
-(`docs/self-build.md`) とは別物である。issue #26 が明示的に求める区別は次の3つ:
+## 責務の訂正（2026-09-10）
 
-1. **LAMINARIA自身の実装**はRust + Nimである。Rust単独の対象をビルドする
-   場合でも、実際の本番Nim Planning Kernelで計画しなければならない —
-   これはRust側で計算した計画で代替してよいという意味ではない。
-2. **LAMINARIA自身のビルド** (`self-build`) は、LAMINARIA自身の両コンポー
-   ネントを再ビルドするために、Rust・Nim両ツールチェーンを正当に必要とする。
-3. **対象プロジェクトのビルド**は、そのプロジェクト自身が要求する成果物と
-   依存関係グラフから決まるツールチェーンのみを必要とする —
-   LAMINARIA自身の実装言語を無関係な対象に持ち込んではならない。
+[独自コンパイラの責務契約](compiler-ownership-contract_ja.md)を研究目的・完了判定の基準とする。
 
-`build`/`plan-build` は `self-build` と全く同じ本番Nim planner
-(`laminaria_plan::call_planner`) とRust実行系
-(`laminaria_run::run_and_record_with_doctor`) を再利用する — 別系統の
-重複実装ではない。実装前の調査で、`PlanningInput -> ExecutionPlan` 契約と
-Nimカーネル自体 (`nim-planner/src/planning_kernel.nim`) は、計画に
-`CargoBuild`/`NimBuild` アクションがいくつ含まれるかに一切分岐しないことを
-確認済みであり、契約やNimカーネル側の変更は不要だった —
-言語固有のロジックはすべて `self_build.rs` のハードコードされた3アクション
-形状と無条件の両ツールチェーン解決に存在しており、`project_build.rs` は
-これらを一切継承していない。
+本書は現行の**外部委譲ビルドbaselineの実装記録**であり、独自コンパイラの達成報告ではない。記載のcommandは今もCargo/rustc/Nimを呼び、粗いActionを逐次実行する。Nim planner/Rust executorの共有は言語IRやコンパイラ内部計算のscheduleを証明しない。本来はRust-only・Nim-only・混成のすべてと最終的なcompiler self-hostingをLAMINARIA独自コンパイラで処理する。この文書訂正でCLIの動作は変更していない。
+
+本書は現行 `laminaria build`/`plan-build` の外部委譲baselineを記録する。ユーザーprojectを対象とし、LAMINARIA自身を再構築する `self-build` baselineとは入口が異なる。
+
+現在は単一言語でも同じNim planner/Rust実行系を使うが、RustにはCargo/rustc、NimにはNim compilerを使っている。「不要な方のcompilerを呼ばない」は検証した限定的機能であり、#26の「同じ独自compilerを使う」要件は未達である。以下のtoolchain要求、PATH操作、build.rsの例はこのbaselineの挙動を説明し、本経路の仕様にはしない。
+
+既存の `CargoBuild`/`NimBuild` planを共有できたことはcompiler IRの共有ではない。独自経路のsource/IR/target処理と否定テストは#25/#3/#6/#8/#26の後続実装で必要になる。
 
 ## 対象プロジェクトの必要要件の決定
 

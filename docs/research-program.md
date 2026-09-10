@@ -1,5 +1,11 @@
 # LAMINARIA Research Program
 
+## Ownership correction (2026-09-10)
+
+The [compiler ownership contract](compiler-ownership-contract.md) governs research objectives and acceptance.
+
+Own compiler/IR/scheduler development is the main path, not optional later integration. Cargo/Nim ecosystem tools may resolve dependencies; existing compilation routes below are reference/observation or external-bootstrap baselines, not target-build alternatives. The Action Graph is not a substitute for a language IR.
+
 ## Purpose
 
 LAMINARIA is a research and development project for treating Rust and Nim compilation, dependency resolution, code generation, artifacts, linking, caching, and execution as one computational system.
@@ -27,6 +33,12 @@ LAMINARIA prefers optimization in this order:
 
 Parallelizing work that should not have executed is not equivalent to eliminating it.
 
+## Core track — owned IR, compiler and scheduler (#25/#3/#6/#8)
+
+Process a declared Rust/Nim source subset through owned semantic analysis, IR, legal transformations and target generation. Execute those compiler computations through the production Nim planner/Rust runtime and negatively test that existing compilers cannot perform target compilation. Single-language and mixed inputs share this substrate. Hand-authored IR, external compiler traces and successful linking are separately limited evidence.
+
+The stage inventory below remains a reference/information-loss study, not a dependency order that postpones the core track. #4 integration and #18–#24 measurement/UX supply the relevant support in parallel.
+
 ## Track A — Compiler pipeline decomposition
 
 ### Question
@@ -39,7 +51,7 @@ Which Rust and Nim compiler stages can be represented as explicit graph nodes wi
 - inventory Nim frontend, semantic processing, backend generation, generated source, native compilation, backend-handoff, object, archive, and link boundaries;
 - classify each boundary as public/stable, observable but internal, experimentally exposable, or opaque;
 - define artifact identities and producer/consumer relationships for useful boundaries;
-- preserve a valid coarse-grained execution path when a fine-grained boundary is unavailable.
+- retain coarse existing-compiler execution only as a reference baseline; unsupported owned semantics fail explicitly rather than selecting an external compiler.
 
 ## Track B — Rust/Nim native linking without a mandatory C ABI boundary
 
@@ -48,6 +60,8 @@ Can Rust and Nim translation units participate in one native link with a direct,
 This does not assume that every Rust or Nim language feature can cross the boundary directly. The dedicated design and experiment plan is in `rust-nim-native-linking.md`.
 
 ## Track C — Backend Route and Backend Pipeline Graph
+
+The main path executes owned IR optimization and target generation. The existing LLVM/Nim backend variants and pipeline projections below are comparison models, not substitute production compilers.
 
 Backend handling is split into two different problems:
 
@@ -84,7 +98,7 @@ See `backend-pipeline-whiteboxing.md` and issues #13, #14 and #15.
 
 ## Track D — Unified Action Graph and scheduling
 
-Can Rust codegen work, Nim-generated native compilation, backend jobs, binding/shim generation, object generation, archive creation, linking and post-link work share one resource-aware scheduler without nested tool schedulers competing for the same machine?
+Can LAMINARIA-owned source/IR analysis, transformations, target generation and artifact work share one resource-aware scheduler, grouping and partitioning work without hidden nested compiler ownership? Existing compiler/backend jobs are separately measured comparison cases.
 
 Track queue wait, dependency/resource wait, execution time, CPU, memory and I/O. Where backend jobs are discovered dynamically, as with DTLTO, investigate explicit dynamic graph expansion rather than hidden nested scheduling.
 

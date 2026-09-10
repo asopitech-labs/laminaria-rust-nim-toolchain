@@ -1,13 +1,12 @@
-# セルフビルド: stage0 → stage1 (issue #8・#6・#4 の最初のスライス)
+# Self-build：外部コンパイラ委譲baselineの実装記録
 
-本ドキュメントは、`docs/research-foundations.md` 第7節および Phase 3/Phase 7
-のロードマップ項目(「`PlanningInput` と `ExecutionPlan` を安定化させる」
-「LAMINARIA自身でRustホストとNimプランニングカーネルをビルドする」)で
-名指しされていた `plan(PlanningInput) -> ExecutionPlan` 契約の、具体的かつ
-実装済みのプロトコルを記述する。この作業以前、両者はコードとして一切
-存在しなかった。本スライスは issue #8(Nim Planning Kernel)・issue #6
-(Rust Action Graph/スケジューラ)・issue #4(Rust↔Nim統合境界)が共同で
-最初に実装する対象である。
+## 責務の訂正（2026-09-10）
+
+[独自コンパイラの責務契約](compiler-ownership-contract_ja.md)を研究目的・完了判定の基準とする。
+
+本書は現行の**外部委譲ビルドbaselineの実装記録**であり、独自コンパイラの達成報告ではない。記載のcommandは今もCargo/rustc/Nimを呼び、粗いActionを逐次実行する。Nim planner/Rust executorの共有は言語IRやコンパイラ内部計算のscheduleを証明しない。本来はRust-only・Nim-only・混成のすべてと最終的なcompiler self-hostingをLAMINARIA独自コンパイラで処理する。この文書訂正でCLIの動作は変更していない。
+
+以下は現行のplanning/driver protocolの実装記録である。独自コンパイラself-hostingは責務契約の別の到達点であり、外部compilerを使うstage0/stage1実験では満たさない。
 
 ## 本スライスのスコープ
 

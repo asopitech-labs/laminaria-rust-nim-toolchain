@@ -1,5 +1,11 @@
 # Measurement Foundation / 計測基盤 研究方針
 
+## 責務の訂正（2026-09-10）
+
+[独自コンパイラの責務契約](compiler-ownership-contract_ja.md)を研究目的・完了判定の基準とする。
+
+共通の証拠基盤を使いつつ、独自コンパイル・比較・bootstrapの結果を分離する。以下の外部process/native telemetry実験はbaselineとして保持する。独自経路にはsource→IRの由来、IR/変換revision、in-process compiler計算・解析無効化・scheduler所有権の証拠が別途必要であり、process traceだけで証明しない。必要最小の計測を#25/#3/#6/#8と並行し、計測全体の完了を直列の前提にしない。
+
 ## 目的
 
 LAMINARIAがcompiler pipeline、backend、LTO、linker、WebAssembly target pipelineを改善する前に、同じ入力を同じ環境・同じtoolchain・同じ実行状態で再現し、処理フロー全体を時系列・resource・artifact・compiler-native telemetryの観点から観測できる恒久的な「計測の背骨」を構築する。
@@ -14,7 +20,7 @@ LAMINARIAがcompiler pipeline、backend、LTO、linker、WebAssembly target pipe
 
 ## 1. 現状と優先順位
 
-現時点のrepositoryは研究文書を中心とし、LAMINARIA runtime、CI、toolchain lock、benchmark harnessはまだ存在しない。この段階では、最初の恒久コードをtoolchain本体より先にmeasurement foundationへ置ける。
+当初は研究文書中心であり計測基盤を最初のコードとして計画した。現在はlock、fingerprint、Run、CI、plannerと外部委譲build baselineが存在する。以下は計測trackの責務であり、独自compilerの実装より先に全計測を完成させるという順序ではない。
 
 最初に固定するもの:
 

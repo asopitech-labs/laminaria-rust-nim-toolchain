@@ -1,5 +1,11 @@
 # LAMINARIA — LLVM Rediscovery Research
 
+## Ownership correction (2026-09-10)
+
+The [compiler ownership contract](compiler-ownership-contract.md) governs research objectives and acceptance.
+
+Own compiler/IR/scheduler development is the main path, not optional later integration. Cargo/Nim ecosystem tools may resolve dependencies; existing compilation routes below are reference/observation or external-bootstrap baselines, not target-build alternatives. The Action Graph is not a substitute for a language IR.
+
 ## Position
 
 LAMINARIA does not treat LLVM as a prerequisite foundation.
@@ -63,9 +69,9 @@ Study the problems LLVM solves and the reasons behind its design, including SSA/
 
 LLVM optimization remarks and pass instrumentation are evidence of what LLVM decided. They are not proof that LAMINARIA should make the same decision.
 
-### Replaceable backend route
+### Owned backend and comparison projections
 
-LAMINARIA's architecture must permit LLVM to be removed. LLVM, Cranelift, GCC-family routes, and future LAMINARIA-native optimization/backend routes should fit in the same research space.
+Removing LLVM must not merely leave another existing compiler in charge. Implement owned IR, transformations, target lowering and code generation as the main path. LLVM/Cranelift/GCC projections remain comparison experiments; the independent backend is not an optional future variant.
 
 ## Rediscovery method
 
@@ -108,7 +114,8 @@ Optimization requirements / legality facts
   ↓
 Backend-specific projection
   ↓
-LLVM | Cranelift | GCC | future native route
+LAMINARIA-owned target lowering / code generation
+(comparison only: LLVM | Cranelift | GCC)
 ```
 
 LAMINARIA does not assume one universal IR is the correct answer. Multiple IRs, typed semantic facts, graph relations, and analysis databases may be more appropriate.
@@ -141,7 +148,7 @@ Compiler Pipeline Decomposition must explain why a stage exists and what semanti
 
 Native Linking must investigate where differing language semantics should be projected into a common contract, not stop at linkability.
 
-Backend Graph must remain capable of introducing a LAMINARIA-native optimization/backend substrate.
+Backend Graph must execute the LAMINARIA-owned optimization/target-generation path and classify existing-backend comparison routes separately.
 
 LLVM White-boxing should study LLVM as prior art in order to rediscover analysis, transformation, summary, partitioning, and target contracts—not merely to control LLVM at finer granularity.
 

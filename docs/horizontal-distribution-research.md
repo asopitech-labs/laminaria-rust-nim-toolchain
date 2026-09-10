@@ -1,5 +1,11 @@
 # LAMINARIA — Horizontal Distribution and Distributed Compiler Research
 
+## Ownership correction (2026-09-10)
+
+The [compiler ownership contract](compiler-ownership-contract.md) governs research objectives and acceptance.
+
+Distribution applies to LAMINARIA-owned compiler work, not only remotely invoking installed compilers. Vertical in-memory integration and horizontal partitioning are joint IR/scheduler research decisions. Kbuild/LLVM/Cargo/Nim paths below are comparison baselines; local recovery must retain the same independent compiler, never fall back to an existing compiler. Source-language subsets, targets and execute-on hosts are separate constraints.
+
 ## Position
 
 LAMINARIA treats horizontal distribution as a research subject, not as a deployment feature to be added after the compiler graph is designed.
@@ -288,7 +294,7 @@ Capture thin-link, index, backend-job and final-link evidence. Record the exact 
 
 ### Experiment 2 — Rust/Nim semantic partition candidate
 
-Define paired Rust/Nim workloads from source contracts, not from merged LLVM IR. Build a candidate preserved-fact and provenance representation, derive a partition manifest, project at least one partition to LLVM, and keep the representation open to another backend.
+Define Rust/Nim source contracts, build the owned semantic/provenance representation, derive a partition manifest and execute it as LAMINARIA compiler work. An LLVM projection is an optional comparison experiment, not the required production path.
 
 ### Experiment 3 — Partition comparison
 

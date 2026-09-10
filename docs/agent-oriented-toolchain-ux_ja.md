@@ -1,5 +1,21 @@
 # Agent-Oriented Toolchain UX / エージェント指向ツールチェーンUX研究方針
 
+## 責務の訂正（2026-09-10）
+
+[独自コンパイラの責務契約](compiler-ownership-contract_ja.md)を研究目的・完了判定の基準とする。
+
+通常のtarget profileはLAMINARIA compiler revision、対応Rust/Nim言語契約、IR/変換revision、target/runtime要件、scheduler・資源方針を選ぶ。以下の既存コンパイラversion行列と外部build試行は、明示的に別の比較/bootstrap profileの研究である。その成功で本コンパイルprofileを認定しない。LAMINARIA未対応は診断して停止し、rustc/Nimへのfallbackにしない。
+
+## 独自コンパイラprofileの本経路と完了条件
+
+本経路のcandidateは `LAMINARIA revision × Rust/Nim言語契約 × IR/変換revision × target/runtime × resource policy` である。Cargo/Nimble resolverのidentityは依存入力として別に記録する。既存compilerを選ぶために本経路を分岐しない。
+
+Rust-only・Nim-only・混成を同じ独自compilerで処理し、未対応構文・target・依存は外部compile前に構造化診断で拒否する。bootstrap/referenceの認定を本経路のrecommendedへ昇格できないこと、profile/IR revision変更が正しく無効化されることをテストする。全機能の認定が揃うまで#25/#3/#6/#8の小さな実装を待たせない。
+
+## 以下の既存ツール行列の適用範囲：比較・bootstrap profile
+
+以下にあるrustc/Nim/LLVMのversion・release・compatibility行列、設定例、外部build試行とその成功条件は**比較・bootstrap profileに限定する**。共通のpruning・説明・探索budget原則は独自profileでも使うが、既存コンパイラを本経路のexecution engineへ昇格させない。例は実装済み／認定済みprofile一覧ではない。
+
 ## 目的
 
 LAMINARIAでは、性能、cache、scheduler、compiler white-boxingだけでなく、**toolchain selectionとconfigurationのUXそのものを研究・実装対象**とする。

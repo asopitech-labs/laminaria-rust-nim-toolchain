@@ -1,13 +1,12 @@
-# Self-build: stage0 → stage1 (issues #8, #6, #4 first slice)
+# Self-build: delegated-compiler baseline implementation record
 
-This document describes the concrete, implemented protocol behind the
-`plan(PlanningInput) -> ExecutionPlan` contract named in
-`docs/research-foundations.md` section 7 and the Phase 3/Phase 7 roadmap
-items ("Stabilize `PlanningInput` and `ExecutionPlan`"; "Use LAMINARIA to
-build its own Rust host and Nim planning kernel"). Before this work,
-neither existed as code — this is the first slice that makes them real,
-shared jointly by issues #8 (the Nim Planning Kernel), #6 (the Rust
-Action Graph/scheduler), and #4 (the Rust↔Nim integration boundary).
+## Ownership correction (2026-09-10)
+
+The [compiler ownership contract](compiler-ownership-contract.md) governs research objectives and acceptance.
+
+This is an implementation record of the current **delegated-build baseline**, not acceptance of the intended independent compiler. The documented commands still invoke Cargo/rustc/Nim and execute coarse actions sequentially. Sharing the Nim planner/Rust executor does not establish shared language IR or compiler-work scheduling. The goal requires Rust-only, Nim-only and mixed inputs to use LAMINARIA's own compiler, including eventual compiler self-hosting. No CLI behavior was changed by this documentation correction.
+
+The following records the implemented planning/driver protocol. Independent compiler self-hosting has separate acceptance in the ownership contract; successful external-compiler stage0/stage1 experiments do not satisfy it.
 
 ## Scope of this slice
 

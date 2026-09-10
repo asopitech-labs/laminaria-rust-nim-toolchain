@@ -1,5 +1,11 @@
 # Metrics-First Research Policy
 
+## Ownership correction (2026-09-10)
+
+The [compiler ownership contract](compiler-ownership-contract.md) governs research objectives and acceptance.
+
+Use one evidence infrastructure but separate independent-compilation, reference and bootstrap results. External process/native-telemetry experiments below remain useful baseline evidence. The independent path additionally needs source-to-IR provenance, IR/transform revision, in-process compiler work/analysis invalidation and scheduler ownership; a process trace alone cannot prove these. Implement the minimum evidence alongside #25/#3/#6/#8, not all measurement work as a serial prerequisite.
+
 LAMINARIA treats performance and execution-path evidence as part of correctness for research claims about scheduling, compiler/backend integration, caching and linking.
 
 ## Rule

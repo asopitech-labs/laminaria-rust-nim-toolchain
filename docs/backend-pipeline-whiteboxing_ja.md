@@ -1,5 +1,19 @@
 # Backend Pipeline White-boxing 研究方針
 
+## 責務の訂正（2026-09-10）
+
+[独自コンパイラの責務契約](compiler-ownership-contract_ja.md)を研究目的・完了判定の基準とする。
+
+本書のLLVM、Nim、rustc、native-link、Wasm経路は比較・観測実験である。図・adapter API・checkpoint条件をLAMINARIA独自コンパイラの規定にしない。#25/#3が独自実装するsource/IR経路を#5/#13で実証し、将来variantとして許容するだけにしない。外部backendによる成果は独自コンパイルの認定にならない。
+
+## 本経路で必要な独自pipelineの実証
+
+#25/#3のsource-derived IRを使い、LAMINARIA自身の解析・変換・target生成を#6/#8へ接続する。論理stage・観測・checkpoint・実行境界を区別し、少なくとも一つの独自計算partitionとcheckpoint採否を意味・資源の証拠で検証する。以下のLLVM/Wasm実験の完了だけではこの条件を満たさない。
+
+## 以下の既存backend実験の適用範囲
+
+以下のprovider、LLVM/ThinLTO/Wasm pipeline、外部fallbackと完了条件は比較・観測用である。独自compiler内のgroupingやcheckpoint経済性に知見を戻すが、既存backendを本経路へ自動的に採用しない。
+
 ## 目的
 
 LAMINARIAは、RustとNimのfrontendやcodegen unitを細粒度化する一方で、選択されたbackend、linker、WASM toolchainを再びopaqueな単一Actionとして扱ってはならない。
