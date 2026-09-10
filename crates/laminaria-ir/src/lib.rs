@@ -51,6 +51,7 @@ pub mod nim_frontend;
 pub mod rust_frontend;
 pub mod transform;
 pub mod types;
+pub mod validate;
 
 // `#[cfg(all(test, unix))]` on the whole module, not `#[cfg(unix)]` on each
 // test function individually -- a CI failure caught the difference

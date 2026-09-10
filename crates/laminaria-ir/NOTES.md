@@ -475,3 +475,55 @@ subset acceptance table (mapping every accept/reject/ignore branch across
 file/function/argument/let/expression positions) and the source/
 transformed/legal-subset real-compiler comparison-recording split are
 still open, tracked directly in issue #27 rather than restated here.
+
+## Fifth pass: issue #27 A2 -- a validated-Program API boundary
+
+A2 asked for the "unvalidated `Program`" vs. "checked input" distinction
+this crate's own API previously lacked entirely: `ValidateIr` was added as
+an `ActionKind` in `laminaria-plan` (issue #27 B) with nothing on the
+`laminaria-ir` side to actually back it. New `validate.rs`:
+
+- `ValidatedProgram`, a newtype with no public constructor other than
+  `validate_program` -- a caller cannot manufacture one without the
+  checks actually having run.
+- `validate_program` checks every function: every `Local` reference
+  resolves to a binding in scope at that exact position (tracked via the
+  same insert-before-body/remove-after-body discipline
+  `interpreter::eval_stmt`/`eval_expr` themselves use for `Let`, so this
+  validates against the scoping rule the interpreter actually relies on,
+  not an invented stricter/looser one); source-level shadowing (two
+  distinct `Let`s at different numeric `LocalId`s) is unaffected, checked
+  directly against the real `nim_frontend`. Every `Call` names a declared
+  function with a matching argument count. Every `IntLit` fits its own
+  declared `IntWidth`. Every `NotEqZero` (this subset's only condition
+  form) appears only directly as an `Stmt::If`'s own `cond` -- a
+  condition nested inside an arithmetic expression is rejected as "used
+  as a value," this subset having no general boolean type.
+- Wired as a genuine **postcondition**, not merely an optional checker a
+  caller could skip: `rust_frontend::lower_rust_source`/
+  `nim_frontend::lower_nim_source` now run it before ever returning `Ok`
+  ("lowering後"), and `transform::apply_inlined_caller` -- the one shared
+  choke point both `anf_insert` and `checked_inline` funnel their final
+  `Program` through -- runs it before returning `Ok` ("変換後"),
+  converting a violation into `LoweringError::PostconditionViolated`/
+  `TransformError::PostconditionViolated` respectively. Every existing
+  frontend/transform test still passes unchanged, confirming this is a
+  live regression guard, not a currently-known gap being closed by
+  fiat -- none of this crate's own correctly-implemented logic was ever
+  expected to trip it.
+- Deliberately does *not* change `interpreter::eval_function`'s own
+  signature to require a `ValidatedProgram` -- that function is this
+  crate's test harness for semantic-preservation across hundreds of
+  existing call sites, a different concern (does a transform preserve
+  behavior?) than the one this module closes (must an executor be able
+  to silently run unvalidated IR? -- no such executor exists in this
+  crate yet; issue #27 stage C is where `ValidatedProgram` will actually
+  gate execution). Also does not introduce a new IR representation or
+  SSA form, per A2's own explicit "新IR体系やSSAの導入は条件にしない."
+
+13 new tests (well-formed programs from both real frontends and both
+transforms validating; unbound-local, unknown-callee, arity-mismatch,
+param-out-of-range, value-out-of-range, and condition-used-as-value each
+rejected; a correct condition-in-`If`-position and source-level shadowing
+both still validating). `cargo test -p laminaria-ir`: 64 passed (was 51).
+Workspace total: 272 (was 259). Clippy/fmt clean.

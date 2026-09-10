@@ -37,6 +37,15 @@ pub enum LoweringError {
     /// exactly `expr != 0`/`expr == 0`, or a call to a function this
     /// program never declares.
     UnsupportedShape { detail: String, span: SourceSpan },
+    /// A frontend's own lowering produced a `Program` that fails
+    /// `validate::validate_program` -- a live postcondition (issue #27
+    /// A2: "検証はlowering後...で行う"), never expected to actually fire
+    /// for a correctly-implemented frontend, but a genuine gate rather
+    /// than a comment claiming the output is well-formed. Never has a
+    /// meaningful per-node span (the violation is structural, not tied to
+    /// one token), so `span` is a placeholder pointing at the start of
+    /// the file.
+    PostconditionViolated { detail: String, span: SourceSpan },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,6 +67,10 @@ impl Diagnostic {
             LoweringError::UnsupportedShape { detail, span } => {
                 (format!("unsupported shape: {detail}"), span)
             }
+            LoweringError::PostconditionViolated { detail, span } => (
+                format!("internal error: lowering produced an invalid Program: {detail}"),
+                span,
+            ),
         };
         Diagnostic {
             severity: Severity::Error,

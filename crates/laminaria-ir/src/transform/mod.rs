@@ -78,6 +78,11 @@ pub enum TransformError {
         callee: String,
         param_index: usize,
     },
+    /// Either candidate's own output failed `validate::validate_program`
+    /// -- a live postcondition (issue #27 A2), never expected to actually
+    /// fire for either transform's own correct logic; see
+    /// `apply_inlined_caller`'s own doc comment.
+    PostconditionViolated(crate::validate::ProgramValidationError),
 }
 
 /// The callee shape both candidates currently support: a body that is
@@ -510,6 +515,16 @@ fn apply_inlined_caller(
     caller_fact.body = new_body;
     let mut result = program.clone();
     result.insert(caller_fact);
+
+    // A live postcondition (issue #27 A2: "検証はlowering後・変換後の両方
+    // で行う"), run at this one shared choke point both `anf_insert` and
+    // `checked_inline` funnel their final `Program` through -- not merely
+    // a doc comment claiming a transform preserves well-formedness. Never
+    // expected to actually fire for either candidate's own correct logic;
+    // a real regression guard against a future change to either, not a
+    // currently-known gap.
+    crate::validate::validate_program(&result).map_err(TransformError::PostconditionViolated)?;
+
     Ok(result)
 }
 

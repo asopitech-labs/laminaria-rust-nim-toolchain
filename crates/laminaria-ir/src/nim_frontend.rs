@@ -483,11 +483,24 @@ pub fn lower_nim_source(
         }
     }
 
-    if diagnostics.is_empty() {
-        Ok(program)
-    } else {
-        Err(diagnostics)
+    if !diagnostics.is_empty() {
+        return Err(diagnostics);
     }
+
+    // A live postcondition (issue #27 A2: "検証はlowering後...で行う"),
+    // not merely a comment claiming this lowering's output is
+    // well-formed -- see `validate::validate_program`'s own doc comment.
+    if let Err(e) = crate::validate::validate_program(&program) {
+        return Err(vec![Diagnostic::from_lowering_error(
+            LoweringError::PostconditionViolated {
+                detail: e.to_string(),
+                span: point_span(1, 1),
+            },
+            SourceLanguage::Nim,
+        )]);
+    }
+
+    Ok(program)
 }
 
 /// `proc name(params): int32 = <body>` -- real Nim's `parseRoutine`

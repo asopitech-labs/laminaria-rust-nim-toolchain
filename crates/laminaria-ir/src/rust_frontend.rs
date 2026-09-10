@@ -177,11 +177,27 @@ pub fn lower_rust_source(
         }
     }
 
-    if diagnostics.is_empty() {
-        Ok(program)
-    } else {
-        Err(diagnostics)
+    if !diagnostics.is_empty() {
+        return Err(diagnostics);
     }
+
+    // A live postcondition (issue #27 A2: "検証はlowering後...で行う"),
+    // not merely a comment claiming this lowering's output is
+    // well-formed -- see `validate::validate_program`'s own doc comment.
+    if let Err(e) = crate::validate::validate_program(&program) {
+        return Err(vec![Diagnostic::from_lowering_error(
+            LoweringError::PostconditionViolated {
+                detail: e.to_string(),
+                span: SourceSpan {
+                    start: SourcePosition { line: 1, column: 1 },
+                    end: SourcePosition { line: 1, column: 1 },
+                },
+            },
+            SourceLanguage::Rust,
+        )]);
+    }
+
+    Ok(program)
 }
 
 fn type_is_i32(ty: &Type) -> bool {
