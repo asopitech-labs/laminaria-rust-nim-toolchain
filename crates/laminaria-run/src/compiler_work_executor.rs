@@ -29,7 +29,9 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs;
+use std::num::NonZeroUsize;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
 
 use laminaria_ir::diagnostics::Diagnostic;
@@ -274,6 +276,53 @@ impl ArtifactStore {
     }
 }
 
+/// Counts how many `laminaria_ir` computations -- never a `SharedStore`
+/// lock-wait -- are genuinely running at once, tracking the peak
+/// observed. Always live (not test-gated): every dispatch enters/exits
+/// one of these around its own real computation, at the cost of a
+/// handful of atomic ops per dispatch, negligible next to the
+/// computation itself. A review found that the previous concurrency
+/// proof -- comparing dispatch *call* start/end timestamps, taken from
+/// `worker_loop` around the whole `dispatch_action` call -- could not
+/// tell real computation apart from time spent merely waiting for a
+/// lock: a temporary, fully-serialized counter-implementation (every
+/// dispatch behind one global `Mutex`) still passed it, since the
+/// *call* intervals still overlapped even though the *work* inside never
+/// did. This probe is entered only around the actual `laminaria_ir`
+/// call(s) inside each `dispatch_*` function -- after any such
+/// serializing lock a regression might add would already have been
+/// acquired -- so a regression that serializes real work, wherever it
+/// adds the lock, shows up as a peak that never exceeds 1.
+#[derive(Default)]
+struct ComputeConcurrencyProbe {
+    active: AtomicUsize,
+    peak: AtomicUsize,
+}
+
+impl ComputeConcurrencyProbe {
+    /// Marks one real computation as starting now, returning a guard
+    /// that marks it as finished when dropped (including via an early
+    /// return or panic) -- an RAII span, not a pair of calls a future
+    /// edit could forget to balance.
+    fn enter(&self) -> ComputeConcurrencyGuard<'_> {
+        let now = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak.fetch_max(now, Ordering::SeqCst);
+        ComputeConcurrencyGuard(self)
+    }
+
+    fn peak(&self) -> usize {
+        self.peak.load(Ordering::SeqCst)
+    }
+}
+
+struct ComputeConcurrencyGuard<'a>(&'a ComputeConcurrencyProbe);
+
+impl Drop for ComputeConcurrencyGuard<'_> {
+    fn drop(&mut self) {
+        self.0.active.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 /// [`ArtifactStore`] behind a single [`Mutex`], with accessors that hold
 /// the lock only long enough to clone an input out or insert a result --
 /// never across the actual `laminaria_ir` computation itself (lowering/
@@ -283,24 +332,39 @@ impl ArtifactStore {
 /// standard "shrink the critical section" pattern -- without it, every
 /// concurrent dispatch would serialize on this one lock for its entire
 /// runtime, defeating the point of a CPU budget greater than one.
-struct SharedStore(Mutex<ArtifactStore>);
+struct SharedStore {
+    store: Mutex<ArtifactStore>,
+    compute_probe: ComputeConcurrencyProbe,
+}
 
 impl SharedStore {
-    #[cfg(test)]
     fn new(store: ArtifactStore) -> Self {
-        SharedStore(Mutex::new(store))
+        SharedStore {
+            store: Mutex::new(store),
+            compute_probe: ComputeConcurrencyProbe::default(),
+        }
     }
 
     fn candidate(&self, artifact_id: &str) -> Option<Program> {
-        self.0.lock().unwrap().candidates.get(artifact_id).cloned()
+        self.store
+            .lock()
+            .unwrap()
+            .candidates
+            .get(artifact_id)
+            .cloned()
     }
 
     fn validated(&self, artifact_id: &str) -> Option<ValidatedProgram> {
-        self.0.lock().unwrap().validated.get(artifact_id).cloned()
+        self.store
+            .lock()
+            .unwrap()
+            .validated
+            .get(artifact_id)
+            .cloned()
     }
 
     fn insert_candidate(&self, artifact_id: String, program: Program) {
-        self.0
+        self.store
             .lock()
             .unwrap()
             .candidates
@@ -308,7 +372,7 @@ impl SharedStore {
     }
 
     fn insert_validated(&self, artifact_id: String, validated: ValidatedProgram) {
-        self.0
+        self.store
             .lock()
             .unwrap()
             .validated
@@ -316,7 +380,7 @@ impl SharedStore {
     }
 
     fn insert_evidence(&self, artifact_id: String, outcomes: Vec<EvalOutcome>) {
-        self.0
+        self.store
             .lock()
             .unwrap()
             .evidence
@@ -382,16 +446,6 @@ struct SchedulerState {
     errors: BTreeMap<String, CompilerWorkExecutionError>,
 }
 
-/// Per-action `(action_id, dispatch start, dispatch end)` timestamps,
-/// recorded only when a caller opts in via
-/// [`run_compiler_work_plan_traced`] -- production dispatch
-/// (`run_compiler_work_plan`) always passes `None`, so this costs
-/// nothing beyond a branch on that path. Exists so a test can prove two
-/// actions' real `laminaria_ir` computations genuinely overlapped in
-/// wall-clock time, without depending on an aggregate-duration
-/// comparison that a loaded CI runner's own contention can make flaky.
-type ActivityLog = Mutex<Vec<(String, std::time::Instant, std::time::Instant)>>;
-
 /// One worker's share of [`run_compiler_work_plan`]'s dependency-ready
 /// dispatch loop: repeatedly take a ready action id, dispatch it, and
 /// update the shared schedule -- exits once every action is resolved
@@ -404,7 +458,6 @@ fn worker_loop(
     scheduler: &Mutex<SchedulerState>,
     ready_or_done: &Condvar,
     store: &SharedStore,
-    activity_log: Option<&ActivityLog>,
 ) {
     loop {
         let action_id = {
@@ -427,15 +480,15 @@ fn worker_loop(
         // transforming/evaluating -- runs here, entirely outside any
         // lock, which is what lets a CPU budget greater than one
         // actually overlap real work rather than merely interleave
-        // acquisitions of one shared lock.
+        // acquisitions of one shared lock. Each `dispatch_*` function
+        // itself enters `store.compute_probe` around only its own real
+        // `laminaria_ir` call(s), not around this whole dispatch (which
+        // still includes brief `SharedStore` lock acquisitions) -- see
+        // `ComputeConcurrencyProbe`'s own doc comment for why that
+        // distinction is exactly what a review found this scheduler's
+        // first concurrency proof was missing.
         let action = &plan.actions[&action_id];
-        let started = std::time::Instant::now();
         let result = dispatch_action(action, store);
-        if let Some(log) = activity_log {
-            log.lock()
-                .unwrap()
-                .push((action_id.clone(), started, std::time::Instant::now()));
-        }
 
         let mut state = scheduler.lock().unwrap();
         state.resolved.insert(action_id.clone());
@@ -493,6 +546,14 @@ fn worker_loop(
 /// own typed accessors, so it cannot silently substitute an unvalidated
 /// `Program` where a validated one is required regardless.
 ///
+/// `cpu_budget` is a [`NonZeroUsize`] -- a review found that a plain
+/// `usize` silently accepted `0` and ran the plan anyway (via a
+/// `.max(1)` clamp), publishing artifacts under a budget the caller
+/// asked to never actually use any worker at all. Forbidding `0` in the
+/// type itself, rather than checking and returning an error at the top
+/// of this function, makes that state unrepresentable instead of merely
+/// rejected.
+///
 /// The same scheduling algorithm runs at every `cpu_budget` -- `1`
 /// degenerates to one worker draining the ready queue as it's produced,
 /// never two actions' `laminaria_ir` computations actually overlapping,
@@ -504,37 +565,34 @@ fn worker_loop(
 pub fn run_compiler_work_plan(
     plan: &ExecutionPlan,
     store: &mut ArtifactStore,
-    cpu_budget: usize,
+    cpu_budget: NonZeroUsize,
 ) -> Result<(), CompilerWorkExecutionError> {
-    run_compiler_work_plan_inner(plan, store, cpu_budget, None)
+    run_compiler_work_plan_inner(plan, store, cpu_budget).0
 }
 
-/// Test-only entry point that also records every dispatch's real
-/// wall-clock interval into `activity_log`, so a concurrency test can
-/// directly confirm two independent actions' dispatches genuinely
-/// overlapped -- see [`ActivityLog`]'s own doc comment for why this
-/// exists instead of comparing aggregate run durations. `#[cfg(unix)]`
-/// because its only caller needs the real `laminaria-planner` binary,
-/// same as this module's other real-binary tests -- Windows CI never
-/// provisions Nim, so an ungated `#[cfg(test)]` alone would leave this
-/// with no caller there and fail as dead code.
+/// Test-only entry point that also returns the peak number of real
+/// `laminaria_ir` computations [`ComputeConcurrencyProbe`] ever observed
+/// running at once, so a concurrency test can directly confirm two
+/// independent actions' *computations* -- not merely their dispatch
+/// calls -- genuinely overlapped. `#[cfg(unix)]` because its only caller
+/// needs the real `laminaria-planner` binary, same as this module's
+/// other real-binary tests -- Windows CI never provisions Nim, so an
+/// ungated `#[cfg(test)]` alone would leave this with no caller there
+/// and fail as dead code.
 #[cfg(all(test, unix))]
 fn run_compiler_work_plan_traced(
     plan: &ExecutionPlan,
     store: &mut ArtifactStore,
-    cpu_budget: usize,
-    activity_log: &ActivityLog,
-) -> Result<(), CompilerWorkExecutionError> {
-    run_compiler_work_plan_inner(plan, store, cpu_budget, Some(activity_log))
+    cpu_budget: NonZeroUsize,
+) -> (Result<(), CompilerWorkExecutionError>, usize) {
+    run_compiler_work_plan_inner(plan, store, cpu_budget)
 }
 
 fn run_compiler_work_plan_inner(
     plan: &ExecutionPlan,
     store: &mut ArtifactStore,
-    cpu_budget: usize,
-    activity_log: Option<&ActivityLog>,
-) -> Result<(), CompilerWorkExecutionError> {
-    let cpu_budget = cpu_budget.max(1);
+    cpu_budget: NonZeroUsize,
+) -> (Result<(), CompilerWorkExecutionError>, usize) {
     let total = plan.actions.len();
     let (remaining_deps, dependents) = dependency_graph(plan);
 
@@ -551,10 +609,10 @@ fn run_compiler_work_plan_inner(
         errors: BTreeMap::new(),
     });
     let ready_or_done = Condvar::new();
-    let shared_store = SharedStore(Mutex::new(std::mem::take(store)));
+    let shared_store = SharedStore::new(std::mem::take(store));
 
     std::thread::scope(|scope| {
-        for _ in 0..cpu_budget {
+        for _ in 0..cpu_budget.get() {
             scope.spawn(|| {
                 worker_loop(
                     plan,
@@ -563,21 +621,22 @@ fn run_compiler_work_plan_inner(
                     &scheduler,
                     &ready_or_done,
                     &shared_store,
-                    activity_log,
                 )
             });
         }
     });
 
-    *store = shared_store.0.into_inner().unwrap();
+    let peak_compute_concurrency = shared_store.compute_probe.peak();
+    *store = shared_store.store.into_inner().unwrap();
 
     // Deterministic regardless of which worker happened to fail first or
     // how many actions failed: always the smallest failing action id's
     // own error, the same choice at every `cpu_budget`.
-    if let Some((_, error)) = scheduler.into_inner().unwrap().errors.into_iter().next() {
-        return Err(error);
-    }
-    Ok(())
+    let result = match scheduler.into_inner().unwrap().errors.into_iter().next() {
+        Some((_, error)) => Err(error),
+        None => Ok(()),
+    };
+    (result, peak_compute_concurrency)
 }
 
 fn dispatch_action(action: &Action, store: &SharedStore) -> Result<(), CompilerWorkExecutionError> {
@@ -657,14 +716,17 @@ fn dispatch_lower_source(
         .map(String::as_str)
         .collect();
     let language = descriptor.language.as_deref().unwrap_or("");
-    let lowered = match language {
-        "rust" => lower_rust_source(source_path, &source_text, &requested),
-        "nim" => lower_nim_source(source_path, &source_text, &requested),
-        other => {
-            return Err(CompilerWorkExecutionError::UnsupportedLanguage {
-                action_id: action.id.clone(),
-                language: other.to_string(),
-            })
+    let lowered = {
+        let _compute = store.compute_probe.enter();
+        match language {
+            "rust" => lower_rust_source(source_path, &source_text, &requested),
+            "nim" => lower_nim_source(source_path, &source_text, &requested),
+            other => {
+                return Err(CompilerWorkExecutionError::UnsupportedLanguage {
+                    action_id: action.id.clone(),
+                    language: other.to_string(),
+                })
+            }
         }
     };
     let program = lowered.map_err(|diagnostics| CompilerWorkExecutionError::LoweringFailed {
@@ -692,11 +754,14 @@ fn dispatch_validate_ir(
             artifact_id: input_id.clone(),
         }
     })?;
-    let validated =
-        validate_program(&candidate).map_err(|e| CompilerWorkExecutionError::ValidationFailed {
-            action_id: action.id.clone(),
-            detail: e,
-        })?;
+    let validated = {
+        let _compute = store.compute_probe.enter();
+        validate_program(&candidate)
+    }
+    .map_err(|e| CompilerWorkExecutionError::ValidationFailed {
+        action_id: action.id.clone(),
+        detail: e,
+    })?;
     store.insert_validated(action.id.clone(), validated);
     Ok(())
 }
@@ -726,9 +791,12 @@ fn dispatch_transform_function(
         }
     })?;
     let program = validated.program();
-    let transformed = match params.kind {
-        TransformKind::Anf => anf_insert(program, &params.caller, &params.callee),
-        TransformKind::Checked => checked_inline(program, &params.caller, &params.callee),
+    let transformed = {
+        let _compute = store.compute_probe.enter();
+        match params.kind {
+            TransformKind::Anf => anf_insert(program, &params.caller, &params.callee),
+            TransformKind::Checked => checked_inline(program, &params.caller, &params.callee),
+        }
     }
     .map_err(|e| CompilerWorkExecutionError::TransformFailed {
         action_id: action.id.clone(),
@@ -773,14 +841,17 @@ fn dispatch_evaluate_evidence(
         });
     }
     let mut outcomes = Vec::with_capacity(descriptor.test_inputs.len());
-    for args in &descriptor.test_inputs {
-        let outcome = eval_function(validated.program(), function_name, args).map_err(|e| {
-            CompilerWorkExecutionError::EvaluationFailed {
-                action_id: action.id.clone(),
-                detail: format!("{e:?}"),
-            }
-        })?;
-        outcomes.push(outcome);
+    {
+        let _compute = store.compute_probe.enter();
+        for args in &descriptor.test_inputs {
+            let outcome = eval_function(validated.program(), function_name, args).map_err(|e| {
+                CompilerWorkExecutionError::EvaluationFailed {
+                    action_id: action.id.clone(),
+                    detail: format!("{e:?}"),
+                }
+            })?;
+            outcomes.push(outcome);
+        }
     }
     store.insert_evidence(action.id.clone(), outcomes);
     Ok(())
@@ -1047,7 +1118,7 @@ mod tests {
         // though this particular chain is purely linear (no two actions
         // are ever simultaneously ready) -- it must produce exactly the
         // same result a sequential run would.
-        run_compiler_work_plan(&plan, &mut store, 2)
+        run_compiler_work_plan(&plan, &mut store, NonZeroUsize::new(2).unwrap())
             .expect("the full vertical compiler-work path must run end to end");
 
         let outcomes = store
@@ -1348,7 +1419,7 @@ mod tests {
         let validate_consumer = minimal_validate_ir_action("validate-consumer", "lower-fail");
         let plan = plan_of(vec![lower, validate_consumer]);
 
-        for cpu_budget in [1usize, 2usize] {
+        for cpu_budget in [1usize, 2usize].map(|n| NonZeroUsize::new(n).unwrap()) {
             let mut store = ArtifactStore::new();
             let result = run_compiler_work_plan(&plan, &mut store, cpu_budget);
             assert!(
@@ -1512,10 +1583,6 @@ mod tests {
             chain("rust", &rust_path_str, rust_text, "f", &test_inputs);
         let (nim_actions, nim_evidence_id) =
             chain("nim", &nim_path_str, nim_text, "g", &test_inputs);
-        let rust_action_ids: std::collections::HashSet<String> =
-            rust_actions.iter().map(|a| a.id.clone()).collect();
-        let nim_action_ids: std::collections::HashSet<String> =
-            nim_actions.iter().map(|a| a.id.clone()).collect();
 
         let mut all_actions = rust_actions;
         all_actions.extend(nim_actions);
@@ -1536,12 +1603,20 @@ mod tests {
         validate(&plan, &input).expect("a well-formed compiler-work plan must validate");
 
         let mut store_budget_1 = ArtifactStore::new();
-        run_compiler_work_plan(&plan, &mut store_budget_1, 1).expect("budget 1 must succeed");
+        let (result_1, peak_1) = run_compiler_work_plan_traced(
+            &plan,
+            &mut store_budget_1,
+            NonZeroUsize::new(1).unwrap(),
+        );
+        result_1.expect("budget 1 must succeed");
 
         let mut store_budget_2 = ArtifactStore::new();
-        let activity_log: ActivityLog = Mutex::new(Vec::new());
-        run_compiler_work_plan_traced(&plan, &mut store_budget_2, 2, &activity_log)
-            .expect("budget 2 must succeed");
+        let (result_2, peak_2) = run_compiler_work_plan_traced(
+            &plan,
+            &mut store_budget_2,
+            NonZeroUsize::new(2).unwrap(),
+        );
+        result_2.expect("budget 2 must succeed");
 
         std::fs::remove_dir_all(&dir).ok();
 
@@ -1560,25 +1635,23 @@ mod tests {
         assert_eq!(evidence_1_rust.len(), test_inputs.len());
         assert_eq!(evidence_1_nim.len(), test_inputs.len());
 
-        // Real overlap, proven directly rather than inferred from an
-        // aggregate-duration comparison (which a loaded CI runner's own
-        // contention can make flaky regardless of whether the scheduler
-        // is genuinely concurrent): under budget 2, some action from the
-        // Rust chain and some action from the Nim chain must have
-        // dispatches whose real wall-clock intervals actually overlap --
-        // impossible for a scheduler that ever serializes all dispatch
-        // behind one lock, however fast it runs.
-        let intervals = activity_log.into_inner().unwrap();
-        let overlaps = intervals.iter().any(|(id_a, start_a, end_a)| {
-            rust_action_ids.contains(id_a)
-                && intervals.iter().any(|(id_b, start_b, end_b)| {
-                    nim_action_ids.contains(id_b) && start_a < end_b && start_b < end_a
-                })
-        });
-        assert!(
-            overlaps,
-            "expected at least one Rust-chain action and one Nim-chain action to have \
-             genuinely overlapping dispatch intervals under a CPU budget of 2, got {intervals:#?}"
+        // Real overlap, measured directly at the point of actual
+        // computation (see `ComputeConcurrencyProbe`'s own doc comment)
+        // rather than around the whole dispatch call or via an
+        // aggregate-duration comparison -- both of which a review found
+        // (the former) or this session's own earlier attempt found (the
+        // latter) could pass even when the scheduler never truly runs
+        // two computations at once. At budget 1, only one worker thread
+        // ever exists, so peak concurrency can only ever be exactly 1;
+        // at budget 2, the two independent chains' evaluation loops
+        // (60,000 real interpreter calls each) must genuinely overlap.
+        assert_eq!(
+            peak_1, 1,
+            "budget 1 must never run more than one real computation at a time"
+        );
+        assert_eq!(
+            peak_2, 2,
+            "budget 2 must let the two independent chains' real computations genuinely overlap"
         );
     }
 }

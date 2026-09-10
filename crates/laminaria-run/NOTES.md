@@ -1956,3 +1956,60 @@ suite run 3 times back to back with no flakes.
   relies entirely on the plan already being pruned (see
   `laminaria-plan/NOTES.md`'s "Sixth pass"); the executor simply never
   sees an undemanded action in the first place.
+
+## Seventh pass: the concurrency proof didn't actually prove concurrency, and budget 0 silently ran anyway
+
+A review found 2 real P2s in the sixth pass's own new concurrency work,
+both confirmed and fixed in the same round:
+
+1. **The concurrency test would still pass against a fully serialized
+   implementation.** The previous proof measured, from `worker_loop`,
+   the wall-clock interval from just before calling `dispatch_action` to
+   just after it returned. The review reproduced directly: temporarily
+   wrap `dispatch_action`'s entire body in one global `Mutex` (fully
+   serializing every dispatch) and the old test *still passed*, because
+   the recorded intervals still overlapped -- one thread's "waiting for
+   the global lock" time overlapped with another's "actually computing"
+   time, and the measurement couldn't tell the two apart. Fixed by
+   replacing wall-clock intervals with a new
+   [`ComputeConcurrencyProbe`](../laminaria-run/src/compiler_work_executor.rs):
+   an `AtomicUsize`-based active/peak counter, entered via an RAII guard
+   placed *inside* each of the four `dispatch_*` functions, wrapping only
+   their own actual `laminaria_ir` call(s) -- never the brief
+   `SharedStore` lock acquisitions around them. A regression that adds a
+   serializing lock anywhere between a worker picking up an action and
+   this point would necessarily also serialize entry into the guarded
+   section, so it now shows up as a peak that never exceeds 1.
+   **Verified the fix actually closes the gap, the same way the review
+   itself found the gap**: temporarily re-added the exact "one global
+   `Mutex` around all of `dispatch_action`" experiment against the
+   *fixed* code, confirmed the new test now fails
+   (`peak_2` == 1, expected 2), then reverted. The new test asserts two
+   concrete numbers directly, not a margin: `peak_1 == 1` (budget 1 has
+   only one worker, so this is structurally guaranteed but still
+   checked) and `peak_2 == 2` (the two independent chains' 60,000-call
+   evaluation loops must genuinely overlap).
+2. **`cpu_budget: 0` silently ran the plan anyway.** `cpu_budget.max(1)`
+   quietly bumped a caller's `0` up to `1` and published artifacts under
+   a budget the caller asked to never use any worker at all. Fixed by
+   changing `cpu_budget`'s type from `usize` to
+   [`NonZeroUsize`](https://doc.rust-lang.org/std/num/struct.NonZeroUsize.html)
+   -- making the invalid state unrepresentable in the API's own type
+   rather than checking for it and returning a new error variant, per
+   the review's own offered alternative ("0はdispatch開始前にエラーに
+   するか、APIの型で禁止してください").
+
+`run_compiler_work_plan_traced` (test-only) now returns
+`(Result<(), CompilerWorkExecutionError>, usize)` -- the peak compute
+concurrency alongside the usual result -- instead of taking a shared
+activity-log parameter, since the probe now lives inside `SharedStore`
+itself and needs no separate plumbing through `worker_loop`.
+
+No new tests added this round (the existing concurrency test was
+rewritten in place to assert the two exact numbers above); `cpu_budget`'s
+type change is itself what makes "0 is rejected" true, with nothing left
+to separately test at the value level. `cargo test -p laminaria-run`:
+130 passed (unchanged count, same tests strengthened). Workspace total:
+324 (unchanged). `cargo fmt --check`/`cargo clippy --workspace
+--all-targets -- -D warnings` clean; the full workspace suite run 3
+times back to back with no flakes.
