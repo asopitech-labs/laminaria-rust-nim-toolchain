@@ -1128,4 +1128,49 @@ mod tests {
             "content left at a deeper indent than the tail must be rejected"
         );
     }
+
+    // The following close named gaps in SUBSET.md's acceptance table
+    // (issue #27 A1) -- each pairs a table row that previously had no
+    // dedicated test with one.
+
+    #[test]
+    fn rejects_a_tuple_destructuring_let() {
+        let source = "proc f(): int32 =\n  let (a, b) = 1'i32\n  a\n";
+        assert!(lower_nim_source(&path(), source, &["f"]).is_err());
+    }
+
+    #[test]
+    fn rejects_a_reference_to_an_undeclared_identifier() {
+        let source = "proc f(x: int32): int32 =\n  y\n";
+        assert!(lower_nim_source(&path(), source, &["f"]).is_err());
+    }
+
+    #[test]
+    fn rejects_a_call_to_a_function_not_in_the_lowering_request() {
+        let source =
+            "proc helper(x: int32): int32 =\n  x\n\nproc f(x: int32): int32 =\n  helper(x)\n";
+        // Only "f" is requested -- "helper" is declared in the file but
+        // not part of this lowering request.
+        assert!(lower_nim_source(&path(), source, &["f"]).is_err());
+    }
+
+    #[test]
+    fn rejects_an_unrecognized_character_inside_a_requested_procs_body() {
+        let source = "proc f(x: int32): int32 =\n  [x]\n";
+        assert!(lower_nim_source(&path(), source, &["f"]).is_err());
+    }
+
+    #[test]
+    fn rejects_a_pragma_between_the_return_type_and_the_body() {
+        let source = "proc f(x: int32): int32 {.inline.} =\n  x\n";
+        assert!(lower_nim_source(&path(), source, &["f"]).is_err());
+    }
+
+    #[test]
+    fn accepts_the_literal_first_zero_comparison_form() {
+        let source = "proc f(x: int32): int32 =\n  if 0'i32 != x:\n    1'i32\n  else:\n    2'i32\n";
+        let program = lower_nim_source(&path(), source, &["f"]).unwrap();
+        assert_eq!(eval_function(&program, "f", &[5]).unwrap().value, 1);
+        assert_eq!(eval_function(&program, "f", &[0]).unwrap().value, 2);
+    }
 }

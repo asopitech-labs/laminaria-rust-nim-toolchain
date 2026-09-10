@@ -164,12 +164,12 @@ fn gen_call_arg(rng: &mut Rng, next_mark_value: &mut i64) -> Expr {
     }
 }
 
+/// Delegates to `interpreter::observed_calls` -- the shared
+/// instrumentation contract, not a filter defined independently here (a
+/// review named this exact duplication: `transform::tests::effects_of`
+/// re-implemented the same filter separately).
 fn observed_marks(effects: &[crate::interpreter::CallEvent]) -> Vec<i64> {
-    effects
-        .iter()
-        .filter(|e| e.fn_name == "mark")
-        .map(|e| e.args[0])
-        .collect()
+    crate::interpreter::observed_calls(effects, "mark")
 }
 
 /// Builds one random program (`mark`, `helper`, `g`, `f`, `entry`) and

@@ -27,6 +27,38 @@ pub struct EvalOutcome {
     pub effects: Vec<CallEvent>,
 }
 
+/// The shared, explicit instrumentation contract this crate's regression
+/// tests and generative fuzz batteries (`transform::composition_fuzz`)
+/// compare a transform's before/after behavior against -- not an ad-hoc
+/// per-test filter invented independently at each call site (issue #27
+/// A3's own distinction: "このfixtureで用いるmark等の観測対象集合は
+/// テストごとの場当たりなfilterではなく、共通の明示されたinstrumentation
+/// 契約とする"). An "observed event" is a call to the function named
+/// `observed_fn_name` (by this crate's own convention, `"mark"` -- a real
+/// `Call`, so both the interpreter's own effect trace and
+/// `types::expr_contains_call` see it, without this IR needing a
+/// dedicated I/O primitive), compared by its own evaluated single
+/// argument value, in occurrence order.
+///
+/// `order_index` is deliberately excluded from this comparison: it exists
+/// so a callee's own effects splice correctly into a caller's trace at
+/// evaluation time (see `eval_expr`'s own `Call` arm's doc comment), not
+/// as part of what "the same observed behavior" means for a
+/// before/after-transform comparison -- comparing the returned `Vec`'s
+/// own order already captures relative sequencing, which is what
+/// actually matters here.
+///
+/// This is *not* a claim to model real Rust/Nim I/O, exceptions, or a
+/// general ownership/side-effect system -- A3's own explicit boundary:
+/// "真のI/O/例外/所有権effect体系の完成はこのゲート外."
+pub fn observed_calls(effects: &[CallEvent], observed_fn_name: &str) -> Vec<i64> {
+    effects
+        .iter()
+        .filter(|e| e.fn_name == observed_fn_name)
+        .map(|e| e.args[0])
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EvalError {
     UnknownFunction(String),
@@ -415,5 +447,31 @@ mod tests {
              effects {:?}",
             outcome.effects
         );
+    }
+
+    /// The shared observation contract itself: filters by function name,
+    /// ignores `order_index` (a different, non-"mark" call sitting
+    /// between two `mark` calls must not appear, and must not shift which
+    /// argument value is reported for either `mark`).
+    #[test]
+    fn observed_calls_filters_by_name_and_ignores_order_index() {
+        let effects = vec![
+            CallEvent {
+                fn_name: "mark".to_string(),
+                args: vec![1],
+                order_index: 0,
+            },
+            CallEvent {
+                fn_name: "helper".to_string(),
+                args: vec![99],
+                order_index: 1,
+            },
+            CallEvent {
+                fn_name: "mark".to_string(),
+                args: vec![2],
+                order_index: 2,
+            },
+        ];
+        assert_eq!(observed_calls(&effects, "mark"), vec![1, 2]);
     }
 }

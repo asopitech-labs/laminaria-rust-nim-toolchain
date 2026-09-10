@@ -64,6 +64,18 @@ pub mod validate;
 // itself removes the entire module's contents together, matching every
 // other real-toolchain-invoking test in this workspace (the `windows` job
 // is kept lean).
+// This module is the *only* place in this whole crate that invokes an
+// external `rustc`/`nim` process (grep confirms it) -- every other test
+// is a pure, self-contained independent-IR test. Verified directly, not
+// merely structurally argued: building this crate's test binary
+// normally, then running the *already-compiled* binary with `rustc`/
+// `nim` invisible on `PATH` (`PATH=/usr/bin:/bin ... --skip
+// fixture_parity_tests`) passes every one of the remaining tests --
+// issue #27 A4's own requirement that independent-IR tests run "from a
+// distributed test runner rustc/nim are invisible from" ("配布済みtest
+// runnerからrustc/nimが見えない環境でも実行できる"). This is a fact about
+// this workspace's `laminaria-ir` crate specifically -- not a claim about
+// any other crate in it.
 #[cfg(all(test, unix))]
 mod fixture_parity_tests {
     //! The actual proof this crate is source-derived, not hand-transcribed

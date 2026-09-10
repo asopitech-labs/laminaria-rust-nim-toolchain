@@ -527,3 +527,54 @@ param-out-of-range, value-out-of-range, and condition-used-as-value each
 rejected; a correct condition-in-`If`-position and source-level shadowing
 both still validating). `cargo test -p laminaria-ir`: 64 passed (was 51).
 Workspace total: 272 (was 259). Clippy/fmt clean.
+
+## Sixth pass: A's remaining named residuals -- acceptance table, shared
+## observation contract, independent-IR/parity-test separation
+
+Closes the three items still open from A ("Aの既存残件を閉じる"): a
+subset acceptance table with test correspondence, a shared observation
+contract instead of a per-test filter, and verified independent-IR/
+external-compiler-parity test separation. No new language features (per
+the review's own "言語対応範囲を広げる指摘ではありません").
+
+- **New `SUBSET.md`**: every accept/reject/ignore branch in
+  `rust_frontend.rs`/`nim_frontend.rs`, built by reading both files in
+  full (not from memory), mapped to the implementing function/match-arm
+  and the test that exercises it -- across file, function-declaration,
+  parameter, let-binding, statement/block-shape, `if`/`else`,
+  expression, and (Nim-only) unknown-token levels. Rows with no test are
+  named explicitly as gaps, not glossed over; several genuine Rust/Nim
+  frontend asymmetries (the `==`-swap condition form being Nim-
+  unsupported, the call-shadowing check being Rust-only, `elif`/same-line
+  `if`/command-call-syntax being deliberate Nim scope exclusions) are
+  named as asymmetries, not silently presented as parallel coverage.
+- Closed most of the table's own named gaps with 31 new regression tests
+  (25 in `rust_frontend.rs`, 6 in `nim_frontend.rs`, including genuinely
+  new positive-acceptance tests for the literal-first zero-comparison
+  form and an `else if` chain) -- each targets a distinct code path the
+  table identified as previously untested, not a restatement of existing
+  coverage. 9 rows remain intentionally open (documented in `SUBSET.md`'s
+  own "What this table is not" section): several are structurally
+  unreachable from stable surface syntax, several share an
+  already-exercised code path, and a couple are genuinely open follow-up
+  work, named as such rather than silently left off the table.
+- **Shared observation contract**: `interpreter::observed_calls`, a new
+  public function with its own doc comment declaring the actual contract
+  (filter by function name, compare by evaluated argument value in
+  occurrence order, `order_index` deliberately excluded since it's
+  splicing bookkeeping, not part of "the same observed behavior"; not a
+  claim to model general I/O/effects). `transform::tests::effects_of` and
+  `composition_fuzz::observed_marks` -- previously two independent
+  copies of the identical filter -- now both delegate to it, closing the
+  exact duplication a review named directly.
+- **Verified, not merely argued, independent-IR/parity-test separation**:
+  confirmed `fixture_parity_tests` is the *only* module in this crate
+  invoking an external `rustc`/`nim` process (grepped), then empirically
+  built this crate's test binary normally and ran the *already-compiled*
+  binary with `rustc`/`nim` invisible on `PATH`
+  (`PATH=/usr/bin:/bin ... --skip fixture_parity_tests`) -- every
+  remaining test passed. Documented directly in `lib.rs`'s own comment on
+  that module, not left as an implicit structural fact.
+
+`cargo test -p laminaria-ir`: 96 passed (was 65). Workspace total: 304
+(was 272). Clippy/fmt clean.

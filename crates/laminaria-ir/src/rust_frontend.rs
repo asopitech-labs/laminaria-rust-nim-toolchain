@@ -1036,4 +1036,169 @@ mod tests {
         assert_eq!(fact.provenance.language, SourceLanguage::Rust);
         assert!(fact.provenance.span.start.line >= 1);
     }
+
+    // The following close named gaps in SUBSET.md's acceptance table
+    // (issue #27 A1) -- each pairs a table row that previously had no
+    // dedicated test with one.
+
+    #[test]
+    fn rejects_an_extern_fn() {
+        let result = lower_rust_source(&path(), r#"extern "C" fn f(x: i32) -> i32 { x }"#, &["f"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_a_where_clause() {
+        let source = "fn f(x: i32) -> i32 where i32: Sized { x }";
+        assert!(lower_rust_source(&path(), source, &["f"]).is_err());
+    }
+
+    #[test]
+    fn rejects_a_self_parameter() {
+        let source = "fn f(self, x: i32) -> i32 { x }";
+        assert!(lower_rust_source(&path(), source, &["f"]).is_err());
+    }
+
+    #[test]
+    fn rejects_a_non_identifier_parameter_pattern() {
+        let source = "fn f((a, b): (i32, i32)) -> i32 { a }";
+        assert!(lower_rust_source(&path(), source, &["f"]).is_err());
+    }
+
+    #[test]
+    fn rejects_a_return_type_other_than_i32() {
+        let source = "fn f(x: i32) -> bool { true }";
+        assert!(lower_rust_source(&path(), source, &["f"]).is_err());
+    }
+
+    #[test]
+    fn rejects_a_function_with_no_return_type() {
+        let source = "fn f(x: i32) { }";
+        assert!(lower_rust_source(&path(), source, &["f"]).is_err());
+    }
+
+    #[test]
+    fn rejects_a_non_identifier_let_pattern() {
+        let source = "fn f() -> i32 { let (a, b) = (1, 2); a }";
+        assert!(lower_rust_source(&path(), source, &["f"]).is_err());
+    }
+
+    #[test]
+    fn rejects_a_let_with_no_initializer() {
+        let source = "fn f() -> i32 { let x: i32; x }";
+        assert!(lower_rust_source(&path(), source, &["f"]).is_err());
+    }
+
+    #[test]
+    fn rejects_let_else() {
+        let source = "fn f(x: i32) -> i32 { let y = x else { return 0; }; y }";
+        assert!(lower_rust_source(&path(), source, &["f"]).is_err());
+    }
+
+    #[test]
+    fn rejects_an_item_statement_inside_a_block() {
+        let source = "fn f(x: i32) -> i32 { fn g() {} x }";
+        assert!(lower_rust_source(&path(), source, &["f"]).is_err());
+    }
+
+    #[test]
+    fn rejects_a_bare_return_with_no_value() {
+        let source = "fn f(x: i32) -> i32 { return; }";
+        assert!(lower_rust_source(&path(), source, &["f"]).is_err());
+    }
+
+    #[test]
+    fn rejects_a_semicolon_terminated_non_return_tail() {
+        let source = "fn f(x: i32) -> i32 { x.wrapping_add(1); }";
+        assert!(lower_rust_source(&path(), source, &["f"]).is_err());
+    }
+
+    #[test]
+    fn rejects_a_non_block_else_branch() {
+        let source = "fn f(x: i32) -> i32 { if x != 0 { x } else if x == 0 { 0 } else { 1 } }";
+        // A genuinely non-block, non-if else (e.g. a call) is what this
+        // targets; an `else if` chain is itself supported (SUBSET.md's own
+        // table), so this uses a shape neither block nor `if`.
+        let bad = "fn f(x: i32) -> i32 { if x != 0 { x } else x.wrapping_add(1) }";
+        assert!(lower_rust_source(&path(), bad, &["f"]).is_err());
+        // The `else if` chain above must still lower fine, confirming the
+        // rejection above is about the *shape*, not `else` in general.
+        assert!(lower_rust_source(&path(), source, &["f"]).is_ok());
+    }
+
+    #[test]
+    fn accepts_an_else_if_chain() {
+        let source = "fn f(x: i32) -> i32 {\n  if x != 0 { 1 } else if x == 0 { 2 } else { 3 }\n}";
+        let program = lower_rust_source(&path(), source, &["f"]).unwrap();
+        assert_eq!(eval_function(&program, "f", &[0]).unwrap().value, 2);
+    }
+
+    #[test]
+    fn rejects_an_if_used_as_a_value_expression() {
+        let source = "fn f(x: i32) -> i32 { (if x != 0 { 1 } else { 2 }).wrapping_add(0) }";
+        assert!(lower_rust_source(&path(), source, &["f"]).is_err());
+    }
+
+    #[test]
+    fn rejects_a_block_with_no_tail_expression() {
+        let source = "fn f(x: i32) -> i32 { let y = x; }";
+        assert!(lower_rust_source(&path(), source, &["f"]).is_err());
+    }
+
+    #[test]
+    fn rejects_a_reference_to_an_undeclared_identifier() {
+        let source = "fn f(x: i32) -> i32 { y }";
+        assert!(lower_rust_source(&path(), source, &["f"]).is_err());
+    }
+
+    #[test]
+    fn rejects_a_call_to_a_function_not_in_the_lowering_request() {
+        let source = "fn helper(x: i32) -> i32 { x }\nfn f(x: i32) -> i32 { helper(x) }";
+        // Only "f" is requested -- "helper" is declared in the file but
+        // not part of this lowering request, so calling it must fail
+        // rather than reach into the file for a function never asked for.
+        assert!(lower_rust_source(&path(), source, &["f"]).is_err());
+    }
+
+    #[test]
+    fn rejects_a_call_through_a_qualified_path() {
+        let source = "fn f(x: i32) -> i32 { std::convert::identity(x) }";
+        assert!(lower_rust_source(&path(), source, &["f"]).is_err());
+    }
+
+    #[test]
+    fn rejects_a_non_integer_literal() {
+        let source = r#"fn f() -> i32 { "not an int" }"#;
+        assert!(lower_rust_source(&path(), source, &["f"]).is_err());
+    }
+
+    #[test]
+    fn rejects_unary_negation_of_a_non_literal() {
+        let source = "fn f(x: i32) -> i32 { -x }";
+        assert!(lower_rust_source(&path(), source, &["f"]).is_err());
+    }
+
+    #[test]
+    fn rejects_a_method_call_other_than_wrapping_ops() {
+        let source = "fn f(x: i32) -> i32 { x.checked_add(1).unwrap() }";
+        assert!(lower_rust_source(&path(), source, &["f"]).is_err());
+    }
+
+    #[test]
+    fn rejects_a_wrapping_call_with_the_wrong_argument_count() {
+        let source = "fn f(x: i32) -> i32 { x.wrapping_add() }";
+        assert!(lower_rust_source(&path(), source, &["f"]).is_err());
+    }
+
+    #[test]
+    fn rejects_a_positive_literal_with_a_non_i32_suffix() {
+        let source = "fn f() -> i32 { 5u64 }";
+        assert!(lower_rust_source(&path(), source, &["f"]).is_err());
+    }
+
+    #[test]
+    fn rejects_a_positive_literal_out_of_i32_range() {
+        let source = "fn f() -> i32 { 2147483648 }"; // i32::MAX + 1
+        assert!(lower_rust_source(&path(), source, &["f"]).is_err());
+    }
 }

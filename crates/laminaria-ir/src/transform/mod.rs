@@ -585,14 +585,13 @@ mod tests {
         Expr::IntLit(v, IntWidth::I32, prov())
     }
 
+    /// Delegates to `interpreter::observed_calls` -- the shared
+    /// instrumentation contract, not a filter defined independently here.
     fn effects_of(program: &Program, fn_name: &str) -> Vec<i64> {
-        eval_function(program, fn_name, &[])
-            .unwrap()
-            .effects
-            .into_iter()
-            .filter(|e| e.fn_name == "mark")
-            .map(|e| e.args[0])
-            .collect()
+        crate::interpreter::observed_calls(
+            &eval_function(program, fn_name, &[]).unwrap().effects,
+            "mark",
+        )
     }
 
     /// `double(x) = x +% x` (occurs twice) -- inlining `double(mark(5))`
