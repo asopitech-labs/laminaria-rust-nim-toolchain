@@ -217,9 +217,16 @@ cargo build --workspace --release
 # stage1, produced through the real plan+execute pipeline, using
 # stage0's own planner to plan it:
 ./target/release/laminaria self-build \
+  --planner nim-planner/bin/laminaria-planner \
   --generation-root target/laminaria-gen/stage1 \
   --generation-label stage0-to-stage1
 ```
+
+(`--planner` is required here because `target/release/laminaria` itself
+has no sibling `laminaria-planner` next to it — only `nim-planner/bin/`
+does; `--planner` is what points stage0's `laminaria` at stage0's own
+planner. stage1's own `laminaria` binary, once produced by `integrate`,
+*does* have a sibling planner and needs no such flag — see below.)
 
 `self-build` gathers the self-build `PlanningInput`, calls stage0's own
 `laminaria-planner` binary (resolved next to the running `laminaria`

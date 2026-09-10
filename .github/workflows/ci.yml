@@ -117,6 +117,52 @@ jobs:
       - name: Build workspace binaries (laminaria-rustc-wrapper needs the plain target/debug/ copy)
         run: cargo build --workspace
 
+      # Issues #8/#6/#4's shared first slice, this repo's documented
+      # self-build/CI entry point (issue #6's own acceptance criterion):
+      # stage0 is an ordinary, un-planned build by external tools (`nim
+      # c` + `cargo build --release`, deliberately not `laminaria
+      # self-build`); stage0's own `laminaria` binary then plans (via the
+      # real Nim Planning Kernel) and executes the construction of
+      # stage1. See docs/self-build.md for the full protocol and why
+      # `nim c`, not `nimble build`, is used here (nimble was found to
+      # exit 0 on a genuine compile failure).
+      - name: Build stage0 (nim-planner + Rust host, an ordinary un-planned build)
+        run: |
+          cd nim-planner
+          nim c --path:src -o:bin/laminaria-planner src/laminaria_planner.nim
+          cd ..
+          cargo build --workspace --release
+
+      - name: Run laminaria self-build to produce stage1 (issues #8/#6/#4)
+        run: |
+          ./target/release/laminaria self-build \
+            --planner nim-planner/bin/laminaria-planner \
+            --generation-root target/laminaria-gen/stage1 \
+            --generation-label stage0-to-stage1 \
+            --runs-root runs \
+            --json \
+            > /tmp/self-build.json
+          cat /tmp/self-build.json
+          FAILED=$(jq '[.actions[] | select(.succeeded == false)] | length' /tmp/self-build.json)
+          [ "$FAILED" = "0" ] || { echo "expected every self-build action to succeed"; exit 1; }
+          for bin in laminaria laminaria-planner laminaria-rustc-wrapper laminaria-cc-wrapper; do
+            [ -x "target/laminaria-gen/stage1/$bin" ] || { echo "expected stage1 to contain $bin"; exit 1; }
+          done
+
+      # The actual proof this isn't "linked but unused" (issue #8):
+      # stage1's own freshly built laminaria binary, run with no flags at
+      # all, must find its own sibling laminaria-planner and plan
+      # successfully.
+      - name: Confirm stage1's own planner actually plans (issues #8/#6/#4)
+        run: |
+          target/laminaria-gen/stage1/laminaria plan-self-build --json > /tmp/stage1-plan.json
+          PRODUCED_BY=$(jq -r '.data.produced_by' /tmp/stage1-plan.json)
+          [ "$PRODUCED_BY" = "laminaria-nim-planning-kernel" ] || {
+            echo "expected stage1's own planner to produce a plan with produced_by=laminaria-nim-planning-kernel, got $PRODUCED_BY"
+            exit 1
+          }
+          echo "stage1's own laminaria-planner independently plans successfully (plan_id=$(jq -r '.data.plan_id' /tmp/stage1-plan.json))"
+
       - name: Trace a cold and a true-no-op rust-heavy-workspace build (issue #19 Experiment 1)
         run: |
           rm -rf fixtures/rust-heavy-workspace/target

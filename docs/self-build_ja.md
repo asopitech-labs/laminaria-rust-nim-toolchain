@@ -214,9 +214,17 @@ cargo build --workspace --release
 # stage1: 実際のplan+executeパイプラインを通じて生成される。
 # stage0自身のプランナーがそれを計画する:
 ./target/release/laminaria self-build \
+  --planner nim-planner/bin/laminaria-planner \
   --generation-root target/laminaria-gen/stage1 \
   --generation-label stage0-to-stage1
 ```
+
+(`--planner`が必要なのは、`target/release/laminaria`自身の隣には
+兄弟の`laminaria-planner`が存在しないためである — 存在するのは
+`nim-planner/bin/`だけである。`--planner`はstage0の`laminaria`に
+stage0自身のプランナーを指し示す役割を果たす。`integrate`によって
+生成されたstage1自身の`laminaria`バイナリには兄弟プランナーが実際に
+存在するため、このフラグは不要である — 下記参照。)
 
 `self-build`はセルフビルド用の`PlanningInput`を組み立て、stage0自身の
 `laminaria-planner`バイナリ(実行中の`laminaria`実行ファイルの隣に
