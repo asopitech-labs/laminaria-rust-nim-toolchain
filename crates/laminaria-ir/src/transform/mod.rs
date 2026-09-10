@@ -942,4 +942,50 @@ mod tests {
              the result"
         );
     }
+
+    /// Issue #27's own A4(a) case, literally: `add(x,y)=x+y`, `g(x)=add(1,x)`
+    /// ANF-inlined, `f(x)=g(g(x))` (the same callee at *two nested* call
+    /// sites) checked-inlined, then `entry()=f(10)` ANF-inlined -- a
+    /// three-step, mixed-candidate composition through the real
+    /// `nim_frontend`, required to still evaluate to `12`
+    /// (`f(10) = g(g(10)) = g(11) = add(1, 11) = 12`) at every stage.
+    #[test]
+    fn issue_27_a4_a_mixed_anf_checked_anf_composition_preserves_value() {
+        let source = "proc add(x, y: int32): int32 =\n  x +% y\n\nproc g(x: int32): int32 =\n  add(1'i32, x)\n\nproc f(x: int32): int32 =\n  g(g(x))\n\nproc entry(): int32 =\n  f(10'i32)\n";
+        let program = crate::nim_frontend::lower_nim_source(
+            &PathBuf::from("issue27_a4a.nim"),
+            source,
+            &["add", "g", "f", "entry"],
+        )
+        .unwrap();
+
+        let baseline = eval_function(&program, "entry", &[]).unwrap();
+        assert_eq!(
+            baseline.value, 12,
+            "f(10) = g(g(10)) = g(11) = add(1, 11) = 12"
+        );
+
+        let after_anf_g = anf_insert(&program, "g", "add").unwrap();
+        assert_eq!(
+            eval_function(&after_anf_g, "entry", &[]).unwrap().value,
+            12,
+            "ANF-inlining add into g must not change entry()'s value"
+        );
+
+        let after_checked_f = checked_inline(&after_anf_g, "f", "g").unwrap();
+        assert_eq!(
+            eval_function(&after_checked_f, "entry", &[]).unwrap().value,
+            12,
+            "checked_inline-ing g (called at two nested sites) into f must not change \
+             entry()'s value"
+        );
+
+        let after_anf_entry = anf_insert(&after_checked_f, "entry", "f").unwrap();
+        assert_eq!(
+            eval_function(&after_anf_entry, "entry", &[]).unwrap().value,
+            12,
+            "ANF-inlining f into entry, on top of the two prior transforms, must still \
+             preserve the value"
+        );
+    }
 }
