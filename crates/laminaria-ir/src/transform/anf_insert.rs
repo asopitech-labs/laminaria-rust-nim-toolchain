@@ -14,7 +14,7 @@
 use crate::types::{Expr, LocalId, Program, Provenance};
 
 use super::{
-    as_simple_return_expr, prepare_callee_body_for_grafting, rewrite_calls_in_stmt,
+    alpha_rename_for_one_graft, as_simple_return_expr, initial_next_local, rewrite_calls_in_stmt,
     substitute_params_with_locals, TransformError,
 };
 
@@ -44,17 +44,9 @@ pub fn anf_insert(
         .get(caller_name)
         .ok_or_else(|| TransformError::UnknownCaller(caller_name.to_string()))?;
 
-    // Alpha-renames the callee body's own embedded `Let`s (if it has any,
-    // from an earlier inlining pass) and returns a starting counter for
-    // this call's *own* fresh per-argument bindings that continues past
-    // both the caller's existing ids and the (now-renamed) callee body's
-    // own -- see `prepare_callee_body_for_grafting`'s doc comment for the
-    // composition bug this closes, and the doc comment on the earlier,
-    // narrower fix this replaces (considering only the caller's own
-    // pre-existing locals was not enough once a callee's body can itself
-    // already contain embedded `Let`s from a prior transformation).
-    let (callee_body, mut next_local) =
-        prepare_callee_body_for_grafting(&caller_fact.body, &raw_callee_body);
+    // Starting counter for this whole operation's fresh ids, above every id
+    // already meaningful in the caller's body.
+    let mut next_local = initial_next_local(&caller_fact.body);
 
     let new_body = rewrite_calls_in_stmt(
         &caller_fact.body,
@@ -65,6 +57,17 @@ pub fn anf_insert(
                     callee: callee_name.to_string(),
                 });
             }
+
+            // A *fresh* alpha-rename of the callee's raw body, per call
+            // site -- see `alpha_rename_for_one_graft`'s own doc comment
+            // for why reusing one renamed copy (and its ids) across more
+            // than one call site of the same callee inside this caller
+            // would be wrong: every such site ends up grafted into the
+            // same caller scope, coexisting with each other. `next_local`
+            // continues advancing past whatever this rename allocates, so
+            // this call site's own fresh per-argument bindings (below)
+            // are also guaranteed disjoint from it.
+            let callee_body = alpha_rename_for_one_graft(&raw_callee_body, &mut next_local);
 
             let locals: Vec<LocalId> = (0..param_count)
                 .map(|_| {

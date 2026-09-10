@@ -26,6 +26,8 @@
 
 pub mod anf_insert;
 pub mod checked_inline;
+#[cfg(test)]
+mod composition_fuzz;
 
 use crate::types::{Expr, FnFact, FnId, LocalId, Program, Provenance, Stmt};
 
@@ -61,6 +63,20 @@ pub enum TransformError {
         callee: String,
         earlier_arg: usize,
         later_arg: usize,
+    },
+    /// `checked_inline` only: a call-containing argument would end up
+    /// evaluated *after* a call the callee body makes internally (a `Call`
+    /// present directly in the callee's own body, not derived from any
+    /// parameter substitution). Real call semantics evaluate every argument
+    /// before the callee body starts running at all, so this would run the
+    /// callee's own internal call ahead of an argument's effect instead of
+    /// after it. See issue #27's reference to rustc's AST-attribute/
+    /// evaluation-order handling -- this is the same "the callee's own body
+    /// is not just a hole for parameters" class of gap, applied to effect
+    /// ordering rather than attributes.
+    WouldReorderRelativeToCalleeCall {
+        callee: String,
+        param_index: usize,
     },
 }
 
@@ -157,19 +173,41 @@ fn alpha_rename_callee_body(
     }
 }
 
-/// Prepares a callee body for grafting into `caller_body`: alpha-renames
-/// the callee's own embedded `Let`s (see [`alpha_rename_callee_body`]) and
-/// returns both the renamed body and the counter value the caller should
-/// continue from for any *additional* fresh ids it still needs to
-/// introduce itself (only `anf_insert` does; `checked_inline` doesn't, but
-/// still needs the rename).
-fn prepare_callee_body_for_grafting(caller_body: &Stmt, callee_body: &Expr) -> (Expr, u32) {
-    let mut next_local = crate::types::max_local_id_in_stmt(caller_body)
+/// Starting fresh-`LocalId` counter for a whole inlining operation: strictly
+/// above every id already meaningful in `caller_body`, so the *first* graft
+/// this operation performs (see [`alpha_rename_for_one_graft`]) cannot
+/// collide with anything the caller already binds or references.
+fn initial_next_local(caller_body: &Stmt) -> u32 {
+    crate::types::max_local_id_in_stmt(caller_body)
         .map(|m| m + 1)
-        .unwrap_or(0);
+        .unwrap_or(0)
+}
+
+/// Alpha-renames a *fresh copy* of the callee's raw (un-renamed) body for
+/// exactly one graft site, using a brand-new, empty substitution map every
+/// time this is called. `next_local` is threaded across every call site an
+/// inlining operation performs (the shared `rewrite_calls_in_stmt` closure
+/// calls this once per matched call site), so each successive call
+/// continues allocating ids strictly above whatever the previous one used.
+///
+/// This must NOT reuse one renamed copy (and its ids) across more than one
+/// call site: a review reproduced the real consequence directly when
+/// `callee_name` is called more than once inside the same caller body --
+/// every one of those call sites ends up grafted into the *same* caller
+/// scope, coexisting with each other, so reusing identical ids for the
+/// callee's own embedded `Let`s at each site is exactly the same hazard the
+/// caller-vs-callee alpha-rename above closes, one level up: two grafted
+/// copies of the same callee body would bind the *same* `LocalId` in the
+/// same enclosing scope, so a reference meant for one copy's binding can
+/// silently resolve to the other copy's instead. Nim's own
+/// `openScope`/`rawCloseScope` (issue #27's reference table) keep exactly
+/// this invariant for a single lexical scope -- a scope's own bindings
+/// never leak into a sibling scope opened afterward; a fresh, empty `remap`
+/// per graft site is this transform's equivalent: each insertion point is
+/// its own scope, closed (its `remap` dropped) before the next one opens.
+fn alpha_rename_for_one_graft(raw_callee_body: &Expr, next_local: &mut u32) -> Expr {
     let mut remap = std::collections::BTreeMap::new();
-    let renamed = alpha_rename_callee_body(callee_body, &mut remap, &mut next_local);
-    (renamed, next_local)
+    alpha_rename_callee_body(raw_callee_body, &mut remap, next_local)
 }
 
 fn count_param_occurrences(expr: &Expr, target: usize) -> usize {
@@ -212,6 +250,54 @@ fn param_evaluation_order(expr: &Expr, out: &mut Vec<usize>) {
         Expr::Let { value, body, .. } => {
             param_evaluation_order(value, out);
             param_evaluation_order(body, out);
+        }
+    }
+}
+
+/// One position in a callee body's own left-to-right evaluation order,
+/// unifying two kinds of observable event `checked_inline` must reason
+/// about together: a parameter reference (which becomes an argument's own
+/// effect once substituted) and a `Call` the callee body makes *directly*,
+/// independent of any parameter (a genuine internal effect of the callee
+/// itself, e.g. `mark(2) +% x`'s `mark(2)`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ObservedEvent {
+    Param(usize),
+    CalleeCall,
+}
+
+/// The evaluation-order sequence of both parameter references *and* the
+/// callee body's own internal calls, in the exact order
+/// `interpreter::eval_expr` actually evaluates them (per its own `Call`
+/// arm: a call's arguments evaluate first, then the call itself is
+/// recorded as an effect, matching the `CalleeCall` marker's position
+/// here). `checked_inline` uses this to check a fact `param_evaluation_order`
+/// alone cannot see: whether an effectful argument would end up evaluated
+/// *after* a call the callee body makes on its own -- real call semantics
+/// evaluate every argument before the callee body runs at all, so an
+/// effectful `Param` occurring after a `CalleeCall` here means verbatim
+/// substitution would reorder them (issue #27's own worked example: a
+/// callee body of `mark(2) +% x` called as `f(mark(1))` must run `mark(1)`
+/// before `mark(2)`, but substituting `x -> mark(1)` verbatim produces
+/// `mark(2) +% mark(1)`, evaluated in the opposite order).
+fn observed_event_order(expr: &Expr, out: &mut Vec<ObservedEvent>) {
+    match expr {
+        Expr::Param(i, _) => out.push(ObservedEvent::Param(*i)),
+        Expr::IntLit(..) | Expr::Local(..) => {}
+        Expr::WrappingAdd(a, b, _) | Expr::WrappingSub(a, b, _) | Expr::WrappingMul(a, b, _) => {
+            observed_event_order(a, out);
+            observed_event_order(b, out);
+        }
+        Expr::NotEqZero(inner, _) => observed_event_order(inner, out),
+        Expr::Call(_, args, _) => {
+            for a in args {
+                observed_event_order(a, out);
+            }
+            out.push(ObservedEvent::CalleeCall);
+        }
+        Expr::Let { value, body, .. } => {
+            observed_event_order(value, out);
+            observed_event_order(body, out);
         }
     }
 }
@@ -631,6 +717,71 @@ mod tests {
             vec![1, 2],
             "ANF must preserve the caller's original left-to-right effect order regardless of \
              the callee body's own reference order"
+        );
+    }
+
+    /// `callee_with_own_effect(x) = mark(2) +% x` -- the callee makes a
+    /// call *of its own*, directly, independent of any parameter. Calling
+    /// it as `caller() = callee_with_own_effect(mark(1))` must run
+    /// `mark(1)` (the argument) before `mark(2)` (the callee's own
+    /// internal call), matching real call semantics (every argument
+    /// evaluates before the callee body starts running at all). Verbatim
+    /// substitution instead produces `mark(2) +% mark(1)`, which the
+    /// interpreter evaluates left-to-right as `[2, 1]` -- reordered.
+    /// Issue #27's own worked example for this exact hazard: checking only
+    /// argument-to-argument order (as the pre-existing
+    /// `WouldReorderEffects` check does) misses it entirely, since there is
+    /// only one effectful argument here, never compared against anything.
+    /// A generative fuzz battery
+    /// (`composition_fuzz::ir_level_composition_fuzz_preserves_value_and_observed_effects`)
+    /// independently rediscovered this same class of bug at a randomly
+    /// generated seed; confirmed to actually matter by reverting
+    /// `WouldReorderRelativeToCalleeCall`'s own check and re-running: both
+    /// this test and that fuzz seed failed with the exact predicted wrong
+    /// order, not a hypothetical concern.
+    #[test]
+    fn reordering_relative_to_callee_internal_call_hazard_checked_inline_rejects_anf_insert_accepts(
+    ) {
+        let mut program = Program::default();
+        program.insert(mark_fact());
+        program.insert(fact(
+            "callee_with_own_effect",
+            1,
+            Stmt::Return(
+                Expr::WrappingAdd(
+                    Box::new(call("mark", vec![lit(2)])),
+                    Box::new(Expr::Param(0, prov())),
+                    prov(),
+                ),
+                prov(),
+            ),
+        ));
+        program.insert(fact(
+            "caller",
+            0,
+            Stmt::Return(call("callee_with_own_effect", vec![marked(lit(1))]), prov()),
+        ));
+
+        let baseline = eval_function(&program, "caller", &[]).unwrap();
+        assert_eq!(baseline.value, 3);
+        assert_eq!(
+            effects_of(&program, "caller"),
+            vec![1, 2],
+            "the argument's own mark(1) must run before the callee's internal mark(2)"
+        );
+
+        match checked_inline(&program, "caller", "callee_with_own_effect") {
+            Err(TransformError::WouldReorderRelativeToCalleeCall { param_index: 0, .. }) => {}
+            other => panic!("expected WouldReorderRelativeToCalleeCall, got {other:?}"),
+        }
+
+        let transformed = anf_insert(&program, "caller", "callee_with_own_effect").unwrap();
+        let after = eval_function(&transformed, "caller", &[]).unwrap();
+        assert_eq!(after.value, baseline.value);
+        assert_eq!(
+            effects_of(&transformed, "caller"),
+            vec![1, 2],
+            "ANF must still hoist the argument ahead of the callee's own internal call"
         );
     }
 

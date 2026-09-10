@@ -382,3 +382,96 @@ declared subset doesn't yet enforce) should be expected and fixed
 incrementally as they're found, the same way this round's were, rather
 than treated as a one-time completeness gate before proceeding to Task 2
 (#6/#8 planner/scheduler integration).
+
+## Fourth pass: issue #27's semantic-gate (A), grounded in real reference code
+
+[Issue #27](https://github.com/asopitech-labs/laminaria-rust-nim-toolchain/issues/27)
+reframes Task 2 as a joint milestone that does not wait for #3/#25's
+research to fully close, and names its own "A" gate: fix the three
+concrete defects its reference-code table identifies, add finite
+regression/composition tests, and stop there (no new language features).
+Its reference table names exact revisions/functions this round actually
+read before deciding what to fix -- see the issue body itself for the
+full list; summarized here only where a fix follows directly from one:
+
+1. **Per-graft-site alpha-rename, instead of one rename shared across every
+   call site of the same callee.** `checked_inline`/`anf_insert` used to
+   call `prepare_callee_body_for_grafting` *once*, before scanning for call
+   sites, producing a single alpha-renamed callee body reused verbatim at
+   every match `rewrite_calls_in_stmt` finds. When the same callee is
+   called more than once inside one caller, every one of those call sites
+   grafts into the *same* caller scope -- reusing identical `LocalId`s for
+   each graft's own embedded `Let`s is exactly the "a scope's own bindings
+   must not leak into a sibling scope opened afterward" hazard issue #27
+   names via Nim's own `openScope`/`rawCloseScope`. Fixed with
+   `alpha_rename_for_one_graft`, called fresh (a brand-new, empty `remap`)
+   inside the per-call-site closure itself, threading one monotonically
+   advancing `next_local` counter across every site an operation performs.
+   Honestly: this round's own fuzz battery (below) did not find a
+   currently-reachable wrong *value* from the single-shared-rename version
+   for any construction attempted (`Expr::Let`'s value-before-bind, fully-
+   unwind-before-return evaluation order happens to protect every
+   nesting/sibling shape tried) -- this is recorded as a structural
+   invariant fix following the reference discipline directly, not a
+   confirmed-by-reverting wrong-value bug the way the next two are.
+2. **A callee body's own attributes were checked, but a `let` statement's
+   or a function parameter's were not.** Verified directly against rustc's
+   own `rustc_expand::config::StripUnconfigured::configure` and
+   `rustc_expand::expand`'s `flat_map_stmt`/`flat_map_param` (issue #27's
+   reference table): `cfg` acts on statements and parameters, not only
+   items. `syn` happily parses `#[cfg(test)] let y = x;` and
+   `fn f(#[cfg(test)] x: i32)` into `Local.attrs`/`PatType.attrs`, and
+   `rust_frontend` never inspected either field -- confirmed by reverting
+   the fix and re-running two new regression tests: both silently
+   `Ok(Program{..})`'d instead of rejecting. Fixed with a shared
+   `reject_unsupported_attrs` helper, now also called on every `Local` and
+   `FnArg::Typed`, plus `ExprIf.attrs` for completeness (an `if` used at a
+   block's tail can carry its own attribute too).
+3. **`checked_inline` only ever compared arguments against each other,
+   never against a call the callee body makes on its own.** A callee like
+   `f(x) = mark(2) +% x` called as `caller() = f(mark(1))` must run
+   `mark(1)` before `mark(2)` (every argument evaluates before the callee
+   body runs at all), but verbatim substitution produces
+   `mark(2) +% mark(1)`, evaluated left-to-right as `[2, 1]` --
+   `count_param_occurrences`/`param_evaluation_order` never looked at any
+   `Call` embedded directly in the callee body, only at `Param`
+   references, so this reordering was silently accepted. Fixed with
+   `ObservedEvent`/`observed_event_order` (unifying `Param` references and
+   the callee's own internal calls into one evaluation-order sequence) and
+   a new `TransformError::WouldReorderRelativeToCalleeCall`, checked
+   alongside the pre-existing argument-to-argument checks. Confirmed by
+   reverting and re-running: the dedicated regression test failed with
+   observed order `[2, 1]` against baseline `[1, 2]`, exactly as predicted.
+
+**A new generative battery**
+(`transform::composition_fuzz`) directly answers issue #27's A4 checklist
+rather than only adding hand-picked cases: a deterministic, seeded
+(splitmix64, no external `rand` dependency) generator builds 120 random
+`mark`/`helper`/`g`/`f`/`entry` programs -- covering 0-2 prior compositions,
+nested and sibling multi-call-sites of the same callee, unused/duplicated/
+reordered parameter references (occurring naturally from uniformly random
+parameter-index selection, not hand-picked per case), and edge/random
+`i32` values -- and asserts both candidates either match the baseline
+interpreter's value *and* observed `mark(..)` sequence exactly, or (for
+`checked_inline` only) conservatively refuse; a coverage self-check fails
+the test outright if a run never exercises both `checked_inline`'s
+acceptance and rejection paths, or never produces any effect to compare at
+all. **This fuzzer independently rediscovered defect 3 above at a randomly
+generated seed** when run against the pre-fix code (confirmed directly:
+reverting only the transform files and re-running failed at seed 2 with
+observed marks `[0, 1, 0, 0]` against expected `[1, 0, 0, 0]`) -- real
+corroborating evidence, not merely a plausible-sounding battery. A second,
+smaller fuzz test (`source_level_shadowing_fuzz_preserves_value`, 40
+seeds) generalizes the existing hand-written shadowing regression test
+through the real `nim_frontend` across a random number of pre-existing
+caller locals.
+
+`cargo test --workspace`: 237 passed (up from 231; +6 in `laminaria-ir`
+proper: 4 new hand-written regression tests plus these 2 fuzz batteries).
+Clippy and fmt clean workspace-wide.
+
+**Issue #27's A is not fully closed by this round alone**: A1's full
+subset acceptance table (mapping every accept/reject/ignore branch across
+file/function/argument/let/expression positions) and the source/
+transformed/legal-subset real-compiler comparison-recording split are
+still open, tracked directly in issue #27 rather than restated here.

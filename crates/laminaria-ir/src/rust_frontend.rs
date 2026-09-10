@@ -95,6 +95,27 @@ fn unsupported_shape(detail: impl Into<String>, span: Span) -> LoweringError {
     }
 }
 
+/// Pushes an [`unsupported`] error for every attribute in `attrs` that isn't
+/// `#[doc = ...]` (what a `///` comment desugars to, allowed through since
+/// it has no semantic effect). A review first added this check only for a
+/// function's own attributes (`item_fn.attrs`), but `cfg` and other
+/// attributes attach to far more positions than just item declarations --
+/// confirmed directly against rustc's own `StripUnconfigured::configure`,
+/// which `rustc_expand::expand`'s `flat_map_stmt`/`flat_map_param` invoke on
+/// individual statements and function parameters, not only whole items
+/// (issue #27's reference table). This subset does not implement `cfg` at
+/// all, so an unsupported attribute at *any* position it can appear at must
+/// be diagnosed the same way -- silently accepting one anywhere this
+/// helper isn't called would let it act on (or be ignored on) the tagged
+/// construct without ever being noticed.
+fn reject_unsupported_attrs(attrs: &[syn::Attribute], errors: &mut Vec<LoweringError>) {
+    for attr in attrs {
+        if !attr.path().is_ident("doc") {
+            errors.push(unsupported("attribute", attr.span()));
+        }
+    }
+}
+
 /// Lowers exactly the named top-level functions from `source_text` (a whole
 /// Rust file) into a [`Program`]. Only these functions -- and any function
 /// they call, which must *also* be in `requested_functions` -- are ever
@@ -247,11 +268,7 @@ fn lower_item_fn(
     if let Some(where_clause) = &item_fn.sig.generics.where_clause {
         errors.push(unsupported("where clause", where_clause.span()));
     }
-    for attr in &item_fn.attrs {
-        if !attr.path().is_ident("doc") {
-            errors.push(unsupported("attribute", attr.span()));
-        }
-    }
+    reject_unsupported_attrs(&item_fn.attrs, &mut errors);
 
     let mut params = Vec::new();
     let mut param_index = BTreeMap::new();
@@ -259,6 +276,12 @@ fn lower_item_fn(
     for (index, arg) in item_fn.sig.inputs.iter().enumerate() {
         match arg {
             FnArg::Typed(pat_type) => {
+                // A parameter can carry its own attribute independent of
+                // the function's own (`fn f(#[cfg(test)] x: i32) -> i32`)
+                // -- rustc's `flat_map_param` (issue #27's reference table)
+                // strips `cfg` here specifically, one of the positions the
+                // function-level-only check above did not cover.
+                reject_unsupported_attrs(&pat_type.attrs, &mut errors);
                 let name = match pat_type.pat.as_ref() {
                     Pat::Ident(pi) if pi.by_ref.is_none() && pi.subpat.is_none() => {
                         pi.ident.to_string()
@@ -371,6 +394,19 @@ fn lower_block(block: &Block, ctx: &mut Ctx) -> Result<Stmt, Vec<LoweringError>>
     }
     let mut pending = Vec::with_capacity(lets.len());
     for (local, span) in &lets {
+        // `cfg` and other attributes can attach to a `let` statement itself
+        // (`#[cfg(test)] let x = 1;`), not only to a function/parameter --
+        // rustc's `flat_map_stmt` (issue #27's reference table) is exactly
+        // where a real compiler applies `cfg` at this position. This
+        // subset implements no `cfg`, so any non-doc attribute here is
+        // diagnosed the same way a function-level one already is, instead
+        // of being silently accepted because only `ItemFn.attrs` was ever
+        // checked.
+        let mut attr_errors = Vec::new();
+        reject_unsupported_attrs(&local.attrs, &mut attr_errors);
+        if !attr_errors.is_empty() {
+            return Err(attr_errors);
+        }
         let name = match &local.pat {
             Pat::Ident(pi) if pi.by_ref.is_none() && pi.subpat.is_none() => pi.ident.to_string(),
             other => {
@@ -452,6 +488,11 @@ fn lower_tail_stmt(stmt: &SynStmt, ctx: &mut Ctx) -> Result<Stmt, Vec<LoweringEr
 }
 
 fn lower_if(expr_if: &ExprIf, ctx: &mut Ctx) -> Result<Stmt, Vec<LoweringError>> {
+    let mut attr_errors = Vec::new();
+    reject_unsupported_attrs(&expr_if.attrs, &mut attr_errors);
+    if !attr_errors.is_empty() {
+        return Err(attr_errors);
+    }
     let (cond, swap) = lower_condition(&expr_if.cond, ctx)?;
     let then = lower_block(&expr_if.then_branch, ctx)?;
     let Some((_, else_expr)) = &expr_if.else_branch else {
@@ -861,6 +902,36 @@ mod tests {
         let source = "#[cfg(target_os = \"linux\")]\nfn f(x: i32) -> i32 { x }";
         let result = lower_rust_source(&path(), source, &["f"]);
         assert!(result.is_err());
+    }
+
+    /// A review caught that only `ItemFn.attrs` was ever checked -- `cfg`
+    /// and other attributes attach to a `let` statement too (verified
+    /// against rustc's own `flat_map_stmt`, issue #27's reference table),
+    /// and were silently accepted there before this fix.
+    #[test]
+    fn rejects_a_cfg_attribute_on_a_let_statement() {
+        let source = "fn f(x: i32) -> i32 {\n  #[cfg(test)]\n  let y = x;\n  y\n}";
+        let result = lower_rust_source(&path(), source, &["f"]);
+        assert!(result.is_err(), "{result:?}");
+    }
+
+    /// The same gap, on a function parameter (`flat_map_param` in rustc's
+    /// own `rustc_expand::expand`, issue #27's reference table) -- silently
+    /// accepted before this fix since only the function's own attributes
+    /// were checked, never a parameter's.
+    #[test]
+    fn rejects_a_cfg_attribute_on_a_function_parameter() {
+        let source = "fn f(#[cfg(test)] x: i32) -> i32 { x }";
+        let result = lower_rust_source(&path(), source, &["f"]);
+        assert!(result.is_err(), "{result:?}");
+    }
+
+    /// The same gap, on an `if` used at a block's tail position.
+    #[test]
+    fn rejects_a_cfg_attribute_on_an_if_tail() {
+        let source = "fn f(x: i32) -> i32 {\n  #[cfg(test)]\n  if x != 0 { x } else { 0 }\n}";
+        let result = lower_rust_source(&path(), source, &["f"]);
+        assert!(result.is_err(), "{result:?}");
     }
 
     /// A plain doc comment carries no semantic effect and must still be

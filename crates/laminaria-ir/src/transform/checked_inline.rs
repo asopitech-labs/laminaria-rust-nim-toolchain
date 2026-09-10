@@ -8,9 +8,9 @@
 use crate::types::{expr_contains_call, Program};
 
 use super::{
-    as_simple_return_expr, count_param_occurrences, param_evaluation_order,
-    prepare_callee_body_for_grafting, rewrite_calls_in_stmt, substitute_params_verbatim,
-    TransformError,
+    alpha_rename_for_one_graft, as_simple_return_expr, count_param_occurrences, initial_next_local,
+    observed_event_order, param_evaluation_order, rewrite_calls_in_stmt,
+    substitute_params_verbatim, ObservedEvent, TransformError,
 };
 
 /// Inlines every call to `callee_name` inside `caller_name`'s body,
@@ -40,12 +40,15 @@ pub fn checked_inline(
         .get(caller_name)
         .ok_or_else(|| TransformError::UnknownCaller(caller_name.to_string()))?;
 
-    // Alpha-rename the callee body's own embedded `Let`s (if it has any,
-    // from an earlier inlining pass) before doing anything else with it --
-    // see `prepare_callee_body_for_grafting`'s own doc comment for the
-    // composition bug this closes. `checked_inline` never introduces
-    // fresh ids of its own, so the returned counter is unused here.
-    let (callee_body, _) = prepare_callee_body_for_grafting(&caller_fact.body, &raw_callee_body);
+    // Starting counter for this whole operation's alpha-renames -- see
+    // `alpha_rename_for_one_graft`'s own doc comment for why a *fresh*
+    // rename (not one shared copy reused verbatim) is required at every
+    // call site `callee_name` occurs at inside `caller_name`'s body: they
+    // all end up grafted into the same caller scope, so a copy shared
+    // across sites would let two grafts collide on the same `LocalId`s.
+    // `checked_inline` never introduces fresh ids of its own beyond the
+    // rename, so `next_local` only ever advances via that rename here.
+    let mut next_local = initial_next_local(&caller_fact.body);
 
     let new_body = rewrite_calls_in_stmt(&caller_fact.body, callee_name, &mut |args, _prov| {
         if args.len() != param_count {
@@ -53,6 +56,8 @@ pub fn checked_inline(
                 callee: callee_name.to_string(),
             });
         }
+
+        let callee_body = alpha_rename_for_one_graft(&raw_callee_body, &mut next_local);
 
         let mut evaluation_order = Vec::new();
         param_evaluation_order(&callee_body, &mut evaluation_order);
@@ -86,6 +91,37 @@ pub fn checked_inline(
                         earlier_arg: earlier,
                         later_arg: later,
                     });
+                }
+            }
+        }
+
+        // A callee body is not just a hole for its parameters: it can make
+        // calls of its own, directly, independent of any argument (e.g.
+        // `mark(2) +% x`). Real call semantics evaluate *every* argument
+        // before the callee body runs at all, so an effectful argument
+        // whose parameter is referenced *after* the callee's own first
+        // internal call (in the callee body's own evaluation order) would
+        // have its effect reordered to run after that internal call
+        // instead of before it. Checking only argument-to-argument order
+        // (above) misses this entirely -- see `observed_event_order`'s own
+        // doc comment.
+        let mut events = Vec::new();
+        observed_event_order(&callee_body, &mut events);
+        if let Some(first_call_pos) = events
+            .iter()
+            .position(|e| matches!(e, ObservedEvent::CalleeCall))
+        {
+            for &i in &effectful_indices {
+                let param_pos = events
+                    .iter()
+                    .position(|e| matches!(e, ObservedEvent::Param(p) if *p == i));
+                if let Some(pp) = param_pos {
+                    if pp > first_call_pos {
+                        return Err(TransformError::WouldReorderRelativeToCalleeCall {
+                            callee: callee_name.to_string(),
+                            param_index: i,
+                        });
+                    }
                 }
             }
         }
