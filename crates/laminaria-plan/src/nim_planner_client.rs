@@ -143,6 +143,7 @@ pub fn call_default_planner(input: &PlanningInput) -> Result<PlanOutcome, Planne
 mod tests {
     use super::*;
     use crate::types::{Action, ActionKind, ArtifactRef};
+    #[cfg(unix)]
     use std::path::PathBuf;
 
     /// Locates (building first if necessary) the real `laminaria-planner`

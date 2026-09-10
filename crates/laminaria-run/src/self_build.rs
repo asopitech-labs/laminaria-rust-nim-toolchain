@@ -58,6 +58,20 @@ const HOST_BINARY_NAMES: &[&str] = &[
 ];
 const PLANNER_BINARY_NAME: &str = "laminaria-planner";
 
+/// Joins a relative `path` onto this process's own current directory,
+/// leaving an already-absolute path untouched. Deliberately not
+/// `std::fs::canonicalize` (which requires the path to already exist --
+/// `generation_root` usually doesn't yet on a first run) and not
+/// `std::path::absolute` (stabilized in Rust 1.79, newer than this
+/// workspace's own `rust-version = "1.74"`).
+fn absolute_path(path: &Path) -> std::io::Result<PathBuf> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()?.join(path))
+    }
+}
+
 fn binary_name(base: &str) -> String {
     if cfg!(windows) {
         format!("{base}.exe")
@@ -203,6 +217,23 @@ pub fn run_generation(
     runs_root: &Path,
     lock_path: &Path,
 ) -> Result<GenerationResult, SelfBuildError> {
+    // Resolved to an absolute path *before* anything else derives paths
+    // from it -- a real bug an external review caught: `nim_build_root`
+    // spawns `nim` with `cwd = repo_root/nim-planner`, `cargo_build_root`
+    // spawns `cargo` with `cwd = repo_root`, and `run_integrate_action`
+    // never spawns a subprocess at all (Rust's own `std::fs` calls
+    // resolve relative paths against *this process's* cwd). A relative
+    // `--generation-root` therefore got resolved three different,
+    // mutually inconsistent ways depending on which action touched it,
+    // reproduced directly with `--generation-root gen-relative`: Nim's
+    // output landed under `nim-planner/gen-relative/...`, Cargo's under
+    // `gen-relative/...` (relative to `repo_root`), and `integrate` then
+    // failed to find either. An absolute `generation_root` resolves
+    // identically regardless of any subprocess's own `cwd`, closing the
+    // whole class at the source rather than fixing each call site
+    // separately.
+    let generation_root = &absolute_path(generation_root)?;
+
     let input = self_build_planning_input();
     let outcome =
         laminaria_plan::call_planner(planner_binary, &input).map_err(SelfBuildError::Planner)?;
@@ -258,7 +289,12 @@ pub fn run_generation(
                 runs_root,
                 lock_path,
                 &evidence,
-                cargo_build_root(repo_root, generation_root, &toolchain.cargo),
+                cargo_build_root(
+                    repo_root,
+                    generation_root,
+                    &toolchain.cargo,
+                    &toolchain.rustc,
+                ),
                 vec![cargo_target_dir(generation_root).join("release")],
             ),
             ActionKind::Integrate => run_integrate_action(action, generation_root),
@@ -296,26 +332,62 @@ struct ActionEvidence {
     generation_label: String,
 }
 
-/// The exact, resolved-from-the-lock-file `cargo`/`nim` executables
-/// self-build must invoke -- never a bare `"cargo"`/`"nim"` program name
-/// resolved implicitly from `PATH` at spawn time (an external review
-/// caught this: with no verification step, a nonexistent `--lock`
-/// resulted in an empty resolved-toolchain list in the evidence while
-/// execution silently used PATH's own `cargo`/`nim` anyway).
+/// The exact, resolved-from-the-lock-file `cargo`/`rustc`/`nim`
+/// executables self-build must invoke -- never a bare `"cargo"`/`"nim"`
+/// program name resolved implicitly from `PATH` at spawn time (an
+/// external review caught this: with no verification step, a
+/// nonexistent `--lock` resulted in an empty resolved-toolchain list in
+/// the evidence while execution silently used PATH's own `cargo`/`nim`
+/// anyway). `rustc` is tracked separately from `cargo` and passed
+/// through as an explicit `RUSTC` override (`cargo_build_root`) -- a
+/// second review caught that resolving *only* `cargo`'s path does not
+/// pin which `rustc` it invokes internally; without `RUSTC` set, `cargo`
+/// (or a `rustup` shim in front of it) resolves `rustc` through its own,
+/// independent selection, which can silently disagree with the toolchain
+/// this function just verified.
+#[derive(Debug)]
 struct VerifiedToolchain {
     cargo: PathBuf,
+    rustc: PathBuf,
     nim: PathBuf,
+}
+
+/// Whether `resolved_version` is consistent with a requested `selector`.
+/// An empty selector, or a non-numeric channel name (`"stable"`/
+/// `"beta"`/`"nightly"`, which has no single fixed version to compare
+/// against), always matches. A numeric-looking selector (`"2.2.10"`,
+/// `"1.75"`) must be a prefix of the resolved version -- the same
+/// prefix-matching rule `laminaria_fingerprint::nim_toolchain` already
+/// uses for its own (bin_dir-less-only) mismatch note, generalized here
+/// to a hard failure that applies regardless of *how* the toolchain was
+/// resolved (bin_dir-pinned, rustup-resolved, or bare PATH).
+fn selector_matches_resolved(selector: &str, resolved_version: Option<&str>) -> bool {
+    if selector.is_empty() {
+        return true;
+    }
+    if !selector.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        return true;
+    }
+    resolved_version.is_some_and(|resolved| resolved.starts_with(selector))
 }
 
 /// Loads `lock_path`, and requires it to resolve at least one Rust
 /// toolchain and one Nim toolchain, each with a real executable path
-/// (`laminaria_fingerprint`'s own `doctor::build`, reused directly
-/// rather than re-deriving toolchain resolution here). This project's
-/// `toolchains.lock.toml` declares exactly one of each today, so simply
-/// taking the first resolved entry is unambiguous; a lock file
-/// declaring more than one Rust or Nim toolchain would need an explicit
-/// `--rust-toolchain`/`--nim-toolchain` selector this first slice does
-/// not yet have -- named as an open gap, not silently guessed at.
+/// *and* a resolved version consistent with what the lock actually
+/// requested (`laminaria_fingerprint`'s own `doctor::build`, reused
+/// directly rather than re-deriving toolchain resolution here). A
+/// second external review reproduced the version-check gap directly:
+/// setting the Nim selector to a nonexistent `"999.0.0"` still resolved
+/// (and this function still accepted) the real, already-installed
+/// `2.2.10` with no mismatch reported at all -- `bin_dir`-based
+/// resolution success only proves *a* `nim` binary exists at that path,
+/// never that it matches the version the lock claims to pin. This
+/// project's `toolchains.lock.toml` declares exactly one Rust and one
+/// Nim toolchain today, so simply taking the first resolved entry is
+/// unambiguous; a lock file declaring more than one of either would need
+/// an explicit `--rust-toolchain`/`--nim-toolchain` selector this first
+/// slice does not yet have -- named as an open gap, not silently guessed
+/// at.
 fn resolve_verified_toolchain(
     lock_path: &Path,
     repo_root: &Path,
@@ -347,6 +419,13 @@ fn resolve_verified_toolchain(
             rust_toolchain.logical_name
         ))
     })?;
+    let rustc = rust_toolchain.rustc.path.clone().ok_or_else(|| {
+        SelfBuildError::ToolchainUnresolved(format!(
+            "Rust toolchain '{}' has no resolved rustc executable (see its own resolution notes \
+             from `laminaria doctor`)",
+            rust_toolchain.logical_name
+        ))
+    })?;
     let nim = nim_toolchain.nim.path.clone().ok_or_else(|| {
         SelfBuildError::ToolchainUnresolved(format!(
             "Nim toolchain '{}' has no resolved nim executable (see its own resolution notes \
@@ -355,7 +434,26 @@ fn resolve_verified_toolchain(
         ))
     })?;
 
-    Ok(VerifiedToolchain { cargo, nim })
+    let rust_selector = rust_toolchain.requested_selector.as_deref().unwrap_or("");
+    if !selector_matches_resolved(rust_selector, rust_toolchain.resolved_version.as_deref()) {
+        return Err(SelfBuildError::ToolchainUnresolved(format!(
+            "Rust toolchain '{}' requested selector '{rust_selector}' but resolved version is \
+             {:?} -- refusing to build with a toolchain that does not match what the lock file \
+             actually pinned",
+            rust_toolchain.logical_name, rust_toolchain.resolved_version
+        )));
+    }
+    let nim_selector = nim_toolchain.requested_selector.as_deref().unwrap_or("");
+    if !selector_matches_resolved(nim_selector, nim_toolchain.resolved_version.as_deref()) {
+        return Err(SelfBuildError::ToolchainUnresolved(format!(
+            "Nim toolchain '{}' requested selector '{nim_selector}' but resolved version is \
+             {:?} -- refusing to build with a toolchain that does not match what the lock file \
+             actually pinned",
+            nim_toolchain.logical_name, nim_toolchain.resolved_version
+        )));
+    }
+
+    Ok(VerifiedToolchain { cargo, rustc, nim })
 }
 
 /// `<generation_root>/.build/` -- everything a generation's own
@@ -422,7 +520,28 @@ fn nim_build_root(repo_root: &Path, generation_root: &Path, nim_binary: &Path) -
 /// generation's own isolated staging area, not `repo_root`'s shared
 /// `target/` -- the actual fix for the cross-generation cache-sharing
 /// bug this module's own doc comment describes.
-fn cargo_build_root(repo_root: &Path, generation_root: &Path, cargo_binary: &Path) -> RootCommand {
+///
+/// `rustc_binary` is set as an explicit `RUSTC` override, not merely
+/// resolved and left unused -- a second external review caught that
+/// pinning `cargo`'s own path does not, by itself, pin which `rustc` it
+/// invokes internally: without `RUSTC` set, `cargo` resolves `rustc`
+/// through its own separate mechanism (a `rustup` shim's active-
+/// toolchain default, `PATH`, ...), which can silently disagree with the
+/// toolchain `resolve_verified_toolchain` just verified. Setting `RUSTC`
+/// here also feeds `lib.rs`'s own `resolve_real_rustc` (called from
+/// `run_and_record`'s wrapper-substitution setup), which checks an
+/// explicit `RUSTC` in `env_overrides` *first*, ahead of any `+toolchain`
+/// arg or `PATH` default -- so the per-`rustc`-invocation tracer wraps
+/// this exact, verified binary too, not a different one it would
+/// otherwise have auto-detected.
+fn cargo_build_root(
+    repo_root: &Path,
+    generation_root: &Path,
+    cargo_binary: &Path,
+    rustc_binary: &Path,
+) -> RootCommand {
+    let mut env_overrides = std::collections::BTreeMap::new();
+    env_overrides.insert("RUSTC".to_string(), rustc_binary.display().to_string());
     RootCommand {
         program: cargo_binary.display().to_string(),
         args: vec![
@@ -433,7 +552,7 @@ fn cargo_build_root(repo_root: &Path, generation_root: &Path, cargo_binary: &Pat
             cargo_target_dir(generation_root).display().to_string(),
         ],
         cwd: Some(repo_root.to_path_buf()),
-        env_overrides: Default::default(),
+        env_overrides,
     }
 }
 
@@ -727,6 +846,7 @@ mod tests {
     /// file without ever leaving the real repo dirty. Same reasoning as
     /// `reuse.rs`'s own `copy_dir_recursive` test helper: a plain
     /// `std::fs` walk, not `cp -r`, to stay portable.
+    #[cfg(unix)]
     fn copy_workspace_sources(src_root: &Path, dst_root: &Path) {
         std::fs::create_dir_all(dst_root).unwrap();
         for name in ["Cargo.toml", "Cargo.lock", "toolchains.lock.toml"] {
@@ -739,6 +859,7 @@ mod tests {
         copy_dir_filtered(&src_root.join("nim-planner"), &dst_root.join("nim-planner"));
     }
 
+    #[cfg(unix)]
     fn copy_dir_filtered(src: &Path, dst: &Path) {
         std::fs::create_dir_all(dst).unwrap();
         for entry in std::fs::read_dir(src).unwrap() {
@@ -822,5 +943,125 @@ mod tests {
         let _ = std::fs::remove_dir_all(&broken_repo);
         let _ = std::fs::remove_dir_all(&generation_root);
         let _ = std::fs::remove_dir_all(&runs_root);
+    }
+
+    #[test]
+    fn absolute_path_leaves_an_already_absolute_path_untouched() {
+        let abs = PathBuf::from("/tmp/already-absolute-example");
+        assert_eq!(absolute_path(&abs).unwrap(), abs);
+    }
+
+    #[test]
+    fn absolute_path_resolves_a_relative_path_against_the_current_directory() {
+        let relative = Path::new("some-relative-subdir");
+        let resolved = absolute_path(relative).unwrap();
+        assert!(resolved.is_absolute());
+        assert_eq!(resolved, std::env::current_dir().unwrap().join(relative));
+    }
+
+    /// The exact bug an external review caught: `nim_build_root` spawns
+    /// `nim` with `cwd = repo_root/nim-planner`, `cargo_build_root`
+    /// spawns `cargo` with `cwd = repo_root`, and `run_integrate_action`
+    /// never spawns a subprocess at all -- three different, mutually
+    /// inconsistent ways a *relative* `generation_root` used to get
+    /// resolved, reproduced directly with `--generation-root
+    /// gen-relative` (Nim wrote under `nim-planner/gen-relative/...`,
+    /// Cargo under `gen-relative/...` relative to `repo_root`, and
+    /// `integrate` then found neither). A relative `generation_root`
+    /// passed all the way through `run_generation` must still produce a
+    /// working generation at the path the caller actually meant (this
+    /// process's own current directory joined with the relative name).
+    #[test]
+    #[cfg(unix)]
+    fn run_generation_with_a_relative_generation_root_still_produces_a_working_generation() {
+        let repo_root = repo_root();
+        build_stage0_planner(&repo_root);
+        let cargo_status = std::process::Command::new("cargo")
+            .args(["build", "--workspace", "--release"])
+            .current_dir(&repo_root)
+            .status()
+            .expect("failed to invoke cargo");
+        assert!(cargo_status.success(), "stage0 cargo build failed");
+        let stage0_planner = repo_root
+            .join("nim-planner/bin")
+            .join(binary_name(PLANNER_BINARY_NAME));
+
+        // Relative to *this test process's own* current directory, not
+        // to `repo_root` or `repo_root/nim-planner` -- the exact
+        // ambiguity the bug produced. No `set_current_dir` anywhere:
+        // that's global per-process state that would race every other
+        // test running concurrently in this same binary.
+        let relative_name = format!("laminaria-self-build-relative-test-{}", std::process::id());
+        let expected_absolute_root = std::env::current_dir().unwrap().join(&relative_name);
+        let _ = std::fs::remove_dir_all(&expected_absolute_root);
+        let runs_root = tmp_dir("relative-gen-runs");
+        let lock_path = repo_root.join("toolchains.lock.toml");
+
+        let result = run_generation(
+            &repo_root,
+            Path::new(&relative_name),
+            &stage0_planner,
+            "relative-path-test",
+            &runs_root,
+            &lock_path,
+        )
+        .expect("a relative generation_root must still produce a working generation");
+
+        assert_eq!(
+            result.generation_root, expected_absolute_root,
+            "the returned generation_root must be the absolute path this process's own cwd \
+             implies, not left relative"
+        );
+        for name in HOST_BINARY_NAMES {
+            assert!(
+                expected_absolute_root.join(binary_name(name)).is_file(),
+                "expected {name} at the resolved absolute location {}",
+                expected_absolute_root.display()
+            );
+        }
+        assert!(expected_absolute_root
+            .join(binary_name(PLANNER_BINARY_NAME))
+            .is_file());
+
+        let _ = std::fs::remove_dir_all(&expected_absolute_root);
+        let _ = std::fs::remove_dir_all(&runs_root);
+    }
+
+    /// The other half of the same external review's fault-injection: a
+    /// resolved executable path alone was previously accepted as
+    /// "verified" regardless of whether its *version* actually matched
+    /// what the lock file claimed to pin. Reproduced directly before
+    /// this fix: setting `nim2_pinned`'s selector to a nonexistent
+    /// `"999.0.0"` while leaving its `bin_dir` pointed at the real,
+    /// already-installed `2.2.10` still resolved successfully, with no
+    /// mismatch reported at all.
+    #[test]
+    fn resolve_verified_toolchain_rejects_a_version_that_does_not_match_the_requested_selector() {
+        let repo_root = repo_root();
+        let real_lock = std::fs::read_to_string(repo_root.join("toolchains.lock.toml")).unwrap();
+        let mismatched_lock =
+            real_lock.replace(r#"selector = "2.2.10""#, r#"selector = "999.0.0""#);
+        assert_ne!(
+            real_lock, mismatched_lock,
+            "the replacement must have actually matched something in the real lock file"
+        );
+
+        let lock_dir = tmp_dir("mismatched-lock");
+        let lock_path = lock_dir.join("toolchains.lock.toml");
+        std::fs::write(&lock_path, mismatched_lock).unwrap();
+
+        let result = resolve_verified_toolchain(&lock_path, &repo_root);
+
+        match result {
+            Err(SelfBuildError::ToolchainUnresolved(detail)) => {
+                assert!(
+                    detail.contains("999.0.0"),
+                    "expected the mismatch detail to name the requested selector, got: {detail}"
+                );
+            }
+            other => panic!("expected ToolchainUnresolved, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&lock_dir);
     }
 }

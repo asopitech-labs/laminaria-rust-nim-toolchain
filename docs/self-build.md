@@ -343,3 +343,36 @@ All of the following are automated tests, not just described behavior:
   each one's `compile-rust-host` `Run` reports 0 of 57 artifacts fresh
   (real recompilation), not the all-fresh, zero-work result the shared-
   `target/`-directory bug produced before this fix.
+- **A relative `--generation-root` still produces a working generation**:
+  a third external review reproduced `nim`/`cargo`/`integrate` each
+  resolving the *same* relative path differently (against
+  `nim-planner/`, against `repo_root`, and against this process's own
+  cwd, respectively), because each is spawned with a different
+  subprocess `cwd`. `run_generation` now resolves `generation_root` to
+  an absolute path immediately, before deriving any other path from it.
+  `laminaria-run`'s `run_generation_with_a_relative_generation_root_still_produces_a_working_generation`
+  covers this end-to-end (with the real Nim/Cargo builds), and it was
+  also re-verified manually through the actual `laminaria` CLI binary.
+- **A resolved toolchain must actually match the version the lock file
+  requested, and `cargo` cannot silently pick a different `rustc`**: the
+  same review reproduced a Nim `999.0.0` selector still resolving (and
+  being accepted) against the real, already-installed `2.2.10`, with no
+  mismatch reported. `resolve_verified_toolchain` now compares
+  `resolved_version` against the requested selector (skipped only for
+  non-numeric channel names like `"stable"`, which have no single fixed
+  version to compare against) and rejects a mismatch --
+  `resolve_verified_toolchain_rejects_a_version_that_does_not_match_the_requested_selector`
+  covers this directly. Separately, `cargo_build_root` now sets an
+  explicit `RUSTC` override to the toolchain's own resolved `rustc` path
+  -- pinning `cargo`'s own executable was never enough on its own, since
+  `cargo` (or a `rustup` shim in front of it) otherwise resolves `rustc`
+  through its own, independent mechanism.
+- **CI's Nim install now actually matches what the lock file pins**: CI
+  previously installed Nim via plain `apt`/`brew`, which never populates
+  `toolchains.lock.toml`'s declared
+  `~/.choosenim/toolchains/nim-2.2.10/bin` -- the self-build tests
+  correctly failed closed with `ToolchainUnresolved` once toolchain
+  verification actually existed to check it. Fixed by adding a CI step
+  that installs the exact pinned version via `choosenim`, the same
+  mechanism `scripts/bootstrap.sh` already documents for this, rather
+  than loosening the lock file's own pinning.

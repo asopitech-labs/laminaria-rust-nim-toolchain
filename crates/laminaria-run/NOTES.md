@@ -1246,3 +1246,87 @@ every fix has a dedicated test. `cargo test --workspace`: 141 passed (up
 from 119); the substrate prototype fixture: 10 passed (up from 8).
 Clippy and fmt clean throughout, both for the main workspace and the
 substrate prototype fixture separately.
+
+## Sixth review pass: self-build path/toolchain/CI alignment (issues #8/#6)
+
+A third external review of the self-build pipeline, run after the fifth
+pass's fixes actually shipped and immediately broke CI (the fifth pass's
+own local testing never exercised a from-scratch CI runner, only this
+already-bootstrapped dev machine -- see below). Four P1/P2 findings, all
+fault-injection-reproduced, plus the CI break itself:
+
+1. **[P1] A relative `--generation-root` resolved three different,
+   mutually inconsistent ways.** `nim_build_root` spawns `nim` with
+   `cwd = repo_root/nim-planner`; `cargo_build_root` spawns `cargo` with
+   `cwd = repo_root`; `run_integrate_action` never spawns a subprocess at
+   all (plain `std::fs` calls resolve against *this process's* cwd).
+   Reproduced directly with `--generation-root gen-relative`: Nim wrote
+   under `nim-planner/gen-relative/...`, Cargo under `gen-relative/...`
+   relative to `repo_root`, and `integrate` found neither. Fixed with
+   `absolute_path`, resolving `generation_root` to an absolute path
+   *before* anything else derives a path from it -- closing the whole
+   class at the source rather than fixing each call site's own relative
+   resolution separately.
+2. **[P1] A "verified" toolchain didn't have to match the version the
+   lock actually requested, and pinning `cargo` didn't pin `rustc`.**
+   `resolve_verified_toolchain` previously only checked that *a* path
+   resolved, never that its version matched the lock's own `selector`.
+   Reproduced: setting the Nim selector to a nonexistent `"999.0.0"`
+   while `bin_dir` still pointed at the real, already-installed
+   `2.2.10` resolved (and was accepted) with no mismatch reported at
+   all. Fixed with `selector_matches_resolved` (a numeric selector must
+   prefix-match the resolved version; a channel name like `"stable"` has
+   no fixed version to compare against and always matches), applied to
+   both Rust and Nim. Separately: resolving `cargo`'s own path is not
+   the same as pinning which `rustc` it invokes internally -- `cargo`
+   (or a `rustup` shim) resolves `rustc` through its own independent
+   mechanism unless told otherwise. Fixed by having `cargo_build_root`
+   set an explicit `RUSTC` override to the verified toolchain's own
+   resolved `rustc` path, which also feeds `lib.rs`'s existing
+   `resolve_real_rustc` (checked first, ahead of `PATH`/`+toolchain`
+   detection) so the per-invocation tracer wraps the same, correct
+   binary.
+3. **[P1] CI never actually provisioned the Nim version the lock file
+   pins, so real toolchain verification (once it existed) had no chance
+   of passing there.** `toolchains.lock.toml`'s `nim2_pinned` entry
+   declares `bin_dir = "~/.choosenim/toolchains/nim-2.2.10/bin"`; CI's
+   "Install Nim" step only ever ran plain `apt-get install nim` / `brew
+   install nim`, which never populates that path. This was invisible
+   before the fifth pass's toolchain verification existed (nothing
+   previously treated an unresolved toolchain as a hard failure) and
+   surfaced immediately once it did: both of the ubuntu-latest self-build
+   tests failed with `ToolchainUnresolved("Nim toolchain 'nim2_pinned'
+   has no resolved nim executable")` on the very next push. Fixed by
+   adding a CI step that installs the exact pinned version via
+   `choosenim` (the same mechanism `scripts/bootstrap.sh` already
+   documents), rather than loosening the lock file's own pinning to fit
+   what CI happened to have -- keeping the plain apt/brew install
+   alongside it for the later fixture-building steps that only need
+   *some* nim runtime on `PATH`, not the pinned identity.
+4. **[P2] Windows `clippy -D warnings` failed on dead code / an unused
+   import that only exist to support Unix-only tests.** `#[cfg(unix)]`
+   correctly excludes `laminaria-run`'s `copy_workspace_sources`/
+   `copy_dir_filtered` test helpers and `laminaria-plan`'s
+   `real_planner_binary`-only `use std::path::PathBuf` from compiling on
+   Windows at all -- but their own definitions weren't gated the same
+   way, so on Windows they became genuinely dead/unused code under
+   `-D warnings`. Fixed by gating the helper functions (and the import)
+   `#[cfg(unix)]` too, matching their only callers.
+
+A structural lesson from how (3) reached CI at all: this session's own
+local testing runs on a dev machine that a *previous* session already
+fully bootstrapped via `scripts/bootstrap.sh --install`, so
+`nim2_pinned`'s `bin_dir` silently resolved correctly here despite CI
+never being able to reproduce that. Verifying "does the lock file's own
+pinning mechanism actually work" needs a genuinely fresh environment,
+not just this dev machine's already-provisioned one -- worth remembering
+before claiming a toolchain-resolution fix is verified based on local
+success alone.
+
+Every finding was verified against a live reproduction before fixing
+(including the CLI's own `--generation-root gen-relative` end-to-end,
+not just the library-level test), and every fix has a dedicated test.
+`cargo test --workspace`: 145 passed (up from 141). Clippy and fmt clean.
+CI's actual green/red status for this pass is confirmed by the next
+push's own workflow run, not by local reproduction alone -- see this
+file's revision history / the corresponding commit for whether it held.

@@ -74,6 +74,31 @@ jobs:
             brew install nim
           fi
 
+      # issue #8/#6's self-build toolchain verification
+      # (self_build.rs's resolve_verified_toolchain) requires
+      # toolchains.lock.toml's nim2_pinned entry to actually resolve at
+      # its declared bin_dir (~/.choosenim/toolchains/nim-2.2.10/bin) --
+      # a real gap a second external review caught (this job's plain
+      # apt/brew Nim above never populates that path, so the self-build
+      # tests failed closed with ToolchainUnresolved). Fixed by making
+      # this bootstrap actually match what the lock file pins, the same
+      # choosenim mechanism scripts/bootstrap.sh already documents for
+      # this -- not by loosening the lock's own pinning. Independent of
+      # the plain "Install Nim" step above, which stays as-is for the
+      # later fixture-building steps that only need *some* nim runtime
+      # on PATH, not the pinned identity.
+      - name: Install pinned Nim via choosenim (matches toolchains.lock.toml's nim2_pinned)
+        run: |
+          curl https://nim-lang.org/choosenim/init.sh -sSf | sh -s -- -y
+          echo "$HOME/.nimble/bin" >> "$GITHUB_PATH"
+          "$HOME/.nimble/bin/choosenim" --yes 2.2.10
+          PINNED_NIM="$HOME/.choosenim/toolchains/nim-2.2.10/bin/nim"
+          [ -x "$PINNED_NIM" ] || {
+            echo "expected $PINNED_NIM to exist and be executable after choosenim --yes 2.2.10"
+            exit 1
+          }
+          "$PINNED_NIM" --version
+
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
 
