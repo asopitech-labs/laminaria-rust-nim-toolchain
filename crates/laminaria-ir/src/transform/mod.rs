@@ -1,0 +1,576 @@
+//! Two compared candidate representations for "an argument is evaluated
+//! exactly once, in the caller's original order" -- issue #25's own third
+//! comment flags this as the concrete open gap in
+//! `fixtures/laminaria-semantic-substrate-prototype/substrate/src/inline.rs`
+//! ("a real single-evaluation order-preserving `let`-like binding form
+//! remains unimplemented"). Both candidates inline every call to a named
+//! callee inside a named caller's body, run through the identical safety
+//! battery in this crate's tests, and are compared honestly rather than
+//! one being assumed correct upfront (`docs/llvm-rediscovery-research.md`'s
+//! own "do not adopt concepts because they already exist" stance, applied
+//! here to ANF/SSA-style binding disciplines, not just LLVM):
+//!
+//! - [`checked_inline`] ports the existing fixture's approach: substitute
+//!   verbatim, but first *check* whether that substitution would
+//!   duplicate, drop, or reorder a call-containing (therefore possibly
+//!   effectful) argument, and refuse if so.
+//! - [`anf_insert`] instead hoists every argument into an explicit
+//!   [`crate::types::Expr::Let`] binding, in the caller's own left-to-right
+//!   evaluation order, before substituting -- duplication, dropping, and
+//!   reordering become structurally impossible (each argument is evaluated
+//!   exactly once, at the original call site's position, regardless of how
+//!   many times or in what order the callee body's parameters are
+//!   referenced), so it never needs to refuse on those grounds at all.
+//!
+//! See `NOTES.md` for the honest comparison write-up.
+
+pub mod anf_insert;
+pub mod checked_inline;
+
+use crate::types::{Expr, FnFact, FnId, LocalId, Program, Provenance, Stmt};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransformError {
+    UnknownCaller(String),
+    UnknownCallee(String),
+    /// This task's first slice only substitutes a callee whose body is a
+    /// single `Return(expr)` with no internal `Let`/`If` of its own --
+    /// matching the existing fixture's own `double`-shaped example
+    /// exactly. Extending either candidate to a richer callee body is a
+    /// direct follow-up, not a design gap either candidate's own
+    /// substitution logic would need to change to support.
+    UnsupportedCalleeShape {
+        callee: String,
+    },
+    /// `checked_inline` only: a call-containing argument would be
+    /// duplicated (the callee references that parameter more than once).
+    WouldDuplicateEffect {
+        callee: String,
+        param_index: usize,
+    },
+    /// `checked_inline` only: a call-containing argument would never be
+    /// evaluated at all (the callee never references that parameter).
+    WouldDropEffect {
+        callee: String,
+        param_index: usize,
+    },
+    /// `checked_inline` only: two call-containing arguments would be
+    /// evaluated in a different relative order than the caller's own
+    /// left-to-right argument evaluation.
+    WouldReorderEffects {
+        callee: String,
+        earlier_arg: usize,
+        later_arg: usize,
+    },
+}
+
+/// The callee shape both candidates currently support: a body that is
+/// exactly one `Return(expr)`. See [`TransformError::UnsupportedCalleeShape`].
+fn as_simple_return_expr(fact: &FnFact) -> Option<&Expr> {
+    match &fact.body {
+        Stmt::Return(expr, _) => Some(expr),
+        _ => None,
+    }
+}
+
+fn count_param_occurrences(expr: &Expr, target: usize) -> usize {
+    match expr {
+        Expr::Param(i, _) => usize::from(*i == target),
+        Expr::IntLit(..) | Expr::Local(..) => 0,
+        Expr::WrappingAdd(a, b, _) | Expr::WrappingSub(a, b, _) | Expr::WrappingMul(a, b, _) => {
+            count_param_occurrences(a, target) + count_param_occurrences(b, target)
+        }
+        Expr::NotEqZero(inner, _) => count_param_occurrences(inner, target),
+        Expr::Call(_, args, _) => args
+            .iter()
+            .map(|a| count_param_occurrences(a, target))
+            .sum(),
+        Expr::Let { value, body, .. } => {
+            count_param_occurrences(value, target) + count_param_occurrences(body, target)
+        }
+    }
+}
+
+/// The evaluation-order sequence of parameter references inside `expr`, in
+/// the exact order `interpreter::eval_expr` actually evaluates them --
+/// generalizes `fixtures/.../inline.rs`'s own `param_evaluation_order`
+/// (left operand before right for wrapping ops, argument order for calls,
+/// straight through for `NotEqZero`) to this crate's richer `Expr`.
+fn param_evaluation_order(expr: &Expr, out: &mut Vec<usize>) {
+    match expr {
+        Expr::Param(i, _) => out.push(*i),
+        Expr::IntLit(..) | Expr::Local(..) => {}
+        Expr::WrappingAdd(a, b, _) | Expr::WrappingSub(a, b, _) | Expr::WrappingMul(a, b, _) => {
+            param_evaluation_order(a, out);
+            param_evaluation_order(b, out);
+        }
+        Expr::NotEqZero(inner, _) => param_evaluation_order(inner, out),
+        Expr::Call(_, args, _) => {
+            for a in args {
+                param_evaluation_order(a, out);
+            }
+        }
+        Expr::Let { value, body, .. } => {
+            param_evaluation_order(value, out);
+            param_evaluation_order(body, out);
+        }
+    }
+}
+
+/// Verbatim substitution: every `Param(i)` in `callee_body` becomes a
+/// *clone* of `args[i]` -- used by `checked_inline` only after it has
+/// already verified this cannot duplicate/drop/reorder an effect.
+fn substitute_params_verbatim(callee_body: &Expr, args: &[Expr]) -> Expr {
+    match callee_body {
+        Expr::Param(i, _) => args[*i].clone(),
+        Expr::IntLit(..) | Expr::Local(..) => callee_body.clone(),
+        Expr::WrappingAdd(a, b, p) => Expr::WrappingAdd(
+            Box::new(substitute_params_verbatim(a, args)),
+            Box::new(substitute_params_verbatim(b, args)),
+            p.clone(),
+        ),
+        Expr::WrappingSub(a, b, p) => Expr::WrappingSub(
+            Box::new(substitute_params_verbatim(a, args)),
+            Box::new(substitute_params_verbatim(b, args)),
+            p.clone(),
+        ),
+        Expr::WrappingMul(a, b, p) => Expr::WrappingMul(
+            Box::new(substitute_params_verbatim(a, args)),
+            Box::new(substitute_params_verbatim(b, args)),
+            p.clone(),
+        ),
+        Expr::NotEqZero(inner, p) => {
+            Expr::NotEqZero(Box::new(substitute_params_verbatim(inner, args)), p.clone())
+        }
+        Expr::Call(name, cargs, p) => Expr::Call(
+            name.clone(),
+            cargs
+                .iter()
+                .map(|a| substitute_params_verbatim(a, args))
+                .collect(),
+            p.clone(),
+        ),
+        Expr::Let {
+            local,
+            value,
+            body,
+            provenance,
+        } => Expr::Let {
+            local: *local,
+            value: Box::new(substitute_params_verbatim(value, args)),
+            body: Box::new(substitute_params_verbatim(body, args)),
+            provenance: provenance.clone(),
+        },
+    }
+}
+
+/// Structural substitution: every `Param(i)` in `callee_body` becomes a
+/// reference to `locals[i]` -- used by `anf_insert`, which has already
+/// bound each `locals[i]` to `args[i]`'s value via a `Let` wrapped around
+/// the result, so the parameter's *value* is always `args[i]` regardless
+/// of how many times (zero, one, or many) this substitution references it.
+fn substitute_params_with_locals(
+    callee_body: &Expr,
+    locals: &[LocalId],
+    provenance: &Provenance,
+) -> Expr {
+    match callee_body {
+        Expr::Param(i, _) => Expr::Local(locals[*i], provenance.clone()),
+        Expr::IntLit(..) | Expr::Local(..) => callee_body.clone(),
+        Expr::WrappingAdd(a, b, p) => Expr::WrappingAdd(
+            Box::new(substitute_params_with_locals(a, locals, provenance)),
+            Box::new(substitute_params_with_locals(b, locals, provenance)),
+            p.clone(),
+        ),
+        Expr::WrappingSub(a, b, p) => Expr::WrappingSub(
+            Box::new(substitute_params_with_locals(a, locals, provenance)),
+            Box::new(substitute_params_with_locals(b, locals, provenance)),
+            p.clone(),
+        ),
+        Expr::WrappingMul(a, b, p) => Expr::WrappingMul(
+            Box::new(substitute_params_with_locals(a, locals, provenance)),
+            Box::new(substitute_params_with_locals(b, locals, provenance)),
+            p.clone(),
+        ),
+        Expr::NotEqZero(inner, p) => Expr::NotEqZero(
+            Box::new(substitute_params_with_locals(inner, locals, provenance)),
+            p.clone(),
+        ),
+        Expr::Call(name, cargs, p) => Expr::Call(
+            name.clone(),
+            cargs
+                .iter()
+                .map(|a| substitute_params_with_locals(a, locals, provenance))
+                .collect(),
+            p.clone(),
+        ),
+        Expr::Let {
+            local,
+            value,
+            body,
+            provenance: bp,
+        } => Expr::Let {
+            local: *local,
+            value: Box::new(substitute_params_with_locals(value, locals, provenance)),
+            body: Box::new(substitute_params_with_locals(body, locals, provenance)),
+            provenance: bp.clone(),
+        },
+    }
+}
+
+/// Rewrites every `Call(callee_name, args, _)` node anywhere in `stmt`
+/// (recursing into `args` first, so a call nested inside another call's
+/// arguments is rewritten too) via `replace`, which receives the already-
+/// rewritten argument expressions and produces the replacement expression.
+/// Shared by both candidates -- they differ only in what `replace` does.
+fn rewrite_calls_in_stmt(
+    stmt: &Stmt,
+    callee_name: &str,
+    replace: &mut impl FnMut(&[Expr], &Provenance) -> Result<Expr, TransformError>,
+) -> Result<Stmt, TransformError> {
+    Ok(match stmt {
+        Stmt::Let {
+            local,
+            value,
+            body,
+            provenance,
+        } => Stmt::Let {
+            local: *local,
+            value: rewrite_calls_in_expr(value, callee_name, replace)?,
+            body: Box::new(rewrite_calls_in_stmt(body, callee_name, replace)?),
+            provenance: provenance.clone(),
+        },
+        Stmt::If {
+            cond,
+            then,
+            els,
+            provenance,
+        } => Stmt::If {
+            cond: rewrite_calls_in_expr(cond, callee_name, replace)?,
+            then: Box::new(rewrite_calls_in_stmt(then, callee_name, replace)?),
+            els: Box::new(rewrite_calls_in_stmt(els, callee_name, replace)?),
+            provenance: provenance.clone(),
+        },
+        Stmt::Return(expr, provenance) => Stmt::Return(
+            rewrite_calls_in_expr(expr, callee_name, replace)?,
+            provenance.clone(),
+        ),
+    })
+}
+
+fn rewrite_calls_in_expr(
+    expr: &Expr,
+    callee_name: &str,
+    replace: &mut impl FnMut(&[Expr], &Provenance) -> Result<Expr, TransformError>,
+) -> Result<Expr, TransformError> {
+    Ok(match expr {
+        Expr::IntLit(..) | Expr::Param(..) | Expr::Local(..) => expr.clone(),
+        Expr::WrappingAdd(a, b, p) => Expr::WrappingAdd(
+            Box::new(rewrite_calls_in_expr(a, callee_name, replace)?),
+            Box::new(rewrite_calls_in_expr(b, callee_name, replace)?),
+            p.clone(),
+        ),
+        Expr::WrappingSub(a, b, p) => Expr::WrappingSub(
+            Box::new(rewrite_calls_in_expr(a, callee_name, replace)?),
+            Box::new(rewrite_calls_in_expr(b, callee_name, replace)?),
+            p.clone(),
+        ),
+        Expr::WrappingMul(a, b, p) => Expr::WrappingMul(
+            Box::new(rewrite_calls_in_expr(a, callee_name, replace)?),
+            Box::new(rewrite_calls_in_expr(b, callee_name, replace)?),
+            p.clone(),
+        ),
+        Expr::NotEqZero(inner, p) => Expr::NotEqZero(
+            Box::new(rewrite_calls_in_expr(inner, callee_name, replace)?),
+            p.clone(),
+        ),
+        Expr::Call(FnId(name), args, p) => {
+            let rewritten_args: Vec<Expr> = args
+                .iter()
+                .map(|a| rewrite_calls_in_expr(a, callee_name, replace))
+                .collect::<Result<_, _>>()?;
+            if name == callee_name {
+                replace(&rewritten_args, p)?
+            } else {
+                Expr::Call(FnId(name.clone()), rewritten_args, p.clone())
+            }
+        }
+        Expr::Let {
+            local,
+            value,
+            body,
+            provenance,
+        } => Expr::Let {
+            local: *local,
+            value: Box::new(rewrite_calls_in_expr(value, callee_name, replace)?),
+            body: Box::new(rewrite_calls_in_expr(body, callee_name, replace)?),
+            provenance: provenance.clone(),
+        },
+    })
+}
+
+/// Runs `inline_fn` (either candidate) and, on success, replaces `caller`'s
+/// `FnFact` in a clone of `program` -- shared plumbing so both candidates'
+/// public functions are a few lines each.
+fn apply_inlined_caller(
+    program: &Program,
+    caller_name: &str,
+    new_body: Stmt,
+) -> Result<Program, TransformError> {
+    let mut caller_fact = program
+        .functions
+        .get(caller_name)
+        .ok_or_else(|| TransformError::UnknownCaller(caller_name.to_string()))?
+        .clone();
+    caller_fact.body = new_body;
+    let mut result = program.clone();
+    result.insert(caller_fact);
+    Ok(result)
+}
+
+/// The comparison battery: the same four historical hazards
+/// `fixtures/.../inline.rs` was built to catch (duplication, dropping,
+/// reordering, plus a positive control), run against **both** candidates,
+/// asserting what each one actually does -- not assuming an answer.
+/// `mark(v) = v` stands in for "some effectful computation": it's a real
+/// `Call`, so `expr_contains_call` sees it and the interpreter's effect
+/// trace records it, without needing any I/O primitive this IR doesn't have.
+#[cfg(test)]
+mod tests {
+    use super::anf_insert::anf_insert;
+    use super::checked_inline::checked_inline;
+    use super::*;
+    use crate::interpreter::eval_function;
+    use crate::types::{IntWidth, SourceLanguage, SourcePosition, SourceSpan};
+    use std::path::PathBuf;
+
+    fn prov() -> Provenance {
+        Provenance {
+            source_file: PathBuf::from("test"),
+            span: SourceSpan {
+                start: SourcePosition { line: 1, column: 1 },
+                end: SourcePosition { line: 1, column: 1 },
+            },
+            language: SourceLanguage::Rust,
+        }
+    }
+
+    fn fact(name: &str, params: usize, body: Stmt) -> FnFact {
+        FnFact {
+            name: name.to_string(),
+            params: (0..params)
+                .map(|i| (format!("p{i}"), IntWidth::I32))
+                .collect(),
+            return_width: IntWidth::I32,
+            body,
+            provenance: prov(),
+        }
+    }
+
+    fn mark_fact() -> FnFact {
+        // mark(v) = v -- a real Call, standing in for "some effectful
+        // computation," with no I/O primitive needed.
+        fact("mark", 1, Stmt::Return(Expr::Param(0, prov()), prov()))
+    }
+
+    fn call(name: &str, args: Vec<Expr>) -> Expr {
+        Expr::Call(FnId(name.to_string()), args, prov())
+    }
+
+    fn marked(inner: Expr) -> Expr {
+        call("mark", vec![inner])
+    }
+
+    fn lit(v: i64) -> Expr {
+        Expr::IntLit(v, IntWidth::I32, prov())
+    }
+
+    fn effects_of(program: &Program, fn_name: &str) -> Vec<i64> {
+        eval_function(program, fn_name, &[])
+            .unwrap()
+            .effects
+            .into_iter()
+            .filter(|e| e.fn_name == "mark")
+            .map(|e| e.args[0])
+            .collect()
+    }
+
+    /// `double(x) = x +% x` (occurs twice) -- inlining `double(mark(5))`
+    /// verbatim would duplicate `mark(5)`'s effect.
+    #[test]
+    fn duplication_hazard_checked_inline_rejects_anf_insert_accepts() {
+        let mut program = Program::default();
+        program.insert(mark_fact());
+        program.insert(fact(
+            "double",
+            1,
+            Stmt::Return(
+                Expr::WrappingAdd(
+                    Box::new(Expr::Param(0, prov())),
+                    Box::new(Expr::Param(0, prov())),
+                    prov(),
+                ),
+                prov(),
+            ),
+        ));
+        program.insert(fact(
+            "caller",
+            0,
+            Stmt::Return(call("double", vec![marked(lit(5))]), prov()),
+        ));
+
+        let baseline = eval_function(&program, "caller", &[]).unwrap();
+        assert_eq!(baseline.value, 10);
+        assert_eq!(effects_of(&program, "caller"), vec![5]);
+
+        match checked_inline(&program, "caller", "double") {
+            Err(TransformError::WouldDuplicateEffect { param_index: 0, .. }) => {}
+            other => panic!("expected WouldDuplicateEffect, got {other:?}"),
+        }
+
+        let transformed = anf_insert(&program, "caller", "double").unwrap();
+        let after = eval_function(&transformed, "caller", &[]).unwrap();
+        assert_eq!(
+            after.value, baseline.value,
+            "return value must be preserved"
+        );
+        assert_eq!(
+            effects_of(&transformed, "caller"),
+            vec![5],
+            "mark(5) must be evaluated exactly once, not duplicated"
+        );
+    }
+
+    /// `pick(x, y) = x` (never references `y`) -- inlining `pick(a,
+    /// mark(a))` verbatim would drop `mark(a)`'s effect entirely.
+    #[test]
+    fn dropped_argument_hazard_checked_inline_rejects_anf_insert_accepts() {
+        let mut program = Program::default();
+        program.insert(mark_fact());
+        program.insert(fact(
+            "pick",
+            2,
+            Stmt::Return(Expr::Param(0, prov()), prov()),
+        ));
+        program.insert(fact(
+            "caller",
+            0,
+            Stmt::Return(call("pick", vec![lit(7), marked(lit(9))]), prov()),
+        ));
+
+        let baseline = eval_function(&program, "caller", &[]).unwrap();
+        assert_eq!(baseline.value, 7);
+        assert_eq!(
+            effects_of(&program, "caller"),
+            vec![9],
+            "a real call always evaluates all its arguments, used or not"
+        );
+
+        match checked_inline(&program, "caller", "pick") {
+            Err(TransformError::WouldDropEffect { param_index: 1, .. }) => {}
+            other => panic!("expected WouldDropEffect, got {other:?}"),
+        }
+
+        let transformed = anf_insert(&program, "caller", "pick").unwrap();
+        let after = eval_function(&transformed, "caller", &[]).unwrap();
+        assert_eq!(after.value, baseline.value);
+        assert_eq!(
+            effects_of(&transformed, "caller"),
+            vec![9],
+            "ANF must still evaluate the unused argument exactly once, matching real call \
+             semantics -- not silently drop it the way verbatim substitution would"
+        );
+    }
+
+    /// `reverse(x, y) = y +% x` (body references param 1 before param 0)
+    /// -- inlining `reverse(mark(1), mark(2))` verbatim would evaluate
+    /// `mark(2)` before `mark(1)`, reversing the caller's own left-to-right
+    /// argument order.
+    #[test]
+    fn reordering_hazard_checked_inline_rejects_anf_insert_accepts() {
+        let mut program = Program::default();
+        program.insert(mark_fact());
+        program.insert(fact(
+            "reverse",
+            2,
+            Stmt::Return(
+                Expr::WrappingAdd(
+                    Box::new(Expr::Param(1, prov())),
+                    Box::new(Expr::Param(0, prov())),
+                    prov(),
+                ),
+                prov(),
+            ),
+        ));
+        program.insert(fact(
+            "caller",
+            0,
+            Stmt::Return(
+                call("reverse", vec![marked(lit(1)), marked(lit(2))]),
+                prov(),
+            ),
+        ));
+
+        let baseline = eval_function(&program, "caller", &[]).unwrap();
+        assert_eq!(baseline.value, 3);
+        assert_eq!(effects_of(&program, "caller"), vec![1, 2]);
+
+        match checked_inline(&program, "caller", "reverse") {
+            Err(TransformError::WouldReorderEffects {
+                earlier_arg: 0,
+                later_arg: 1,
+                ..
+            }) => {}
+            other => panic!("expected WouldReorderEffects, got {other:?}"),
+        }
+
+        let transformed = anf_insert(&program, "caller", "reverse").unwrap();
+        let after = eval_function(&transformed, "caller", &[]).unwrap();
+        assert_eq!(after.value, baseline.value);
+        assert_eq!(
+            effects_of(&transformed, "caller"),
+            vec![1, 2],
+            "ANF must preserve the caller's original left-to-right effect order regardless of \
+             the callee body's own reference order"
+        );
+    }
+
+    /// `combine(x, y) = x +% y` (same order, no duplication/dropping) --
+    /// the positive control: both candidates must accept this.
+    #[test]
+    fn same_order_no_hazard_both_candidates_accept() {
+        let mut program = Program::default();
+        program.insert(mark_fact());
+        program.insert(fact(
+            "combine",
+            2,
+            Stmt::Return(
+                Expr::WrappingAdd(
+                    Box::new(Expr::Param(0, prov())),
+                    Box::new(Expr::Param(1, prov())),
+                    prov(),
+                ),
+                prov(),
+            ),
+        ));
+        program.insert(fact(
+            "caller",
+            0,
+            Stmt::Return(
+                call("combine", vec![marked(lit(1)), marked(lit(2))]),
+                prov(),
+            ),
+        ));
+        let baseline = eval_function(&program, "caller", &[]).unwrap();
+
+        let checked = checked_inline(&program, "caller", "combine").unwrap();
+        let checked_after = eval_function(&checked, "caller", &[]).unwrap();
+        assert_eq!(checked_after.value, baseline.value);
+        assert_eq!(effects_of(&checked, "caller"), vec![1, 2]);
+
+        let anf = anf_insert(&program, "caller", "combine").unwrap();
+        let anf_after = eval_function(&anf, "caller", &[]).unwrap();
+        assert_eq!(anf_after.value, baseline.value);
+        assert_eq!(effects_of(&anf, "caller"), vec![1, 2]);
+    }
+}

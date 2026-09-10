@@ -1,0 +1,12 @@
+[package]
+name = "laminaria-ir"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Source-derived owned IR for a declared Rust/Nim subset (issues #25/#3): real parsing, provenance, an effect-sequence model, and compared semantics-preserving transformations."
+
+[dependencies]
+syn = { version = "2", features = ["full", "extra-traits"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }

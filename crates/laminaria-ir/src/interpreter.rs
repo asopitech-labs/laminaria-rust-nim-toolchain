@@ -1,0 +1,311 @@
+//! A direct recursive reference evaluator, generalizing
+//! `fixtures/laminaria-semantic-substrate-prototype/substrate/src/eval.rs`.
+//! Beyond computing a function's return value, this also produces an
+//! **effect trace**: the real, ordered sequence of function calls actually
+//! executed. A call is this subset's only source of an effect an outside
+//! observer could see (arithmetic/conditionals/bindings are pure by
+//! construction), so recording the real executed call sequence -- which
+//! function, with which evaluated arguments, in which order -- *is* the
+//! effect model, replacing the old bare `has_side_effects: bool` fact with
+//! something a transformation's before/after states can actually be
+//! compared against (`transform`'s own tests do exactly this).
+
+use std::collections::BTreeMap;
+
+use crate::types::{Expr, FnId, LocalId, Program, Stmt};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallEvent {
+    pub fn_name: String,
+    pub args: Vec<i64>,
+    pub order_index: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvalOutcome {
+    pub value: i64,
+    pub effects: Vec<CallEvent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EvalError {
+    UnknownFunction(String),
+    ArityMismatch {
+        function: String,
+        expected: usize,
+        got: usize,
+    },
+    UnboundLocal(LocalId),
+}
+
+struct EvalState<'a> {
+    program: &'a Program,
+    params: &'a [i64],
+    locals: BTreeMap<LocalId, i64>,
+    effects: Vec<CallEvent>,
+}
+
+/// Evaluates `function_name(args)` in `program`, wrapping wrapping-arithmetic
+/// in real 32-bit two's-complement semantics (`i32::wrapping_*`) --
+/// matching both `rustc`'s `wrapping_add`/etc. and Nim's `+%`/`-%`/`*%`
+/// exactly, per `fixtures/llvm-rediscovery-semantic-workload`'s own
+/// established cross-language equivalence.
+pub fn eval_function(
+    program: &Program,
+    function_name: &str,
+    args: &[i64],
+) -> Result<EvalOutcome, EvalError> {
+    let fact = program
+        .functions
+        .get(function_name)
+        .ok_or_else(|| EvalError::UnknownFunction(function_name.to_string()))?;
+    if fact.params.len() != args.len() {
+        return Err(EvalError::ArityMismatch {
+            function: function_name.to_string(),
+            expected: fact.params.len(),
+            got: args.len(),
+        });
+    }
+
+    let mut state = EvalState {
+        program,
+        params: args,
+        locals: BTreeMap::new(),
+        effects: Vec::new(),
+    };
+    let value = eval_stmt(&fact.body, &mut state)?;
+    Ok(EvalOutcome {
+        value,
+        effects: state.effects,
+    })
+}
+
+fn eval_stmt(stmt: &Stmt, state: &mut EvalState) -> Result<i64, EvalError> {
+    match stmt {
+        Stmt::Let {
+            local, value, body, ..
+        } => {
+            let v = eval_expr(value, state)?;
+            let previous = state.locals.insert(*local, v);
+            let result = eval_stmt(body, state);
+            match previous {
+                Some(p) => {
+                    state.locals.insert(*local, p);
+                }
+                None => {
+                    state.locals.remove(local);
+                }
+            }
+            result
+        }
+        Stmt::If {
+            cond, then, els, ..
+        } => {
+            if eval_expr(cond, state)? != 0 {
+                eval_stmt(then, state)
+            } else {
+                eval_stmt(els, state)
+            }
+        }
+        Stmt::Return(expr, _) => eval_expr(expr, state),
+    }
+}
+
+fn eval_expr(expr: &Expr, state: &mut EvalState) -> Result<i64, EvalError> {
+    match expr {
+        Expr::IntLit(v, _, _) => Ok(*v),
+        Expr::Param(n, _) => Ok(state.params[*n]),
+        Expr::Local(id, _) => state
+            .locals
+            .get(id)
+            .copied()
+            .ok_or(EvalError::UnboundLocal(*id)),
+        Expr::WrappingAdd(a, b, _) => {
+            let a = eval_expr(a, state)? as i32;
+            let b = eval_expr(b, state)? as i32;
+            Ok(a.wrapping_add(b) as i64)
+        }
+        Expr::WrappingSub(a, b, _) => {
+            let a = eval_expr(a, state)? as i32;
+            let b = eval_expr(b, state)? as i32;
+            Ok(a.wrapping_sub(b) as i64)
+        }
+        Expr::WrappingMul(a, b, _) => {
+            let a = eval_expr(a, state)? as i32;
+            let b = eval_expr(b, state)? as i32;
+            Ok(a.wrapping_mul(b) as i64)
+        }
+        Expr::NotEqZero(inner, _) => Ok((eval_expr(inner, state)? != 0) as i64),
+        Expr::Call(FnId(name), args, _) => {
+            let mut evaluated = Vec::with_capacity(args.len());
+            for a in args {
+                evaluated.push(eval_expr(a, state)?);
+            }
+            let order_index = state.effects.len();
+            state.effects.push(CallEvent {
+                fn_name: name.clone(),
+                args: evaluated.clone(),
+                order_index,
+            });
+            let outcome = eval_function(state.program, name, &evaluated)?;
+            state.effects.extend(outcome.effects);
+            Ok(outcome.value)
+        }
+        Expr::Let {
+            local, value, body, ..
+        } => {
+            let v = eval_expr(value, state)?;
+            let previous = state.locals.insert(*local, v);
+            let result = eval_expr(body, state);
+            match previous {
+                Some(p) => {
+                    state.locals.insert(*local, p);
+                }
+                None => {
+                    state.locals.remove(local);
+                }
+            }
+            result
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{FnFact, Program, Provenance, SourceLanguage, SourcePosition, SourceSpan};
+    use std::path::PathBuf;
+
+    fn prov() -> Provenance {
+        Provenance {
+            source_file: PathBuf::from("test"),
+            span: SourceSpan {
+                start: SourcePosition { line: 1, column: 1 },
+                end: SourcePosition { line: 1, column: 1 },
+            },
+            language: SourceLanguage::Rust,
+        }
+    }
+
+    fn simple_program() -> Program {
+        let mut program = Program::default();
+        // double(x) = x +% x
+        program.insert(FnFact {
+            name: "double".to_string(),
+            params: vec![("x".to_string(), crate::types::IntWidth::I32)],
+            return_width: crate::types::IntWidth::I32,
+            provenance: prov(),
+            body: Stmt::Return(
+                Expr::WrappingAdd(
+                    Box::new(Expr::Param(0, prov())),
+                    Box::new(Expr::Param(0, prov())),
+                    prov(),
+                ),
+                prov(),
+            ),
+        });
+        program
+    }
+
+    #[test]
+    fn a_call_produces_exactly_one_effect_event_with_its_evaluated_arguments() {
+        let mut program = simple_program();
+        // caller(a) = double(a)
+        program.insert(FnFact {
+            name: "caller".to_string(),
+            params: vec![("a".to_string(), crate::types::IntWidth::I32)],
+            return_width: crate::types::IntWidth::I32,
+            provenance: prov(),
+            body: Stmt::Return(
+                Expr::Call(
+                    FnId("double".to_string()),
+                    vec![Expr::Param(0, prov())],
+                    prov(),
+                ),
+                prov(),
+            ),
+        });
+        let outcome = eval_function(&program, "caller", &[21]).unwrap();
+        assert_eq!(outcome.value, 42);
+        assert_eq!(
+            outcome.effects,
+            vec![CallEvent {
+                fn_name: "double".to_string(),
+                args: vec![21],
+                order_index: 0,
+            }]
+        );
+    }
+
+    #[test]
+    fn nested_effects_are_recorded_in_real_execution_order() {
+        let mut program = simple_program();
+        // caller() = double(double(1))  -- the inner double() must be
+        // recorded before the outer one, since it's evaluated first as
+        // the outer call's own argument.
+        program.insert(FnFact {
+            name: "caller".to_string(),
+            params: vec![],
+            return_width: crate::types::IntWidth::I32,
+            provenance: prov(),
+            body: Stmt::Return(
+                Expr::Call(
+                    FnId("double".to_string()),
+                    vec![Expr::Call(
+                        FnId("double".to_string()),
+                        vec![Expr::IntLit(1, crate::types::IntWidth::I32, prov())],
+                        prov(),
+                    )],
+                    prov(),
+                ),
+                prov(),
+            ),
+        });
+        let outcome = eval_function(&program, "caller", &[]).unwrap();
+        assert_eq!(outcome.value, 4); // double(double(1)) = double(2) = 4
+        assert_eq!(outcome.effects.len(), 2);
+        assert_eq!(outcome.effects[0].args, vec![1]); // inner double(1) first
+        assert_eq!(outcome.effects[1].args, vec![2]); // outer double(2) second
+        assert_eq!(outcome.effects[0].order_index, 0);
+        assert_eq!(outcome.effects[1].order_index, 1);
+    }
+
+    #[test]
+    fn a_let_bound_value_is_evaluated_exactly_once_even_when_referenced_twice() {
+        let mut program = simple_program();
+        // caller() = let x = double(3); x +% x
+        // If `double(3)` were re-evaluated per reference to `x`, this
+        // would record two effect events instead of one.
+        program.insert(FnFact {
+            name: "caller".to_string(),
+            params: vec![],
+            return_width: crate::types::IntWidth::I32,
+            provenance: prov(),
+            body: Stmt::Let {
+                local: LocalId(0),
+                value: Expr::Call(
+                    FnId("double".to_string()),
+                    vec![Expr::IntLit(3, crate::types::IntWidth::I32, prov())],
+                    prov(),
+                ),
+                body: Box::new(Stmt::Return(
+                    Expr::WrappingAdd(
+                        Box::new(Expr::Local(LocalId(0), prov())),
+                        Box::new(Expr::Local(LocalId(0), prov())),
+                        prov(),
+                    ),
+                    prov(),
+                )),
+                provenance: prov(),
+            },
+        });
+        let outcome = eval_function(&program, "caller", &[]).unwrap();
+        assert_eq!(outcome.value, 12); // double(3)=6, 6+6=12
+        assert_eq!(
+            outcome.effects.len(),
+            1,
+            "expected exactly one effect event, got {:?}",
+            outcome.effects
+        );
+    }
+}

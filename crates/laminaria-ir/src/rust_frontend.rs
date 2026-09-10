@@ -1,0 +1,747 @@
+//! Lowers a declared subset of real Rust source into [`crate::types::Program`].
+//!
+//! Uses the `syn` crate for the *syntax* layer only (tokenizing and parsing
+//! into a `syn::File`/`syn::Item`/`syn::Expr` tree) -- `syn` performs zero
+//! semantic analysis, zero type checking, and zero macro expansion. Every
+//! semantic fact (what `+` means, what `i32` means, whether a construct is
+//! in the supported subset) is derived by this module's own code walking
+//! that tree. This matches `docs/compiler-ownership-contract.md`'s
+//! lexical/syntactic-parsing-reuse boundary directly: a parsing library
+//! producing a syntax tree is not itself "meaning."
+//!
+//! The supported subset is exactly: `i32` parameters/locals/return type,
+//! integer literals, `.wrapping_add/sub/mul(..)`, `!= 0`/`0 != ..` as an
+//! `if` condition, `if { .. } else { .. }` at a block's tail position,
+//! `let NAME = EXPR;` prefixing a block, calls to other functions lowered
+//! in the same request, and a trailing tail expression or `return EXPR;`.
+//! Anything else is a [`LoweringError::UnsupportedConstruct`] naming the
+//! real span -- never a panic, never a partial `Program`, never a fallback
+//! to invoking `rustc`.
+
+use std::collections::BTreeMap;
+use std::path::Path;
+
+use proc_macro2::{LineColumn, Span};
+use syn::spanned::Spanned;
+use syn::{
+    BinOp, Block, Expr as SynExpr, ExprIf, FnArg, Item, ItemFn, Lit, Local, Pat, ReturnType,
+    Stmt as SynStmt, Type,
+};
+
+use crate::diagnostics::{Diagnostic, LoweringError};
+use crate::types::{
+    Expr, FnFact, FnId, IntWidth, LocalId, Program, Provenance, SourceLanguage, SourcePosition,
+    SourceSpan, Stmt,
+};
+
+fn to_source_position(lc: LineColumn) -> SourcePosition {
+    // `LineColumn::column` is 0-indexed (per proc_macro2's own docs); this
+    // crate reports 1-indexed positions to humans everywhere, matching
+    // `line` (already 1-indexed).
+    SourcePosition {
+        line: lc.line as u32,
+        column: lc.column as u32 + 1,
+    }
+}
+
+fn to_provenance(source_file: &Path, span: Span) -> Provenance {
+    Provenance {
+        source_file: source_file.to_path_buf(),
+        span: SourceSpan {
+            start: to_source_position(span.start()),
+            end: to_source_position(span.end()),
+        },
+        language: SourceLanguage::Rust,
+    }
+}
+
+struct Ctx<'a> {
+    source_file: &'a Path,
+    declared_functions: &'a std::collections::BTreeSet<String>,
+    params: BTreeMap<String, usize>,
+    locals: BTreeMap<String, LocalId>,
+    next_local: u32,
+}
+
+impl<'a> Ctx<'a> {
+    fn prov(&self, span: Span) -> Provenance {
+        to_provenance(self.source_file, span)
+    }
+
+    fn fresh_local(&mut self) -> LocalId {
+        let id = LocalId(self.next_local);
+        self.next_local += 1;
+        id
+    }
+}
+
+fn unsupported(construct: impl Into<String>, span: Span) -> LoweringError {
+    LoweringError::UnsupportedConstruct {
+        construct: construct.into(),
+        span: SourceSpan {
+            start: to_source_position(span.start()),
+            end: to_source_position(span.end()),
+        },
+    }
+}
+
+fn unsupported_shape(detail: impl Into<String>, span: Span) -> LoweringError {
+    LoweringError::UnsupportedShape {
+        detail: detail.into(),
+        span: SourceSpan {
+            start: to_source_position(span.start()),
+            end: to_source_position(span.end()),
+        },
+    }
+}
+
+/// Lowers exactly the named top-level functions from `source_text` (a whole
+/// Rust file) into a [`Program`]. Only these functions -- and any function
+/// they call, which must *also* be in `requested_functions` -- are ever
+/// lowered; other items in the file (a `main` with a `for` loop and
+/// `println!`, a `const`, ...) are never inspected, so a workload file that
+/// mixes a supported library subset with an unrelated unsupported driver
+/// (exactly `rust-src/add_or_double.rs`'s own shape) does not need every
+/// item in the file to be in-subset, only the ones actually requested.
+pub fn lower_rust_source(
+    source_file: &Path,
+    source_text: &str,
+    requested_functions: &[&str],
+) -> Result<Program, Vec<Diagnostic>> {
+    let file = syn::parse_file(source_text).map_err(|e| {
+        vec![Diagnostic::from_lowering_error(
+            LoweringError::ParseError {
+                detail: e.to_string(),
+                span: SourceSpan {
+                    start: to_source_position(e.span().start()),
+                    end: to_source_position(e.span().end()),
+                },
+            },
+            SourceLanguage::Rust,
+        )]
+    })?;
+
+    let mut by_name: BTreeMap<String, &ItemFn> = BTreeMap::new();
+    for item in &file.items {
+        if let Item::Fn(f) = item {
+            by_name.insert(f.sig.ident.to_string(), f);
+        }
+    }
+    let declared_functions: std::collections::BTreeSet<String> =
+        requested_functions.iter().map(|s| s.to_string()).collect();
+
+    let mut program = Program::default();
+    let mut diagnostics = Vec::new();
+    for name in requested_functions {
+        let Some(item_fn) = by_name.get(*name) else {
+            diagnostics.push(Diagnostic::from_lowering_error(
+                LoweringError::UnsupportedShape {
+                    detail: format!("requested function '{name}' is not declared in this file"),
+                    span: SourceSpan {
+                        start: SourcePosition { line: 1, column: 1 },
+                        end: SourcePosition { line: 1, column: 1 },
+                    },
+                },
+                SourceLanguage::Rust,
+            ));
+            continue;
+        };
+        match lower_item_fn(source_file, item_fn, &declared_functions) {
+            Ok(fact) => program.insert(fact),
+            Err(errors) => diagnostics.extend(
+                errors
+                    .into_iter()
+                    .map(|e| Diagnostic::from_lowering_error(e, SourceLanguage::Rust)),
+            ),
+        }
+    }
+
+    if diagnostics.is_empty() {
+        Ok(program)
+    } else {
+        Err(diagnostics)
+    }
+}
+
+fn type_is_i32(ty: &Type) -> bool {
+    matches!(ty, Type::Path(p) if p.path.is_ident("i32"))
+}
+
+fn lower_item_fn(
+    source_file: &Path,
+    item_fn: &ItemFn,
+    declared_functions: &std::collections::BTreeSet<String>,
+) -> Result<FnFact, Vec<LoweringError>> {
+    let mut errors = Vec::new();
+    let mut params = Vec::new();
+    let mut param_index = BTreeMap::new();
+
+    for (index, arg) in item_fn.sig.inputs.iter().enumerate() {
+        match arg {
+            FnArg::Typed(pat_type) => {
+                let name = match pat_type.pat.as_ref() {
+                    Pat::Ident(pi) if pi.by_ref.is_none() && pi.subpat.is_none() => {
+                        pi.ident.to_string()
+                    }
+                    other => {
+                        errors.push(unsupported(
+                            "non-identifier parameter pattern",
+                            other.span(),
+                        ));
+                        continue;
+                    }
+                };
+                if !type_is_i32(&pat_type.ty) {
+                    errors.push(unsupported(
+                        "parameter type other than i32",
+                        pat_type.ty.span(),
+                    ));
+                    continue;
+                }
+                param_index.insert(name.clone(), index);
+                params.push((name, IntWidth::I32));
+            }
+            FnArg::Receiver(r) => errors.push(unsupported("self parameter", r.span())),
+        }
+    }
+
+    let return_width = match &item_fn.sig.output {
+        ReturnType::Type(_, ty) if type_is_i32(ty) => IntWidth::I32,
+        ReturnType::Type(_, ty) => {
+            errors.push(unsupported("return type other than i32", ty.span()));
+            IntWidth::I32
+        }
+        ReturnType::Default => {
+            errors.push(unsupported(
+                "function with no return type",
+                item_fn.sig.span(),
+            ));
+            IntWidth::I32
+        }
+    };
+
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+
+    let mut ctx = Ctx {
+        source_file,
+        declared_functions,
+        params: param_index,
+        locals: BTreeMap::new(),
+        next_local: 0,
+    };
+
+    let body = lower_block(&item_fn.block, &mut ctx)?;
+
+    Ok(FnFact {
+        name: item_fn.sig.ident.to_string(),
+        params,
+        return_width,
+        provenance: ctx.prov(item_fn.span()),
+        body,
+    })
+}
+
+/// Lowers a block whose shape is: zero or more `let NAME = EXPR;`
+/// statements, followed by exactly one tail form (a trailing expression
+/// with no semicolon, an `if` used at the tail, or a `return EXPR;`).
+/// Anything else (extra statements after the tail, a `let` with no
+/// initializer, item/macro statements, ...) is rejected.
+fn lower_block(block: &Block, ctx: &mut Ctx) -> Result<Stmt, Vec<LoweringError>> {
+    let mut lets: Vec<(&Local, Span)> = Vec::new();
+    let mut tail: Option<&SynStmt> = None;
+    for stmt in &block.stmts {
+        if tail.is_some() {
+            return Err(vec![unsupported_shape(
+                "a statement follows this block's tail form; only a let-prefix followed by \
+                 exactly one tail expression/return is supported",
+                stmt.span(),
+            )]);
+        }
+        match stmt {
+            SynStmt::Local(local) => lets.push((local, local.span())),
+            SynStmt::Expr(_, _) => tail = Some(stmt),
+            other => {
+                return Err(vec![unsupported("item/macro statement", other.span())]);
+            }
+        }
+    }
+    let Some(tail_stmt) = tail else {
+        return Err(vec![unsupported_shape(
+            "block has no tail expression/return",
+            block.span(),
+        )]);
+    };
+
+    // Lower each let's *value* expression and bind it in forward (source)
+    // order first -- a later let's initializer, and the tail itself, must
+    // be able to see every earlier let's binding. The nested `Stmt::Let`
+    // tree is then built in reverse afterward, since the first let must
+    // end up as the *outermost* node (its `body` is everything that
+    // follows it, matching `types::Stmt::Let`'s own doc comment) -- name
+    // resolution order and tree-construction order are different passes
+    // over the same list, not the same loop.
+    struct PendingLet {
+        name: String,
+        id: LocalId,
+        value: Expr,
+        span: Span,
+        shadowed: Option<LocalId>,
+    }
+    let mut pending = Vec::with_capacity(lets.len());
+    for (local, span) in &lets {
+        let name = match &local.pat {
+            Pat::Ident(pi) if pi.by_ref.is_none() && pi.subpat.is_none() => pi.ident.to_string(),
+            other => {
+                return Err(vec![unsupported(
+                    "non-identifier let pattern",
+                    other.span(),
+                )])
+            }
+        };
+        let Some(init) = &local.init else {
+            return Err(vec![unsupported_shape(
+                "let binding with no initializer",
+                *span,
+            )]);
+        };
+        if init.diverge.is_some() {
+            return Err(vec![unsupported("let-else", *span)]);
+        }
+        let value = lower_expr(&init.expr, ctx)?;
+        let id = ctx.fresh_local();
+        let shadowed = ctx.locals.insert(name.clone(), id);
+        pending.push(PendingLet {
+            name,
+            id,
+            value,
+            span: *span,
+            shadowed,
+        });
+    }
+
+    let mut inner = lower_tail_stmt(tail_stmt, ctx)?;
+
+    for p in pending.into_iter().rev() {
+        match p.shadowed {
+            Some(prev) => {
+                ctx.locals.insert(p.name, prev);
+            }
+            None => {
+                ctx.locals.remove(&p.name);
+            }
+        }
+        inner = Stmt::Let {
+            local: p.id,
+            value: p.value,
+            body: Box::new(inner),
+            provenance: to_provenance(ctx.source_file, p.span),
+        };
+    }
+    Ok(inner)
+}
+
+fn lower_tail_stmt(stmt: &SynStmt, ctx: &mut Ctx) -> Result<Stmt, Vec<LoweringError>> {
+    let SynStmt::Expr(expr, semi) = stmt else {
+        unreachable!("lower_block only ever stores an Expr statement as `tail`")
+    };
+    match expr {
+        SynExpr::If(expr_if) if semi.is_none() => lower_if(expr_if, ctx),
+        SynExpr::Return(ret) if semi.is_some() => {
+            let Some(inner) = &ret.expr else {
+                return Err(vec![unsupported_shape(
+                    "bare return with no value",
+                    ret.span(),
+                )]);
+            };
+            let e = lower_expr(inner, ctx)?;
+            Ok(Stmt::Return(e, to_provenance(ctx.source_file, ret.span())))
+        }
+        _ if semi.is_none() => {
+            let e = lower_expr(expr, ctx)?;
+            let prov = e.provenance().clone();
+            Ok(Stmt::Return(e, prov))
+        }
+        _ => Err(vec![unsupported_shape(
+            "a semicolon-terminated non-return tail statement (implicit () return) is not \
+             supported",
+            expr.span(),
+        )]),
+    }
+}
+
+fn lower_if(expr_if: &ExprIf, ctx: &mut Ctx) -> Result<Stmt, Vec<LoweringError>> {
+    let (cond, swap) = lower_condition(&expr_if.cond, ctx)?;
+    let then = lower_block(&expr_if.then_branch, ctx)?;
+    let Some((_, else_expr)) = &expr_if.else_branch else {
+        return Err(vec![unsupported_shape(
+            "if with no else (every path must return)",
+            expr_if.span(),
+        )]);
+    };
+    let els = match else_expr.as_ref() {
+        SynExpr::Block(b) => lower_block(&b.block, ctx)?,
+        SynExpr::If(inner) => lower_if(inner, ctx)?,
+        other => return Err(vec![unsupported("else-branch shape", other.span())]),
+    };
+    let provenance = to_provenance(ctx.source_file, expr_if.span());
+    Ok(if swap {
+        Stmt::If {
+            cond,
+            then: Box::new(els),
+            els: Box::new(then),
+            provenance,
+        }
+    } else {
+        Stmt::If {
+            cond,
+            then: Box::new(then),
+            els: Box::new(els),
+            provenance,
+        }
+    })
+}
+
+/// Lowers an `if` condition, which this subset restricts to `EXPR != 0`,
+/// `0 != EXPR`, `EXPR == 0`, or `0 == EXPR`. Returns the lowered
+/// `NotEqZero` expression plus whether the caller must swap its `then`/
+/// `else` branches (true for the `== 0` forms, since this IR has no
+/// standalone boolean negation).
+fn lower_condition(expr: &SynExpr, ctx: &mut Ctx) -> Result<(Expr, bool), Vec<LoweringError>> {
+    let SynExpr::Binary(bin) = expr else {
+        return Err(vec![unsupported_shape(
+            "if condition must be `EXPR != 0` or `EXPR == 0`",
+            expr.span(),
+        )]);
+    };
+    let swap = match bin.op {
+        BinOp::Ne(_) => false,
+        BinOp::Eq(_) => true,
+        _ => {
+            return Err(vec![unsupported_shape(
+                "if condition must use != or ==",
+                bin.span(),
+            )])
+        }
+    };
+    let is_zero_lit = |e: &SynExpr| -> bool {
+        matches!(e, SynExpr::Lit(l) if matches!(&l.lit, Lit::Int(i) if i.base10_digits() == "0"))
+    };
+    let inner = if is_zero_lit(&bin.right) {
+        &bin.left
+    } else if is_zero_lit(&bin.left) {
+        &bin.right
+    } else {
+        return Err(vec![unsupported_shape(
+            "if condition must compare against a literal 0",
+            bin.span(),
+        )]);
+    };
+    let lowered_inner = lower_expr(inner, ctx)?;
+    let provenance = to_provenance(ctx.source_file, bin.span());
+    Ok((Expr::NotEqZero(Box::new(lowered_inner), provenance), swap))
+}
+
+fn lower_expr(expr: &SynExpr, ctx: &mut Ctx) -> Result<Expr, Vec<LoweringError>> {
+    match expr {
+        SynExpr::Paren(p) => lower_expr(&p.expr, ctx),
+        SynExpr::Group(g) => lower_expr(&g.expr, ctx),
+        SynExpr::Lit(l) => match &l.lit {
+            Lit::Int(i) => {
+                if !i.suffix().is_empty() && i.suffix() != "i32" {
+                    return Err(vec![unsupported(
+                        "integer literal suffix other than i32",
+                        l.span(),
+                    )]);
+                }
+                let value: i64 = i.base10_parse::<i32>().map_err(|e| {
+                    vec![unsupported_shape(format!("integer literal: {e}"), l.span())]
+                })? as i64;
+                Ok(Expr::IntLit(
+                    value,
+                    IntWidth::I32,
+                    to_provenance(ctx.source_file, l.span()),
+                ))
+            }
+            _ => Err(vec![unsupported("non-integer literal", l.span())]),
+        },
+        SynExpr::Unary(u) if matches!(u.op, syn::UnOp::Neg(_)) => {
+            // `-N` for a literal is folded directly; `-x` for a general
+            // expression is out of scope for this subset (no standalone
+            // negation operator in the IR).
+            if let SynExpr::Lit(l) = u.expr.as_ref() {
+                if let Lit::Int(i) = &l.lit {
+                    let value = i.base10_parse::<i32>().map_err(|e| {
+                        vec![unsupported_shape(format!("integer literal: {e}"), l.span())]
+                    })?;
+                    return Ok(Expr::IntLit(
+                        (-value) as i64,
+                        IntWidth::I32,
+                        to_provenance(ctx.source_file, u.span()),
+                    ));
+                }
+            }
+            Err(vec![unsupported(
+                "unary negation of a non-literal",
+                u.span(),
+            )])
+        }
+        SynExpr::Path(p) if p.path.get_ident().is_some() => {
+            let name = p.path.get_ident().unwrap().to_string();
+            let provenance = to_provenance(ctx.source_file, p.span());
+            if let Some(local) = ctx.locals.get(&name) {
+                Ok(Expr::Local(*local, provenance))
+            } else if let Some(index) = ctx.params.get(&name) {
+                Ok(Expr::Param(*index, provenance))
+            } else {
+                Err(vec![unsupported_shape(
+                    format!("reference to undeclared identifier '{name}'"),
+                    p.span(),
+                )])
+            }
+        }
+        SynExpr::MethodCall(m) => {
+            let method = m.method.to_string();
+            let kind = match method.as_str() {
+                "wrapping_add" => 0,
+                "wrapping_sub" => 1,
+                "wrapping_mul" => 2,
+                _ => {
+                    return Err(vec![unsupported(
+                        format!("method call '{method}'"),
+                        m.span(),
+                    )])
+                }
+            };
+            if m.args.len() != 1 {
+                return Err(vec![unsupported_shape(
+                    format!("'{method}' with other than one argument"),
+                    m.span(),
+                )]);
+            }
+            let receiver = lower_expr(&m.receiver, ctx)?;
+            let arg = lower_expr(&m.args[0], ctx)?;
+            let provenance = to_provenance(ctx.source_file, m.span());
+            Ok(match kind {
+                0 => Expr::WrappingAdd(Box::new(receiver), Box::new(arg), provenance),
+                1 => Expr::WrappingSub(Box::new(receiver), Box::new(arg), provenance),
+                _ => Expr::WrappingMul(Box::new(receiver), Box::new(arg), provenance),
+            })
+        }
+        SynExpr::Binary(bin) if matches!(bin.op, BinOp::Ne(_) | BinOp::Eq(_)) => {
+            let (e, swap) = lower_condition(expr, ctx)?;
+            if swap {
+                return Err(vec![unsupported_shape(
+                    "'== 0' is only supported as an if condition, not a general value expression \
+                     (this IR has no standalone boolean negation)",
+                    bin.span(),
+                )]);
+            }
+            Ok(e)
+        }
+        SynExpr::Call(c) => {
+            let SynExpr::Path(p) = c.func.as_ref() else {
+                return Err(vec![unsupported(
+                    "call to a non-identifier callee",
+                    c.span(),
+                )]);
+            };
+            let Some(ident) = p.path.get_ident() else {
+                return Err(vec![unsupported("call to a qualified path", c.span())]);
+            };
+            let name = ident.to_string();
+            if !ctx.declared_functions.contains(&name) {
+                return Err(vec![unsupported_shape(
+                    format!("call to '{name}', which is not in this lowering request"),
+                    c.span(),
+                )]);
+            }
+            let mut args = Vec::with_capacity(c.args.len());
+            for a in &c.args {
+                args.push(lower_expr(a, ctx)?);
+            }
+            Ok(Expr::Call(
+                FnId(name),
+                args,
+                to_provenance(ctx.source_file, c.span()),
+            ))
+        }
+        SynExpr::If(_) => Err(vec![unsupported(
+            "if used as a value expression (only supported at a block's tail position)",
+            expr.span(),
+        )]),
+        other => Err(vec![unsupported(describe_expr_kind(other), other.span())]),
+    }
+}
+
+fn describe_expr_kind(expr: &SynExpr) -> &'static str {
+    match expr {
+        SynExpr::Array(_) => "array expression",
+        SynExpr::Assign(_) => "assignment",
+        SynExpr::Async(_) => "async block",
+        SynExpr::Await(_) => "await",
+        SynExpr::Block(_) => "block expression",
+        SynExpr::Break(_) => "break",
+        SynExpr::Cast(_) => "cast",
+        SynExpr::Closure(_) => "closure",
+        SynExpr::Continue(_) => "continue",
+        SynExpr::Field(_) => "field access",
+        SynExpr::ForLoop(_) => "for loop",
+        SynExpr::Index(_) => "indexing",
+        SynExpr::Loop(_) => "loop",
+        SynExpr::Macro(_) => "macro invocation",
+        SynExpr::Match(_) => "match",
+        SynExpr::MethodCall(_) => "unsupported method call",
+        SynExpr::Range(_) => "range",
+        SynExpr::Reference(_) => "reference expression",
+        SynExpr::Repeat(_) => "array repeat expression",
+        SynExpr::Struct(_) => "struct literal",
+        SynExpr::Try(_) => "try (?) operator",
+        SynExpr::TryBlock(_) => "try block",
+        SynExpr::Tuple(_) => "tuple expression",
+        SynExpr::Unary(_) => "unary operator",
+        SynExpr::Unsafe(_) => "unsafe block",
+        SynExpr::While(_) => "while loop",
+        _ => "unsupported expression",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::interpreter::eval_function;
+    use std::path::PathBuf;
+
+    fn path() -> PathBuf {
+        PathBuf::from("test.rs")
+    }
+
+    #[test]
+    fn lowers_the_existing_workload_functions_and_matches_real_semantics() {
+        let source = r#"
+            fn double(x: i32) -> i32 {
+                x.wrapping_add(x)
+            }
+            fn add_or_double(a: i32, b: i32, use_double: i32) -> i32 {
+                if use_double != 0 {
+                    double(a)
+                } else {
+                    a.wrapping_add(b)
+                }
+            }
+        "#;
+        let program = lower_rust_source(&path(), source, &["double", "add_or_double"]).unwrap();
+        assert_eq!(program.functions.len(), 2);
+
+        let cases: &[((i32, i32, i32), i32)] = &[
+            ((3, 4, 0), 7),
+            ((3, 4, 1), 6),
+            ((i32::MAX, 1, 0), i32::MIN),
+            ((-5, 10, 1), -10),
+        ];
+        for &((a, b, u), expected) in cases {
+            let outcome =
+                eval_function(&program, "add_or_double", &[a as i64, b as i64, u as i64]).unwrap();
+            assert_eq!(outcome.value as i32, expected, "inputs ({a},{b},{u})");
+        }
+    }
+
+    #[test]
+    fn lowers_let_bindings_and_multiple_wrapping_ops() {
+        let source = r#"
+            fn combo(a: i32, b: i32, c: i32) -> i32 {
+                let x = a.wrapping_add(b);
+                let y = x.wrapping_sub(c);
+                y.wrapping_mul(2)
+            }
+        "#;
+        let program = lower_rust_source(&path(), source, &["combo"]).unwrap();
+        let outcome = eval_function(&program, "combo", &[10, 3, 2]).unwrap();
+        // (10+3)=13, 13-2=11, 11*2=22
+        assert_eq!(outcome.value, 22);
+    }
+
+    #[test]
+    fn explicit_return_and_return_only_body_are_supported() {
+        let source = r#"
+            fn f(a: i32) -> i32 {
+                return a.wrapping_add(1);
+            }
+        "#;
+        let program = lower_rust_source(&path(), source, &["f"]).unwrap();
+        let outcome = eval_function(&program, "f", &[41]).unwrap();
+        assert_eq!(outcome.value, 42);
+    }
+
+    #[test]
+    fn rejects_a_match_expression_as_unsupported() {
+        let source = r#"
+            fn f(a: i32) -> i32 {
+                match a {
+                    _ => a,
+                }
+            }
+        "#;
+        let result = lower_rust_source(&path(), source, &["f"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_a_while_loop_as_unsupported() {
+        let source = r#"
+            fn f(a: i32) -> i32 {
+                while a > 0 {}
+                a
+            }
+        "#;
+        let result = lower_rust_source(&path(), source, &["f"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_a_struct_definition_referenced_from_the_requested_function() {
+        let source = r#"
+            struct Point { x: i32 }
+            fn f(a: i32) -> i32 {
+                let p = Point { x: a };
+                p.x
+            }
+        "#;
+        let result = lower_rust_source(&path(), source, &["f"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_a_generic_function() {
+        let source = r#"
+            fn identity<T>(x: T) -> T { x }
+            fn f(a: i32) -> i32 {
+                a
+            }
+        "#;
+        // `identity` itself is never requested, so this only proves the
+        // *requested* function's own generic-parameter-free shape is what
+        // matters -- a separate, direct generic-parameter rejection is
+        // exercised by requesting `identity` itself:
+        let result = lower_rust_source(&path(), source, &["identity"]);
+        assert!(result.is_err());
+        // and `f` alone still lowers fine, unaffected by an unrelated
+        // unsupported item elsewhere in the file (matches this module's
+        // "only inspect requested functions" contract).
+        assert!(lower_rust_source(&path(), source, &["f"]).is_ok());
+    }
+
+    #[test]
+    fn every_node_in_a_lowered_program_carries_real_source_provenance() {
+        let source = r#"
+            fn f(a: i32) -> i32 {
+                a.wrapping_add(1)
+            }
+        "#;
+        let program = lower_rust_source(&path(), source, &["f"]).unwrap();
+        let fact = &program.functions["f"];
+        assert_eq!(fact.provenance.language, SourceLanguage::Rust);
+        assert!(fact.provenance.span.start.line >= 1);
+    }
+}

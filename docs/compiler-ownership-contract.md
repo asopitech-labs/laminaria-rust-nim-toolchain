@@ -29,12 +29,34 @@ LAMINARIA must derive semantic facts from supported source constructs, not requi
 | Role | Permitted use of existing tools | What it proves |
 | --- | --- | --- |
 | Package/dependency resolution | Cargo/Nim ecosystem metadata, manifests, lockfiles, source acquisition and resolution | Dependency inputs, not compilation |
+| Lexical/syntactic parsing | A parsing library, a parser generator, or an existing compiler's own lexer/parser logic, used purely as a syntax-only component (tokens, concrete/abstract syntax tree, source positions) | A syntax tree, not meaning |
 | Reference / baseline | Existing compilers, LLVM and build systems in explicitly selected comparison experiments | Behavior and costs under the tested reference contract |
 | External bootstrap | Existing tools build the initial research executable | A starting executable, not independent compiler self-hosting |
 | Delegated-build baseline | Current coarse Cargo/Nim project-build and self-build experiments | Planner/process integration and baseline measurements only |
 | Independent compilation | LAMINARIA owns source semantics, IR, transformations, code generation and compiler-work scheduling | Candidate evidence for the project goal |
 
 Resolution must not silently run compilation through a build script, procedural macro, plugin or transitive tool invocation. Such work needs an explicit LAMINARIA-supported implementation contract; unsupported constructs/dependencies return a diagnostic. Dependency acquisition is not permission to invoke `cargo build`, `rustc`, `nim c`, `nim cpp`, nlvm, Nimony, or C/LLVM compilation on the target-production path.
+
+**Lexical/syntactic parsing reuse, precisely bounded.** Reuse limited to producing
+tokens, a concrete/abstract syntax tree, and source positions is permitted —
+including a parsing library (e.g. Rust's `syn`), a parser generator, or an
+existing compiler's own lexer/parser logic studied and adapted as a syntax-only
+component. This does not by itself establish compiler ownership and does not
+extend to name resolution, type inference/checking, ownership/effect
+interpretation, constant evaluation, owned-IR construction, analysis,
+transformation, work partitioning, scheduling, or code generation — all of
+which remain LAMINARIA's own responsibility. An already semantically-analyzed
+representation (a typed AST, HIR, MIR, or equivalent) is not "just parsing" and
+must not become a required input. Invoking `rustc`'s or Nim's own compiler
+execution to obtain an AST is never a required entry point on the production
+path — a reused parsing component must be one LAMINARIA controls directly
+(in-process or a library dependency it invokes, not an opaque external
+compiler process), including its execution unit, parallelism, and memory
+lifetime. Macro expansion and compile-time execution are not covered by "just
+parsing"; they need their own explicit implementation contract, and an
+unsupported case returns a diagnostic rather than being silently skipped or
+delegated. A reused parsing dependency is not exempted from LAMINARIA's own
+eventual self-build target merely because it sits at the syntax layer.
 
 LLVM/Cranelift/GCC projection may be studied as a **comparison experiment**. Making LLVM optional or invoking it as a library does not by itself establish compiler ownership. Existing-compiler orchestration, modified upstream compilers, and finer-grained invocation of their passes are not substitutes for the independent path. Reuse of algorithms or libraries is evaluated by the responsibilities actually retained; this contract neither mandates rewriting every utility nor grants an unexamined backend exception. Runtime, assembler and linker boundaries need explicit design and evidence and must not conceal delegated compilation.
 

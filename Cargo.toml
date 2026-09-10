@@ -5,6 +5,7 @@ members = [
     "crates/laminaria-run",
     "crates/laminaria-plan",
     "crates/laminaria-cli",
+    "crates/laminaria-ir",
 ]
 
 [workspace.package]
