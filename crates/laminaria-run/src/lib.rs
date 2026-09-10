@@ -56,6 +56,7 @@ pub mod nim_telemetry;
 pub mod nim_wrapper;
 pub mod reuse;
 pub mod scenario;
+pub mod self_build;
 pub mod store;
 pub mod tracer;
 pub mod types;
