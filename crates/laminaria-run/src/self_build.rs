@@ -33,6 +33,7 @@ use laminaria_plan::{
     PlannerCallError, PlanningInput, ValidationError,
 };
 
+use crate::absolute_path;
 use crate::types::{ProbeLevel, RootCommand, Run};
 
 pub const SELF_BUILD_WORKLOAD_ID: &str = "laminaria-self-build";
@@ -57,20 +58,6 @@ const HOST_BINARY_NAMES: &[&str] = &[
     "laminaria-cc-wrapper",
 ];
 const PLANNER_BINARY_NAME: &str = "laminaria-planner";
-
-/// Joins a relative `path` onto this process's own current directory,
-/// leaving an already-absolute path untouched. Deliberately not
-/// `std::fs::canonicalize` (which requires the path to already exist --
-/// `generation_root` usually doesn't yet on a first run) and not
-/// `std::path::absolute` (stabilized in Rust 1.79, newer than this
-/// workspace's own `rust-version = "1.74"`).
-fn absolute_path(path: &Path) -> std::io::Result<PathBuf> {
-    if path.is_absolute() {
-        Ok(path.to_path_buf())
-    } else {
-        Ok(std::env::current_dir()?.join(path))
-    }
-}
 
 fn binary_name(base: &str) -> String {
     if cfg!(windows) {
@@ -356,11 +343,20 @@ struct VerifiedToolchain {
 /// An empty selector, or a non-numeric channel name (`"stable"`/
 /// `"beta"`/`"nightly"`, which has no single fixed version to compare
 /// against), always matches. A numeric-looking selector (`"2.2.10"`,
-/// `"1.75"`) must be a prefix of the resolved version -- the same
-/// prefix-matching rule `laminaria_fingerprint::nim_toolchain` already
-/// uses for its own (bin_dir-less-only) mismatch note, generalized here
-/// to a hard failure that applies regardless of *how* the toolchain was
-/// resolved (bin_dir-pinned, rustup-resolved, or bare PATH).
+/// `"2.2"`) must match the resolved version component-by-component
+/// (split on `.`), for as many components as the selector itself
+/// specifies -- *not* a raw string-prefix check. A second external
+/// review caught the difference directly: `"2.2.10".starts_with("2.2.1")`
+/// is `true` as plain strings (`"2.2.1"` really is a character-for-
+/// character prefix of `"2.2.10"`), so a lock pinning the exact patch
+/// version `"2.2.1"` silently accepted the real, already-installed
+/// `"2.2.10"` -- a materially different release. Comparing dot-separated
+/// components instead (`["2","2","1"]` vs `["2","2","10"]`) correctly
+/// rejects that case at the third component, while a shorter, less
+/// specific selector like `"2.2"` (`["2","2"]`) still matches any
+/// resolved version sharing that major/minor prefix, `"2.2.10"`
+/// included -- matching how a partial version pin is actually meant to
+/// behave.
 fn selector_matches_resolved(selector: &str, resolved_version: Option<&str>) -> bool {
     if selector.is_empty() {
         return true;
@@ -368,7 +364,18 @@ fn selector_matches_resolved(selector: &str, resolved_version: Option<&str>) -> 
     if !selector.chars().next().is_some_and(|c| c.is_ascii_digit()) {
         return true;
     }
-    resolved_version.is_some_and(|resolved| resolved.starts_with(selector))
+    let Some(resolved) = resolved_version else {
+        return false;
+    };
+    let selector_parts: Vec<&str> = selector.split('.').collect();
+    let resolved_parts: Vec<&str> = resolved.split('.').collect();
+    if resolved_parts.len() < selector_parts.len() {
+        return false;
+    }
+    selector_parts
+        .iter()
+        .zip(resolved_parts.iter())
+        .all(|(s, r)| s == r)
 }
 
 /// Loads `lock_path`, and requires it to resolve at least one Rust
@@ -1050,6 +1057,51 @@ mod tests {
 
     /// The other half of the same external review's fault-injection: a
     /// resolved executable path alone was previously accepted as
+    /// The exact bug a fourth external review caught: naive
+    /// `str::starts_with` treats `"2.2.1"` as a match for `"2.2.10"`
+    /// because it really is a character-for-character string prefix of
+    /// it, even though they are different patch versions. A lock pinning
+    /// the full three-component version `"2.2.1"` must not silently
+    /// accept the real, already-installed `"2.2.10"`.
+    #[test]
+    fn selector_matches_resolved_rejects_a_string_prefix_that_is_not_a_real_version_match() {
+        assert!(!selector_matches_resolved("2.2.1", Some("2.2.10")));
+    }
+
+    #[test]
+    fn selector_matches_resolved_accepts_an_exact_full_version_match() {
+        assert!(selector_matches_resolved("2.2.10", Some("2.2.10")));
+    }
+
+    /// A shorter, less specific selector (major.minor only) is still
+    /// meant to match any resolved version sharing that prefix --
+    /// confirms the component-wise fix didn't overcorrect into requiring
+    /// full equality unconditionally.
+    #[test]
+    fn selector_matches_resolved_accepts_a_partial_major_minor_selector() {
+        assert!(selector_matches_resolved("2.2", Some("2.2.10")));
+    }
+
+    #[test]
+    fn selector_matches_resolved_rejects_a_completely_different_version() {
+        assert!(!selector_matches_resolved("999.0.0", Some("2.2.10")));
+    }
+
+    #[test]
+    fn selector_matches_resolved_always_matches_a_channel_name_selector() {
+        assert!(selector_matches_resolved("stable", Some("1.97.1")));
+    }
+
+    #[test]
+    fn selector_matches_resolved_always_matches_an_empty_selector() {
+        assert!(selector_matches_resolved("", Some("anything")));
+    }
+
+    #[test]
+    fn selector_matches_resolved_rejects_a_numeric_selector_with_no_resolved_version() {
+        assert!(!selector_matches_resolved("2.2.10", None));
+    }
+
     /// "verified" regardless of whether its *version* actually matched
     /// what the lock file claimed to pin. Reproduced directly before
     /// this fix: setting `nim2_pinned`'s selector to a nonexistent
@@ -1093,5 +1145,150 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&lock_dir);
+    }
+
+    /// The end-to-end version of `selector_matches_resolved_rejects_a_
+    /// string_prefix_that_is_not_a_real_version_match`, exercised through
+    /// the real `resolve_verified_toolchain`/real lock file/real
+    /// `choosenim`-installed Nim, matching a fourth external review's own
+    /// repro exactly: pinning the patch version `"2.2.1"` must not accept
+    /// the real, already-installed `"2.2.10"` just because it is a raw
+    /// string prefix of it.
+    #[test]
+    #[cfg(unix)]
+    fn resolve_verified_toolchain_rejects_a_version_that_is_only_a_string_prefix_match() {
+        let repo_root = repo_root();
+        let real_lock = std::fs::read_to_string(repo_root.join("toolchains.lock.toml")).unwrap();
+        let prefix_only_lock = real_lock.replace(r#"selector = "2.2.10""#, r#"selector = "2.2.1""#);
+        assert_ne!(
+            real_lock, prefix_only_lock,
+            "the replacement must have actually matched something in the real lock file"
+        );
+
+        let lock_dir = tmp_dir("string-prefix-lock");
+        let lock_path = lock_dir.join("toolchains.lock.toml");
+        std::fs::write(&lock_path, prefix_only_lock).unwrap();
+
+        let result = resolve_verified_toolchain(&lock_path, &repo_root);
+
+        match result {
+            Err(SelfBuildError::ToolchainUnresolved(detail)) => {
+                assert!(
+                    detail.contains("2.2.1"),
+                    "expected the mismatch detail to name the requested selector, got: {detail}"
+                );
+            }
+            other => panic!(
+                "expected ToolchainUnresolved (2.2.1 must not accept the real 2.2.10 just \
+                 because it's a string prefix of it), got {other:?}"
+            ),
+        }
+
+        let _ = std::fs::remove_dir_all(&lock_dir);
+    }
+
+    /// Locates (building first if necessary) the real `laminaria` CLI
+    /// binary. This specific test needs the *actual* `laminaria`
+    /// executable, not an in-process call to `run_generation`: RUSTC-
+    /// wrapper substitution (`find_rustc_wrapper_binary` in
+    /// `cargo_wrapper.rs`) only finds `laminaria-rustc-wrapper` next to
+    /// the *running executable*, and inside `cargo test` that's this
+    /// test binary itself (under `target/debug/deps/`), which never has
+    /// the wrapper binary copied next to it -- the same gap `reuse.rs`'s
+    /// own `laminaria_cli_binary` test helper documents for the same
+    /// reason.
+    #[cfg(unix)]
+    fn laminaria_cli_binary(repo_root: &Path) -> PathBuf {
+        let status = std::process::Command::new("cargo")
+            .args(["build", "--workspace"])
+            .current_dir(repo_root)
+            .status()
+            .unwrap();
+        assert!(status.success(), "failed to build the workspace");
+        let bin = repo_root
+            .join("target/debug")
+            .join(binary_name("laminaria"));
+        assert!(bin.is_file(), "expected {} to exist", bin.display());
+        bin
+    }
+
+    /// The exact bug a fourth external review caught: a relative
+    /// `--runs-root` (the CLI's own default, `"runs"`) resolved
+    /// inconsistently between this process (whose own `std::fs` calls
+    /// correctly resolve it against its own cwd) and the wrapper binary
+    /// spawned as part of a self-build action (whose `cwd` is
+    /// `repo_root` or `repo_root/nim-planner`, never this process's cwd)
+    /// -- so every per-compiler-invocation wrapper event failed to write
+    /// at all (`No such file or directory` from the wrapper's own
+    /// perspective) and was silently dropped, leaving only the root
+    /// process's own record. Exercised through the real `laminaria` CLI
+    /// binary (not an in-process call to `run_generation`), since
+    /// wrapper substitution only engages next to the actually-running
+    /// executable -- see `laminaria_cli_binary`'s own doc comment.
+    #[test]
+    #[cfg(unix)]
+    fn a_relative_runs_root_still_captures_per_compiler_invocation_records() {
+        let repo_root = repo_root();
+        let stage0_planner = build_stage0_planner(&repo_root);
+        let cli_bin = laminaria_cli_binary(&repo_root);
+
+        let generation_root = tmp_dir("relative-runs-root-gen");
+        // Relative to *this test process's own* current directory -- the
+        // exact scenario the bug reproduced in. No `set_current_dir`:
+        // see `run_generation_with_a_relative_generation_root_...`'s own
+        // reasoning for why that would race concurrent tests.
+        let relative_runs_root =
+            format!("laminaria-relative-runs-root-test-{}", std::process::id());
+        let expected_runs_root = std::env::current_dir().unwrap().join(&relative_runs_root);
+        let _ = std::fs::remove_dir_all(&expected_runs_root);
+
+        let output = std::process::Command::new(&cli_bin)
+            .arg("self-build")
+            .arg("--planner")
+            .arg(&stage0_planner)
+            .arg("--generation-root")
+            .arg(&generation_root)
+            .arg("--runs-root")
+            .arg(&relative_runs_root)
+            .arg("--lock")
+            .arg(repo_root.join("toolchains.lock.toml"))
+            .arg("--repo-root")
+            .arg(&repo_root)
+            .arg("--json")
+            .output()
+            .expect("failed to invoke laminaria self-build");
+        assert!(
+            output.status.success(),
+            "laminaria self-build failed: stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let cargo_run_id = report["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["action_id"] == "compile-rust-host")
+            .and_then(|a| a["run_id"].as_str())
+            .expect("expected compile-rust-host to have a run_id")
+            .to_string();
+
+        let run_json_path = expected_runs_root.join(&cargo_run_id).join("run.json");
+        let run_json_text = std::fs::read_to_string(&run_json_path).unwrap_or_else(|e| {
+            panic!(
+                "expected a Run record at {} (a relative runs_root must resolve to this \
+                 process's own cwd, not silently vanish): {e}",
+                run_json_path.display()
+            )
+        });
+        let run: serde_json::Value = serde_json::from_str(&run_json_text).unwrap();
+        let process_count = run["process_trace"]["processes"].as_array().unwrap().len();
+        assert!(
+            process_count > 1,
+            "expected real per-rustc-invocation wrapper records (more than just the root \
+             process), got {process_count} -- a relative runs_root must not silently drop them"
+        );
+
+        let _ = std::fs::remove_dir_all(&generation_root);
+        let _ = std::fs::remove_dir_all(&expected_runs_root);
     }
 }

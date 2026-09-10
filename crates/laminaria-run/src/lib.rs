@@ -340,6 +340,37 @@ fn prepare_nim_wrapping(
 /// Sufficiently unique for this crate's purpose (distinct `runs/<id>/`
 /// directories within one repository checkout); not a claim of global
 /// uniqueness across machines.
+/// Joins a relative `path` onto this process's own current directory,
+/// leaving an already-absolute path untouched. Deliberately not
+/// `std::fs::canonicalize` (which requires the path to already exist)
+/// and not `std::path::absolute` (stabilized in Rust 1.79, newer than
+/// this workspace's own `rust-version = "1.74"`).
+///
+/// `run_and_record` uses this on `runs_root` for a real bug an external
+/// review caught: `RootCommand.cwd` can be (and, for `self_build.rs`'s
+/// own actions, always is) a *different* directory than this process's
+/// own cwd. `wrapper_events_path` (derived from `runs_root`) is passed
+/// to the spawned wrapper binary via `ENV_EVENTS_PATH`, which resolves
+/// it against *its own* cwd -- inherited from the traced root command's
+/// `cwd`, not this process's. A relative `--runs-root` (the CLI's own
+/// default, `"runs"`) therefore resolved consistently only by accident
+/// whenever `RootCommand.cwd` happened to equal this process's cwd;
+/// reproduced directly with a self-build action (`cwd` set to
+/// `repo_root` or `repo_root/nim-planner`): the root command's own Run
+/// record was written fine (this process's own `std::fs` calls resolve
+/// against its own cwd correctly), but every per-compiler-invocation
+/// wrapper event failed to write (`No such file or directory` from the
+/// wrapper binary's own perspective) and was silently dropped, leaving
+/// only the root process's record with zero real compiler-invocation
+/// evidence.
+pub(crate) fn absolute_path(path: &Path) -> std::io::Result<PathBuf> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()?.join(path))
+    }
+}
+
 pub fn generate_run_id() -> String {
     let unix_ns = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -388,6 +419,11 @@ pub fn run_and_record(
 
     let doctor_run = doctor::build(lock_path, repo_root);
 
+    // Absolutized *before* `run_dir`/`wrapper_events_path` are derived --
+    // see `absolute_path`'s own doc comment for the exact bug this
+    // fixes (a relative `runs_root` resolved inconsistently between this
+    // process and a traced root command spawned with a different `cwd`).
+    let runs_root = &absolute_path(runs_root)?;
     let run_dir = runs_root.join(&run_id);
     std::fs::create_dir_all(&run_dir)?;
     let stdout_path = run_dir.join("stdout.log");

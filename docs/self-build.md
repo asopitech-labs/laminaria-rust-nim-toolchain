@@ -376,3 +376,31 @@ All of the following are automated tests, not just described behavior:
   that installs the exact pinned version via `choosenim`, the same
   mechanism `scripts/bootstrap.sh` already documents for this, rather
   than loosening the lock file's own pinning.
+- **A version selector match is a real version comparison, not a string
+  prefix check**: a fourth external review caught that
+  `"2.2.10".starts_with("2.2.1")` is `true` as plain strings, so pinning
+  the exact patch version `"2.2.1"` silently accepted the real,
+  already-installed `"2.2.10"` -- a different release. `selector_matches_
+  resolved` now splits both sides on `.` and compares components
+  exactly, so a full three-component selector must match all three
+  components while a shorter selector (`"2.2"`) still matches any
+  resolved version sharing that prefix.
+  `selector_matches_resolved_rejects_a_string_prefix_that_is_not_a_real_version_match`
+  and `resolve_verified_toolchain_rejects_a_version_that_is_only_a_string_prefix_match`
+  cover this directly.
+- **A relative `--runs-root` no longer silently drops per-compiler-
+  invocation evidence**: the same review found that `run_and_record`'s
+  `wrapper_events_path` (derived from `runs_root`) is passed to the
+  spawned wrapper binary via an environment variable, which resolves it
+  against *the wrapper's own* `cwd` -- inherited from the traced root
+  command's `cwd`, not the calling process's. For a self-build action
+  (whose `cwd` is `repo_root` or `repo_root/nim-planner`), a relative
+  `--runs-root` (the CLI's own default, `"runs"`) meant every wrapper
+  event failed to write at all, leaving only the root process's own Run
+  record with zero real compiler-invocation evidence. Fixed the same way
+  as `generation_root`: `run_and_record` now resolves `runs_root` to an
+  absolute path immediately, before deriving any other path from it.
+  `a_relative_runs_root_still_captures_per_compiler_invocation_records`
+  covers this end-to-end through the real CLI binary (in-process calls
+  to `run_generation` can't exercise wrapper substitution at all, since
+  it only engages next to the actually-running executable).

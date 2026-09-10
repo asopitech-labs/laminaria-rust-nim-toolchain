@@ -1370,3 +1370,61 @@ re-run on an already-warm binary -- confirmed via each fix's own build
 log showing exactly one `nim c`/`SuccessX` line despite multiple
 concurrent callers, where a race would have shown more than one racing
 attempt or a mid-build failure.
+
+## Seventh review pass: version-selector matching and a relative runs-root (issues #8/#6)
+
+A fourth external review, run after the sixth pass's CI run finally went
+fully green. Two P2s, both fault-injection-reproduced:
+
+1. **A version selector match was a string-prefix check, not a real
+   version comparison.** `selector_matches_resolved`'s prior
+   `resolved.starts_with(selector)` treats `"2.2.1"` as matching
+   `"2.2.10"`, because it really is a character-for-character prefix of
+   it as plain text -- reproduced directly: a lock pinning the exact
+   patch version `"2.2.1"` still accepted the real, already-installed
+   `"2.2.10"`, a different release, with self-build reporting success.
+   Fixed by splitting both the selector and the resolved version on `.`
+   and comparing components exactly (for as many components as the
+   selector specifies) instead of raw string prefix matching -- a
+   shorter selector like `"2.2"` still matches any resolved version
+   sharing that prefix, but a full `"2.2.1"` now only matches an
+   actually-resolved `"2.2.1"`.
+2. **A relative `--runs-root` silently dropped every per-compiler-
+   invocation record.** `run_and_record`'s `wrapper_events_path`
+   (derived from `runs_root`) is handed to the spawned wrapper binary
+   via an environment variable, which the wrapper resolves against *its
+   own* `cwd` -- inherited from the traced root command's `cwd`, which
+   self-build's own actions deliberately set to `repo_root` or
+   `repo_root/nim-planner`, not the calling process's cwd. Reproduced
+   directly: with the CLI's own default relative `--runs-root` ("runs"),
+   both the Nim and Cargo builds succeeded, but every per-rustc/per-cc
+   wrapper event failed to write (`No such file or directory` from the
+   wrapper's own perspective) and was silently dropped -- only the root
+   process's own Run record survived, with zero real compiler-invocation
+   evidence. Fixed the same way as the sixth pass's `generation_root`
+   fix: `run_and_record` now resolves `runs_root` to an absolute path
+   immediately, before `run_dir`/`wrapper_events_path` are derived from
+   it. The shared `absolute_path` helper moved from `self_build.rs` to
+   `lib.rs` (`pub(crate)`) so both call sites use the same
+   implementation instead of two copies.
+
+The second finding's own test
+(`a_relative_runs_root_still_captures_per_compiler_invocation_records`)
+had to go through the real `laminaria` CLI binary as a subprocess, not
+an in-process call to `run_generation` -- confirmed directly (see
+`laminaria_cli_binary`'s own doc comment, mirroring `reuse.rs`'s
+existing one): `find_rustc_wrapper_binary` looks for
+`laminaria-rustc-wrapper` next to `std::env::current_exe()`, which
+inside `cargo test` is the test binary itself under `target/debug/deps/`
+-- a directory the wrapper binaries are never copied into. An in-process
+test call to `run_generation` therefore never engages wrapper
+substitution at all, regardless of this fix; this was true of every
+`self_build.rs` test *before* this pass too, just never previously
+exercised or noticed because none of them asserted anything about
+per-invocation wrapper record counts.
+
+`cargo test --workspace`: 154 passed (up from 145). Clippy and fmt
+clean. Both fixes were manually re-verified through the real CLI binary
+in addition to their dedicated tests, matching this file's own repeated
+lesson about not trusting an in-process/already-warm-environment
+reproduction alone.
