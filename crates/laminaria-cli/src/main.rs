@@ -629,7 +629,7 @@ fn plan_self_build_command(planner: Option<PathBuf>, json: bool) -> i32 {
     };
 
     if let laminaria_plan::PlanOutcome::Planned(plan) = &outcome {
-        if let Err(err) = laminaria_plan::validate(plan) {
+        if let Err(err) = laminaria_plan::validate(plan, &input) {
             eprintln!(
                 "laminaria plan-self-build: the returned ExecutionPlan failed validation: {err}"
             );

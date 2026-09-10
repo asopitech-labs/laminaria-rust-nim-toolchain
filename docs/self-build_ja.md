@@ -166,12 +166,20 @@ issue #4は、より広いABIフリー研究課題を確定させることなく
   `nim_planner_client.rs`(サブプロセスクライアント — このクレート内で
   `PlanOutcome`を得る*唯一*の経路であり、プランナーバイナリが見つからない
   /失敗した場合は常に`Err`であり、代替計画になることは決してない)、
-  `validate.rs`(計画を実行に信頼する前に行う、順序性の軽量な構造的
-  再検証 — Nim側ソルバーの再実装ではない)。
+  `validate.rs`(2つの異なることを検証する: 元の`PlanningInput`との対応
+  — 計画は要求されたアクションを要求された形状のまま過不足なく宣言し、
+  要求された成果物は実際に生成されること — に加えて内部的な順序整合性。
+  外部レビューが発見した実バグ: 後者だけの検証では、故障注入した空の
+  `ExecutionPlan`(`{"actions": {}, "ordered_actions": []}`)が「空集合は
+  自明に自分自身と等しい」ために検証を通過し、何もビルドせずに
+  「成功」してしまっていた)。
 - `crates/laminaria-run/src/self_build.rs` — セルフビルドの
   `PlanningInput`(3つのアクション:`compile-nim-planner`・
   `compile-rust-host`・`integrate`)を組み立て、プランナーを呼び出し、
-  検証し、`ordered_actions`を厳密に逐次実行する(並行度の上限は1、
+  検証し、lockファイルからRust/Nimツールチェーンを解決・検証し
+  (lockが読めない、あるいはツールチェーンが解決できない場合はPATH上の
+  `cargo`/`nim`を黙って実行せず、そこで失敗する)、`ordered_actions`を
+  厳密に逐次実行する(並行度の上限は1、
   明示的に保守的な選択 — issue #6は最初のローカルスライスにこれを許容
   している。ネストされたCargo/`nim c`の並列性は各ツール自身のデフォルト
   のままとし、各アクションの`Run`証拠内で隠さず明記する)。
@@ -188,7 +196,13 @@ issue #4は、より広いABIフリー研究課題を確定させることなく
   系譜ラベルでパッチされる(issue #6:「起動したビルドドライバの識別子・
   プランナーの識別子・plan ID・アクション結果・世代系譜を記録する」)。
   失敗したアクションはそれに依存するすべてを中断する。不完全な世代が
-  成功として返されることは決してない。
+  成功として返されることは決してない。各世代は自身専用の隔離された
+  `<generation_root>/.build/`ステージング領域(専用のCargo
+  `--target-dir`とNimの`--nimcache`、`run_generation`呼び出しごとに
+  消去される)にビルドする — 外部レビューが発見した実バグ: 以前の版は
+  `repo_root`自身の共有`target/`/`nim-planner/bin/`を世代間で共有して
+  おり、2つ目の世代のビルドが1つ目の世代の既にfreshな成果物を横取り
+  して、実際には何も再コンパイルせずに成功と報告していた。
 - `crates/laminaria-cli` — `laminaria plan-self-build`(計画のみ、実行
   なし)と`laminaria self-build --generation-root <dir>`(計画+実行)。
   どちらもデフォルトでは実行中の実行ファイルの隣にある`laminaria-planner`
@@ -198,9 +212,12 @@ issue #4は、より広いABIフリー研究課題を確定させることなく
 ## stage0 → stage1 プロトコル
 
 **stage0**は、外部ツールによって作られる、計画立てられていない通常の
-ビルドである — 文字通り`nim-planner/`に対する`nim c`(あるいは
-`nimble build`)と、リポジトリルートでの`cargo build --workspace
---release`を、手動またはCIで、`laminaria self-build`を一切経由せずに
+ビルドである — 文字通り`nim-planner/`に対する`nim c`(`nimble build`
+ではない。`nimble build`は本物のコンパイルエラーでも終了コード0を
+返すこと、さらにUbuntuのAPT版nim/nimbleでは依存解決自体が失敗する
+ことが本作業中に判明した)と、リポジトリルートでの`cargo build
+--workspace --release`を、手動またはCIで、`laminaria self-build`を
+一切経由せずに
 実行するだけである。これはブートストラップの種であり、従来のコンパイラ
 ブートストラップにおける「前バージョンのコンパイラ」と同じ役割を担う。
 

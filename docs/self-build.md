@@ -169,16 +169,31 @@ unparseable input exits nonzero
   truth), `nim_planner_client.rs` (the subprocess client — the *only*
   source of a `PlanOutcome` anywhere in this crate; a missing/failing
   planner binary is always `Err`, never a fallback plan),
-  `validate.rs` (a lightweight structural re-check of the ordering
-  property before any plan is trusted for execution — not a
-  reimplementation of Nim's solver).
+  `validate.rs` (checks two distinct things: correspondence with the
+  original `PlanningInput` — the plan declares exactly the requested
+  actions with their requested shape, and every demanded artifact is
+  actually produced — *and* internal ordering consistency; an external
+  review caught that checking only the latter let a fault-injected empty
+  `ExecutionPlan` validate and "succeed" without building anything, since
+  the empty set trivially equals itself).
 - `crates/laminaria-run/src/self_build.rs` — builds the self-build's
   `PlanningInput` (three actions: `compile-nim-planner`,
-  `compile-rust-host`, `integrate`), calls the planner, validates, and
-  executes `ordered_actions` strictly sequentially (concurrency bound 1,
-  explicitly conservative — issue #6 permits this for the first local
-  slice; nested Cargo/`nim c` parallelism is left at each tool's own
-  default and named, not hidden, in each action's `Run` evidence).
+  `compile-rust-host`, `integrate`), calls the planner, validates,
+  resolves and verifies a Rust and a Nim toolchain from the lock file
+  (failing closed on a missing/unreadable lock or an unresolved
+  toolchain, rather than silently executing whatever `cargo`/`nim`
+  happen to be on `PATH`), and executes `ordered_actions` strictly
+  sequentially (concurrency bound 1, explicitly conservative — issue #6
+  permits this for the first local slice; nested Cargo/`nim c`
+  parallelism is left at each tool's own default and named, not hidden,
+  in each action's `Run` evidence). Each generation builds into its own
+  isolated `<generation_root>/.build/` staging area (a fresh Cargo
+  `--target-dir` and Nim `--nimcache`, wiped before every
+  `run_generation` call) — an external review caught an earlier version
+  sharing `repo_root`'s own `target/`/`nim-planner/bin/` across
+  generations, so a second generation's build spuriously inherited the
+  first one's already-fresh outputs and reported success with zero
+  actual recompilation.
   `nim_build`/`cargo_build` actions run through the same `run_and_record`
   RUSTC-wrapper/CC-wrapper tracer paths every other traced command in
   this crate already uses — even this slice's coarse ("whole `cargo
@@ -201,7 +216,10 @@ unparseable input exits nonzero
 ## The stage0 → stage1 protocol
 
 **stage0** is an ordinary, un-planned build produced by an external tool
-— literally just `nim c` (or `nimble build`) on `nim-planner/` and
+— literally just `nim c` on `nim-planner/` (not `nimble build`, which was
+found during this work to exit `0` on a genuine Nim compile error and to
+fail its own dependency check outright on Ubuntu's packaged `nim`/
+`nimble`) and
 `cargo build --workspace --release` at the repo root, run by hand or in
 CI, *without* going through `laminaria self-build` at all. This is the
 bootstrap seed, the same role a previous release compiler plays in a
@@ -305,3 +323,23 @@ All of the following are automated tests, not just described behavior:
   `nim-planner/` (never the tracked repo) and asserts the generation
   fails at exactly that action, `integrate` never runs, and no stage
   output binary is produced.
+- **A plan that doesn't answer the request is rejected**: `laminaria-plan`'s
+  `an_empty_plan_that_drops_every_requested_action_is_rejected`,
+  `a_plan_that_alters_a_requested_actions_declared_shape_is_rejected`,
+  `a_plan_that_does_not_produce_a_demanded_artifact_is_rejected`, and
+  `two_actions_claiming_the_same_output_artifact_is_rejected` cover the
+  exact fault-injection case an external review caught (a stub planner
+  returning `{"actions": {}, "ordered_actions": []}` previously produced
+  a "successful," artifact-less self-build) plus three related
+  input/plan correspondence gaps found alongside it.
+- **A missing/unreadable toolchain lock is rejected before executing**:
+  manually verified (`--lock /does/not/exist.toml` now fails with
+  `ToolchainUnresolved` and no generation root is created) and
+  structurally guaranteed by `resolve_verified_toolchain` running before
+  the first action.
+- **Generation isolation actually prevents cross-generation cache
+  sharing**: manually verified by running `self-build` into two
+  different `--generation-root` directories back to back and confirming
+  each one's `compile-rust-host` `Run` reports 0 of 57 artifacts fresh
+  (real recompilation), not the all-fresh, zero-work result the shared-
+  `target/`-directory bug produced before this fix.

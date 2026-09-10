@@ -16,7 +16,15 @@
 //!
 //! **No caching/reuse** (issues #7/#12) is wired in here -- every
 //! `run_generation` call fully rebuilds both the Nim planner and the
-//! Rust host from source, per this slice's explicit scope.
+//! Rust host from source, per this slice's explicit scope. This is
+//! actually enforced, not just claimed: an external review caught that
+//! an earlier version built into `repo_root`'s own shared `target/`
+//! and `nim-planner/bin/`, so a *second* generation silently inherited
+//! the first generation's already-fresh Cargo/Nim outputs and reported
+//! success without recompiling anything. Every generation now gets its
+//! own isolated `<generation_root>/.build/` staging area (a fresh
+//! Cargo `--target-dir` and Nim `--nimcache`), wiped before each
+//! `run_generation` call.
 
 use std::path::{Path, PathBuf};
 
@@ -103,7 +111,19 @@ pub enum SelfBuildError {
     Planner(PlannerCallError),
     Rejected(PlanRejection),
     InvalidPlan(ValidationError),
-    ActionFailed { action_id: String, detail: String },
+    /// The toolchain lock file could not be loaded, or does not resolve
+    /// both a Rust and a Nim toolchain with a real executable path --
+    /// checked and resolved *before* any action executes, so self-build
+    /// never silently falls back to running whatever `cargo`/`nim`
+    /// happen to be on `PATH` (an external review caught this: pointing
+    /// `--lock` at a nonexistent file previously still "succeeded,"
+    /// with an empty resolved-toolchain list in the evidence and PATH's
+    /// own `cargo`/`nim` actually invoked).
+    ToolchainUnresolved(String),
+    ActionFailed {
+        action_id: String,
+        detail: String,
+    },
     Io(std::io::Error),
 }
 
@@ -122,6 +142,10 @@ impl std::fmt::Display for SelfBuildError {
                     "the Nim planner's ExecutionPlan failed Rust-side validation: {e}"
                 )
             }
+            SelfBuildError::ToolchainUnresolved(detail) => write!(
+                f,
+                "could not resolve a verified Rust and Nim toolchain before executing: {detail}"
+            ),
             SelfBuildError::ActionFailed { action_id, detail } => {
                 write!(f, "self-build action '{action_id}' failed: {detail}")
             }
@@ -186,8 +210,22 @@ pub fn run_generation(
         PlanOutcome::Planned(plan) => plan,
         PlanOutcome::Rejected(rejection) => return Err(SelfBuildError::Rejected(rejection)),
     };
-    validate(&plan).map_err(SelfBuildError::InvalidPlan)?;
+    validate(&plan, &input).map_err(SelfBuildError::InvalidPlan)?;
 
+    // Resolve and verify the Rust/Nim toolchains *before* executing
+    // anything -- a missing/unreadable lock file, or one that resolves
+    // no usable toolchain, must fail closed here rather than letting
+    // execution silently fall through to whatever `cargo`/`nim` happen
+    // to be on `PATH`.
+    let toolchain = resolve_verified_toolchain(lock_path, repo_root)?;
+
+    // Wipe this generation's own build staging area first, so a
+    // previous call into the *same* `generation_root` (or, before this
+    // fix, `repo_root`'s own shared `target/`/`nim-planner/bin/`) can
+    // never make this call's actions spuriously report "already fresh,
+    // nothing to do" -- every `run_generation` call is a genuine
+    // from-scratch rebuild, not just documented as one.
+    let _ = std::fs::remove_dir_all(build_staging_dir(generation_root));
     std::fs::create_dir_all(generation_root)?;
 
     let planner_digest = laminaria_fingerprint::exec::sha256_file(planner_binary);
@@ -211,8 +249,8 @@ pub fn run_generation(
                 runs_root,
                 lock_path,
                 &evidence,
-                nim_build_root(repo_root),
-                vec![repo_root.join("nim-planner/bin")],
+                nim_build_root(repo_root, generation_root, &toolchain.nim),
+                vec![nim_output_dir(generation_root)],
             ),
             ActionKind::CargoBuild => run_traced_action(
                 action,
@@ -220,10 +258,10 @@ pub fn run_generation(
                 runs_root,
                 lock_path,
                 &evidence,
-                cargo_build_root(repo_root),
-                vec![repo_root.join("target/release")],
+                cargo_build_root(repo_root, generation_root, &toolchain.cargo),
+                vec![cargo_target_dir(generation_root).join("release")],
             ),
-            ActionKind::Integrate => run_integrate_action(action, repo_root, generation_root),
+            ActionKind::Integrate => run_integrate_action(action, generation_root),
         };
 
         let outcome = result?;
@@ -258,6 +296,89 @@ struct ActionEvidence {
     generation_label: String,
 }
 
+/// The exact, resolved-from-the-lock-file `cargo`/`nim` executables
+/// self-build must invoke -- never a bare `"cargo"`/`"nim"` program name
+/// resolved implicitly from `PATH` at spawn time (an external review
+/// caught this: with no verification step, a nonexistent `--lock`
+/// resulted in an empty resolved-toolchain list in the evidence while
+/// execution silently used PATH's own `cargo`/`nim` anyway).
+struct VerifiedToolchain {
+    cargo: PathBuf,
+    nim: PathBuf,
+}
+
+/// Loads `lock_path`, and requires it to resolve at least one Rust
+/// toolchain and one Nim toolchain, each with a real executable path
+/// (`laminaria_fingerprint`'s own `doctor::build`, reused directly
+/// rather than re-deriving toolchain resolution here). This project's
+/// `toolchains.lock.toml` declares exactly one of each today, so simply
+/// taking the first resolved entry is unambiguous; a lock file
+/// declaring more than one Rust or Nim toolchain would need an explicit
+/// `--rust-toolchain`/`--nim-toolchain` selector this first slice does
+/// not yet have -- named as an open gap, not silently guessed at.
+fn resolve_verified_toolchain(
+    lock_path: &Path,
+    repo_root: &Path,
+) -> Result<VerifiedToolchain, SelfBuildError> {
+    let doctor_run = laminaria_fingerprint::doctor::build(lock_path, repo_root);
+    if let Some(load_error) = &doctor_run.lock_load_error {
+        return Err(SelfBuildError::ToolchainUnresolved(format!(
+            "failed to load toolchain lock file {}: {load_error:?}",
+            lock_path.display()
+        )));
+    }
+
+    let rust_toolchain = doctor_run.report.rust_toolchains.first().ok_or_else(|| {
+        SelfBuildError::ToolchainUnresolved(format!(
+            "toolchain lock file {} declares no Rust toolchain",
+            lock_path.display()
+        ))
+    })?;
+    let nim_toolchain = doctor_run.report.nim_toolchains.first().ok_or_else(|| {
+        SelfBuildError::ToolchainUnresolved(format!(
+            "toolchain lock file {} declares no Nim toolchain",
+            lock_path.display()
+        ))
+    })?;
+    let cargo = rust_toolchain.cargo.path.clone().ok_or_else(|| {
+        SelfBuildError::ToolchainUnresolved(format!(
+            "Rust toolchain '{}' has no resolved cargo executable (see its own resolution notes \
+             from `laminaria doctor`)",
+            rust_toolchain.logical_name
+        ))
+    })?;
+    let nim = nim_toolchain.nim.path.clone().ok_or_else(|| {
+        SelfBuildError::ToolchainUnresolved(format!(
+            "Nim toolchain '{}' has no resolved nim executable (see its own resolution notes \
+             from `laminaria doctor`)",
+            nim_toolchain.logical_name
+        ))
+    })?;
+
+    Ok(VerifiedToolchain { cargo, nim })
+}
+
+/// `<generation_root>/.build/` -- everything a generation's own
+/// compilation needs that is *not* part of the final assembled layout
+/// (unlike the four sibling binaries `integrate` copies to the top
+/// level of `generation_root`). Wiped at the start of every
+/// `run_generation` call.
+fn build_staging_dir(generation_root: &Path) -> PathBuf {
+    generation_root.join(".build")
+}
+
+fn nim_output_dir(generation_root: &Path) -> PathBuf {
+    build_staging_dir(generation_root).join("nim-out")
+}
+
+fn nim_cache_dir(generation_root: &Path) -> PathBuf {
+    build_staging_dir(generation_root).join("nimcache")
+}
+
+fn cargo_target_dir(generation_root: &Path) -> PathBuf {
+    build_staging_dir(generation_root).join("cargo-target")
+}
+
 /// Invokes `nim c` directly, *not* `nimble build`: a real bug this
 /// crate's own compile-failure test caught -- `nimble build`'s wrapper
 /// around `nim c` prints "Error: Build failed for the package" on a
@@ -269,13 +390,25 @@ struct ActionEvidence {
 /// `lib.rs`, so it gets real CC-wrapper per-invocation tracing --
 /// `nimble build` would have hidden its internal `nim c` invocation from
 /// that tracer entirely, which `nimble build` would not have.
-fn nim_build_root(repo_root: &Path) -> RootCommand {
+///
+/// `nim_binary` is the resolved, lock-verified executable
+/// (`resolve_verified_toolchain`), not a bare `"nim"` program name --
+/// `is_nim_c_command`'s own file-stem check still recognizes it (it
+/// compares `Path::new(&root.program).file_stem()`, not the full path)
+/// so CC-wrapper substitution still engages. Output and nimcache both
+/// live under `generation_root`'s own isolated `.build/` staging area
+/// (this module's own doc comment: never `repo_root`'s shared
+/// `nim-planner/bin/`, which let one generation's build spuriously
+/// inherit an earlier one's freshness).
+fn nim_build_root(repo_root: &Path, generation_root: &Path, nim_binary: &Path) -> RootCommand {
+    let output_path = nim_output_dir(generation_root).join(binary_name(PLANNER_BINARY_NAME));
     RootCommand {
-        program: "nim".to_string(),
+        program: nim_binary.display().to_string(),
         args: vec![
             "c".to_string(),
             "--path:src".to_string(),
-            format!("-o:bin/{}", binary_name(PLANNER_BINARY_NAME)),
+            format!("--nimcache:{}", nim_cache_dir(generation_root).display()),
+            format!("-o:{}", output_path.display()),
             "src/laminaria_planner.nim".to_string(),
         ],
         cwd: Some(repo_root.join("nim-planner")),
@@ -283,13 +416,21 @@ fn nim_build_root(repo_root: &Path) -> RootCommand {
     }
 }
 
-fn cargo_build_root(repo_root: &Path) -> RootCommand {
+/// `cargo_binary` is the resolved, lock-verified executable, same
+/// reasoning as `nim_build_root`'s own doc comment (`is_cargo_command`
+/// also compares only the file stem). `--target-dir` points at this
+/// generation's own isolated staging area, not `repo_root`'s shared
+/// `target/` -- the actual fix for the cross-generation cache-sharing
+/// bug this module's own doc comment describes.
+fn cargo_build_root(repo_root: &Path, generation_root: &Path, cargo_binary: &Path) -> RootCommand {
     RootCommand {
-        program: "cargo".to_string(),
+        program: cargo_binary.display().to_string(),
         args: vec![
             "build".to_string(),
             "--workspace".to_string(),
             "--release".to_string(),
+            "--target-dir".to_string(),
+            cargo_target_dir(generation_root).display().to_string(),
         ],
         cwd: Some(repo_root.to_path_buf()),
         env_overrides: Default::default(),
@@ -366,16 +507,13 @@ fn run_traced_action(
 /// binary ends up running.
 fn run_integrate_action(
     action: &Action,
-    repo_root: &Path,
     generation_root: &Path,
 ) -> Result<ActionOutcome, SelfBuildError> {
     std::fs::create_dir_all(generation_root)?;
 
     let mut missing = Vec::new();
 
-    let planner_src = repo_root
-        .join("nim-planner/bin")
-        .join(binary_name(PLANNER_BINARY_NAME));
+    let planner_src = nim_output_dir(generation_root).join(binary_name(PLANNER_BINARY_NAME));
     if planner_src.is_file() {
         copy_executable(
             &planner_src,
@@ -385,8 +523,9 @@ fn run_integrate_action(
         missing.push(planner_src.display().to_string());
     }
 
+    let cargo_release_dir = cargo_target_dir(generation_root).join("release");
     for name in HOST_BINARY_NAMES {
-        let src = repo_root.join("target/release").join(binary_name(name));
+        let src = cargo_release_dir.join(binary_name(name));
         if src.is_file() {
             copy_executable(&src, &generation_root.join(binary_name(name)))?;
         } else {
@@ -442,6 +581,33 @@ mod tests {
             .unwrap()
     }
 
+    /// Builds `nim-planner/bin/laminaria-planner` via `nim c` directly --
+    /// *not* `nimble build`, which this same test module already found
+    /// exits `0` on a genuine compile failure (see `nim_build_root`'s own
+    /// doc comment). A second, independent reason surfaced in CI: on
+    /// Ubuntu, `apt`'s packaged `nim`/`nimble` fail `nimble build`'s own
+    /// dependency check outright (`Error: Unsatisfied dependency: nim
+    /// (>= 2.0.0)`, even though the installed `nim --version` genuinely
+    /// satisfies it) -- `nim c` sidesteps nimble's dependency resolution
+    /// entirely, matching production's own `nim_build_root`.
+    #[cfg(unix)]
+    fn build_stage0_planner(repo_root: &Path) {
+        let status = std::process::Command::new("nim")
+            .args([
+                "c",
+                "--path:src",
+                "-o:bin/laminaria-planner",
+                "src/laminaria_planner.nim",
+            ])
+            .current_dir(repo_root.join("nim-planner"))
+            .status()
+            .expect("failed to invoke nim -- is Nim installed?");
+        assert!(
+            status.success(),
+            "stage0 nim c build of laminaria-planner failed"
+        );
+    }
+
     fn tmp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "laminaria-run-self-build-test-{name}-{}",
@@ -492,12 +658,7 @@ mod tests {
 
         // stage0: an ordinary, external-tool build -- deliberately not
         // going through run_generation/the Nim planner at all.
-        let nimble_status = std::process::Command::new("nimble")
-            .args(["build", "-y"])
-            .current_dir(repo_root.join("nim-planner"))
-            .status()
-            .expect("failed to invoke nimble -- is Nim installed?");
-        assert!(nimble_status.success(), "stage0 nimble build failed");
+        build_stage0_planner(&repo_root);
         let cargo_status = std::process::Command::new("cargo")
             .args(["build", "--workspace", "--release"])
             .current_dir(&repo_root)
@@ -613,12 +774,7 @@ mod tests {
             .join("nim-planner/bin")
             .join(binary_name(PLANNER_BINARY_NAME));
         if !stage0_planner.is_file() {
-            let status = std::process::Command::new("nimble")
-                .args(["build", "-y"])
-                .current_dir(repo_root.join("nim-planner"))
-                .status()
-                .expect("failed to invoke nimble -- is Nim installed?");
-            assert!(status.success(), "stage0 nimble build failed");
+            build_stage0_planner(&repo_root);
         }
 
         let broken_repo = tmp_dir("broken-repo");
