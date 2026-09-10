@@ -290,42 +290,72 @@ fn verify_true_noop_precondition(scenario: &Scenario) -> std::io::Result<()> {
 /// (a genuine no-op, or no artifact inventory was captured at all -- this
 /// never *fabricates* a violation from missing evidence), `Some(reason)`
 /// otherwise.
-/// How many changed artifacts a genuine no-op still tolerates before this
-/// is treated as a real postcondition violation -- not zero: Cargo itself
-/// rewrites its own `.d` dep-info files with byte-identical content but a
-/// fresh mtime on *every* invocation, even a true no-op (a real,
-/// independently-verified finding, see `artifact_inventory`'s own
-/// NOTES.md section) -- so a strict zero-tolerance check here would flag
-/// every genuine Cargo no-op as a violation. This tolerance is small
-/// enough to still catch the actual hazard (a real, full rebuild against
-/// an emptied-but-technically-non-empty output directory) while not
-/// false-positiving on that already-documented benign noise.
-const TRUE_NOOP_CHANGED_ARTIFACT_TOLERANCE: usize = 5;
-
+///
+/// Judged by the *kind* of each changed artifact, not by how many
+/// changed -- a second external review reproduced a real regression in
+/// an earlier, count-based version of this check (tolerate up to 5
+/// changed artifacts, regardless of what they were): a genuine C
+/// compile that newly created an executable still validated as
+/// `TrueNoop` because it was the only changed file, under the
+/// tolerance. Two rules instead:
+/// - `Created` is *never* tolerated, at any count: a genuine no-op must
+///   never bring a new file into existence, full stop.
+/// - `Modified` is tolerated only for the one specific, independently-
+///   verified benign case (`artifact_inventory`'s own NOTES.md): Cargo
+///   rewrites its own `.d` dep-info files with byte-identical content
+///   but a fresh mtime on *every* invocation, even a true no-op. A
+///   `Modified` file outside that documented pattern (e.g. a relinked
+///   binary) is a violation regardless of how few such files there are.
 fn true_noop_postcondition_violation(scenario: &Scenario, run: &Run) -> Option<String> {
     if scenario.cache_state_label != CacheStateLabel::TrueNoop {
         return None;
     }
     let records = run.artifact_delta.as_ref()?.get("records")?.as_array()?;
-    let changed_count = records
-        .iter()
-        .filter(|r| {
-            matches!(
-                r.get("state").and_then(|s| s.as_str()),
-                Some("Created") | Some("Modified")
-            )
-        })
-        .count();
-    if changed_count <= TRUE_NOOP_CHANGED_ARTIFACT_TOLERANCE {
-        return None;
+
+    fn logical_path(r: &serde_json::Value) -> String {
+        r.get("logical_path")
+            .and_then(|p| p.as_str())
+            .unwrap_or("<unknown path>")
+            .to_string()
     }
-    Some(format!(
-        "scenario {:?} was labeled TrueNoop, but {changed_count} artifact(s) were actually \
-         Created/Modified during this run (more than the \
-         {TRUE_NOOP_CHANGED_ARTIFACT_TOLERANCE} tolerated for Cargo's own benign no-op \
-         rewrites) -- this was not a genuine no-op",
-        scenario.id
-    ))
+    fn state(r: &serde_json::Value) -> Option<&str> {
+        r.get("state").and_then(|s| s.as_str())
+    }
+
+    let created: Vec<String> = records
+        .iter()
+        .filter(|r| state(r) == Some("Created"))
+        .map(logical_path)
+        .collect();
+    if !created.is_empty() {
+        return Some(format!(
+            "scenario {:?} was labeled TrueNoop, but {} file(s) were newly created during this \
+             run ({}) -- a genuine no-op never brings a new file into existence, regardless of \
+             how few",
+            scenario.id,
+            created.len(),
+            created.join(", ")
+        ));
+    }
+
+    let unexplained_modified: Vec<String> = records
+        .iter()
+        .filter(|r| state(r) == Some("Modified"))
+        .map(logical_path)
+        .filter(|path| !path.ends_with(".d"))
+        .collect();
+    if !unexplained_modified.is_empty() {
+        return Some(format!(
+            "scenario {:?} was labeled TrueNoop, but {} file(s) outside the one documented \
+             benign pattern (Cargo's own `.d` dep-info rewrites) were Modified during this run \
+             ({}) -- this was not a genuine no-op",
+            scenario.id,
+            unexplained_modified.len(),
+            unexplained_modified.join(", ")
+        ));
+    }
+
+    None
 }
 
 /// Runs `scenario` once: preparation (untimed, recorded into
@@ -1052,11 +1082,15 @@ mod tests {
         }
     }
 
-    fn run_with_artifact_records(states: &[&str]) -> Run {
+    /// `records` is `(state, logical_path)` pairs -- `logical_path`
+    /// matters now that `true_noop_postcondition_violation` judges by
+    /// which *specific* files changed (the documented `.d`-dep-info
+    /// pattern), not merely by how many.
+    fn run_with_artifact_records(records: &[(&str, &str)]) -> Run {
         let mut run = sample_run("run-1", true, 0.05);
-        let records: Vec<serde_json::Value> = states
+        let records: Vec<serde_json::Value> = records
             .iter()
-            .map(|state| serde_json::json!({ "state": state }))
+            .map(|(state, path)| serde_json::json!({ "state": state, "logical_path": path }))
             .collect();
         run.artifact_delta = Some(serde_json::json!({ "records": records }));
         run
@@ -1072,7 +1106,13 @@ mod tests {
     fn true_noop_postcondition_is_violated_when_many_artifacts_actually_changed() {
         let scenario = true_noop_scenario();
         let run = run_with_artifact_records(&[
-            "Created", "Created", "Created", "Created", "Created", "Created", "Created",
+            ("Created", "target/debug/deps/a.rlib"),
+            ("Created", "target/debug/deps/b.rlib"),
+            ("Created", "target/debug/deps/c.rlib"),
+            ("Created", "target/debug/deps/d.rlib"),
+            ("Created", "target/debug/deps/e.rlib"),
+            ("Created", "target/debug/deps/f.rlib"),
+            ("Created", "target/debug/fixture-bin"),
         ]);
 
         let violation = true_noop_postcondition_violation(&scenario, &run);
@@ -1084,15 +1124,55 @@ mod tests {
         );
     }
 
-    /// Cargo's own real, independently-verified behavior (see
-    /// `artifact_inventory`'s NOTES.md): a handful of `.d` dep-info files
-    /// get rewritten with identical content but a fresh mtime on *every*
-    /// invocation, even a true no-op. A strict zero-tolerance check would
-    /// flag every genuine Cargo no-op as a violation.
+    /// The other half of a second external review's fault-injection
+    /// finding: the *old* count-based tolerance (up to 5 changed
+    /// artifacts, regardless of kind) let a real C compile that newly
+    /// created exactly one executable still validate as `TrueNoop`,
+    /// because one is fewer than five. A single `Created` file must be
+    /// rejected just as surely as seven.
     #[test]
-    fn true_noop_postcondition_tolerates_a_small_number_of_benign_changes() {
+    fn a_single_newly_created_executable_is_a_violation_even_though_the_count_is_small() {
         let scenario = true_noop_scenario();
-        let run = run_with_artifact_records(&["Modified", "Modified", "Unchanged", "Unchanged"]);
+        let run = run_with_artifact_records(&[("Created", "fixture_out")]);
+
+        assert!(
+            true_noop_postcondition_violation(&scenario, &run).is_some(),
+            "one newly-created file is still real compiler output, not benign churn -- it must \
+             be rejected regardless of count"
+        );
+    }
+
+    /// A `Modified` file outside the one documented benign pattern (a
+    /// relinked binary, say) must also be rejected regardless of count --
+    /// the same fault-injection finding as the `Created` case above,
+    /// checked for `Modified` too.
+    #[test]
+    fn a_single_modified_non_dep_info_file_is_a_violation() {
+        let scenario = true_noop_scenario();
+        let run = run_with_artifact_records(&[("Modified", "target/debug/fixture-bin")]);
+
+        assert!(true_noop_postcondition_violation(&scenario, &run).is_some());
+    }
+
+    /// Cargo's own real, independently-verified behavior (see
+    /// `artifact_inventory`'s NOTES.md): its `.d` dep-info files get
+    /// rewritten with identical content but a fresh mtime on *every*
+    /// invocation, even a true no-op. Judged here by the specific `.d`
+    /// suffix, not by an arbitrary count -- any number of `.d` rewrites
+    /// is tolerated, since that is the actual documented mechanism, not
+    /// a coincidence of "5 or fewer."
+    #[test]
+    fn true_noop_postcondition_tolerates_any_number_of_dep_info_rewrites() {
+        let scenario = true_noop_scenario();
+        let run = run_with_artifact_records(&[
+            ("Modified", "target/debug/.fingerprint/a/a.d"),
+            ("Modified", "target/debug/.fingerprint/b/b.d"),
+            ("Modified", "target/debug/.fingerprint/c/c.d"),
+            ("Modified", "target/debug/.fingerprint/d/d.d"),
+            ("Modified", "target/debug/.fingerprint/e/e.d"),
+            ("Modified", "target/debug/.fingerprint/f/f.d"),
+            ("Unchanged", "target/debug/fixture-bin"),
+        ]);
 
         assert!(true_noop_postcondition_violation(&scenario, &run).is_none());
     }
@@ -1102,7 +1182,13 @@ mod tests {
         let mut scenario = true_noop_scenario();
         scenario.cache_state_label = CacheStateLabel::Cold;
         let run = run_with_artifact_records(&[
-            "Created", "Created", "Created", "Created", "Created", "Created", "Created",
+            ("Created", "target/debug/deps/a.rlib"),
+            ("Created", "target/debug/deps/b.rlib"),
+            ("Created", "target/debug/deps/c.rlib"),
+            ("Created", "target/debug/deps/d.rlib"),
+            ("Created", "target/debug/deps/e.rlib"),
+            ("Created", "target/debug/deps/f.rlib"),
+            ("Created", "target/debug/fixture-bin"),
         ]);
 
         assert!(true_noop_postcondition_violation(&scenario, &run).is_none());

@@ -1165,3 +1165,84 @@ rather than patched blind), and every fix has a dedicated test.
 `cargo test --workspace`: 119 passed (up from 110). Clippy and fmt clean,
 both for the main workspace and the substrate prototype fixture
 separately.
+
+## Fifth review pass: self-build correctness (issues #8/#6/#4) plus the two named carryovers
+
+A review of the newly-added self-build pipeline (`self_build.rs`,
+`laminaria-plan`) found three more bugs (2 P1, 1 P2), all fault-injection-
+reproduced before and after each fix, and asked for the two still-open
+carryovers this same file already named (item 4 above's `TrueNoop`
+count-based tolerance, and item 5's evaluation-order gap) to actually be
+closed rather than left documented as open indefinitely:
+
+1. **[P1] Cross-generation cache sharing let a second generation "succeed"
+   with zero real compilation.** `run_generation` built into `repo_root`'s
+   own shared `target/` and `nim-planner/bin/`; a second call into a
+   *different* `--generation-root` still silently inherited the first
+   call's already-fresh Cargo/Nim outputs. Reproduced: 57/57 Cargo
+   artifacts `fresh=true`, 0 recompiled, still reported success. Fixed by
+   giving every generation its own isolated `<generation_root>/.build/`
+   staging area (a fresh Cargo `--target-dir` and Nim `--nimcache`, wiped
+   at the start of every `run_generation` call). Manually re-verified:
+   two different generation roots each now show 0/57 fresh.
+2. **[P1] An internally-consistent-but-empty `ExecutionPlan` validated and
+   "succeeded."** `laminaria_plan::validate` checked only the returned
+   plan's own internal ordering consistency, never its correspondence to
+   the original `PlanningInput` -- reproduced with a stub planner
+   returning `{"actions": {}, "ordered_actions": []}`: exit 0, no
+   generation root, "success," because the empty set trivially equals
+   itself. `validate` now also takes the original `PlanningInput` and
+   rejects a plan whose action set doesn't match exactly, whose
+   per-action shape was altered, or that doesn't produce every demanded
+   artifact. Also closed a related gap found alongside it: duplicate-
+   output-producer detection in Rust's own `validate` was silently
+   overwritten by `BTreeMap::insert` instead of rejected outright.
+3. **[P2] Execution proceeded on a missing/unreadable toolchain lock,
+   silently using whatever `cargo`/`nim` were on `PATH`.** Reproduced: a
+   nonexistent `--lock` still "succeeded," with an empty resolved-
+   toolchain list in the evidence. `run_generation` now resolves and
+   verifies a real Rust and Nim toolchain from the lock file before
+   executing any action, and invokes those resolved executable paths
+   directly (never bare `"cargo"`/`"nim"` names) -- manually re-verified:
+   a nonexistent `--lock` now fails closed with a structured
+   `ToolchainUnresolved` error before touching the generation root at
+   all.
+4. **[P2, carryover from the fourth pass] `TrueNoop`'s postcondition
+   tolerated up to 5 changed artifacts regardless of what they were.**
+   Reproduced: a genuine C compile that newly created exactly one
+   executable still validated as `TrueNoop`, since one file is fewer than
+   the tolerance of five. Replaced the count-based tolerance with a
+   kind-based judgment: `Created` is *never* tolerated at any count (a
+   genuine no-op must never bring a new file into existence), and
+   `Modified` is tolerated only for the one specific, independently-
+   verified benign pattern -- Cargo's own `.d` dep-info files, judged by
+   their literal `.d` suffix, not by how many changed. Re-verified against
+   the real `rust-heavy-workspace` fixture's own true no-op rebuild
+   (`reuse_decision_matches_real_fixture_behavior_across_cold_noop_and_edits`
+   still passes, confirming the real `.d`-file paths this fix tolerates
+   match what Cargo actually rewrites).
+5. **[P2, carryover from the fourth pass, issue #25 substrate prototype]
+   The inliner could still reorder two side-effecting call arguments.**
+   The fourth pass's occurrence-count fix (`!= 1`) only proved a
+   parameter was referenced *once*, not that it was evaluated at the same
+   *position* the caller's own argument list implied. Reproduced directly
+   before this fix: `reverse(x, y) = y +% x` (each parameter referenced
+   exactly once) inlining `reverse(effect1(), effect2())` returned `Ok`,
+   producing `effect2() +% effect1()` -- silently reordering two
+   side-effecting calls. Fixed with `param_evaluation_order`, which walks
+   the callee's body in the exact order `eval_expr` actually evaluates it
+   and requires, for every pair of parameters that both receive an
+   effectful argument, that the earlier-indexed one's occurrence precede
+   the later-indexed one's -- refusing inlining otherwise. A companion
+   test (`combine(x, y) = x +% y`, order-preserving) confirms the fix is
+   scoped to actual reordering, not a blanket "never inline two effectful
+   arguments" rule. The representation still has no single-evaluation,
+   order-preserving binding form that could prove a genuinely-reordering
+   case safe instead of merely refusing it -- named as before, but no
+   longer gating an unfixed hazard.
+
+Every finding was verified against a live reproduction before fixing, and
+every fix has a dedicated test. `cargo test --workspace`: 141 passed (up
+from 119); the substrate prototype fixture: 10 passed (up from 8).
+Clippy and fmt clean throughout, both for the main workspace and the
+substrate prototype fixture separately.

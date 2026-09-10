@@ -50,6 +50,30 @@ fn count_param_occurrences(expr: &Expr, param_index: usize) -> usize {
     }
 }
 
+/// The evaluation-order sequence of parameter references inside `expr`,
+/// in the exact order `eval_expr` (`eval.rs`) actually evaluates them:
+/// left operand before right operand for `WrappingAdd`, argument order
+/// for `Call`, and straight through for `NotEqZero`'s single inner
+/// expression. Used to detect whether substituting call arguments into
+/// the callee's body would reorder their evaluation relative to the
+/// caller's own left-to-right argument evaluation -- checked directly
+/// against `eval_expr`'s real traversal order, not assumed to match it.
+fn param_evaluation_order(expr: &Expr, out: &mut Vec<usize>) {
+    match expr {
+        Expr::Param(n) => out.push(*n),
+        Expr::WrappingAdd(lhs, rhs) => {
+            param_evaluation_order(lhs, out);
+            param_evaluation_order(rhs, out);
+        }
+        Expr::NotEqZero(inner) => param_evaluation_order(inner, out),
+        Expr::Call(_, args) => {
+            for a in args {
+                param_evaluation_order(a, out);
+            }
+        }
+    }
+}
+
 /// Whether `expr` contains a function call anywhere inside it. A `Call`
 /// represents "evaluate this once" in a call-by-value language -- an
 /// argument expression containing one is not safe to copy into more than
@@ -96,17 +120,32 @@ fn expr_contains_call(expr: &Expr) -> bool {
 ///     which is just as much an observable-behavior change as duplicating
 ///     it. Reproduced directly before this fix.
 ///
-///   Note this still does not cover every hazard in this class: a call
-///   argument that is evaluated exactly once, but whose position relative
-///   to another argument's own effects changes (evaluation *order*, not
-///   count), is not detected by an occurrence-count check at all --
-///   naive substitution can still reorder side effects relative to the
-///   caller's original left-to-right argument evaluation. Fixing that
-///   would need this representation to have a single-evaluation,
-///   order-preserving binding form (a `let`-like construct) that this
-///   small experiment does not implement; until it does, this check only
-///   proves "evaluated exactly once," not "evaluated at the same point in
-///   the sequence."
+/// - **two or more parameters each receive a call-argument expression,
+///   and the callee's body evaluates them in a different relative order
+///   than the caller's own left-to-right argument list** -- a third
+///   external review caught this exact gap, previously documented here
+///   as open and unfixed: an occurrence-count of exactly one only proves
+///   "evaluated once," not "evaluated at the same point in the
+///   sequence." Reproduced directly before this fix: for `reverse(x, y)
+///   = y +% x` (each parameter referenced exactly once, so the
+///   occurrence-count check above raised no objection), inlining
+///   `reverse(effect1(), effect2())` returned `Ok` and produced `effect2
+///   () +% effect1()` -- silently reordering two side-effecting calls
+///   relative to the caller's own `effect1()`-then-`effect2()`
+///   evaluation order. Checked via `param_evaluation_order`, which walks
+///   the callee's body in the exact order `eval_expr` (`eval.rs`)
+///   actually evaluates it: for every pair of parameters whose actual
+///   argument could have an effect (`expr_contains_call`), the earlier-
+///   indexed argument's parameter must occur at an earlier evaluation
+///   position than the later-indexed one, or inlining is refused.
+///
+///   This still does not cover every conceivable case a real
+///   single-evaluation, order-preserving binding form (a `let`-like
+///   construct) would handle more precisely -- that representation
+///   remains unimplemented in this small experiment -- but the rule
+///   above is conservative in the correct direction: it never permits an
+///   order it cannot show matches the caller's own, rather than
+///   assuming reordering is safe absent proof otherwise.
 pub fn inline_call(
     program: &SemanticProgram,
     callee_name: &str,
@@ -142,6 +181,48 @@ pub fn inline_call(
                     ));
                 }
             }
+
+            // Evaluation-order hazard: every parameter reaching this
+            // point that receives an effectful argument is guaranteed
+            // (by the loop above) to occur exactly once in body_expr,
+            // but "exactly once" says nothing about *where* -- checked
+            // by pairwise-adjacent comparison over the effectful
+            // arguments in their original (ascending) call-argument
+            // order, which is sufficient to verify the whole sequence is
+            // monotonically increasing (if position(a) < position(b) and
+            // position(b) < position(c), then position(a) < position(c)
+            // transitively).
+            let mut evaluation_order = Vec::new();
+            param_evaluation_order(body_expr, &mut evaluation_order);
+            let effectful_param_indices: Vec<usize> = call_args
+                .iter()
+                .enumerate()
+                .filter(|(_, arg)| expr_contains_call(arg))
+                .map(|(i, _)| i)
+                .collect();
+            for pair in effectful_param_indices.windows(2) {
+                let (earlier, later) = (pair[0], pair[1]);
+                let earlier_pos = evaluation_order
+                    .iter()
+                    .position(|&p| p == earlier)
+                    .expect("an effectful argument's parameter occurs exactly once, checked above");
+                let later_pos = evaluation_order
+                    .iter()
+                    .position(|&p| p == later)
+                    .expect("an effectful argument's parameter occurs exactly once, checked above");
+                if earlier_pos > later_pos {
+                    return Err(format!(
+                        "refusing to inline `{callee_name}`: parameters {earlier} and {later} \
+                         both receive call-argument expressions, but `{callee_name}`'s body \
+                         evaluates parameter {later} before parameter {earlier} -- substitution \
+                         would reorder their side effects relative to the caller's own \
+                         left-to-right argument evaluation, which this experiment's inliner \
+                         cannot prove safe without a single-evaluation, order-preserving binding \
+                         it doesn't implement"
+                    ));
+                }
+            }
+
             Ok(substitute_params(body_expr, call_args))
         }
         _ => Err(format!(
@@ -345,6 +426,78 @@ mod tests {
             result.is_ok(),
             "identity's parameter is referenced only once, so substituting a call argument \
              there duplicates nothing and must be permitted, got {result:?}"
+        );
+    }
+
+    /// The exact bug a third external review caught: `reverse`'s body
+    /// (`y +% x`) references each of its two parameters exactly once --
+    /// the occurrence-count check alone raises no objection -- but
+    /// evaluates them in the *opposite* order from the caller's own
+    /// left-to-right `reverse(effect1(), effect2())` argument list.
+    /// Naive substitution would produce `effect2() +% effect1()`,
+    /// silently reordering two side-effecting calls.
+    #[test]
+    fn inlining_is_refused_when_two_effectful_arguments_would_be_evaluated_out_of_order() {
+        let mut program = program_with_effect_function();
+        program.insert(FnFact {
+            name: "reverse".to_string(),
+            param_widths: vec![32, 32],
+            return_width: 32,
+            has_side_effects: false,
+            body: Stmt::Return(Expr::WrappingAdd(
+                Box::new(Expr::Param(1)),
+                Box::new(Expr::Param(0)),
+            )),
+        });
+        let call_args = vec![
+            Expr::Call("effect".to_string(), vec![Expr::Param(0)]),
+            Expr::Call("effect".to_string(), vec![Expr::Param(1)]),
+        ];
+
+        let result = inline_call(&program, "reverse", &call_args);
+
+        assert!(
+            result.is_err(),
+            "inlining reverse(effect1(), effect2()) must be refused -- reverse's body evaluates \
+             its second argument before its first, reordering their side effects, got Ok"
+        );
+        let reason = result.unwrap_err();
+        assert!(
+            reason.contains("evaluates parameter") && reason.contains("before parameter"),
+            "reason: {reason}"
+        );
+    }
+
+    /// The companion case: a callee whose body evaluates its parameters
+    /// in the *same* order as the caller's own argument list (`x +% y`,
+    /// not `y +% x`) must still be permitted even with two effectful
+    /// arguments -- confirms the new check is scoped to actual
+    /// reordering, not a blanket "never inline more than one effectful
+    /// argument" rule.
+    #[test]
+    fn inlining_two_effectful_arguments_in_the_same_order_is_still_allowed() {
+        let mut program = program_with_effect_function();
+        program.insert(FnFact {
+            name: "combine".to_string(),
+            param_widths: vec![32, 32],
+            return_width: 32,
+            has_side_effects: false,
+            body: Stmt::Return(Expr::WrappingAdd(
+                Box::new(Expr::Param(0)),
+                Box::new(Expr::Param(1)),
+            )),
+        });
+        let call_args = vec![
+            Expr::Call("effect".to_string(), vec![Expr::Param(0)]),
+            Expr::Call("effect".to_string(), vec![Expr::Param(1)]),
+        ];
+
+        let result = inline_call(&program, "combine", &call_args);
+
+        assert!(
+            result.is_ok(),
+            "combine's body evaluates its parameters in the same order the caller's argument \
+             list did, so nothing is reordered and inlining must be permitted, got {result:?}"
         );
     }
 }
