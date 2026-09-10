@@ -304,3 +304,130 @@ fn build_never_invokes_an_unneeded_nim_even_when_one_is_first_on_path() {
     let _ = std::fs::remove_dir_all(&runs_root);
     let _ = std::fs::remove_dir_all(marker_path.parent().unwrap());
 }
+
+/// The Nim-only mirror of `build_never_invokes_an_unneeded_nim_even_when_one_is_first_on_path`,
+/// added per review: #26's completion criterion is symmetric ("no unused
+/// compiler invocation" for *either* direction), and only the Rust-only
+/// side had an adversarial proof before this. A sentinel `rustc`/`cargo`/
+/// `rustup` (covering both the managed-toolchain and the plain-PATH
+/// resolution mechanisms `rust_toolchain::resolve` can take) is placed
+/// first on this child process's own `PATH`; a Nim-only build must
+/// succeed without ever running any of them.
+#[test]
+fn build_never_invokes_an_unneeded_rust_toolchain_even_when_one_is_first_on_path() {
+    let repo_root = repo_root();
+    let planner = stage0_planner();
+    let project_root = repo_root.join("fixtures/nim-heavy-workspace");
+
+    let sentinel_dir = tmp_dir("sentinel-rust-bin");
+    let marker_path = tmp_dir("sentinel-rust-marker").join("invoked");
+    for name in ["rustc", "cargo", "rustup"] {
+        let script_path = sentinel_dir.join(name);
+        std::fs::write(
+            &script_path,
+            format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker_path.display()),
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        std::fs::set_permissions(&script_path, perms).unwrap();
+    }
+
+    let original_path = std::env::var("PATH").unwrap_or_default();
+    let sandboxed_path = format!("{}:{original_path}", sentinel_dir.display());
+
+    let generation_root = tmp_dir("sentinel-rust-gen");
+    let runs_root = tmp_dir("sentinel-rust-runs");
+    let output = std::process::Command::new(laminaria_bin())
+        .env("PATH", &sandboxed_path)
+        .args(["build", "--project-root"])
+        .arg(&project_root)
+        .args(["--generation-root"])
+        .arg(&generation_root)
+        .args(["--runs-root"])
+        .arg(&runs_root)
+        .args(["--lock"])
+        .arg(repo_root.join("toolchains.lock.toml"))
+        .args(["--planner"])
+        .arg(&planner)
+        .arg("--json")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "build should succeed without touching the sentinel Rust toolchain: {output:?}"
+    );
+    assert!(
+        !marker_path.exists(),
+        "the sentinel rustc/cargo/rustup was invoked even though this is a Nim-only build"
+    );
+
+    let _ = std::fs::remove_dir_all(&sentinel_dir);
+    let _ = std::fs::remove_dir_all(&generation_root);
+    let _ = std::fs::remove_dir_all(&runs_root);
+    let _ = std::fs::remove_dir_all(marker_path.parent().unwrap());
+}
+
+/// Regression test for the exact bug an external review reproduced:
+/// `plan-build` left `--project-root` relative while `build` absolutized
+/// it internally, so the same logical project (invoked with a relative
+/// `--project-root` from the same cwd) produced two *different*
+/// `plan_id`s depending on which command computed it.
+#[test]
+fn plan_build_and_build_compute_the_same_plan_id_for_a_relative_project_root() {
+    let repo_root = repo_root();
+    let planner = stage0_planner();
+
+    let plan_output = std::process::Command::new(laminaria_bin())
+        .current_dir(&repo_root)
+        .args([
+            "plan-build",
+            "--project-root",
+            "fixtures/rust-heavy-workspace",
+        ])
+        .args(["--planner"])
+        .arg(&planner)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(
+        plan_output.status.success(),
+        "plan-build failed: {plan_output:?}"
+    );
+    let plan_json = parse_json_stdout(&plan_output);
+    let plan_id_from_plan_build = plan_json["result"]["plan_id"].as_str().unwrap().to_string();
+
+    let generation_root = tmp_dir("plan-id-parity-gen");
+    let runs_root = tmp_dir("plan-id-parity-runs");
+    let build_output = std::process::Command::new(laminaria_bin())
+        .current_dir(&repo_root)
+        .args(["build", "--project-root", "fixtures/rust-heavy-workspace"])
+        .args(["--generation-root"])
+        .arg(&generation_root)
+        .args(["--runs-root"])
+        .arg(&runs_root)
+        .args(["--planner"])
+        .arg(&planner)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(
+        build_output.status.success(),
+        "build failed: {build_output:?}"
+    );
+    let build_json = parse_json_stdout(&build_output);
+    let plan_id_from_build = build_json["result"]["plan_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    assert_eq!(
+        plan_id_from_plan_build, plan_id_from_build,
+        "plan-build and build must compute the identical plan_id for the same logical project \
+         regardless of --project-root being given as a relative path"
+    );
+
+    let _ = std::fs::remove_dir_all(&generation_root);
+    let _ = std::fs::remove_dir_all(&runs_root);
+}

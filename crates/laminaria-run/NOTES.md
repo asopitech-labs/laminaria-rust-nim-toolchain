@@ -1577,4 +1577,87 @@ manually -- the structural guarantee (`build_selective` never calls the
 unneeded family's `resolve()` at all, regardless of what is or isn't on
 `PATH`) and the CLI-level sentinel-poisoning test together are the actual
 evidence for "no unused compiler invocation," not a manual PATH edit.
-actually uses.
+
+## Issue #26, second pass: four real bugs found against the real CLI
+
+A review of the first pass's actual behavior (not just its design) found
+four concrete bugs by running the real CLI against constructed repro
+cases, not just reading the code:
+
+1. **P1: success was reported even when the demanded artifact did not
+   exist.** A target Nim project's own `nim.cfg` can set
+   `--compileOnly:on` (entirely outside this crate's control) --
+   confirmed directly: `nim c -o:<path> src/thing.nim` with that config
+   prints `[SuccessX]` and exits 0, and `<path>` is never created.
+   `run_project_traced_action` previously only checked the root exit
+   status; it now additionally requires every candidate artifact path to
+   actually exist on disk (`produced_expected_artifacts`), and there must
+   be at least one -- exit status is necessary but not sufficient. When
+   this check fails on an otherwise-zero exit, the persisted `Run`'s own
+   `result.success` is corrected to `false` too (with a `known_gaps` note
+   explaining why), so the raw evidence file on disk doesn't keep
+   claiming success once this function's own verdict disagrees with it.
+2. **P1: a mixed build could invoke an unverified Nim instead of the
+   verified one.** `--requires rust,nim` with a *real* Nim entry point
+   also present (the two-independent-producers shape) previously never
+   put the verified Nim toolchain on the Cargo action's own `PATH` at
+   all -- gated on `req.nim_entry.is_none()`, i.e. "only when there's no
+   separate Nim producer." A Rust `build.rs` that itself shells out to
+   `nim` in that shape therefore found whatever `nim` happened to be
+   first on this process's own ambient `PATH` instead of the one this
+   crate had just resolved and verified. Whether a Nim *artifact* exists
+   and whether the Cargo *action* needs Nim on hand are independent
+   facts; fixed by making the PATH injection depend purely on `req.rust
+   && req.nim` (both requested at all), never on `nim_entry`.
+3. **P2: an explicit but nonexistent `--nim-entry` was silently
+   downgraded to "no Nim entry."** `resolve_nim_entry`'s override branch
+   returned `None` (via `Option::then`) exactly the same way "no entry
+   found by inference" did, so `--nim-entry src/missing.nim` against a
+   project that also had a `Cargo.toml` quietly built Rust-only and
+   reported success, discarding the caller's actual (broken) request
+   without a word. `resolve_nim_entry` now returns
+   `Result<Option<PathBuf>, ProjectBuildError>`: an override that doesn't
+   exist is `Err(NimEntryNotFound)`, a genuinely new variant -- distinct
+   from "not given at all," which still resolves to `Ok(None)` when
+   inference finds nothing.
+4. **P2: `plan-build` and `build` computed different `plan_id`s for the
+   same project.** `run_project_generation` absolutizes `project_root`
+   before building the `PlanningInput` (so `ArtifactRef::source`'s path
+   is stable regardless of the caller's cwd); `plan_build_command` never
+   did, since it calls `project_planning_input` directly without going
+   through `run_project_generation` at all. The same relative
+   `--project-root` therefore produced two different `plan_id`s
+   (confirmed independently by the review: `ceb707e7f866c23e` vs.
+   `500339001d2a53b3` for the same logical project) depending on which
+   command computed it. Fixed by exposing
+   `project_build::absolute_project_root` (a thin wrapper over the same
+   `absolute_path` helper) and calling it from `plan_build_command`
+   before doing anything else -- confirmed manually afterward: both
+   commands now report `d4d9703df41d5b39` for the same relative
+   `fixtures/rust-heavy-workspace` project root.
+
+The review also asked for the existing Rust-side "unneeded Nim never
+invoked" adversarial test to get a Nim-side mirror, since #26's actual
+completion criterion is symmetric. Added
+`build_never_invokes_an_unneeded_rust_toolchain_even_when_one_is_first_on_path`,
+placing sentinel `rustc`/`cargo`/`rustup` (covering both the
+managed-toolchain and plain-PATH resolution paths `rust_toolchain::resolve`
+can take) first on a Nim-only build's own `PATH` and asserting none of
+them are ever invoked.
+
+Six new regression tests total (four in `laminaria-run::project_build`,
+two in `laminaria-cli`'s integration suite): the `--compileOnly:on` repro
+built as a real throwaway Nim project (not simulated); a direct check on
+`cargo_project_build_root`'s constructed `RootCommand` proving the
+verified Nim bin dir is on `PATH` even with a real Nim entry present;
+both the inference-path and explicit-`--requires`-path variants of the
+nonexistent-`--nim-entry` case; the Nim-side sentinel test; and a
+`plan-build`/`build` plan_id-parity test run from the same cwd with a
+relative `--project-root`.
+
+`cargo test --workspace`: 185 passed (up from 179). Clippy and fmt clean.
+Each of the four bugs was independently reproduced against the real CLI
+binary before writing its fix, not just inferred from reading the review
+comment -- the `--compileOnly:on` repro in particular was verified
+directly (`nim c` really does exit 0 and skip linking) before assuming
+the review's description was exactly right.

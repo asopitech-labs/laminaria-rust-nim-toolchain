@@ -845,6 +845,7 @@ fn project_build_error_kind(err: &laminaria_run::project_build::ProjectBuildErro
     match err {
         NoBuildableSources(_) => "no_buildable_sources",
         AmbiguousProject { .. } => "ambiguous_project",
+        NimEntryNotFound(_) => "nim_entry_not_found",
         Toolchain(_) => "toolchain_unresolved",
         Planner(_) => "planner_call_failed",
         Rejected(_) => "planner_rejected",
@@ -905,6 +906,17 @@ fn plan_build_command(
     planner: Option<PathBuf>,
     json: bool,
 ) -> i32 {
+    // Absolutized the same way `build`'s own `run_project_generation`
+    // does internally, so `plan-build` and `build` compute the identical
+    // `PlanningInput` (and therefore the identical `plan_id`) for the
+    // same logical project regardless of which command computed it --
+    // otherwise a relative `--project-root` here (unlike `build`, which
+    // never sees the caller's relative path at all) fed a different
+    // `Source` artifact path into the plan.
+    let project_root = match laminaria_run::project_build::absolute_project_root(&project_root) {
+        Ok(project_root) => project_root,
+        Err(err) => return print_build_error("plan-build", "io", err.to_string(), json, 2),
+    };
     let requires_caps = match requires.as_deref().map(parse_requires) {
         Some(Ok(caps)) => Some(caps),
         Some(Err(msg)) => return print_build_error("plan-build", "invalid_requires", msg, json, 2),

@@ -72,10 +72,21 @@ producer entry point actually exists:
   no generic equivalent for an arbitrary target project, and this code
   does not pretend otherwise.
 - **No Nim entry point exists**: a single `CargoBuild` action is planned.
-  The Nim toolchain is still resolved and verified (since it was
-  requested), and its resolved `bin` directory is prepended to that one
-  action's own `PATH` — so a `build.rs` that shells out to `nim` can find
-  it — rather than being treated as a second, nonexistent producer.
+
+In **both** cases, whenever Rust and Nim are both requested, the verified
+Nim toolchain's resolved `bin` directory is prepended to the `CargoBuild`
+action's own `PATH` — so a `build.rs` that shells out to `nim` can find
+it. This is governed purely by "was Nim requested at all"
+(`req.rust && req.nim`), never by whether a separate Nim entry point also
+happens to exist: whether a Nim *artifact* is produced and whether the
+Cargo *action* needs Nim on hand are independent facts. An earlier version
+of this code conflated them — gating the `PATH` injection on `req.nim_entry
+.is_none()` — so a `build.rs` that called `nim` in the
+two-independent-producers shape silently found whatever unpinned `nim`
+happened to be first on this process's own ambient `PATH` instead of the
+one this crate had just resolved and verified. Fixed, and covered by a
+dedicated test constructing the `RootCommand` directly and asserting the
+verified bin dir is on `PATH` even with a real Nim entry present.
 
 **What this does not attempt**: automatically *inferring* a real
 cross-language dependency from source or manifest inspection (e.g.
@@ -133,6 +144,17 @@ bin targets, none of which a fixed guessed directory like
 `artifacts` is exactly the `-o:` path this code itself passed — fully known
 upfront, since Nim has no equivalent variable output-layout concern.
 
+A zero exit status alone is never treated as proof that the demanded
+artifact actually exists: a target project's own `nim.cfg` can set
+`--compileOnly:on`, which makes `nim c` exit 0 without ever linking the
+requested `-o:` output (confirmed directly before relying on it). Every
+candidate artifact path is checked to actually exist on disk, and there
+must be at least one, for an action to be reported as succeeded — an
+otherwise-zero exit that fails this check is reported as a failure, and
+the persisted `Run`'s own `result.success` is corrected to `false` to
+match, so the raw evidence on disk never disagrees with the reported
+outcome.
+
 ## Usage
 
 ```
@@ -177,10 +199,27 @@ just described behavior:
   Nim file at all) plans a single `CargoBuild` action.
 - `--requires nim` against a directory with no resolvable Nim entry point
   is rejected rather than silently producing zero actions.
+- An explicit `--nim-entry` naming a file that does not exist is rejected
+  outright — both via pure inference and via explicit `--requires
+  rust,nim` — never silently downgraded to "no Nim entry, build Rust
+  only."
 - A real Rust-only build succeeds end to end (real planner, real `cargo`)
   with a sentinel `nim`/`nimble` placed first on the spawned build's own
   `PATH` and a lock file forcing a PATH-based lookup if resolution were
-  ever attempted — the sentinel is never invoked.
+  ever attempted — the sentinel is never invoked. A Nim-only build has the
+  symmetric test: a sentinel `rustc`/`cargo`/`rustup` first on `PATH` is
+  never invoked either.
+- `--requires rust,nim` with a real Nim entry point also present still
+  puts the verified Nim toolchain on the Cargo action's own `PATH` — not
+  just when no separate Nim entry exists.
+- A Nim `nim.cfg` setting `--compileOnly:on` (which exits 0 without
+  linking the requested output — confirmed directly against real `nim c`)
+  is reported as a build failure, not a false success naming a
+  nonexistent artifact; the persisted `Run`'s own `result.success` is
+  corrected to match.
+- `plan-build` and `build`, invoked with the same relative
+  `--project-root` from the same working directory, compute the identical
+  `plan_id`.
 - A genuinely broken source aborts the build as a reported failure, never
   a false success.
 - Mixed-project `self-build` (stage0 → stage1) is untouched by any of the

@@ -82,6 +82,7 @@ pub enum ProjectBuildError {
         cargo_toml: PathBuf,
         nim_entry: PathBuf,
     },
+    NimEntryNotFound(PathBuf),
     Toolchain(ToolchainResolutionError),
     Planner(PlannerCallError),
     Rejected(PlanRejection),
@@ -107,6 +108,12 @@ impl std::fmt::Display for ProjectBuildError {
                  --requires rust|nim|rust,nim to say what this build should actually target",
                 cargo_toml.display(),
                 nim_entry.display()
+            ),
+            ProjectBuildError::NimEntryNotFound(path) => write!(
+                f,
+                "--nim-entry names {}, but no such file exists -- an explicit --nim-entry must \
+                 name a real file; it is never silently treated as \"no Nim entry\"",
+                path.display()
             ),
             ProjectBuildError::Toolchain(e) => write!(f, "{e}"),
             ProjectBuildError::Planner(e) => write!(f, "failed to call the Nim planner: {e}"),
@@ -138,40 +145,55 @@ impl From<std::io::Error> for ProjectBuildError {
 }
 
 /// Resolves a Nim producer entry point relative to `project_root`:
-/// `nim_entry_override` if given (must exist), else the standard `nimble
-/// init` convention -- a single `*.nimble` file at `project_root` whose
-/// stem matches `src/<stem>.nim` or `<stem>.nim`. More than one `.nimble`
-/// file, or none matching the convention, resolves to `None` rather than
-/// guessing.
-fn resolve_nim_entry(project_root: &Path, nim_entry_override: Option<&Path>) -> Option<PathBuf> {
+/// `nim_entry_override` if given, else the standard `nimble init`
+/// convention -- a single `*.nimble` file at `project_root` whose stem
+/// matches `src/<stem>.nim` or `<stem>.nim`. More than one `.nimble` file,
+/// or none matching the convention, resolves to `Ok(None)` rather than
+/// guessing -- that is a legitimate "no entry point found by inference"
+/// answer. An explicit `nim_entry_override` naming a file that does not
+/// exist is different: it is a caller mistake, not "no entry," and must
+/// be reported as `Err`, never silently downgraded to `Ok(None)` (a
+/// review caught exactly that: `--nim-entry src/missing.nim` against a
+/// project that also has a `Cargo.toml` used to build Rust-only and
+/// report success, silently discarding the broken explicit request).
+fn resolve_nim_entry(
+    project_root: &Path,
+    nim_entry_override: Option<&Path>,
+) -> Result<Option<PathBuf>, ProjectBuildError> {
     if let Some(entry) = nim_entry_override {
-        return project_root
-            .join(entry)
-            .is_file()
-            .then(|| entry.to_path_buf());
+        let full_path = project_root.join(entry);
+        return if full_path.is_file() {
+            Ok(Some(entry.to_path_buf()))
+        } else {
+            Err(ProjectBuildError::NimEntryNotFound(full_path))
+        };
     }
 
-    let entries = std::fs::read_dir(project_root).ok()?;
+    let Ok(entries) = std::fs::read_dir(project_root) else {
+        return Ok(None);
+    };
     let mut nimble_stems = entries
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("nimble"))
         .filter_map(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()));
 
-    let stem = nimble_stems.next()?;
+    let Some(stem) = nimble_stems.next() else {
+        return Ok(None);
+    };
     if nimble_stems.next().is_some() {
         // More than one .nimble file: which one names the real entry
         // point is genuinely ambiguous, so this is not a case to guess at
         // -- the caller should pass --nim-entry explicitly.
-        return None;
+        return Ok(None);
     }
 
     for candidate in [format!("src/{stem}.nim"), format!("{stem}.nim")] {
         if project_root.join(&candidate).is_file() {
-            return Some(PathBuf::from(candidate));
+            return Ok(Some(PathBuf::from(candidate)));
         }
     }
-    None
+    Ok(None)
 }
 
 /// Determines which toolchain(s) a target project's build needs. See this
@@ -195,7 +217,7 @@ pub fn determine_project_requirements(
             ));
         }
         let nim_entry = if nim {
-            resolve_nim_entry(project_root, nim_entry_override)
+            resolve_nim_entry(project_root, nim_entry_override)?
         } else {
             None
         };
@@ -216,7 +238,7 @@ pub fn determine_project_requirements(
 
     let cargo_toml = project_root.join("Cargo.toml");
     let has_cargo_toml = cargo_toml.is_file();
-    let nim_entry = resolve_nim_entry(project_root, nim_entry_override);
+    let nim_entry = resolve_nim_entry(project_root, nim_entry_override)?;
 
     match (has_cargo_toml, nim_entry) {
         (true, None) => Ok(ProjectRequirements {
@@ -354,10 +376,20 @@ fn prepend_to_path(dir: &Path, existing: Option<&str>) -> String {
 /// `--workspace`: the target project's own `Cargo.toml` already
 /// determines single-crate-vs-workspace shape, and forcing `--workspace`
 /// would leak a LAMINARIA-shaped assumption onto an arbitrary target.
-/// `extra_path_prepend`, when `Some(nim_bin_dir)`, is the "a single Cargo
-/// build also needs the Nim toolchain on hand" shape (`req.nim &&
-/// req.nim_entry.is_none()`): prepended to this action's own `PATH`, built
-/// from the verified Nim path, not a second, unpinned lookup.
+/// `extra_path_prepend`, when `Some(nim_bin_dir)`, makes the *verified*
+/// Nim toolchain available on this action's own `PATH` -- prepended,
+/// never a second, unpinned lookup. Whether Nim is needed here is
+/// governed purely by whether Nim was requested at all (`req.rust &&
+/// req.nim`), independent of whether a separate `NimBuild` producer
+/// action also exists: a review caught that gating this solely on
+/// `req.nim_entry.is_none()` meant a Cargo `build.rs` that itself calls
+/// `nim` got *no* verified Nim on its `PATH` whenever a real Nim entry
+/// point also happened to exist elsewhere in the project (the
+/// two-independent-producers shape) -- silently falling through to
+/// whatever unpinned `nim` was first on this process's own `PATH`
+/// instead. Whether a Nim *artifact* is produced and whether the Cargo
+/// *action* needs Nim on hand are separate facts; conflating them was
+/// the bug.
 fn cargo_project_build_root(
     project_root: &Path,
     generation_root: &Path,
@@ -491,13 +523,13 @@ fn run_project_traced_action(
         &observation_roots,
     )?;
 
-    let succeeded = run.result.as_ref().is_some_and(|r| r.success);
+    let exit_succeeded = run.result.as_ref().is_some_and(|r| r.success);
     // Cargo's own telemetry is only known once the action has actually
     // run -- read it from the persisted Run itself rather than the
-    // pre-execution RootCommand, and only report artifacts on success (a
-    // failed compile's stale/partial output must never be reported as a
-    // real, usable artifact).
-    let artifacts = if succeeded {
+    // pre-execution RootCommand, and only look at artifacts on exit
+    // success (a failed compile's stale/partial output must never be
+    // reported as a real, usable artifact).
+    let candidate_artifacts = if exit_succeeded {
         let mut from_run = cargo_artifacts_from_run(&run);
         if from_run.is_empty() {
             from_run = artifacts;
@@ -506,6 +538,40 @@ fn run_project_traced_action(
     } else {
         Vec::new()
     };
+
+    // A zero exit status is not proof the demanded artifact was actually
+    // produced: a review caught that Nim's `--compileOnly:on` (set via
+    // the target project's own `nim.cfg`, entirely outside this crate's
+    // control) exits 0 without ever linking the requested `-o:` output,
+    // and this action was still reported as a success naming a file that
+    // was never created. Every candidate artifact path must exist on
+    // disk, and there must be at least one, for the action to count as a
+    // genuine success -- exit status alone is necessary, not sufficient.
+    let produced_expected_artifacts =
+        !candidate_artifacts.is_empty() && candidate_artifacts.iter().all(|p| p.is_file());
+    let succeeded = exit_succeeded && produced_expected_artifacts;
+    let artifacts = if succeeded {
+        candidate_artifacts.clone()
+    } else {
+        Vec::new()
+    };
+
+    if exit_succeeded && !produced_expected_artifacts {
+        // The persisted Run's own `result.success` must not keep claiming
+        // success once the artifact-existence check has overridden it --
+        // an evidence record that still says "succeeded" while this
+        // function's own verdict says otherwise would be a real Run file
+        // silently disagreeing with the CLI's own reported outcome.
+        if let Some(result) = run.result.as_mut() {
+            result.success = false;
+        }
+        run.process_trace.known_gaps.push(format!(
+            "action '{}' exited 0 (root_exit_status) but its demanded artifact(s) {:?} were not \
+             all present on disk afterward; result.success has been corrected to false to \
+             reflect that (issue #26 artifact-existence check, not just exit status)",
+            action.id, candidate_artifacts
+        ));
+    }
 
     run.process_trace.known_gaps.push(format!(
         "project-build evidence (issue #26): plan_project_root={}, generation={}, action_id={}",
@@ -520,6 +586,12 @@ fn run_project_traced_action(
             "action '{}' completed successfully (run {})",
             action.id, run.run_id
         )
+    } else if exit_succeeded {
+        format!(
+            "action '{}' exited successfully but did not produce the expected artifact(s) (see \
+             run {})",
+            action.id, run.run_id
+        )
     } else {
         format!("action '{}' failed (see run {})", action.id, run.run_id)
     };
@@ -531,6 +603,22 @@ fn run_project_traced_action(
         detail,
         artifacts,
     })
+}
+
+/// Resolves `project_root` to an absolute path exactly the way
+/// `run_project_generation` does internally, before it is ever fed into
+/// `determine_project_requirements`/`project_planning_input`. Exposed so
+/// a caller that only plans (`plan-build`, which never executes anything
+/// and so has no other reason to touch `project_root`) computes the
+/// identical `PlanningInput` -- and therefore the identical `plan_id` --
+/// that `build` would for the same input, regardless of the two
+/// commands' own current working directory. A review caught this
+/// directly: `plan-build` left `project_root` relative while `build`
+/// absolutized it, so the same logical project produced two different
+/// `plan_id`s depending on which command computed it, even though
+/// nothing about the target had actually changed.
+pub fn absolute_project_root(project_root: &Path) -> std::io::Result<PathBuf> {
+    absolute_path(project_root)
 }
 
 /// Plans and builds `project_root` using `planner_binary` (the production
@@ -572,11 +660,13 @@ pub fn run_project_generation(
     let _ = std::fs::remove_dir_all(build_staging_dir(generation_root));
     std::fs::create_dir_all(generation_root)?;
 
-    // Only set when a single CargoBuild action must also see the Nim
-    // toolchain on its own PATH (req.nim && req.nim_entry.is_none()) --
-    // never set for the two-independent-producers shape, where each
-    // action only needs its own toolchain.
-    let nim_needed_by_single_cargo_action = requirements.nim && requirements.nim_entry.is_none();
+    // Whether the CargoBuild action needs the verified Nim toolchain on
+    // its own PATH is governed by whether Nim was requested at all, not
+    // by whether a separate NimBuild producer action also exists (see
+    // `cargo_project_build_root`'s own doc comment for the bug this
+    // fixes) -- a Cargo build.rs calling `nim` and a separate real Nim
+    // entry point elsewhere in the project are independent facts.
+    let nim_needed_by_cargo_action = requirements.rust && requirements.nim;
 
     let mut action_outcomes = Vec::new();
     for action_id in &plan.ordered_actions {
@@ -591,7 +681,7 @@ pub fn run_project_generation(
                     .rust
                     .as_ref()
                     .expect("a CargoBuild action implies req.rust, which implies toolchains.rust");
-                let extra_path = if nim_needed_by_single_cargo_action {
+                let extra_path = if nim_needed_by_cargo_action {
                     toolchains.nim.as_deref().and_then(Path::parent)
                 } else {
                     None
@@ -1059,6 +1149,164 @@ mod tests {
         let _ = std::fs::remove_dir_all(&broken_project);
         let _ = std::fs::remove_dir_all(&generation_root);
         let _ = std::fs::remove_dir_all(&runs_root);
+    }
+
+    /// Regression test for the exact bug an external review reproduced:
+    /// a Nim entry point's own `nim.cfg` sets `--compileOnly:on` (entirely
+    /// outside this crate's control -- a real thing a target project's
+    /// own config can do), so `nim c` exits 0 without ever linking the
+    /// requested `-o:` output. Confirmed directly before writing this
+    /// test: `nim c -o:<path> src/thing.nim` with a `--compileOnly:on`
+    /// `nim.cfg` alongside it prints `[SuccessX]` and exits 0, and
+    /// `<path>` is never created. The action must be reported as failed,
+    /// not a success naming a file that doesn't exist.
+    #[test]
+    #[cfg(unix)]
+    fn run_project_generation_fails_when_nim_exits_zero_without_producing_the_artifact() {
+        let repo_root = repo_root();
+        let planner = stage0_planner(&repo_root);
+        let project_root = tmp_dir("compile-only-nim-project");
+        std::fs::create_dir_all(project_root.join("src")).unwrap();
+        std::fs::write(
+            project_root.join("thing.nimble"),
+            "srcDir = \"src\"\nbin = @[\"thing\"]\n",
+        )
+        .unwrap();
+        std::fs::write(project_root.join("src/thing.nim"), "echo \"hi\"\n").unwrap();
+        std::fs::write(project_root.join("nim.cfg"), "--compileOnly:on\n").unwrap();
+
+        let generation_root = tmp_dir("compile-only-nim-gen");
+        let runs_root = tmp_dir("compile-only-nim-runs");
+        let lock_path = repo_root.join("toolchains.lock.toml");
+
+        let result = run_project_generation(
+            &project_root,
+            &generation_root,
+            &planner,
+            "compile-only-test",
+            &runs_root,
+            &lock_path,
+            None,
+            None,
+        );
+
+        match result {
+            Err(ProjectBuildError::ActionFailed { .. }) => {}
+            other => panic!(
+                "expected ActionFailed when nim exits 0 without producing the artifact, got \
+                 {other:?}"
+            ),
+        }
+
+        let _ = std::fs::remove_dir_all(&project_root);
+        let _ = std::fs::remove_dir_all(&generation_root);
+        let _ = std::fs::remove_dir_all(&runs_root);
+    }
+
+    /// Regression test for the exact bug an external review reproduced:
+    /// with `--requires rust,nim` and a *real* Nim entry point also
+    /// present (the two-independent-producers shape), the Cargo action's
+    /// `build.rs` must still see the *verified* Nim toolchain on its own
+    /// `PATH` -- not whatever unpinned `nim` happens to be first on this
+    /// process's ambient `PATH`. Checked directly on the constructed
+    /// `RootCommand`/persisted `Run`, not just on build success (an
+    /// unpinned PATH lookup could easily "work" if it happens to resolve
+    /// to something compatible, which would hide the bug).
+    #[test]
+    #[cfg(unix)]
+    fn cargo_action_gets_the_verified_nim_on_path_even_when_a_real_nim_entry_also_exists() {
+        let repo_root = repo_root();
+        let project_root = tmp_dir("mixed-with-real-nim-entry");
+        std::fs::write(
+            project_root.join("Cargo.toml"),
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(project_root.join("thing.nimble"), "").unwrap();
+        std::fs::create_dir_all(project_root.join("src")).unwrap();
+        std::fs::write(project_root.join("src/thing.nim"), "echo \"hi\"\n").unwrap();
+
+        let req = ProjectRequirements {
+            rust: true,
+            nim: true,
+            nim_entry: Some(PathBuf::from("src/thing.nim")),
+        };
+        let lock_path = repo_root.join("toolchains.lock.toml");
+        let (_doctor_run, toolchains) =
+            resolve_project_toolchains(&lock_path, &project_root, &req).unwrap();
+        let (cargo, rustc) = toolchains.rust.as_ref().unwrap();
+        let nim_bin_dir = toolchains.nim.as_deref().and_then(Path::parent).unwrap();
+
+        let generation_root = tmp_dir("mixed-with-real-nim-entry-gen");
+        let root = cargo_project_build_root(
+            &project_root,
+            &generation_root,
+            cargo,
+            rustc,
+            Some(nim_bin_dir),
+        );
+
+        let path_value = root
+            .env_overrides
+            .get("PATH")
+            .expect("PATH must be overridden to include the verified Nim toolchain");
+        assert!(
+            path_value.starts_with(&nim_bin_dir.display().to_string()),
+            "expected the verified Nim bin dir to be prepended to PATH, got: {path_value}"
+        );
+
+        let _ = std::fs::remove_dir_all(&project_root);
+        let _ = std::fs::remove_dir_all(&generation_root);
+    }
+
+    /// Regression test: an explicit `--nim-entry` naming a file that does
+    /// not exist must be reported as an error, never silently downgraded
+    /// to "no Nim entry point" and built as Rust-only -- the exact bug an
+    /// external review reproduced (a Rust project with a bad `--nim-entry`
+    /// used to build and report success as if `--nim-entry` had never
+    /// been given at all).
+    #[test]
+    fn determine_project_requirements_rejects_a_nonexistent_explicit_nim_entry() {
+        let dir = tmp_dir("bad-nim-entry");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        let result = determine_project_requirements(&dir, None, Some(Path::new("src/missing.nim")));
+        match result {
+            Err(ProjectBuildError::NimEntryNotFound(path)) => {
+                assert!(
+                    path.ends_with("src/missing.nim"),
+                    "expected the error to name the missing path, got {}",
+                    path.display()
+                );
+            }
+            other => panic!("expected NimEntryNotFound, got {other:?}"),
+        }
+    }
+
+    /// Same bug, exercised through the `--requires rust,nim` explicit
+    /// path rather than pure inference.
+    #[test]
+    fn determine_project_requirements_rejects_a_nonexistent_explicit_nim_entry_with_requires() {
+        let dir = tmp_dir("bad-nim-entry-explicit-requires");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        let result = determine_project_requirements(
+            &dir,
+            Some(&[Capability::Rust, Capability::Nim]),
+            Some(Path::new("src/missing.nim")),
+        );
+        match result {
+            Err(ProjectBuildError::NimEntryNotFound(_)) => {}
+            other => panic!("expected NimEntryNotFound, got {other:?}"),
+        }
     }
 
     #[cfg(unix)]
