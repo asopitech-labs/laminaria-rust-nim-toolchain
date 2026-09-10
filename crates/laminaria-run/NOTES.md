@@ -1070,3 +1070,98 @@ from 68). The substrate prototype's own `cargo test`/`cargo clippy`
 (run separately, it's outside the main workspace) and `trace.sh`'s full
 cross-check (real Rust/Nim binaries, reference evaluator, LLVM-IR
 projection, and the allowed/rejected inlining demo) all still pass.
+
+## Fourth review pass: 6 more bugs (3 P1, 3 P2), all in comparison/reuse/inlining correctness
+
+A third round of external review, checking the same review's own earlier
+fixes (all reconfirmed still passing via independent reproduction) and
+finding six more real bugs, all fixed and verified:
+
+1. **[P1] `compare_reports` never checked `success`.** `build_report`
+   already excludes a failed repetition's wall time from `wall_seconds`,
+   but the comparator itself never checked whether *any* repetition in
+   either report had failed at all. Reproduced: a `[success, failure]`
+   report compared against an all-success one produced an ordinary
+   `-90%`/`BelowNoise` verdict with zero confounding notes. Fixed with
+   `reject_if_any_repetition_failed`, called on both baseline and
+   candidate before any other eligibility check -- excluding a failed
+   sample's *time* from statistics is not the same claim as "this report
+   is a valid baseline/candidate."
+2. **[P1] `build_report` only validated the first Run's identity.**
+   `environment_fingerprint`/`toolchain_digest_sha256` were read from
+   `runs[0]` alone, with nothing checking whether the rest of the
+   repetition set actually agreed. Reproduced: mixing Runs of different
+   `workload_id`/architecture/toolchain still built one report carrying
+   only the first Run's identity, and a comparison against it passed
+   cleanly. Fixed with a validation loop over every Run in the set,
+   checking `workload_id` equality, `environments_comparable`, and
+   toolchain digest equality against the first Run, erroring with the
+   specific mismatching Run's id on any disagreement.
+3. **[P1] `reuse.rs`'s source walker skipped symlinks inside the tree.**
+   The prior round's root-level checks (missing/unreadable/non-directory
+   root) didn't cover a symlink *inside* a source root -- `walk_files`
+   silently contributed nothing for a symlink entry, so a source file that
+   happened to be a symlink was invisible to the digest, and editing its
+   link target's content never changed the digest. Fixed to error on any
+   symlink encountered while walking (`InvalidInput`) rather than skip it
+   -- following it safely needs cycle detection this walker doesn't
+   implement, so it's explicitly unsupported input until then, not a
+   silently-empty one. (`artifact_inventory.rs`'s own, separate symlink-
+   skipping walker was deliberately left as-is -- it tracks build
+   *artifacts*, not source identity, a different concern the reviewer
+   didn't flag.)
+4. **[P2] `TrueNoop`'s precondition only checked `root.exists()`.** An
+   *empty* `target/` directory passes `exists()` but isn't evidence of a
+   prior successful build; running a scenario against one still performed
+   a real, full build (Cargo correctly reported `fresh=false`) yet was
+   still recorded `TrueNoop`. Fixed two ways: (a) `verify_true_noop_
+   precondition` now requires at least one entry under each observation
+   root, not just existence; (b) a new postcondition check,
+   `true_noop_postcondition_violation`, runs *after* the traced command,
+   counting Created/Modified records in the run's own `artifact_delta` --
+   more than `TRUE_NOOP_CHANGED_ARTIFACT_TOLERANCE` (5, matching the
+   already-established CI tolerance for Cargo's own benign `.d`-file
+   rewrites, see the "Scenario repetition..." CI step) means real
+   compile/link work happened despite the `TrueNoop` label. The Run is
+   still written to disk either way (the work that happened is real
+   evidence, not something to discard because the label turned out
+   wrong), with the violation appended to `cache_state.notes`, and
+   `run_scenario_once` returns an `Err` so callers are alerted rather than
+   silently trusting a mislabeled result. This is the same mislabeling
+   `reuse.rs`'s own real-fixture integration test had been relying on for
+   its deliberate "edit content, then run scenario kind `noop`" step --
+   that step now correctly uses kind `edit` (`CacheStateLabel::Warm`)
+   instead, matching what actually happens to the source.
+5. **[P2, issue #25 substrate prototype] The inliner silently dropped an
+   unused call argument's evaluation.** The prior round's fix refused
+   inlining when a parameter's occurrence count was `> 1` (duplication),
+   but permitted `0` (an unused parameter) -- substituting only the
+   referenced parameters silently drops any unreferenced argument
+   expression, never evaluating it. Reproduced: for `pick(x, y) = x`,
+   inlining `pick(x, effect(x))` transformed to just `x`, and the call to
+   `effect` disappeared entirely. Fixed by changing the guard from `> 1`
+   to `!= 1`, covering both hazards (duplication and silent drop) with
+   distinct error wording for each. The still-open evaluation-*order*
+   hazard the reviewer also named (a singly-evaluated argument whose
+   *position* relative to another argument's own effects changes) remains
+   explicitly documented as unfixed in `inline_call`'s own doc comment --
+   fixing it needs a single-evaluation, order-preserving binding form this
+   small experiment doesn't implement.
+6. **[P2] `environments_comparable` didn't check resource capacity.**
+   CPU core count and installed memory weren't load-bearing fields at
+   all, so two fingerprints differing only in `cpu_physical_cores`/
+   `cpu_logical_cores`/`memory_bytes` (e.g. 8 cores/32 GiB vs. 192
+   cores/1 TiB) compared as one performance baseline. Fixed by adding all
+   three to the field list `push_if_differs` already checks. A caller
+   deliberately comparing across different resource envelopes (a real,
+   separate research question, see `docs/horizontal-distribution-
+   research.md`) is not served by this function at all -- it exists
+   specifically to reject that by default for an ordinary regression
+   comparison.
+
+Every finding was verified against a live reproduction before fixing (the
+reviewer's own additional reproduction code, cross-checked directly
+rather than patched blind), and every fix has a dedicated test.
+`cargo test --workspace`: 119 passed (up from 110). Clippy and fmt clean,
+both for the main workspace and the substrate prototype fixture
+separately.

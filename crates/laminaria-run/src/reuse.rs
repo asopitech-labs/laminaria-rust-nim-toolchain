@@ -137,7 +137,25 @@ fn walk_files(dir: &Path, out: &mut BTreeMap<PathBuf, ()>) -> std::io::Result<()
         let path = entry.path();
         let file_type = entry.file_type()?;
         if file_type.is_symlink() {
-            continue;
+            // Fails closed rather than silently skipping -- a real bug
+            // an external review caught: the previous behavior (skip,
+            // contribute nothing) meant a source file that happened to be
+            // a symlink was invisible to this digest entirely, so editing
+            // its link target's content never changed the digest at all.
+            // Safely following a symlink needs cycle detection this
+            // walker doesn't implement; until then, a symlink anywhere
+            // under a source root is explicitly unsupported input, not a
+            // silently-empty one.
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "hash_source_roots: {} is a symlink -- symlinks inside a source root are \
+                     not supported (following them safely needs cycle detection this walker \
+                     doesn't implement, and silently skipping them would mean a change to the \
+                     link's target is never detected)",
+                    path.display()
+                ),
+            ));
         }
         if file_type.is_dir() {
             walk_files(&path, out)?;
@@ -464,6 +482,31 @@ mod tests {
             result.is_err(),
             "an unreadable directory must be an error, not an empty-set digest"
         );
+    }
+
+    /// The exact bug an external review caught: a symlink inside a source
+    /// root was silently skipped (contributing nothing to the digest), so
+    /// editing the link's target content never changed the digest at all.
+    #[test]
+    #[cfg(unix)]
+    fn hash_source_roots_errors_on_a_symlink_inside_the_source_tree_instead_of_ignoring_it() {
+        let dir = tmp_dir("symlink-inside");
+        let target = dir.join("real_module.rs");
+        std::fs::write(&target, b"fn main() {}").unwrap();
+        std::os::unix::fs::symlink(&target, dir.join("module.rs")).unwrap();
+
+        let before = hash_source_roots(std::slice::from_ref(&dir));
+        assert!(
+            before.is_err(),
+            "a source root containing a symlink must be an error, not silently walked around it"
+        );
+
+        // The literal reproduction: changing the symlink's target content
+        // must not silently keep "matching" via a digest that never saw
+        // the symlink at all.
+        std::fs::write(&target, b"fn main() { println!(\"changed\"); }").unwrap();
+        let after = hash_source_roots(std::slice::from_ref(&dir));
+        assert!(after.is_err());
     }
 
     fn key(
@@ -1022,16 +1065,25 @@ mod tests {
         let mut new_content = original_content.clone();
         new_content.extend_from_slice(b"\n// reuse.rs integration test: real content edit\n");
         std::fs::write(&edited_file, &new_content).unwrap();
+        // Kind "edit" (CacheStateLabel::Warm), not "noop" -- a real bug an
+        // external review caught elsewhere (finding 4, this same review
+        // round) means a "noop"-kind scenario run against source that
+        // actually changed underneath it is now correctly *rejected*
+        // (its own TrueNoop postcondition check no longer permits a real
+        // rebuild to be labeled TrueNoop), so this step -- which
+        // deliberately causes real Cargo work by editing content -- must
+        // use the kind whose label matches that reality, not the one this
+        // test used to get away with before that check existed.
         let content_run = run_scenario_via_cli(
             &cli_bin,
             &repo_root,
             &lock_path,
             &runs_root,
             "rust-heavy-workspace",
-            "noop",
+            "edit",
             &manifest_path,
             &target_dir,
-            None,
+            Some(&edited_file),
             &pinned_rustc,
         );
         let content_key = compute_identity_key(

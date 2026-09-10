@@ -75,17 +75,38 @@ fn expr_contains_call(expr: &Expr) -> bool {
 /// - the callee's body isn't the single-`Return` shape this small
 ///   experiment's inliner knows how to substitute (a named limitation,
 ///   not a silent wrong answer for a shape it can't handle);
-/// - **a parameter is referenced more than once in the callee's body, and
-///   the corresponding actual argument expression contains a function
-///   call** -- a real bug an external review caught: `substitute_params`
-///   copies the argument expression verbatim into *every* occurrence
-///   site, so `double(effect(x))` (where `double`'s own body is `x +% x`,
-///   referencing its one parameter twice) would silently duplicate the
-///   call to `effect`, invoking it twice -- changing observable behavior
-///   even though only `double`'s own `has_side_effects` fact (correctly
-///   `false`) was ever checked, never the argument's own shape. Reproduced
-///   directly before this fix: inlining `double(effect(x))` was permitted
-///   despite `effect` being registered as having side effects.
+/// - **a parameter's occurrence count in the callee's body is anything
+///   other than exactly one, and the corresponding actual argument
+///   expression contains a function call** -- two distinct real bugs an
+///   external review caught, both from the same root cause
+///   (`substitute_params` copies the argument expression verbatim into
+///   *every* occurrence site, including zero or many):
+///   - **more than one occurrence** duplicates the call: `double(effect
+///     (x))` (where `double`'s own body is `x +% x`, referencing its one
+///     parameter twice) would silently duplicate the call to `effect`,
+///     invoking it twice -- changing observable behavior even though only
+///     `double`'s own `has_side_effects` fact (correctly `false`) was ever
+///     checked, never the argument's own shape. Reproduced directly before
+///     this fix: inlining `double(effect(x))` was permitted despite
+///     `effect` being registered as having side effects.
+///   - **zero occurrences** (an unused parameter) silently *drops* the
+///     call entirely: for `pick(x, y) = x`, inlining `pick(x, effect(x))`
+///     substitutes only the `x` actually referenced, so the call to
+///     `effect` disappears from the result -- never evaluated at all,
+///     which is just as much an observable-behavior change as duplicating
+///     it. Reproduced directly before this fix.
+///
+///   Note this still does not cover every hazard in this class: a call
+///   argument that is evaluated exactly once, but whose position relative
+///   to another argument's own effects changes (evaluation *order*, not
+///   count), is not detected by an occurrence-count check at all --
+///   naive substitution can still reorder side effects relative to the
+///   caller's original left-to-right argument evaluation. Fixing that
+///   would need this representation to have a single-evaluation,
+///   order-preserving binding form (a `let`-like construct) that this
+///   small experiment does not implement; until it does, this check only
+///   proves "evaluated exactly once," not "evaluated at the same point in
+///   the sequence."
 pub fn inline_call(
     program: &SemanticProgram,
     callee_name: &str,
@@ -106,14 +127,18 @@ pub fn inline_call(
         Stmt::Return(body_expr) => {
             for (param_index, arg) in call_args.iter().enumerate() {
                 let occurrences = count_param_occurrences(body_expr, param_index);
-                if occurrences > 1 && expr_contains_call(arg) {
+                if occurrences != 1 && expr_contains_call(arg) {
+                    let hazard = if occurrences == 0 {
+                        "is never referenced in its body, so substituting it naively would drop \
+                         the call (and any effect it has) entirely, never evaluating it"
+                    } else {
+                        "is referenced more than once in its body, so substituting it naively \
+                         would duplicate that call (and any effect it has)"
+                    };
                     return Err(format!(
-                        "refusing to inline `{callee_name}`: parameter {param_index} is \
-                         referenced {occurrences} times in its body, and the actual argument \
-                         expression contains a function call -- substituting it naively would \
-                         duplicate that call (and any effect it has), which this experiment's \
-                         inliner cannot prove safe without a single-evaluation binding it \
-                         doesn't implement"
+                        "refusing to inline `{callee_name}`: parameter {param_index} {hazard} -- \
+                         which this experiment's inliner cannot prove safe without a single-\
+                         evaluation binding it doesn't implement (occurrences={occurrences})"
                     ));
                 }
             }
@@ -265,11 +290,43 @@ mod tests {
         assert!(reason.contains("referenced"), "reason: {reason}");
     }
 
+    /// The exact bug an external review caught, second half: for `pick(x,
+    /// y) = x`, `y` is never referenced in the body at all, so inlining
+    /// `pick(x, effect(x))` previously substituted only the referenced
+    /// parameter and silently dropped the call to `effect` -- the call
+    /// disappears from the result entirely, never evaluated, which is
+    /// just as much an observable-behavior change as duplicating it.
+    #[test]
+    fn inlining_is_refused_when_an_unused_parameter_receives_a_call_argument() {
+        let mut program = program_with_effect_function();
+        program.insert(FnFact {
+            name: "pick".to_string(),
+            param_widths: vec![32, 32],
+            return_width: 32,
+            has_side_effects: false,
+            body: Stmt::Return(Expr::Param(0)),
+        });
+        let call_args = vec![
+            Expr::Param(0),
+            Expr::Call("effect".to_string(), vec![Expr::Param(0)]),
+        ];
+
+        let result = inline_call(&program, "pick", &call_args);
+
+        assert!(
+            result.is_err(),
+            "inlining pick(x, effect(x)) must be refused -- pick's body never references its \
+             second parameter, so substitution would silently drop the call to effect, got Ok"
+        );
+        let reason = result.unwrap_err();
+        assert!(reason.contains("occurrences=0"), "reason: {reason}");
+    }
+
     /// The same shape, with a callee whose parameter is referenced only
     /// once -- inlining must still be permitted, since there is nothing
     /// to duplicate. Confirms the fix is scoped to the actual hazard
-    /// (multiply-referenced parameters), not a blanket "never inline a
-    /// call argument" rule.
+    /// (occurrence counts other than exactly one), not a blanket "never
+    /// inline a call argument" rule.
     #[test]
     fn inlining_a_call_argument_into_a_singly_referenced_parameter_is_still_allowed() {
         let mut program = program_with_effect_function();

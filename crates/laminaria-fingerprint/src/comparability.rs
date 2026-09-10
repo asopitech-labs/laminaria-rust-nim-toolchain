@@ -55,6 +55,29 @@ pub fn environments_comparable(
         a.filesystem_type.as_ref(),
         b.filesystem_type.as_ref(),
     );
+    // A real bug an external review caught: resource capacity (core count,
+    // installed memory) was not load-bearing here at all, so two
+    // fingerprints differing only in `cpu_physical_cores`/
+    // `cpu_logical_cores`/`memory_bytes` -- e.g. 8 cores/32 GiB vs. 192
+    // cores/1 TiB -- compared as one performance baseline. A caller
+    // deliberately comparing across different resource envelopes (a real,
+    // separate research question -- see `docs/
+    // horizontal-distribution-research.md`'s heterogeneous-node work) is
+    // not served by this function at all; it exists specifically to
+    // reject that by default for an ordinary regression comparison.
+    push_if_differs(
+        &mut reasons,
+        "cpu_physical_cores",
+        a.cpu_physical_cores,
+        b.cpu_physical_cores,
+    );
+    push_if_differs(
+        &mut reasons,
+        "cpu_logical_cores",
+        a.cpu_logical_cores,
+        b.cpu_logical_cores,
+    );
+    push_if_differs(&mut reasons, "memory_bytes", a.memory_bytes, b.memory_bytes);
 
     if reasons.is_empty() {
         Ok(())
@@ -150,5 +173,26 @@ mod tests {
         let mut b = base_environment();
         b.cpu_model = None;
         assert_eq!(environments_comparable(&a, &b), Ok(()));
+    }
+
+    /// The exact bug an external review caught: two fingerprints
+    /// differing only in resource capacity (core count, installed
+    /// memory) previously compared as one performance baseline.
+    #[test]
+    fn different_cpu_core_count_and_memory_capacity_are_not_comparable() {
+        let mut a = base_environment();
+        a.cpu_physical_cores = Some(8);
+        a.cpu_logical_cores = Some(8);
+        a.memory_bytes = Some(32 * 1024 * 1024 * 1024);
+        let mut b = base_environment();
+        b.cpu_physical_cores = Some(192);
+        b.cpu_logical_cores = Some(192);
+        b.memory_bytes = Some(1024 * 1024 * 1024 * 1024);
+
+        let err = environments_comparable(&a, &b).unwrap_err();
+
+        assert!(err.iter().any(|r| r.contains("cpu_physical_cores")));
+        assert!(err.iter().any(|r| r.contains("cpu_logical_cores")));
+        assert!(err.iter().any(|r| r.contains("memory_bytes")));
     }
 }

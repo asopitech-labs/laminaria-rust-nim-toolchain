@@ -133,6 +133,39 @@ so the fix is scoped to the actual hazard, not an overbroad "never inline
 a call argument" rule. See `inline.rs`'s own doc comment on `inline_call`
 for the full reasoning.
 
+## Second correction: the inliner could also silently drop an unused argument's evaluation
+
+A further external review caught a second, related bug in the same
+occurrence-count check: it refused inlining when a parameter was
+referenced *more than once* (the duplication hazard above), but permitted
+an occurrence count of *zero* -- an unused parameter. Since
+`substitute_params` only ever substitutes at the occurrence sites that
+actually exist in the callee's body, a call argument corresponding to an
+unreferenced parameter is dropped from the result entirely, never
+evaluated. Reproduced directly: for `pick(x, y) = x` (a function that
+ignores its second parameter), inlining `pick(x, effect(x))` (with
+`effect` registered `has_side_effects=true`) transformed to just `x`, and
+the call to `effect` disappeared from the result -- exactly as much an
+observable-behavior change as duplicating it, just in the opposite
+direction.
+
+Fixed: the guard changed from `occurrences > 1` to `occurrences != 1`,
+covering both hazards under one check, with distinct error wording for
+each (`inline.rs`'s own doc comment on `inline_call` has the full
+reasoning). Verified with a dedicated test reproducing the exact
+`pick`/`effect` scenario, alongside the existing tests confirming both the
+duplication case and the singly-referenced-parameter case (which has
+nothing to duplicate or drop) behave as before.
+
+This still does not cover every hazard in this class: an argument
+evaluated exactly once, but whose position relative to another argument's
+own effects changes (evaluation *order*, not count), is invisible to an
+occurrence-count check. Naive substitution can still reorder side effects
+relative to the caller's original left-to-right argument evaluation.
+Fixing that would need a single-evaluation, order-preserving binding form
+(a `let`-like construct) this small experiment does not implement --
+named as an explicit, still-open limitation rather than attempted here.
+
 ## Relation to `fixtures/llvm-rediscovery-semantic-workload`
 
 That fixture traces one difference (`"probe-stack"`) all the way to

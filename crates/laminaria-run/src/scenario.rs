@@ -247,14 +247,28 @@ fn verify_true_noop_precondition(scenario: &Scenario) -> std::io::Result<()> {
         return Ok(());
     }
     for root in &scenario.observation_roots {
-        if !root.exists() {
+        // Not just `root.exists()` -- a real bug an external review
+        // caught: an *empty* target/ directory passes `exists()` but
+        // still isn't evidence of a prior successful build, so a scenario
+        // run against one still did a real, full build (Cargo itself
+        // correctly reported `fresh=false`) and was still recorded
+        // `cache_state=TrueNoop`.
+        let has_any_entry = match std::fs::metadata(root) {
+            Ok(metadata) if metadata.is_file() => true,
+            Ok(metadata) if metadata.is_dir() => std::fs::read_dir(root)
+                .map(|mut entries| entries.next().is_some())
+                .unwrap_or(false),
+            _ => false,
+        };
+        if !has_any_entry {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 format!(
                     "scenario {:?} is labeled TrueNoop, but its observation root {} does not \
-                     exist -- a true no-op requires a prior successful build to have already \
-                     produced it (run a Cold scenario against the same workload first); \
-                     otherwise this would run a real, full build and mislabel it TrueNoop",
+                     exist or is empty -- a true no-op requires a prior successful build to \
+                     have already produced real output there (run a Cold scenario against the \
+                     same workload first); otherwise this would run a real, full build and \
+                     mislabel it TrueNoop",
                     scenario.id,
                     root.display()
                 ),
@@ -262,6 +276,56 @@ fn verify_true_noop_precondition(scenario: &Scenario) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Checked *after* the timed command has already run: whether the
+/// resulting `Run`'s own artifact inventory shows any artifact actually
+/// `Created`/`Modified` -- a real bug an external review caught, the
+/// other half of `verify_true_noop_precondition`'s own gap: satisfying
+/// the precondition (a prior build's real output already exists) does
+/// not, by itself, prove *this* invocation didn't still recompile/relink
+/// something (a cache invalidated by something outside this scenario's
+/// own control, e.g. a toolchain or environment change between the prior
+/// build and this run). Returns `None` when nothing was actually built
+/// (a genuine no-op, or no artifact inventory was captured at all -- this
+/// never *fabricates* a violation from missing evidence), `Some(reason)`
+/// otherwise.
+/// How many changed artifacts a genuine no-op still tolerates before this
+/// is treated as a real postcondition violation -- not zero: Cargo itself
+/// rewrites its own `.d` dep-info files with byte-identical content but a
+/// fresh mtime on *every* invocation, even a true no-op (a real,
+/// independently-verified finding, see `artifact_inventory`'s own
+/// NOTES.md section) -- so a strict zero-tolerance check here would flag
+/// every genuine Cargo no-op as a violation. This tolerance is small
+/// enough to still catch the actual hazard (a real, full rebuild against
+/// an emptied-but-technically-non-empty output directory) while not
+/// false-positiving on that already-documented benign noise.
+const TRUE_NOOP_CHANGED_ARTIFACT_TOLERANCE: usize = 5;
+
+fn true_noop_postcondition_violation(scenario: &Scenario, run: &Run) -> Option<String> {
+    if scenario.cache_state_label != CacheStateLabel::TrueNoop {
+        return None;
+    }
+    let records = run.artifact_delta.as_ref()?.get("records")?.as_array()?;
+    let changed_count = records
+        .iter()
+        .filter(|r| {
+            matches!(
+                r.get("state").and_then(|s| s.as_str()),
+                Some("Created") | Some("Modified")
+            )
+        })
+        .count();
+    if changed_count <= TRUE_NOOP_CHANGED_ARTIFACT_TOLERANCE {
+        return None;
+    }
+    Some(format!(
+        "scenario {:?} was labeled TrueNoop, but {changed_count} artifact(s) were actually \
+         Created/Modified during this run (more than the \
+         {TRUE_NOOP_CHANGED_ARTIFACT_TOLERANCE} tolerated for Cargo's own benign no-op \
+         rewrites) -- this was not a genuine no-op",
+        scenario.id
+    ))
 }
 
 /// Runs `scenario` once: preparation (untimed, recorded into
@@ -306,7 +370,25 @@ pub fn run_scenario_once(
     run.cache_state = CacheState {
         notes: vec![format!("{:?}", scenario.cache_state_label)],
     };
+
+    // Checked after the run, using its own now-populated artifact_delta
+    // -- see true_noop_postcondition_violation's own doc comment. The Run
+    // is still written to disk either way: the compile/link work that
+    // happened is real evidence, not something to discard because the
+    // label turned out to be wrong.
+    let postcondition_violation = true_noop_postcondition_violation(scenario, &run);
+    if let Some(violation) = &postcondition_violation {
+        run.cache_state.notes.push(violation.clone());
+    }
     store::write_run(runs_root, &run)?;
+
+    if let Some(violation) = postcondition_violation {
+        return Err(std::io::Error::other(format!(
+            "{violation} (run {:?} was still written to disk with this note in its own \
+             cache_state)",
+            run.run_id
+        )));
+    }
 
     Ok(run)
 }
@@ -503,6 +585,48 @@ fn build_report(
     })?;
     let is_nim = is_nim_root_program(&first_run.root_command.program);
     let (toolchain_digest_sha256, _) = crate::reuse::toolchain_identity_from_run(first_run, is_nim);
+
+    // Every run in this repetition set must actually share one identity
+    // -- a real bug an external review caught: this function previously
+    // took `environment_fingerprint`/`toolchain_digest_sha256` from the
+    // *first* run only, with nothing checking whether the rest of `runs`
+    // (which `regenerate_report_from_disk` lets a caller supply as an
+    // arbitrary `run_ids` list, and `run_scenario_repeated` could in
+    // principle see drift across real repetitions too) actually agreed.
+    // Reproduced directly: mixing Runs of different workload/ISA/compiler
+    // digest still built one report, carrying only the first Run's
+    // identity, and comparisons against it passed cleanly.
+    for run in runs {
+        if run.workload_id != workload_id {
+            return Err(std::io::Error::other(format!(
+                "scenario {scenario_id:?}: mixed workload_id across its own repetition set \
+                 (expected {workload_id:?}, run {:?} has {:?}) -- refusing to build one report \
+                 from Runs of different workloads",
+                run.run_id, run.workload_id
+            )));
+        }
+        if let Err(reasons) = laminaria_fingerprint::comparability::environments_comparable(
+            &first_run.environment_fingerprint,
+            &run.environment_fingerprint,
+        ) {
+            return Err(std::io::Error::other(format!(
+                "scenario {scenario_id:?}: mixed environment across its own repetition set \
+                 (first run vs. run {:?}): {}",
+                run.run_id,
+                reasons.join("; ")
+            )));
+        }
+        let run_is_nim = is_nim_root_program(&run.root_command.program);
+        let (run_toolchain_digest, _) = crate::reuse::toolchain_identity_from_run(run, run_is_nim);
+        if run_toolchain_digest != toolchain_digest_sha256 {
+            return Err(std::io::Error::other(format!(
+                "scenario {scenario_id:?}: mixed toolchain across its own repetition set (first \
+                 run={toolchain_digest_sha256:?}, run {:?}={run_toolchain_digest:?})",
+                run.run_id
+            )));
+        }
+    }
+
     Ok(ScenarioReport {
         schema_version: SCENARIO_SCHEMA_VERSION.to_string(),
         scenario_id: scenario_id.to_string(),
@@ -610,19 +734,49 @@ fn range(values: &[usize]) -> (usize, usize) {
     )
 }
 
+/// A report is not eligible for an ordinary performance comparison if any
+/// of its own repetitions failed -- a real bug an external review caught:
+/// `build_report` already excludes a failed repetition's wall time from
+/// `wall_seconds` (see that function's own doc comment), but
+/// `compare_reports` itself never checked `success` at all, so a report
+/// built from `[success, failure]` still produced an ordinary verdict --
+/// reproduced directly as a `-90%`/`BelowNoise`/zero-confounding-notes
+/// result. Excluding the failed sample's *time* from the statistics is
+/// not the same claim as "this report is a valid baseline/candidate" --
+/// a scenario that failed even once needs to be understood on its own
+/// terms before its surviving successful samples are trusted for a
+/// routine comparison.
+fn reject_if_any_repetition_failed(report: &ScenarioReport, role: &str) -> Result<(), String> {
+    let failed_count = report.success.iter().filter(|s| !**s).count();
+    if failed_count > 0 {
+        return Err(format!(
+            "not comparable: {role} scenario {:?} had {failed_count} failed repetition(s) out \
+             of {} -- a report containing any failure must not be used in a normal performance \
+             comparison, even though its own wall_seconds already excludes the failed sample(s)",
+            report.scenario_id,
+            report.success.len()
+        ));
+    }
+    Ok(())
+}
+
 /// Compares `candidate` against `baseline`, using `baseline`'s own
 /// measured `stddev` as the noise floor (see
 /// `NOISE_FLOOR_STDDEV_MULTIPLIER`).
 ///
 /// **Rejects the comparison outright** (`Err`, before computing any
-/// numeric verdict at all) unless `workload_id` matches, the two reports'
-/// `EnvironmentFingerprint`s are comparable
+/// numeric verdict at all) unless: neither report contains a failed
+/// repetition (`reject_if_any_repetition_failed`); `workload_id` matches;
+/// the two reports' `EnvironmentFingerprint`s are comparable
 /// (`laminaria_fingerprint::comparability::environments_comparable`,
-/// reused directly), and both sides have the *same, resolved* toolchain
-/// digest (`reuse::toolchain_identity_from_run`'s fail-closed rule
-/// applies here too: an unresolved digest on either side is never treated
-/// as a match). A real bug an external review caught: comparing two
-/// reports from different workloads (with no environment/toolchain
+/// reused directly -- including CPU core count and installed memory, a
+/// second real bug the same review caught: a candidate whose reported
+/// core count/memory capacity was simply different from the baseline's
+/// used to compare cleanly); and both sides have the *same, resolved*
+/// toolchain digest (`reuse::toolchain_identity_from_run`'s fail-closed
+/// rule applies here too: an unresolved digest on either side is never
+/// treated as a match). A real bug an external review caught: comparing
+/// two reports from different workloads (with no environment/toolchain
 /// identity recorded on either at all, prior to this fix) produced an
 /// ordinary-looking `BelowNoise` verdict with zero `confounding_notes` --
 /// exactly the kind of not-actually-comparable result issue #21's
@@ -640,6 +794,8 @@ pub fn compare_reports(
     baseline: &ScenarioReport,
     candidate: &ScenarioReport,
 ) -> Result<Comparison, String> {
+    reject_if_any_repetition_failed(baseline, "baseline")?;
+    reject_if_any_repetition_failed(candidate, "candidate")?;
     if baseline.workload_id != candidate.workload_id {
         return Err(format!(
             "not comparable: workload_id differs (baseline={:?}, candidate={:?})",
@@ -857,6 +1013,10 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&observation_root).unwrap();
+        // Not just an empty directory -- see verify_true_noop_precondition's
+        // own doc comment: an empty target/ passes `exists()` but is not
+        // evidence of a prior successful build.
+        std::fs::write(observation_root.join("output.o"), b"prior build output").unwrap();
 
         let scenario = Scenario {
             id: "true-noop".to_string(),
@@ -874,6 +1034,78 @@ mod tests {
 
         assert!(verify_true_noop_precondition(&scenario).is_ok());
         let _ = std::fs::remove_dir_all(&observation_root);
+    }
+
+    fn true_noop_scenario() -> Scenario {
+        Scenario {
+            id: "true-noop".to_string(),
+            workload_id: "test-workload".to_string(),
+            prepare: Vec::new(),
+            root: RootCommand {
+                program: "true".to_string(),
+                args: Vec::new(),
+                cwd: None,
+                env_overrides: BTreeMap::new(),
+            },
+            observation_roots: Vec::new(),
+            cache_state_label: CacheStateLabel::TrueNoop,
+        }
+    }
+
+    fn run_with_artifact_records(states: &[&str]) -> Run {
+        let mut run = sample_run("run-1", true, 0.05);
+        let records: Vec<serde_json::Value> = states
+            .iter()
+            .map(|state| serde_json::json!({ "state": state }))
+            .collect();
+        run.artifact_delta = Some(serde_json::json!({ "records": records }));
+        run
+    }
+
+    /// The exact bug an external review caught: satisfying the
+    /// precondition (real prior output already exists) does not, by
+    /// itself, prove *this* run didn't still recompile/relink -- an empty
+    /// `target/` recreated right before running would pass the old
+    /// `root.exists()`-only precondition and still perform (and get
+    /// mislabeled as) a `TrueNoop`.
+    #[test]
+    fn true_noop_postcondition_is_violated_when_many_artifacts_actually_changed() {
+        let scenario = true_noop_scenario();
+        let run = run_with_artifact_records(&[
+            "Created", "Created", "Created", "Created", "Created", "Created", "Created",
+        ]);
+
+        let violation = true_noop_postcondition_violation(&scenario, &run);
+
+        assert!(
+            violation.is_some(),
+            "a run that actually created 7 artifacts must not be silently accepted as a \
+             genuine TrueNoop"
+        );
+    }
+
+    /// Cargo's own real, independently-verified behavior (see
+    /// `artifact_inventory`'s NOTES.md): a handful of `.d` dep-info files
+    /// get rewritten with identical content but a fresh mtime on *every*
+    /// invocation, even a true no-op. A strict zero-tolerance check would
+    /// flag every genuine Cargo no-op as a violation.
+    #[test]
+    fn true_noop_postcondition_tolerates_a_small_number_of_benign_changes() {
+        let scenario = true_noop_scenario();
+        let run = run_with_artifact_records(&["Modified", "Modified", "Unchanged", "Unchanged"]);
+
+        assert!(true_noop_postcondition_violation(&scenario, &run).is_none());
+    }
+
+    #[test]
+    fn true_noop_postcondition_does_not_apply_to_cold_or_warm_scenarios() {
+        let mut scenario = true_noop_scenario();
+        scenario.cache_state_label = CacheStateLabel::Cold;
+        let run = run_with_artifact_records(&[
+            "Created", "Created", "Created", "Created", "Created", "Created", "Created",
+        ]);
+
+        assert!(true_noop_postcondition_violation(&scenario, &run).is_none());
     }
 
     #[test]
@@ -946,6 +1178,39 @@ mod tests {
             "an all-failed scenario must not produce a ScenarioReport with a fabricated or \
              empty wall_seconds Stats"
         );
+    }
+
+    /// The exact bug an external review caught: `build_report` (used by
+    /// both `run_scenario_repeated` and `regenerate_report_from_disk`,
+    /// the latter accepting an arbitrary caller-supplied `run_ids` list)
+    /// took identity from the *first* Run only, with nothing checking
+    /// that the rest of the repetition set actually agreed. Mixing Runs
+    /// of different workloads (or environment/toolchain) previously built
+    /// one report silently carrying only the first Run's identity.
+    #[test]
+    fn mixing_runs_of_different_workloads_in_one_repetition_set_is_rejected() {
+        let mut mismatched = sample_run("run-2", true, 10.0);
+        mismatched.workload_id = "nim-heavy-workspace".to_string();
+        let runs = vec![sample_run("run-1", true, 10.0), mismatched];
+
+        let result = build_report("edit", "rust-heavy-workspace", &runs);
+
+        assert!(
+            result.is_err(),
+            "mixing Runs of different workloads into one repetition set must be rejected, not \
+             silently built from the first Run's identity alone"
+        );
+    }
+
+    #[test]
+    fn mixing_runs_of_different_environments_in_one_repetition_set_is_rejected() {
+        let mut mismatched = sample_run("run-2", true, 10.0);
+        mismatched.environment_fingerprint.architecture = "a-different-architecture".to_string();
+        let runs = vec![sample_run("run-1", true, 10.0), mismatched];
+
+        let result = build_report("edit", "test-workload", &runs);
+
+        assert!(result.is_err());
     }
 
     #[test]
@@ -1081,6 +1346,41 @@ mod tests {
             "a min-only comparison would miss this: both sides share a minimum of 1"
         );
         assert!(!comparison.confounding_notes.is_empty());
+    }
+
+    /// The exact bug an external review caught: a report containing any
+    /// failed repetition (wall_seconds already excludes it, but that's a
+    /// different claim from "this report is a valid baseline/candidate")
+    /// must be rejected before comparison, not silently compared. The
+    /// literal reproduction: a [success, failure] baseline vs. an
+    /// all-success candidate producing a "-90%, BelowNoise, zero
+    /// confounding_notes" result.
+    #[test]
+    fn a_report_with_any_failed_repetition_is_rejected_from_comparison() {
+        let mut baseline = report("baseline", vec![10.0], vec![4]);
+        baseline.run_ids.push("run-failed".to_string());
+        baseline.success = vec![true, false];
+        let candidate = report("candidate", vec![1.0], vec![4]);
+
+        let result = compare_reports(&baseline, &candidate);
+
+        assert!(
+            result.is_err(),
+            "a baseline containing a failed repetition must never be used in a normal \
+             performance comparison"
+        );
+    }
+
+    #[test]
+    fn a_candidate_with_any_failed_repetition_is_also_rejected() {
+        let baseline = report("baseline", vec![10.0], vec![4]);
+        let mut candidate = report("candidate", vec![1.0], vec![4]);
+        candidate.run_ids.push("run-failed".to_string());
+        candidate.success = vec![true, false];
+
+        let result = compare_reports(&baseline, &candidate);
+
+        assert!(result.is_err());
     }
 
     /// The exact bug an external review caught: comparing two reports
