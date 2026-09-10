@@ -208,3 +208,41 @@ still owns identity, the new field owns what an executor actually runs.
 Mirrored in `nim-planner/src/contract.nim` by hand from the start this
 time (not forgotten the way the second pass's three fields were), with
 its own dedicated round-trip test.
+
+## Fifth pass: a review found the evidence id and the additional-output check were both unsound
+
+Two more real findings, confirmed directly:
+
+1. **P1: `evaluate_evidence_artifact_id` never actually depended on the
+   function name or the real test-input values.** It hashed a
+   caller-*supplied* `test_inputs_digest` string -- nothing checked that
+   string against `test_inputs`'s real content, or even considered which
+   function was being evaluated at all. Two different functions
+   evaluated against the same validated program (or the same function
+   against genuinely different inputs) could claim the same digest and
+   share an artifact id. Fixed by removing `test_inputs_digest` entirely
+   and hashing `requested_functions`'s first entry (the function name)
+   and a canonical stringification of `test_inputs` directly (see
+   `canonical_test_inputs`) -- the id can now only ever be recomputed
+   from, and can therefore only ever match, the actual evidence a work
+   item produces. 4 new "変更テスト"-style tests (function name, input
+   values, input row count, and row/value grouping each independently
+   changing the id).
+2. **P2: `validate_compiler_work_action` allowed any number of
+   *additional* declared outputs beyond the required one.** The second
+   pass's own positive-control test
+   (`an_additional_output_alongside_the_published_identity_still_validates`)
+   passed happily, but no dispatch arm in
+   `laminaria_run::compiler_work_executor` (built in the very next
+   round) ever produces more than the one artifact keyed by its own
+   `action.id` -- so an additional output would validate successfully
+   yet resolve to nothing at execution time, a gap only surfacing at
+   runtime. Tightened to require *exactly* one output, matching
+   `action.id` exactly; the old positive-control test is now a negative
+   one (`an_additional_output_alongside_the_published_identity_is_rejected`).
+
+`cargo test -p laminaria-plan`: 44 passed (was 40). Workspace total: 320
+(was 315, combined with the `laminaria-run` fix in the same round).
+`nim-planner/src/contract.nim`'s now-unused `testInputsDigest` field
+removed to match (never had independent identity meaning once
+`test_inputs` itself is hashed directly).

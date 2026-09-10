@@ -145,10 +145,16 @@ pub struct CompilerWorkDescriptor {
     /// enforced by [`validate_compiler_work_action`], not merely declared
     /// here. See that function's own doc comment.
     pub semantic_input_artifact_ids: Vec<String>,
-    /// `LowerSource`-only: which functions to lower (mirrors
+    /// `LowerSource`: which functions to lower (mirrors
     /// `laminaria_ir::rust_frontend::lower_rust_source`/
     /// `nim_frontend::lower_nim_source`'s own `requested_functions`
     /// parameter exactly).
+    ///
+    /// `EvaluateEvidence`: reused (its first entry) to name *which*
+    /// function `test_inputs` is evaluated against -- a deliberate,
+    /// minimal reuse rather than a new field, hashed directly into
+    /// [`evaluate_evidence_artifact_id`] alongside `test_inputs` itself,
+    /// so the artifact id actually depends on both.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requested_functions: Vec<String>,
     /// `LowerSource`-only: which source language (`"rust"`/`"nim"`) --
@@ -172,21 +178,17 @@ pub struct CompilerWorkDescriptor {
     pub transform: Option<TransformParameters>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_provenance: Option<SourceProvenanceRef>,
-    /// `EvaluateEvidence`-only: an identity for the finite test-input
-    /// values evaluated against, required (alongside `contract_version`)
-    /// to recompute [`evaluate_evidence_artifact_id`] from this descriptor
-    /// alone.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub test_inputs_digest: Option<String>,
     /// `EvaluateEvidence`-only: the actual finite test-input tuples to run
     /// -- one `Vec<i64>` per call, argument order matching the validated
-    /// function's own declared parameters. Kept separate from
-    /// `test_inputs_digest` (which alone identifies *which* inputs, for a
-    /// stable, compact artifact id) and *not* itself hashed into the
-    /// artifact id, matching `resource_request`/`budget_token`'s own
-    /// carry-along-but-not-identity role: an executor needs the literal
-    /// values to actually run evaluation with, not just an identity for
-    /// them.
+    /// function's own declared parameters (named by `requested_functions`,
+    /// reused for `EvaluateEvidence` too -- see that field's own doc
+    /// comment). Hashed directly into [`evaluate_evidence_artifact_id`]
+    /// (via [`canonical_test_inputs`]), alongside `requested_functions`'s
+    /// own function name -- a review caught that an earlier
+    /// `test_inputs_digest` field let the id diverge from what this work
+    /// item actually evaluates (a caller-supplied digest string, never
+    /// verified against these real values or against which function was
+    /// even being evaluated).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub test_inputs: Vec<Vec<i64>>,
     pub resource_request: ResourceRequest,
@@ -316,11 +318,35 @@ pub fn transform_function_artifact_id(
     )
 }
 
-/// Artifact id for an `EvaluateEvidence` work item.
+/// A canonical, unambiguous string form of `test_inputs` (one call's
+/// argument tuple per row) for hashing into
+/// [`evaluate_evidence_artifact_id`] -- `;`-separated rows, `,`-separated
+/// values within a row. Neither separator can appear inside an `i64`'s
+/// own decimal representation, so no two distinct `test_inputs` values
+/// can canonicalize to the same string.
+fn canonical_test_inputs(test_inputs: &[Vec<i64>]) -> String {
+    test_inputs
+        .iter()
+        .map(|row| row.iter().map(i64::to_string).collect::<Vec<_>>().join(","))
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+/// Artifact id for an `EvaluateEvidence` work item. A review caught that
+/// this previously hashed a caller-*supplied* `test_inputs_digest`
+/// string, never verified against anything -- so two different functions
+/// evaluated against the same validated program (or the same function
+/// against genuinely different test values) could share an identity as
+/// long as the caller claimed the same digest string, and the id never
+/// actually depended on the function name at all. Now takes
+/// `function_name` and the real `test_inputs` directly, so the id can
+/// only ever be recomputed from -- and therefore can only ever match --
+/// the actual evidence this work item produces.
 pub fn evaluate_evidence_artifact_id(
     operation_version: &str,
     validated_artifact_id: &str,
-    test_inputs_digest: &str,
+    function_name: &str,
+    test_inputs: &[Vec<i64>],
     observation_contract_version: &str,
 ) -> String {
     compute_artifact_id(
@@ -328,7 +354,8 @@ pub fn evaluate_evidence_artifact_id(
         operation_version,
         &[
             validated_artifact_id,
-            test_inputs_digest,
+            function_name,
+            &canonical_test_inputs(test_inputs),
             observation_contract_version,
         ],
     )
@@ -536,10 +563,13 @@ fn recompute_work_id(
                 .semantic_input_artifact_ids
                 .first()
                 .ok_or_else(|| missing("semantic_input_artifact_ids[0]"))?;
-            let test_inputs_digest = descriptor
-                .test_inputs_digest
-                .as_deref()
-                .ok_or_else(|| missing("test_inputs_digest"))?;
+            let function_name = descriptor
+                .requested_functions
+                .first()
+                .ok_or_else(|| missing("requested_functions[0]"))?;
+            if descriptor.test_inputs.is_empty() {
+                return Err(missing("test_inputs"));
+            }
             let observation_contract_version = descriptor
                 .contract_version
                 .as_deref()
@@ -547,7 +577,8 @@ fn recompute_work_id(
             Ok(evaluate_evidence_artifact_id(
                 &descriptor.operation_version,
                 validated_artifact_id,
-                test_inputs_digest,
+                function_name,
+                &descriptor.test_inputs,
                 observation_contract_version,
             ))
         }
@@ -639,18 +670,28 @@ pub fn validate_compiler_work_action(action: &Action) -> Result<(), CompilerWork
     // `action.id` is now a verified, content-derived identity -- but that
     // alone doesn't propagate a producer's own semantic change to its
     // consumers unless the producer actually *publishes* that identity as
-    // one of its own declared outputs. Without this, a consumer's
+    // its own declared output. Without this, a consumer's
     // `semantic_input_artifact_ids`/`inputs` could keep referencing a
     // *stale* id even after the real producer's content (and therefore
     // its real `action.id`) changed, with nothing catching the
     // divergence. See this error variant's own doc comment.
-    let publishes_own_identity = action.outputs.iter().any(
-        |output| matches!(output, ArtifactRef::Declared { artifact_id } if *artifact_id == action.id),
-    );
-    if !publishes_own_identity {
-        return Err(CompilerWorkContractError::OutputIdentityNotPublished {
-            action_id: action.id.clone(),
-        });
+    //
+    // A review caught that this previously allowed *any number* of
+    // additional outputs alongside the required one -- passing an
+    // earlier, weaker positive-control test that this executor's own
+    // `compiler_work_executor` dispatch could never actually satisfy: no
+    // compiler-work dispatch arm produces more than the one artifact
+    // keyed by its own `action.id`, so an additional declared output
+    // would validate successfully yet resolve to nothing at execution
+    // time -- a gap only surfacing at runtime, not at validation. Now
+    // requires *exactly* one output, matching `action.id` exactly.
+    match action.outputs.as_slice() {
+        [ArtifactRef::Declared { artifact_id }] if *artifact_id == action.id => {}
+        _ => {
+            return Err(CompilerWorkContractError::OutputIdentityNotPublished {
+                action_id: action.id.clone(),
+            })
+        }
     }
 
     let declared_inputs: std::collections::BTreeSet<&str> = action
@@ -800,7 +841,6 @@ mod tests {
                 source_file: "src/f.rs".to_string(),
                 source_snapshot_id: "hash-1".to_string(),
             }),
-            test_inputs_digest: Some("digest-1".to_string()),
             test_inputs: vec![],
             resource_request: ResourceRequest::minimal(),
             budget_token: "budget-1".to_string(),
@@ -863,7 +903,6 @@ mod tests {
                     callee: "callee".to_string(),
                 }),
                 source_provenance: None,
-                test_inputs_digest: None,
                 test_inputs: vec![],
                 resource_request: ResourceRequest::minimal(),
                 budget_token: "budget-1".to_string(),
@@ -1058,17 +1097,86 @@ mod tests {
             );
         }
 
-        /// The positive control: an *additional* output alongside the
-        /// action's own verified id is fine -- the requirement is that
-        /// the id is published *somewhere* in `outputs`, not that it is
-        /// the *only* one.
+        /// A review caught this exact gap: an *additional* declared
+        /// output alongside the action's own verified id used to pass
+        /// validation, but no compiler-work dispatch arm in
+        /// `laminaria_run::compiler_work_executor` ever produces more
+        /// than the one artifact keyed by its own `action.id` -- so this
+        /// validated successfully yet would resolve to nothing at
+        /// execution time for any consumer depending on it. Now rejected.
         #[test]
-        fn an_additional_output_alongside_the_published_identity_still_validates() {
+        fn an_additional_output_alongside_the_published_identity_is_rejected() {
             let mut action = valid_transform_action();
             action
                 .outputs
                 .push(ArtifactRef::declared("a-secondary-output"));
-            assert_eq!(validate_compiler_work_action(&action), Ok(()));
+            assert_eq!(
+                validate_compiler_work_action(&action),
+                Err(CompilerWorkContractError::OutputIdentityNotPublished {
+                    action_id: action.id.clone(),
+                })
+            );
+        }
+    }
+
+    /// Issue #27's own required "変更テスト", applied to
+    /// `evaluate_evidence_artifact_id`: a review caught the previous
+    /// design (a caller-supplied `test_inputs_digest` string) let the id
+    /// diverge from what a work item actually evaluates -- these confirm
+    /// the id now actually depends on both the function name and the
+    /// real test-input values.
+    mod evaluate_evidence_identity_tests {
+        use super::*;
+
+        #[test]
+        fn changing_the_function_name_changes_the_id_even_with_identical_test_inputs() {
+            let inputs = vec![vec![1, 2]];
+            let f = evaluate_evidence_artifact_id("0.1.0", "prog-1", "f", &inputs, "0.1.0");
+            let g = evaluate_evidence_artifact_id("0.1.0", "prog-1", "g", &inputs, "0.1.0");
+            assert_ne!(
+                f, g,
+                "two different functions evaluated against the same validated program must \
+                 not share an artifact id"
+            );
+        }
+
+        #[test]
+        fn changing_the_test_input_values_changes_the_id() {
+            let a = evaluate_evidence_artifact_id("0.1.0", "prog-1", "f", &[vec![1, 2]], "0.1.0");
+            let b = evaluate_evidence_artifact_id("0.1.0", "prog-1", "f", &[vec![1, 3]], "0.1.0");
+            assert_ne!(a, b);
+        }
+
+        #[test]
+        fn adding_another_test_input_row_changes_the_id() {
+            let a = evaluate_evidence_artifact_id("0.1.0", "prog-1", "f", &[vec![1, 2]], "0.1.0");
+            let b = evaluate_evidence_artifact_id(
+                "0.1.0",
+                "prog-1",
+                "f",
+                &[vec![1, 2], vec![3, 4]],
+                "0.1.0",
+            );
+            assert_ne!(a, b);
+        }
+
+        /// The canonical stringification's own row/value separators must
+        /// not let two structurally different `test_inputs` collide.
+        #[test]
+        fn a_reshaped_but_differently_grouped_test_inputs_does_not_collide() {
+            // `[[1, 23]]` vs. `[[1], [23]]` -- if rows were joined without
+            // a distinct separator from values, these could canonicalize
+            // to the same string.
+            let one_row =
+                evaluate_evidence_artifact_id("0.1.0", "prog-1", "f", &[vec![1, 23]], "0.1.0");
+            let two_rows = evaluate_evidence_artifact_id(
+                "0.1.0",
+                "prog-1",
+                "f",
+                &[vec![1], vec![23]],
+                "0.1.0",
+            );
+            assert_ne!(one_row, two_rows);
         }
     }
 }

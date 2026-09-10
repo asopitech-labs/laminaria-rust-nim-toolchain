@@ -1788,3 +1788,61 @@ suite green.
   planning and dispatch would silently lower the *new* text under the
   *old* snapshot id, named directly in `dispatch_lower_source`'s own
   doc comment rather than glossed over.
+
+## Fifth pass: closing the source-snapshot gap named above, plus a Windows CI cfg-gating regression (twice)
+
+A review confirmed the previous pass's *named-but-open* source-snapshot
+gap as a real P1: `dispatch_lower_source` accepted whatever
+`source_snapshot_id` the plan claimed with no check against the file's
+actual current content, so a source edited after planning but before
+dispatch would be lowered as if it were still the planned text -- the
+wrong compiler-work identity would silently claim to describe the new
+source. Fixed with `compute_source_snapshot_id` (SHA-256 over the source
+text, via the `sha2` crate already a dependency of this crate) and a new
+`SourceSnapshotMismatch` error returned before lowering proceeds. New
+test `a_source_file_changed_after_planning_is_rejected_not_silently_lowered`:
+writes the original text, computes and records its real snapshot id,
+*then* overwrites the file with different text, then dispatches under
+the stale id -- confirmed `Err(SourceSnapshotMismatch)`, not a silent
+lower of the new text. The full-pipeline test was also fixed to compute
+a real snapshot id instead of reusing the source path string as a fake
+stand-in.
+
+Also fixed to match `laminaria-plan`'s companion change (see its own
+NOTES.md "Fifth pass"): `evaluate_evidence_artifact_id` gained a
+`function_name` parameter, so the pipeline test's call site needed
+updating.
+
+**A genuine Windows CI failure, then a self-caught near-repeat of the
+same mistake.** Commit `6f18932` (this crate's first real-executor
+slice) broke the `windows` job: `cargo clippy --workspace --all-targets
+-- -D warnings` failed on `unused imports`
+(`SourceProvenanceRef, evaluate_evidence_artifact_id,
+lower_source_artifact_id, transform_function_artifact_id,
+validate_ir_artifact_id`, `PlanOutcome, PlanningInput, validate`) and
+`function repo_root is never used`, diagnosed via `gh run view
+34472950287 --log-failed`. Cause: only the test *functions* that need a
+real Nim planner binary were `#[cfg(unix)]`-gated, not the `use` items
+and helper functions they alone depend on -- and the `windows` job never
+provisions Nim, so those items are genuinely unused there. This is the
+identical mistake class already fixed once before in
+`laminaria-ir/src/lib.rs`'s `fixture_parity_tests` and already avoided
+correctly in `laminaria-plan/src/nim_planner_client.rs`'s own `#[cfg(unix)]
+use std::path::PathBuf;`. Fixed the same way: gate each `use` item and
+helper function individually by whether *all* of its usages are
+unix-only, not the whole test module.
+
+Applying that fix mechanically over-gated `PathBuf` itself behind
+`#[cfg(unix)]`, even though `PathBuf::from("test")` is used by the
+cross-platform `nim_fact` helper and by
+`transform_function_never_reads_an_unvalidated_candidate_even_if_present`
+(both run on every platform) -- which would have broken the Windows
+build again with an unresolved-import error. Caught before any CI ran
+on it, by manually cross-referencing every `PathBuf` usage in the test
+module against its cfg gate. Fixed by ungating the `use std::path::
+PathBuf;` import alone while keeping `repo_root`/`real_planner_binary`
+(the only functions that *return* a unix-only `PathBuf`) gated.
+
+`cargo test -p laminaria-run`: 128 passed (was 124). Workspace total:
+320 (was 315). `cargo fmt --check` and `cargo clippy --workspace
+--all-targets -- -D warnings` both clean.

@@ -71,6 +71,18 @@ pub enum CompilerWorkExecutionError {
         path: String,
         detail: String,
     },
+    /// The real content hash of the source file just read does not match
+    /// `source_provenance.source_snapshot_id` -- the file changed between
+    /// whenever the descriptor was built and this dispatch, and this
+    /// executor refuses to publish the *new* text as an artifact of the
+    /// *old*, now-stale claimed snapshot. See
+    /// [`compute_source_snapshot_id`]'s own doc comment.
+    SourceSnapshotMismatch {
+        action_id: String,
+        path: String,
+        claimed: String,
+        actual: String,
+    },
     LoweringFailed {
         action_id: String,
         diagnostics: Vec<Diagnostic>,
@@ -148,6 +160,17 @@ impl std::fmt::Display for CompilerWorkExecutionError {
                 f,
                 "action {action_id:?} could not read source file {path:?}: {detail}"
             ),
+            Self::SourceSnapshotMismatch {
+                action_id,
+                path,
+                claimed,
+                actual,
+            } => write!(
+                f,
+                "action {action_id:?}'s source file {path:?} no longer matches its claimed \
+                 snapshot (claimed {claimed:?}, actual content hashes to {actual:?}) -- refusing \
+                 to publish the changed text under the stale snapshot id"
+            ),
             Self::LoweringFailed {
                 action_id,
                 diagnostics,
@@ -199,6 +222,23 @@ impl std::fmt::Display for CompilerWorkExecutionError {
 }
 
 impl std::error::Error for CompilerWorkExecutionError {}
+
+/// A real SHA-256 content hash of `source_text`, formatted as lowercase
+/// hex -- this executor's own canonical `source_snapshot_id` scheme.
+/// Whoever builds a `LowerSource` action's `PlanningInput` (a future
+/// planning-time caller, or this module's own tests) must compute
+/// `source_provenance.source_snapshot_id` the same way, so
+/// `dispatch_lower_source`'s own re-check against the file's real,
+/// current content at dispatch time actually means something -- matching
+/// `laminaria_fingerprint::exec::sha256_file`'s own hex-formatting
+/// convention (a file-based sibling of this one), applied here to an
+/// already-in-memory string instead of re-reading the file a second time.
+pub fn compute_source_snapshot_id(source_text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(source_text.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
 
 /// The Rust-side in-memory artifact store for `laminaria-ir`'s own
 /// values -- issue #27 B's own "IR payloadは初期sliceではRust側の
@@ -307,12 +347,6 @@ fn dispatch_lower_source(
         }
     })?;
     let source_path = Path::new(&source_provenance.source_file);
-    // Reads the real file from disk at the path the descriptor names --
-    // `source_snapshot_id` records a content identity for that text at
-    // the time the descriptor was built, but this slice does not yet
-    // verify the file on disk still matches it (a real, open follow-up:
-    // a source edited between planning and dispatch would silently
-    // lower the *new* text under the *old* snapshot id).
     let source_text = fs::read_to_string(source_path).map_err(|e| {
         CompilerWorkExecutionError::SourceReadFailed {
             action_id: action.id.clone(),
@@ -320,6 +354,23 @@ fn dispatch_lower_source(
             detail: e.to_string(),
         }
     })?;
+    // A review caught a real gap: the file on disk was lowered under
+    // whatever `source_snapshot_id` the descriptor *claimed*, never
+    // checked against the text actually just read -- a source edited
+    // between planning and dispatch would have silently published the
+    // *new* text as an artifact of the *old* snapshot id, exactly the
+    // "changed source published as an artifact of a stale snapshot"
+    // hazard this contract exists to prevent. Recomputed and compared
+    // here, hard-failing on any mismatch rather than trusting the claim.
+    let actual_snapshot_id = compute_source_snapshot_id(&source_text);
+    if actual_snapshot_id != source_provenance.source_snapshot_id {
+        return Err(CompilerWorkExecutionError::SourceSnapshotMismatch {
+            action_id: action.id.clone(),
+            path: source_provenance.source_file.clone(),
+            claimed: source_provenance.source_snapshot_id.clone(),
+            actual: actual_snapshot_id,
+        });
+    }
     let requested: Vec<&str> = descriptor
         .requested_functions
         .iter()
@@ -459,13 +510,33 @@ fn dispatch_evaluate_evidence(
 mod tests {
     use super::*;
     use laminaria_plan::compiler_work::{
-        evaluate_evidence_artifact_id, lower_source_artifact_id, transform_function_artifact_id,
-        validate_ir_artifact_id, ResourceRequest, SourceProvenanceRef, TransformParameters,
-        COMPILER_WORK_SCHEMA_VERSION,
+        ResourceRequest, TransformParameters, COMPILER_WORK_SCHEMA_VERSION,
     };
-    use laminaria_plan::{validate, ArtifactRef, PlanOutcome, PlanningInput};
+    use laminaria_plan::ArtifactRef;
+    // `PathBuf` is used by cross-platform tests too (`nim_fact`'s own
+    // `Provenance.source_file`), so it stays ungated -- only the items
+    // genuinely exclusive to the real-binary tests below are gated
+    // individually, not by wrapping the whole module in `#[cfg(unix)]`
+    // the way `laminaria-ir`'s `fixture_parity_tests` does (a module of
+    // *only* real-toolchain tests, unlike this one). A review's own CI
+    // run caught exactly the "only functions gated, not their shared
+    // imports" version of this mistake here: the `windows` job (which
+    // never provisions Nim) failed `unused_imports`/`dead_code` under
+    // `-D warnings` for the real-binary-only items -- and a second,
+    // narrower version of the same mistake surfaced fixing the first:
+    // `PathBuf` itself is *not* exclusive to those tests, so gating it
+    // too would have broken the `windows` build a different way (a
+    // cross-platform test referencing a name only defined on `unix`).
+    #[cfg(unix)]
+    use laminaria_plan::compiler_work::{
+        evaluate_evidence_artifact_id, lower_source_artifact_id, transform_function_artifact_id,
+        validate_ir_artifact_id, SourceProvenanceRef,
+    };
+    #[cfg(unix)]
+    use laminaria_plan::{validate, PlanOutcome, PlanningInput};
     use std::path::PathBuf;
 
+    #[cfg(unix)]
     fn repo_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
@@ -531,10 +602,11 @@ mod tests {
         let operation_version = "0.1.0";
 
         // 1. LowerSource("add", "g" from g.nim)
+        let source_snapshot_id = compute_source_snapshot_id(source_text);
         let lower_id = lower_source_artifact_id(
             operation_version,
             "nim",
-            &source_path_str, // stand-in content-snapshot id for this test
+            &source_snapshot_id,
             &["add", "g"],
             subset_version,
         );
@@ -554,9 +626,8 @@ mod tests {
                 transform: None,
                 source_provenance: Some(SourceProvenanceRef {
                     source_file: source_path_str.clone(),
-                    source_snapshot_id: source_path_str.clone(),
+                    source_snapshot_id: source_snapshot_id.clone(),
                 }),
-                test_inputs_digest: None,
                 test_inputs: vec![],
                 resource_request: ResourceRequest::minimal(),
                 budget_token: "budget-1".to_string(),
@@ -581,7 +652,6 @@ mod tests {
                 contract_version: Some(semantic_contract_version.to_string()),
                 transform: None,
                 source_provenance: None,
-                test_inputs_digest: None,
                 test_inputs: vec![],
                 resource_request: ResourceRequest::minimal(),
                 budget_token: "budget-1".to_string(),
@@ -617,7 +687,6 @@ mod tests {
                     callee: "add".to_string(),
                 }),
                 source_provenance: None,
-                test_inputs_digest: None,
                 test_inputs: vec![],
                 resource_request: ResourceRequest::minimal(),
                 budget_token: "budget-1".to_string(),
@@ -642,7 +711,6 @@ mod tests {
                 contract_version: Some(semantic_contract_version.to_string()),
                 transform: None,
                 source_provenance: None,
-                test_inputs_digest: None,
                 test_inputs: vec![],
                 resource_request: ResourceRequest::minimal(),
                 budget_token: "budget-1".to_string(),
@@ -651,11 +719,11 @@ mod tests {
 
         // 5. EvaluateEvidence: run "g" against two finite test inputs.
         let test_inputs: Vec<Vec<i64>> = vec![vec![5], vec![i32::MAX as i64]];
-        let test_inputs_digest = "digest-of-2-i32-inputs".to_string();
         let evaluate_id = evaluate_evidence_artifact_id(
             operation_version,
             &validate2_id,
-            &test_inputs_digest,
+            "g",
+            &test_inputs,
             observation_contract_version,
         );
         let evaluate_action = Action {
@@ -673,7 +741,6 @@ mod tests {
                 contract_version: Some(observation_contract_version.to_string()),
                 transform: None,
                 source_provenance: None,
-                test_inputs_digest: Some(test_inputs_digest),
                 test_inputs: test_inputs.clone(),
                 resource_request: ResourceRequest::minimal(),
                 budget_token: "budget-1".to_string(),
@@ -822,7 +889,6 @@ mod tests {
                     callee: "add".to_string(),
                 }),
                 source_provenance: None,
-                test_inputs_digest: None,
                 test_inputs: vec![],
                 resource_request: ResourceRequest::minimal(),
                 budget_token: "budget-1".to_string(),
@@ -877,5 +943,63 @@ mod tests {
             dispatch_action(&action, &mut store),
             Err(CompilerWorkExecutionError::MissingDescriptor { .. })
         ));
+    }
+
+    /// A review caught this exact gap: a source file edited between
+    /// planning and dispatch used to be silently lowered under the *old*
+    /// (now-stale) claimed snapshot id. Writes real content, computes its
+    /// real snapshot id, then *changes the file on disk* before
+    /// dispatching -- the descriptor still claims the original id.
+    #[test]
+    fn a_source_file_changed_after_planning_is_rejected_not_silently_lowered() {
+        let dir = std::env::temp_dir().join(format!(
+            "laminaria-compiler-work-executor-snapshot-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source_path = dir.join("f.nim");
+        let original_text = "proc f(x: int32): int32 =\n  x\n";
+        std::fs::write(&source_path, original_text).unwrap();
+        let claimed_snapshot_id = compute_source_snapshot_id(original_text);
+        let source_path_str = source_path.to_str().unwrap().to_string();
+
+        // The file is edited *after* the descriptor above was built --
+        // dispatch must see this, not the text the id was computed from.
+        std::fs::write(&source_path, "proc f(x: int32): int32 =\n  x +% 1'i32\n").unwrap();
+
+        let action = Action {
+            id: "lower-1".to_string(),
+            kind: ActionKind::LowerSource,
+            command_identity: "lower_source".to_string(),
+            inputs: vec![ArtifactRef::source(&source_path_str)],
+            outputs: vec![ArtifactRef::declared("lower-1")],
+            compiler_work: Some(CompilerWorkDescriptor {
+                descriptor_schema_version: COMPILER_WORK_SCHEMA_VERSION.to_string(),
+                operation_version: "0.1.0".to_string(),
+                semantic_input_artifact_ids: vec![],
+                requested_functions: vec!["f".to_string()],
+                language: Some("nim".to_string()),
+                contract_version: Some("0.1.0".to_string()),
+                transform: None,
+                source_provenance: Some(laminaria_plan::compiler_work::SourceProvenanceRef {
+                    source_file: source_path_str,
+                    source_snapshot_id: claimed_snapshot_id,
+                }),
+                test_inputs: vec![],
+                resource_request: ResourceRequest::minimal(),
+                budget_token: "budget-1".to_string(),
+            }),
+        };
+
+        let mut store = ArtifactStore::new();
+        let result = dispatch_action(&action, &mut store);
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(
+            matches!(
+                result,
+                Err(CompilerWorkExecutionError::SourceSnapshotMismatch { .. })
+            ),
+            "expected SourceSnapshotMismatch, got {result:?}"
+        );
     }
 }
