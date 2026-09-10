@@ -22,7 +22,29 @@ pub struct DoctorRun {
     pub lock_load_error: Option<LockLoadError>,
 }
 
+/// Resolves every toolchain family declared in the lock file. Equivalent to
+/// `build_selective(lock_path, repo_root, true, true)` — kept as the default
+/// entry point since every existing caller (the `doctor` CLI command,
+/// `self_build.rs`, which legitimately always needs both) wants both
+/// families resolved.
 pub fn build(lock_path: &Path, repo_root: &Path) -> DoctorRun {
+    build_selective(lock_path, repo_root, true, true)
+}
+
+/// Like `build`, but skips resolving a toolchain family entirely when the
+/// caller doesn't need it (`need_rust`/`need_nim` false) — not just "resolve
+/// and then ignore the result." Each `resolve()` call is a real subprocess
+/// probe (`rustup which/run`, or `nim`/`nimble` under a `bin_dir`/`PATH`
+/// lookup), so skipping the call is what makes "no unused compiler
+/// invocation is attempted" true by construction for a target project that
+/// only needs one language (`laminaria_run::project_build`), rather than a
+/// property that happens to hold only when the unused tool is absent.
+pub fn build_selective(
+    lock_path: &Path,
+    repo_root: &Path,
+    need_rust: bool,
+    need_nim: bool,
+) -> DoctorRun {
     let (lock_file, lock_load_error) = match lock::load(lock_path) {
         Ok(lf) => (Some(lf), None),
         Err(e) => (None, Some(e)),
@@ -30,16 +52,20 @@ pub fn build(lock_path: &Path, repo_root: &Path) -> DoctorRun {
 
     let mut environment = env::detect(repo_root, HARNESS_NAME, HARNESS_VERSION);
 
-    let rust_toolchains: Vec<_> = lock_file
-        .as_ref()
-        .map(|lf| {
-            lf.rust
-                .toolchains
-                .iter()
-                .map(|(name, sel)| rust_toolchain::resolve(name, sel))
-                .collect()
-        })
-        .unwrap_or_default();
+    let rust_toolchains: Vec<_> = if need_rust {
+        lock_file
+            .as_ref()
+            .map(|lf| {
+                lf.rust
+                    .toolchains
+                    .iter()
+                    .map(|(name, sel)| rust_toolchain::resolve(name, sel))
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
 
     if let Some(triple) = rust_toolchains
         .iter()
@@ -49,16 +75,20 @@ pub fn build(lock_path: &Path, repo_root: &Path) -> DoctorRun {
             env::architecture_notice_for(&environment.architecture, triple);
     }
 
-    let nim_toolchains: Vec<_> = lock_file
-        .as_ref()
-        .map(|lf| {
-            lf.nim
-                .toolchains
-                .iter()
-                .map(|(name, sel)| nim_toolchain::resolve(name, sel))
-                .collect()
-        })
-        .unwrap_or_default();
+    let nim_toolchains: Vec<_> = if need_nim {
+        lock_file
+            .as_ref()
+            .map(|lf| {
+                lf.nim
+                    .toolchains
+                    .iter()
+                    .map(|(name, sel)| nim_toolchain::resolve(name, sel))
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
 
     let external_tools: Vec<_> = lock_file
         .as_ref()
@@ -289,5 +319,83 @@ fn print_human(doctor_run: &DoctorRun) {
         for note in &e.notes {
             println!("      ! {note}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BOTH_FAMILIES_LOCK: &str = r#"
+schema_version = "0.1.0"
+
+[rust.toolchains.system_stable]
+selector = "stable"
+components = []
+
+[nim.toolchains.nim2_pinned]
+selector = "2.2.10"
+"#;
+
+    fn write_lock(dir: &Path, contents: &str) -> PathBuf {
+        let path = dir.join("toolchains.lock.toml");
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
+
+    /// `build_selective(.., false, true)` must never populate
+    /// `rust_toolchains` even though the lock file declares one -- proven
+    /// structurally (the resolve map is skipped entirely, not merely
+    /// filtered afterward), which is what makes "no unused compiler
+    /// invocation is attempted" true by construction rather than by luck
+    /// of the current environment. A runtime, adversarial-poisoning proof
+    /// (a sentinel `rustup`/`rustc` that would prove itself invoked) lives
+    /// at the CLI/subprocess level in `laminaria-run::project_build`'s and
+    /// `laminaria-cli`'s tests, where a genuinely isolated per-test child
+    /// process environment is available without risking a global `PATH`
+    /// mutation racing other parallel `cargo test` threads.
+    #[test]
+    fn build_selective_skips_rust_resolution_when_not_needed() {
+        let tmp = std::env::temp_dir().join(format!(
+            "laminaria-doctor-test-skip-rust-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let lock_path = write_lock(&tmp, BOTH_FAMILIES_LOCK);
+
+        let run = build_selective(&lock_path, &tmp, false, true);
+        assert!(run.report.rust_toolchains.is_empty());
+        assert_eq!(run.report.nim_toolchains.len(), 1);
+    }
+
+    #[test]
+    fn build_selective_skips_nim_resolution_when_not_needed() {
+        let tmp = std::env::temp_dir().join(format!(
+            "laminaria-doctor-test-skip-nim-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let lock_path = write_lock(&tmp, BOTH_FAMILIES_LOCK);
+
+        let run = build_selective(&lock_path, &tmp, true, false);
+        assert!(run.report.nim_toolchains.is_empty());
+        assert_eq!(run.report.rust_toolchains.len(), 1);
+    }
+
+    #[test]
+    fn build_is_equivalent_to_build_selective_with_both_families_needed() {
+        let tmp = std::env::temp_dir().join(format!(
+            "laminaria-doctor-test-build-both-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let lock_path = write_lock(&tmp, BOTH_FAMILIES_LOCK);
+
+        let run = build(&lock_path, &tmp);
+        assert_eq!(run.report.rust_toolchains.len(), 1);
+        assert_eq!(run.report.nim_toolchains.len(), 1);
     }
 }

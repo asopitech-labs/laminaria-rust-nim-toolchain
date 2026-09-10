@@ -277,6 +277,16 @@ independently invokes stage1's own freshly built planner binary and
 asserts it returns a well-formed `ExecutionPlan` with
 `produced_by == "laminaria-nim-planning-kernel"`.
 
+## Using LAMINARIA vs. building LAMINARIA
+
+`self-build` plans and builds **LAMINARIA itself** — its own Rust host and
+Nim planner, from source, which legitimately always needs both toolchains.
+It is not the general interface for building a *user's* target project.
+For that, see `docs/project-build.md` (issue #26): `laminaria build`/
+`plan-build`, which resolve and invoke only the toolchain(s) a target
+project's own demanded artifacts actually need, reusing this same
+production Nim planner and Rust executor.
+
 ## What is *not* claimed by this slice
 
 - **stage1 → stage2** and generation-to-generation plan/artifact

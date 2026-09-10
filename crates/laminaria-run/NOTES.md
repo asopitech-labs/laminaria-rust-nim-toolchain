@@ -1479,3 +1479,102 @@ re-verified to still pass after this change -- confirmed directly via
 `"stable"`, matching its own `"stable"` selector, before trusting that
 the fix doesn't newly break the one toolchain configuration this project
 actually uses.
+
+## Issue #26: single-language and minimally-declared mixed project builds
+
+`self-build` always needs both a Rust and a Nim toolchain, which is
+correct for LAMINARIA building itself but wrong for a general "build a
+user's target project" entry point -- issue #26 asked for a separate one
+that resolves and invokes only the toolchain(s) a target project's own
+demanded artifacts actually need. A first plan-mode design pass was
+reviewed and rejected with five concrete defects before any code was
+written, all fixed in what actually landed:
+
+1. **Toolchain resolution being skipped during planning doesn't matter if
+   execution/recording re-probes both anyway.** `lib.rs`'s own
+   `run_and_record` called `doctor::build(lock_path, repo_root)`
+   internally -- unconditionally, regardless of what any caller had
+   already resolved selectively. Split into `run_and_record_with_doctor`
+   (takes an already-resolved `DoctorRun`) plus a thin `run_and_record`
+   wrapper that calls plain `doctor::build` for callers (`self_build.rs`)
+   that always want both. `project_build.rs` passes the *same*
+   selectively-resolved `DoctorRun` it already built for toolchain
+   verification into `run_and_record_with_doctor`, so the unneeded family
+   is never probed a second time at record time either.
+2. **"A `Cargo.toml` and a Nim entry coexisting ⇒ reject as unsupported"
+   is wrong.** File coexistence isn't dependency (a Rust app can sit next
+   to an unrelated Nim helper tool), and a real dependency can exist
+   *without* file coexistence at all (a `build.rs` shelling out to
+   `nim`, no separate Nim source file anywhere). Fixed by making
+   `--requires rust|nim|rust,nim` always authoritative over file
+   inference when given, inferring only when exactly one language's
+   files are present, and treating coexistence with no explicit
+   `--requires` as an *ambiguous project* request for designation, not a
+   blanket rejection. When both are genuinely requested, the resulting
+   plan depends honestly on whether a real Nim producer entry point
+   exists: two independent producer actions (no fabricated `Integrate`
+   step) when one does, or a single `CargoBuild` action with the Nim
+   toolchain's `bin` directory prepended to that action's own `PATH`
+   when one doesn't (the "single build process needs the other toolchain
+   on hand" shape).
+3. **Missing the resolved-compiler-pinning step.** The design pass had
+   initially omitted the `RUSTC` env-override fix `self_build.rs`'s own
+   `cargo_build_root` already needed once (see the fifth review pass
+   above) -- `cargo_project_build_root` carries it over explicitly rather
+   than silently regressing a bug already fixed once in this crate.
+4. **The verification/fingerprint root defaulted to the caller's own
+   cwd (LAMINARIA-shaped) instead of the target project.** Unlike
+   `self_build.rs`, `project_build.rs` has no separate `repo_root`
+   concept at all -- every `doctor`/environment call fingerprints
+   `project_root` itself, so a recorded `Run`'s environment/dirty-state
+   describes the actual target being built.
+5. **A fixed `.build/cargo-target/release` guessed output path doesn't
+   hold under `--target <triple>` or a custom profile.** Fixed by
+   reporting a `CargoBuild` action's real artifact paths from Cargo's own
+   `--message-format=json` telemetry (`cargo_telemetry`, already parsed
+   unconditionally for every Cargo root command) instead of guessing a
+   directory layout. A `NimBuild` action's artifact is the exact `-o:`
+   path this code itself chose -- fully known upfront, no discovery
+   needed.
+
+New: `laminaria_fingerprint::doctor::build_selective` (skips resolving a
+toolchain family's `resolve()` calls entirely, not just its result, when
+unneeded -- `doctor::build` is now a thin `build_selective(.., true,
+true)` wrapper); `laminaria-run`'s `toolchain_resolve.rs` (shared
+verification logic factored out of `self_build.rs`'s
+`resolve_verified_toolchain`, used by both it and the new
+`project_build.rs`); `project_build.rs` itself; two new `laminaria`
+subcommands, `plan-build`/`build`, with a `--json` failure envelope
+(`{"ok", "error_kind", "detail", "result"}`, always on stdout) that
+`self_build_command`'s own JSON path does not have (a separately-noted
+gap, not retroactively fixed there in this pass).
+
+Verified against the real fixtures: `fixtures/rust-heavy-workspace`
+(pure Rust) and `fixtures/nim-heavy-workspace` (pure Nim, `fixture.nimble`
++ `src/fixture.nim` matching the standard `nimble init` convention this
+code's own inference relies on) each build end to end through the real
+Nim planner and real `cargo`/`nim`, with the *other* toolchain family
+provably never resolved -- checked structurally (`doctor::build_selective`
+never calls the unneeded family's `resolve()` at all, proven by two
+`laminaria-fingerprint` unit tests) and adversarially (a CLI-level test
+places a sentinel `nim`/`nimble` script first on the spawned build's own
+`PATH`, using a lock file with `bin_dir` stripped to force a PATH lookup
+if resolution were ever attempted, and asserts the sentinel is never
+invoked while the build still succeeds).
+
+`cargo test --workspace`: 179 passed (up from 157: +19 in
+`laminaria-run`, +3 in `laminaria-fingerprint`, +4 new integration tests
+in `laminaria-cli`, which had none before). Clippy and fmt clean.
+Manually re-verified via the real CLI binary too (`laminaria plan-build`/
+`build --json` against both fixtures, with `--requires rust`/`rust,nim`
+combinations), confirming the reported plans/artifacts match this
+document's own description. This dev machine's `nim` and `cargo`/`rustc`
+share the same `/usr/local/bin` directory, so a genuine PATH-removal
+check (as opposed to the sentinel-poisoning test, or renaming an
+installed system compiler, which was deliberately not done here as a
+needlessly risky action against shared local tooling) was not performed
+manually -- the structural guarantee (`build_selective` never calls the
+unneeded family's `resolve()` at all, regardless of what is or isn't on
+`PATH`) and the CLI-level sentinel-poisoning test together are the actual
+evidence for "no unused compiler invocation," not a manual PATH edit.
+actually uses.

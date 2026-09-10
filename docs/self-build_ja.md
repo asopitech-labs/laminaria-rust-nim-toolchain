@@ -275,6 +275,16 @@ stage1自身の新しくビルドされたプランナーバイナリを独立�
 `produced_by == "laminaria-nim-planning-kernel"`を持つ整った
 `ExecutionPlan`が返ることを検証する。
 
+## LAMINARIAを使うこと vs. LAMINARIA自身をビルドすること
+
+`self-build`は**LAMINARIA自身**——その自前のRustホストとNimプランナー——
+をソースから計画・ビルドするものであり、これは両ツールチェーンを正当に
+常に必要とする。これは*ユーザーの*対象プロジェクトをビルドするための
+汎用インターフェースではない。そのためのものは`docs/project-build.md`
+(issue #26)、すなわち`laminaria build`/`plan-build`を参照——対象
+プロジェクト自身が要求する成果物が実際に必要とするツールチェーンのみを
+解決・起動し、同じ本番Nim plannerとRust実行系を再利用する。
+
 ## 本スライスが主張していないこと
 
 - **stage1 → stage2**と世代間の計画/アーティファクト比較は、明示的に

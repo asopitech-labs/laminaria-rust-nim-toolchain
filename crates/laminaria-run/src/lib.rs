@@ -54,10 +54,12 @@ pub mod cargo_wrapper;
 pub mod clock;
 pub mod nim_telemetry;
 pub mod nim_wrapper;
+pub mod project_build;
 pub mod reuse;
 pub mod scenario;
 pub mod self_build;
 pub mod store;
+pub mod toolchain_resolve;
 pub mod tracer;
 pub mod types;
 
@@ -414,10 +416,45 @@ pub fn run_and_record(
     probe_level: ProbeLevel,
     observation_roots: &[PathBuf],
 ) -> std::io::Result<(Run, PathBuf)> {
+    let doctor_run = doctor::build(lock_path, repo_root);
+    run_and_record_with_doctor(
+        &doctor_run,
+        runs_root,
+        workload_id,
+        scenario_id,
+        requested_artifact,
+        root,
+        probe_level,
+        observation_roots,
+    )
+}
+
+/// Same as `run_and_record`, but takes an already-resolved `DoctorRun`
+/// instead of deriving one from `(lock_path, repo_root)` itself. Exists so
+/// a caller that already resolved toolchains selectively (e.g.
+/// `project_build::run_project_generation`, which only resolves the
+/// toolchain family a target project actually needs via
+/// `doctor::build_selective`) is not forced to pay for -- or risk -- a
+/// second, unfiltered `doctor::build` probing every toolchain family
+/// again at record time. Plain `run_and_record` calling `doctor::build`
+/// unconditionally was flagged directly during design review as the
+/// concrete way a selectively-resolved caller's own toolchain filtering
+/// would otherwise be silently undone one layer down: resolving only the
+/// needed family up front means nothing if execution/recording then
+/// re-probes both anyway.
+#[allow(clippy::too_many_arguments)]
+pub fn run_and_record_with_doctor(
+    doctor_run: &laminaria_fingerprint::doctor::DoctorRun,
+    runs_root: &Path,
+    workload_id: &str,
+    scenario_id: &str,
+    requested_artifact: Option<String>,
+    root: RootCommand,
+    probe_level: ProbeLevel,
+    observation_roots: &[PathBuf],
+) -> std::io::Result<(Run, PathBuf)> {
     let clock = RunClock::start();
     let run_id = generate_run_id();
-
-    let doctor_run = doctor::build(lock_path, repo_root);
 
     // Absolutized *before* `run_dir`/`wrapper_events_path` are derived --
     // see `absolute_path`'s own doc comment for the exact bug this
@@ -578,7 +615,7 @@ pub fn run_and_record(
         requested_artifact,
         environment_fingerprint: doctor_run.report.environment.clone(),
         requested_toolchain_selector,
-        resolved_toolchain_fingerprint: Some(doctor_run.report),
+        resolved_toolchain_fingerprint: Some(doctor_run.report.clone()),
         preparation_record: PreparationRecord::default(),
         cache_state: CacheState::default(),
         // The command as actually executed (including wrapper-substitution

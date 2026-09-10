@@ -203,6 +203,57 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Gathers a *target project's* PlanningInput (issue #26 -- distinct
+    /// from `plan-self-build`, which is LAMINARIA planning itself), calls
+    /// the real Nim Planning Kernel, validates the returned ExecutionPlan,
+    /// and prints it (or the structured rejection). No execution.
+    PlanBuild {
+        #[arg(long)]
+        project_root: PathBuf,
+        /// Which toolchain(s) this build should target: "rust", "nim", or
+        /// "rust,nim". Omit to infer from project files when unambiguous
+        /// (exactly one of a Cargo.toml or a resolvable Nim entry point is
+        /// present) -- required when both are present, since file
+        /// coexistence alone is never treated as evidence of a dependency
+        /// between them.
+        #[arg(long)]
+        requires: Option<String>,
+        /// Path (relative to --project-root) of the Nim entry point to
+        /// compile, overriding the standard `nimble init` convention
+        /// (a single `<name>.nimble` + `src/<name>.nim` or `<name>.nim`).
+        #[arg(long)]
+        nim_entry: Option<PathBuf>,
+        #[arg(long)]
+        planner: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Plans and builds a *target project* (issue #26): resolves and
+    /// verifies only the toolchain(s) the project's own demanded
+    /// artifacts actually need, using the same production Nim planner and
+    /// Rust executor as `self-build` -- not a separate/duplicate path,
+    /// and not LAMINARIA's own two-language self-build requirement leaked
+    /// onto an arbitrary target.
+    Build {
+        #[arg(long)]
+        project_root: PathBuf,
+        #[arg(long)]
+        generation_root: PathBuf,
+        #[arg(long)]
+        requires: Option<String>,
+        #[arg(long)]
+        nim_entry: Option<PathBuf>,
+        #[arg(long, default_value = "generation")]
+        generation_label: String,
+        #[arg(long)]
+        planner: Option<PathBuf>,
+        #[arg(long, default_value = "runs")]
+        runs_root: PathBuf,
+        #[arg(long, default_value = "toolchains.lock.toml")]
+        lock: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -314,6 +365,34 @@ fn main() {
             runs_root,
             lock,
             repo_root,
+            json,
+        ),
+        Commands::PlanBuild {
+            project_root,
+            requires,
+            nim_entry,
+            planner,
+            json,
+        } => plan_build_command(project_root, requires, nim_entry, planner, json),
+        Commands::Build {
+            project_root,
+            generation_root,
+            requires,
+            nim_entry,
+            generation_label,
+            planner,
+            runs_root,
+            lock,
+            json,
+        } => build_command(
+            project_root,
+            generation_root,
+            requires,
+            nim_entry,
+            generation_label,
+            planner,
+            runs_root,
+            lock,
             json,
         ),
     };
@@ -730,6 +809,260 @@ fn self_build_command(
         Err(err) => {
             eprintln!("laminaria self-build: {err}");
             2
+        }
+    }
+}
+
+/// Parses `--requires`'s comma-separated value ("rust", "nim", or
+/// "rust,nim") into `project_build::Capability`s. A malformed value is
+/// reported as an error rather than silently ignored -- an explicit
+/// designation the caller typed wrong must not fall back to file-presence
+/// inference as if nothing had been said.
+fn parse_requires(value: &str) -> Result<Vec<laminaria_run::project_build::Capability>, String> {
+    use laminaria_run::project_build::Capability;
+    let mut caps = Vec::new();
+    for part in value.split(',') {
+        let part = part.trim();
+        match part {
+            "rust" => caps.push(Capability::Rust),
+            "nim" => caps.push(Capability::Nim),
+            "" => {}
+            other => {
+                return Err(format!(
+                    "unknown --requires value '{other}' (expected rust, nim, or rust,nim)"
+                ))
+            }
+        }
+    }
+    if caps.is_empty() {
+        return Err("--requires must name at least one of rust, nim".to_string());
+    }
+    Ok(caps)
+}
+
+fn project_build_error_kind(err: &laminaria_run::project_build::ProjectBuildError) -> &'static str {
+    use laminaria_run::project_build::ProjectBuildError::*;
+    match err {
+        NoBuildableSources(_) => "no_buildable_sources",
+        AmbiguousProject { .. } => "ambiguous_project",
+        Toolchain(_) => "toolchain_unresolved",
+        Planner(_) => "planner_call_failed",
+        Rejected(_) => "planner_rejected",
+        InvalidPlan(_) => "invalid_plan",
+        ActionFailed { .. } => "action_failed",
+        Io(_) => "io",
+    }
+}
+
+/// Prints a structured `{ok, error_kind, detail, result}` envelope to
+/// **stdout** whenever `--json` is set -- `plan-build`/`build`'s fix for a
+/// gap noted in `self_build_command`'s own JSON path: a failure there
+/// falls through to plain stderr prose even under `--json`, leaving a
+/// caller parsing stdout as JSON with nothing to parse on error. Every
+/// outcome of the new commands, success or failure, goes through either
+/// this or `print_build_success` so a `--json` caller always gets a
+/// parseable envelope.
+fn print_build_error(
+    command_name: &str,
+    error_kind: &str,
+    detail: String,
+    json: bool,
+    exit_code: i32,
+) -> i32 {
+    if json {
+        let envelope = serde_json::json!({
+            "ok": false,
+            "error_kind": error_kind,
+            "detail": detail,
+            "result": null,
+        });
+        println!("{}", serde_json::to_string_pretty(&envelope).unwrap());
+    } else {
+        eprintln!("laminaria {command_name}: {detail}");
+    }
+    exit_code
+}
+
+fn print_build_success(result: serde_json::Value, json: bool, human: impl FnOnce()) -> i32 {
+    if json {
+        let envelope = serde_json::json!({
+            "ok": true,
+            "error_kind": null,
+            "detail": null,
+            "result": result,
+        });
+        println!("{}", serde_json::to_string_pretty(&envelope).unwrap());
+    } else {
+        human();
+    }
+    0
+}
+
+fn plan_build_command(
+    project_root: PathBuf,
+    requires: Option<String>,
+    nim_entry: Option<PathBuf>,
+    planner: Option<PathBuf>,
+    json: bool,
+) -> i32 {
+    let requires_caps = match requires.as_deref().map(parse_requires) {
+        Some(Ok(caps)) => Some(caps),
+        Some(Err(msg)) => return print_build_error("plan-build", "invalid_requires", msg, json, 2),
+        None => None,
+    };
+    let planner_binary = match resolve_planner_binary(planner) {
+        Ok(planner_binary) => planner_binary,
+        Err(_) => {
+            return print_build_error(
+                "plan-build",
+                "planner_not_found",
+                "could not resolve the laminaria-planner binary (pass --planner explicitly)"
+                    .to_string(),
+                json,
+                2,
+            )
+        }
+    };
+
+    let req = match laminaria_run::project_build::determine_project_requirements(
+        &project_root,
+        requires_caps.as_deref(),
+        nim_entry.as_deref(),
+    ) {
+        Ok(req) => req,
+        Err(err) => {
+            let kind = project_build_error_kind(&err);
+            return print_build_error("plan-build", kind, err.to_string(), json, 2);
+        }
+    };
+
+    let input = laminaria_run::project_build::project_planning_input(&project_root, &req);
+    let outcome = match laminaria_plan::call_planner(&planner_binary, &input) {
+        Ok(outcome) => outcome,
+        Err(err) => {
+            return print_build_error(
+                "plan-build",
+                "planner_call_failed",
+                err.to_string(),
+                json,
+                2,
+            )
+        }
+    };
+
+    if let laminaria_plan::PlanOutcome::Planned(plan) = &outcome {
+        if let Err(err) = laminaria_plan::validate(plan, &input) {
+            return print_build_error("plan-build", "invalid_plan", err.to_string(), json, 2);
+        }
+    }
+
+    match &outcome {
+        laminaria_plan::PlanOutcome::Planned(plan) => print_build_success(
+            serde_json::json!({
+                "plan_id": plan.plan_id,
+                "produced_by": plan.produced_by,
+                "ordered_actions": plan.ordered_actions,
+                "requirements": {
+                    "rust": req.rust,
+                    "nim": req.nim,
+                    "nim_entry": req.nim_entry,
+                },
+            }),
+            json,
+            || {
+                println!("plan_id: {}", plan.plan_id);
+                println!("produced_by: {}", plan.produced_by);
+                println!("ordered_actions: {:?}", plan.ordered_actions);
+            },
+        ),
+        laminaria_plan::PlanOutcome::Rejected(rejection) => print_build_error(
+            "plan-build",
+            "planner_rejected",
+            rejection.reason_detail.clone(),
+            json,
+            1,
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_command(
+    project_root: PathBuf,
+    generation_root: PathBuf,
+    requires: Option<String>,
+    nim_entry: Option<PathBuf>,
+    generation_label: String,
+    planner: Option<PathBuf>,
+    runs_root: PathBuf,
+    lock: PathBuf,
+    json: bool,
+) -> i32 {
+    let requires_caps = match requires.as_deref().map(parse_requires) {
+        Some(Ok(caps)) => Some(caps),
+        Some(Err(msg)) => return print_build_error("build", "invalid_requires", msg, json, 2),
+        None => None,
+    };
+    let planner_binary = match resolve_planner_binary(planner) {
+        Ok(planner_binary) => planner_binary,
+        Err(_) => {
+            return print_build_error(
+                "build",
+                "planner_not_found",
+                "could not resolve the laminaria-planner binary (pass --planner explicitly)"
+                    .to_string(),
+                json,
+                2,
+            )
+        }
+    };
+
+    match laminaria_run::project_build::run_project_generation(
+        &project_root,
+        &generation_root,
+        &planner_binary,
+        &generation_label,
+        &runs_root,
+        &lock,
+        requires_caps.as_deref(),
+        nim_entry.as_deref(),
+    ) {
+        Ok(generation) => print_build_success(
+            serde_json::json!({
+                "plan_id": generation.plan.plan_id,
+                "generation_root": generation.generation_root,
+                "requirements": {
+                    "rust": generation.requirements.rust,
+                    "nim": generation.requirements.nim,
+                    "nim_entry": generation.requirements.nim_entry,
+                },
+                "actions": generation.actions.iter().map(|a| serde_json::json!({
+                    "action_id": a.action_id,
+                    "succeeded": a.succeeded,
+                    "detail": a.detail,
+                    "run_id": a.run.run_id,
+                    "artifacts": a.artifacts,
+                })).collect::<Vec<_>>(),
+            }),
+            json,
+            || {
+                println!("plan_id: {}", generation.plan.plan_id);
+                println!("generation_root: {}", generation.generation_root.display());
+                for action in &generation.actions {
+                    println!(
+                        "  {} -> {} ({})",
+                        action.action_id,
+                        if action.succeeded { "ok" } else { "FAILED" },
+                        action.detail
+                    );
+                    for artifact in &action.artifacts {
+                        println!("    artifact: {}", artifact.display());
+                    }
+                }
+            },
+        ),
+        Err(err) => {
+            let kind = project_build_error_kind(&err);
+            print_build_error("build", kind, err.to_string(), json, 2)
         }
     }
 }
