@@ -513,8 +513,12 @@ pub fn run_compiler_work_plan(
 /// wall-clock interval into `activity_log`, so a concurrency test can
 /// directly confirm two independent actions' dispatches genuinely
 /// overlapped -- see [`ActivityLog`]'s own doc comment for why this
-/// exists instead of comparing aggregate run durations.
-#[cfg(test)]
+/// exists instead of comparing aggregate run durations. `#[cfg(unix)]`
+/// because its only caller needs the real `laminaria-planner` binary,
+/// same as this module's other real-binary tests -- Windows CI never
+/// provisions Nim, so an ungated `#[cfg(test)]` alone would leave this
+/// with no caller there and fail as dead code.
+#[cfg(all(test, unix))]
 fn run_compiler_work_plan_traced(
     plan: &ExecutionPlan,
     store: &mut ArtifactStore,

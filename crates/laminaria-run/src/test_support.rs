@@ -17,7 +17,16 @@
 //! *across-modules* version of it, inside one crate's own single test
 //! binary. Fixed by sharing one `OnceLock` across every module in this
 //! crate that needs the real binary, rather than one per module.
-#![cfg(test)]
+//!
+//! `#![cfg(all(test, unix))]` on the whole file, not just the one
+//! function inside it: this crate's Windows CI job never provisions
+//! Nim, so gating only the function (leaving its `use` items ungated)
+//! would strip its only caller there while leaving the imports
+//! themselves compiled -- unused-import errors under `-D warnings`, the
+//! exact mistake class this session already hit twice elsewhere in this
+//! crate (see `compiler_work_executor.rs`'s own test module doc
+//! comment).
+#![cfg(all(test, unix))]
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
