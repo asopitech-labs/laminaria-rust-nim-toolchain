@@ -43,10 +43,26 @@ pub fn anf_insert(
         .get(caller_name)
         .ok_or_else(|| TransformError::UnknownCaller(caller_name.to_string()))?;
 
-    // A monotonically increasing counter across every call site this
-    // rewrite touches, so two inlined call sites in the same caller never
-    // collide on the same `LocalId`.
-    let mut next_local = 0u32;
+    // Starts *above* every `LocalId` already used anywhere in the
+    // caller's body, not at 0 -- a review caught a real bug here: an id
+    // starting at 0 collides with a pre-existing local (e.g. a real
+    // source-level `let`), and because the interpreter's `Let`-scoping
+    // restores "whatever was bound before" by numeric id, a colliding
+    // fresh binding can silently capture -- and then, once its own scope
+    // ends, leave overwritten -- a same-numbered outer variable a later
+    // hoisted argument still needed to read. Reproduced directly: with
+    // `caller() = combine(b, a)` inlined where `a`/`b` are pre-existing
+    // locals whose ids happen to equal the two fresh ids this transform
+    // would otherwise pick, the second hoisted argument's own value
+    // expression (`Local` referencing the outer `a`) read back the
+    // *already-rebound* slot from the first hoisted argument instead of
+    // `a`'s real value, computing the wrong result silently. Starting
+    // above the caller's own maximum in-scope id makes every fresh
+    // binding this transform introduces provably distinct from anything
+    // it could otherwise shadow.
+    let mut next_local = crate::types::max_local_id_in_stmt(&caller_fact.body)
+        .map(|m| m + 1)
+        .unwrap_or(0);
 
     let new_body = rewrite_calls_in_stmt(
         &caller_fact.body,

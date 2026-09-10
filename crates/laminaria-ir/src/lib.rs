@@ -52,7 +52,18 @@ pub mod rust_frontend;
 pub mod transform;
 pub mod types;
 
-#[cfg(test)]
+// `#[cfg(all(test, unix))]` on the whole module, not `#[cfg(unix)]` on each
+// test function individually -- a CI failure caught the difference
+// directly: gating only the functions left this module's own `use`
+// imports and helpers (`repo_root`, `TEST_INPUTS`) unconditionally
+// compiled on every platform, so the `windows` job (which never
+// provisions Nim, and doesn't need this module's real-toolchain-invoking
+// tests at all) failed on `-D warnings` (`unused_imports`/`dead_code`) for
+// items nothing on that platform could reference. Gating the module
+// itself removes the entire module's contents together, matching every
+// other real-toolchain-invoking test in this workspace (the `windows` job
+// is kept lean).
+#[cfg(all(test, unix))]
 mod fixture_parity_tests {
     //! The actual proof this crate is source-derived, not hand-transcribed
     //! the way `fixtures/laminaria-semantic-substrate-prototype/substrate/
@@ -60,8 +71,6 @@ mod fixture_parity_tests {
     //! for real through `rust_frontend`, and diffs its interpreter output
     //! against a genuinely `rustc`-compiled binary of that exact file, for
     //! the same `TEST_INPUTS` the file itself already declares.
-    //! `#[cfg(unix)]`, matching every other real-toolchain-invoking test in
-    //! this workspace (the `windows` CI job is kept lean).
 
     use crate::interpreter::eval_function;
     use crate::rust_frontend::lower_rust_source;

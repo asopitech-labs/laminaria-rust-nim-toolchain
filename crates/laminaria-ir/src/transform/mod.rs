@@ -573,4 +573,71 @@ mod tests {
         assert_eq!(anf_after.value, baseline.value);
         assert_eq!(effects_of(&anf, "caller"), vec![1, 2]);
     }
+
+    /// Regression test for the exact bug a review reproduced:
+    /// `anf_insert`'s fresh `LocalId` counter used to start at 0
+    /// unconditionally, colliding with pre-existing locals already bound
+    /// in the caller's own body. With `caller() { let a = 1; let b = 2;
+    /// combine(b, a) }` (`a`=`LocalId(0)`, `b`=`LocalId(1)` from the real
+    /// frontend's own numbering) and `combine`'s two fresh locals for its
+    /// call also starting at 0/1, the second hoisted argument's own value
+    /// expression (a reference to the outer `a`) read back the
+    /// already-rebound slot from the first hoisted argument instead of
+    /// `a`'s real value -- silently computing the wrong result. Built
+    /// through the real `nim_frontend` (not hand-constructed IR), so the
+    /// `LocalId`s are exactly what a real caller produces.
+    #[test]
+    fn anf_insert_does_not_capture_a_pre_existing_local_with_a_colliding_fresh_id() {
+        let source = "proc combine(x, y: int32): int32 =\n  x +% y\n\nproc caller(): int32 =\n  let a = 1'i32\n  let b = 2'i32\n  combine(b, a)\n";
+        let program = crate::nim_frontend::lower_nim_source(
+            &PathBuf::from("test.nim"),
+            source,
+            &["combine", "caller"],
+        )
+        .unwrap();
+
+        let baseline = eval_function(&program, "caller", &[]).unwrap();
+        assert_eq!(baseline.value, 3, "combine(b, a) = b +% a = 2 +% 1 = 3");
+
+        let transformed = anf_insert(&program, "caller", "combine").unwrap();
+        let after = eval_function(&transformed, "caller", &[]).unwrap();
+        assert_eq!(
+            after.value, baseline.value,
+            "a colliding fresh LocalId must not change the result"
+        );
+    }
+
+    /// Regression test for repeated/iterated transformation: inlining a
+    /// *second* call on the result of an earlier `anf_insert` call must
+    /// not collide with the `LocalId`s the *first* call already
+    /// introduced (not just the original source-level locals) -- proving
+    /// `max_local_id_in_stmt` is re-scanned from the current body on every
+    /// call, not computed once and reused.
+    #[test]
+    fn anf_insert_applied_twice_in_sequence_does_not_collide_with_its_own_earlier_output() {
+        let source = "proc double(x: int32): int32 =\n  x +% x\n\nproc pick(x, y: int32): int32 =\n  x\n\nproc caller(): int32 =\n  let a = 3'i32\n  let b = 5'i32\n  double(a) +% pick(b, a)\n";
+        let program = crate::nim_frontend::lower_nim_source(
+            &PathBuf::from("test.nim"),
+            source,
+            &["double", "pick", "caller"],
+        )
+        .unwrap();
+
+        let baseline = eval_function(&program, "caller", &[]).unwrap();
+        assert_eq!(baseline.value, 11, "double(3) + pick(5, 3) = 6 + 5 = 11");
+
+        let after_first = anf_insert(&program, "caller", "double").unwrap();
+        assert_eq!(
+            eval_function(&after_first, "caller", &[]).unwrap().value,
+            11
+        );
+
+        let after_second = anf_insert(&after_first, "caller", "pick").unwrap();
+        assert_eq!(
+            eval_function(&after_second, "caller", &[]).unwrap().value,
+            11,
+            "a second, sequential anf_insert call must not collide with the first call's own \
+             introduced locals"
+        );
+    }
 }

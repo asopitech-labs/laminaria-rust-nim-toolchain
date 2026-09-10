@@ -172,3 +172,75 @@ coverage for both languages, three interpreter effect-trace tests, the
 four-case transform comparison battery, and the two real-toolchain parity
 tests described above. `cargo clippy --workspace --all-targets -- -D
 warnings` and `cargo fmt --check` clean.
+
+## Second pass: four real bugs found against real input, not just design
+
+A review of the first pass's actual behavior (not just its design) found
+and reproduced four concrete bugs before this crate's own 24 tests could
+be trusted as sufficient evidence:
+
+1. **P1: `anf_insert`'s fresh `LocalId` counter started at 0
+   unconditionally, colliding with a pre-existing local already bound in
+   the caller's body.** Because the interpreter's `Let`-scoping restores
+   "whatever was bound before" purely by numeric id, a colliding fresh
+   binding can transiently overwrite a same-numbered outer variable's slot
+   while it's in scope -- and if a *later* hoisted argument in the same
+   call site needs to read that outer variable's real value (not the
+   fresh binding's), it silently reads the wrong one instead. Reproduced
+   directly: with `caller() { let a = 1; let b = 2; combine(b, a) }`
+   (`a`/`b` = `LocalId(0)`/`LocalId(1)` from real frontend numbering) and
+   `combine`'s own two fresh locals also picked as `0`/`1`, the second
+   hoisted argument's value expression (meant to read outer `a`) instead
+   read the just-rebound slot holding `b`'s value, computing `4` instead
+   of the correct `3`. Fixed by seeding `next_local` from
+   `types::max_local_id_in_stmt(caller_body) + 1` (a new helper walking
+   both `Let` binding sites and `Local` use sites for the maximum id in
+   scope) instead of `0` -- re-scanned fresh on every `anf_insert` call, so
+   a second, sequential call also can't collide with the *first* call's
+   own introduced locals (confirmed by a dedicated repeated-transformation
+   test).
+2. **P1: Nim's `+%`/`-%`/`*%` were parsed in one same-precedence,
+   left-to-right loop**, so `a +% b *% c` lowered as `(a +% b) *% c`
+   instead of real Nim's actual semantics, `a +% (b *% c)` -- confirmed
+   directly against `lexer.nim`'s own `getPrecedence` (`MulPred = 9` for
+   `*%`, strictly above `PlusPred = 8` for `+%`/`-%`). Fixed with the
+   standard two-level precedence-climbing split (`parse_expr` for `+%`/
+   `-%`, calling `parse_term` for the tighter-binding `*%`) -- the
+   grounding research this frontend was already built on named the actual
+   precedence values; the first pass simply didn't apply them. While
+   fixing this, `parse_condition`'s two sides were also upgraded from
+   `parse_atom_expr` to the full `parse_expr` (a condition like `a +% b !=
+   0` needs a real expression on each side, matching how
+   `rust_frontend::lower_condition` already lowers its own inner
+   expression generally, not just a single atom).
+3. **P1: an unsupported/malformed Nim body could be read only part way
+   through and still reported as a whole-file success.** `parse_body_block`
+   returned as soon as it successfully parsed a tail form (an `if` or a
+   plain expression), without checking whether *another* statement
+   followed at the same indentation -- so two same-indent tail-shaped
+   lines in a row silently lowered using only the first line, with the
+   second left unconsumed and then quietly skipped by
+   `lower_nim_source`'s top-level "not a `proc` declaration" loop (which
+   only recognizes `proc` at column 1 and otherwise just advances token by
+   token). `rust_frontend::lower_block` already rejects the equivalent
+   shape explicitly (`if tail.is_some() { return Err(...) }`); this pass
+   adds the matching check for the indentation-based grammar
+   (`p.same_indent()` checked immediately after the tail is parsed,
+   before restoring the caller's own indent level).
+4. **Separately, CI-only: the `windows` job failed on `cargo clippy`**
+   (`unused_imports`/`dead_code` under `-D warnings`) because only the two
+   real-toolchain parity test *functions* in `lib.rs` were
+   `#[cfg(unix)]`-gated, while their shared `use` imports and helpers
+   (`repo_root`, `TEST_INPUTS`) were not -- so on a platform where neither
+   test compiles, those items become genuinely unused. Fixed by gating
+   the whole `fixture_parity_tests` module with `#[cfg(all(test, unix))]`
+   instead of gating each function individually, matching how other
+   real-toolchain test modules in this workspace are structured.
+
+Six new regression tests (two in `transform/mod.rs`, three in
+`nim_frontend.rs`, none needed for the CI-only fix). Each of the three P1
+fixes was confirmed to actually matter by temporarily reverting it and
+re-running its new test before restoring the fix -- all three failed with
+the exact wrong value/behavior predicted, not a hypothetical concern.
+
+`cargo test --workspace`: 216 passed (up from 211). Clippy and fmt clean.

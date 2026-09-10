@@ -227,3 +227,60 @@ pub fn stmt_contains_call(stmt: &Stmt) -> bool {
         Stmt::Return(expr, _) => expr_contains_call(expr),
     }
 }
+
+/// The highest [`LocalId`] number referenced or bound anywhere in `expr`
+/// (both a binding site, `Expr::Let`'s own `local`, and a use site,
+/// `Expr::Local`), or `None` if it contains no local at all. Used by any
+/// transformation that introduces *new* `LocalId`s (e.g.
+/// `transform::anf_insert`) to pick a starting counter that cannot collide
+/// with a `LocalId` already in scope -- a fresh id that happens to equal
+/// an existing one is a real correctness bug, not just a naming
+/// oddity: the interpreter's `Let`-scoping (save the previous binding,
+/// restore it afterward) is only correct when the *same* numeric id always
+/// refers to the *same* logical binding at any position that can observe
+/// both; reusing a number for a genuinely different binding lets a later
+/// read of the original variable resolve to the new one instead.
+pub fn max_local_id_in_expr(expr: &Expr) -> Option<u32> {
+    match expr {
+        Expr::IntLit(..) | Expr::Param(..) => None,
+        Expr::Local(id, _) => Some(id.0),
+        Expr::WrappingAdd(a, b, _) | Expr::WrappingSub(a, b, _) | Expr::WrappingMul(a, b, _) => {
+            max_opt(max_local_id_in_expr(a), max_local_id_in_expr(b))
+        }
+        Expr::NotEqZero(inner, _) => max_local_id_in_expr(inner),
+        Expr::Call(_, args, _) => args.iter().filter_map(max_local_id_in_expr).max(),
+        Expr::Let {
+            local, value, body, ..
+        } => max_opt(
+            Some(local.0),
+            max_opt(max_local_id_in_expr(value), max_local_id_in_expr(body)),
+        ),
+    }
+}
+
+pub fn max_local_id_in_stmt(stmt: &Stmt) -> Option<u32> {
+    match stmt {
+        Stmt::Let {
+            local, value, body, ..
+        } => max_opt(
+            Some(local.0),
+            max_opt(max_local_id_in_expr(value), max_local_id_in_stmt(body)),
+        ),
+        Stmt::If {
+            cond, then, els, ..
+        } => max_opt(
+            max_local_id_in_expr(cond),
+            max_opt(max_local_id_in_stmt(then), max_local_id_in_stmt(els)),
+        ),
+        Stmt::Return(expr, _) => max_local_id_in_expr(expr),
+    }
+}
+
+fn max_opt(a: Option<u32>, b: Option<u32>) -> Option<u32> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    }
+}

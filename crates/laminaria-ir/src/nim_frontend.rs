@@ -654,6 +654,29 @@ fn parse_body_block(p: &mut Parser) -> PResult<Stmt> {
             span: p.span_here(),
         }]);
     };
+
+    // A review caught a real bug here: once the tail form (an `if` or a
+    // plain expression) was successfully parsed, this function returned
+    // immediately without checking whether *another* statement follows at
+    // the same indentation -- so a genuinely malformed body like two
+    // same-indent tail-shaped lines in a row silently lowered using only
+    // the *first* line, with the rest left unconsumed. Those leftover
+    // tokens were then simply skipped by `lower_nim_source`'s top-level
+    // "not a proc declaration" loop (since they don't start a new `proc`
+    // at column 1), so the whole file still reported success -- a
+    // genuinely broken proc body was read only part way through and
+    // treated as valid. `rust_frontend::lower_block` already rejects this
+    // shape explicitly (`if tail.is_some() { return Err(...) }`); this
+    // mirrors that check for the indentation-based grammar.
+    let result = match result {
+        Ok(_) if p.same_indent() => Err(vec![LoweringError::UnsupportedShape {
+            detail: "a statement follows this block's tail form; only a let-prefix followed by \
+                     exactly one tail expression/if is supported"
+                .to_string(),
+            span: p.span_here(),
+        }]),
+        other => other,
+    };
     p.cur_indent = old_indent;
 
     let mut inner = result?;
@@ -718,10 +741,15 @@ fn parse_if(p: &mut Parser) -> PResult<Stmt> {
 /// (matching `rust_frontend::lower_condition`) is a direct, mechanical
 /// follow-up, not a design gap.
 fn parse_condition(p: &mut Parser) -> PResult<Expr> {
-    let lhs = parse_atom_expr(p)?;
+    // Full `parse_expr` on both sides, not `parse_atom_expr` -- a
+    // condition like `a +% b != 0` (a real expression on the left, not
+    // just a single atom) must be supported the same way `rust_frontend`'s
+    // own `lower_condition` already lowers its inner expression with the
+    // general `lower_expr`, not a restricted atom-only parser.
+    let lhs = parse_expr(p)?;
     if p.is_op("!=") {
         p.bump();
-        let rhs = parse_atom_expr(p)?;
+        let rhs = parse_expr(p)?;
         return combine_zero_comparison(lhs, rhs, p);
     }
     Err(vec![LoweringError::UnsupportedShape {
@@ -746,26 +774,49 @@ fn combine_zero_comparison(lhs: Expr, rhs: Expr, p: &Parser) -> PResult<Expr> {
     Ok(Expr::NotEqZero(Box::new(inner), provenance))
 }
 
-/// A full expression: `wrapping_atom (('+%'|'-%'|'*%') wrapping_atom)*`,
-/// left-associative -- this subset needs no general operator-precedence
-/// parser since `+%`/`-%`/`*%` are this grammar's only infix operators.
+/// A full expression: `term (('+%'|'-%') term)*`, left-associative.
+///
+/// A review caught a real bug in an earlier version that parsed `+%`,
+/// `-%`, and `*%` in one same-precedence loop: real Nim's own
+/// `getPrecedence` (`lexer.nim`, studied directly rather than assumed)
+/// gives `*%` (and `*`/`/`/`\`) `MulPred = 9`, strictly higher than `+%`/
+/// `-%` (and `|`) at `PlusPred = 8` -- i.e. multiplication binds tighter
+/// than addition/subtraction, the same as ordinary arithmetic and as
+/// Rust's own `+`/`*` (which this subset's Rust frontend never has to
+/// parse at all, since it only sees `.wrapping_add/sub/mul(...)` method
+/// calls, an unambiguous syntax with no precedence question). A single
+/// same-precedence loop parsed `a +% b *% c` as `(a +% b) *% c` instead of
+/// the correct `a +% (b *% c)`. Fixed with the standard two-level
+/// precedence-climbing split below; this subset needs no more than two
+/// levels since it has exactly these three infix operators.
 fn parse_expr(p: &mut Parser) -> PResult<Expr> {
-    let mut lhs = parse_atom_expr(p)?;
+    let mut lhs = parse_term(p)?;
     loop {
         let op = match &p.tok().kind {
             TokenKind::Operator(s) if s == "+%" => 0,
             TokenKind::Operator(s) if s == "-%" => 1,
-            TokenKind::Operator(s) if s == "*%" => 2,
             _ => break,
         };
         let provenance = p.provenance_here();
         p.bump();
-        let rhs = parse_atom_expr(p)?;
+        let rhs = parse_term(p)?;
         lhs = match op {
             0 => Expr::WrappingAdd(Box::new(lhs), Box::new(rhs), provenance),
-            1 => Expr::WrappingSub(Box::new(lhs), Box::new(rhs), provenance),
-            _ => Expr::WrappingMul(Box::new(lhs), Box::new(rhs), provenance),
+            _ => Expr::WrappingSub(Box::new(lhs), Box::new(rhs), provenance),
         };
+    }
+    Ok(lhs)
+}
+
+/// `*%`'s level -- real Nim's `MulPred`, strictly higher than `parse_expr`'s
+/// `PlusPred`. See `parse_expr`'s own doc comment for the bug this fixes.
+fn parse_term(p: &mut Parser) -> PResult<Expr> {
+    let mut lhs = parse_atom_expr(p)?;
+    while p.is_op("*%") {
+        let provenance = p.provenance_here();
+        p.bump();
+        let rhs = parse_atom_expr(p)?;
+        lhs = Expr::WrappingMul(Box::new(lhs), Box::new(rhs), provenance);
     }
     Ok(lhs)
 }
@@ -926,5 +977,58 @@ mod tests {
         let fact = &program.functions["f"];
         assert_eq!(fact.provenance.language, SourceLanguage::Nim);
         assert!(fact.provenance.span.start.line >= 1);
+    }
+
+    /// Regression test for the exact bug a review reproduced: `+%`, `-%`,
+    /// and `*%` used to be parsed in one same-precedence, left-to-right
+    /// loop, so `a +% b *% c` lowered as `(a +% b) *% c` instead of the
+    /// real Nim semantics `a +% (b *% c)` (`*%` binds tighter -- real
+    /// Nim's own `MulPred = 9` vs. `PlusPred = 8`, confirmed directly
+    /// against `lexer.nim`'s `getPrecedence`). Chosen values make the two
+    /// groupings produce different, distinguishable results: `(a +% b) *%
+    /// c` = `(2+3)*4` = `20`; the correct `a +% (b *% c)` = `2+(3*4)` =
+    /// `14`.
+    #[test]
+    fn multiplication_binds_tighter_than_addition() {
+        let source = "proc mix(a, b, c: int32): int32 =\n  a +% b *% c\n";
+        let program = lower_nim_source(&path(), source, &["mix"]).unwrap();
+        let outcome = eval_function(&program, "mix", &[2, 3, 4]).unwrap();
+        assert_eq!(
+            outcome.value, 14,
+            "expected a +% (b *% c), got (a +% b) *% c"
+        );
+    }
+
+    /// Mirror in the other operand order, so a fix that merely swapped
+    /// which side binds tighter (rather than genuinely separating the two
+    /// precedence levels) would still be caught.
+    #[test]
+    fn multiplication_binds_tighter_than_addition_reversed() {
+        let source = "proc mix(a, b, c: int32): int32 =\n  a *% b +% c\n";
+        let program = lower_nim_source(&path(), source, &["mix"]).unwrap();
+        let outcome = eval_function(&program, "mix", &[2, 3, 4]).unwrap();
+        assert_eq!(
+            outcome.value, 10,
+            "expected (a *% b) +% c = 6+4, got a *% (b +% c) = 2*7"
+        );
+    }
+
+    /// Regression test for the exact bug a review reproduced: once a
+    /// block's tail form (an `if` or a plain expression) was successfully
+    /// parsed, `parse_body_block` returned immediately without checking
+    /// whether another statement follows at the same indentation --
+    /// a genuinely malformed body (two same-indent tail-shaped lines) was
+    /// read only part way through, with the second line silently left
+    /// unconsumed and then skipped by the top-level "not a `proc`" loop,
+    /// so the whole file still reported success using only the first
+    /// line's semantics.
+    #[test]
+    fn rejects_a_statement_following_the_tail_form_instead_of_silently_ignoring_it() {
+        let source = "proc bad(x: int32): int32 =\n  x +% 1'i32\n  x +% 2'i32\n";
+        let result = lower_nim_source(&path(), source, &["bad"]);
+        assert!(
+            result.is_err(),
+            "a second same-indent line after the tail must be rejected, not silently dropped"
+        );
     }
 }
