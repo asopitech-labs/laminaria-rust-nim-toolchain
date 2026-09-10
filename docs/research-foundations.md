@@ -381,6 +381,8 @@ Normalize Cargo and Nimble metadata into a common workspace model. Add cross-lan
 
 Stabilize `PlanningInput` and `ExecutionPlan`. Implement SCC analysis, constraint resolution, lazy variant expansion, pruning, and critical-path computation in Nim.
 
+See `docs/self-build.md` for the first implemented slice of this contract (issues #8/#6/#4): a production Nim Planning Kernel, a Rust subprocess client, and `laminaria self-build`'s stage0/stage1 protocol. Cycle detection, deterministic ordering, and structured rejection are implemented; SCC-based variant pruning and critical-path computation remain open.
+
 ### Phase 4: Unified action scheduler
 
 Represent generated native compilation, bindings, archives, and linking as actions. Enforce global CPU and memory budgets from the Rust runtime.
@@ -396,6 +398,8 @@ Add a daemon, durable graph state, remote cache, sandbox execution, and an abstr
 ### Phase 7: Self-hosting
 
 Use LAMINARIA to build its own Rust host and Nim planning kernel. Compare successive-stage plans and artifacts to continuously exercise the mixed-language architecture.
+
+See `docs/self-build.md`: stage0 (built by an external tool) → stage1 (built by LAMINARIA's own plan+execute pipeline, with stage1's own planner independently verified to work) is implemented. stage1 → stage2 and generation comparison remain open.
 
 ## 13. Evaluation plan
 

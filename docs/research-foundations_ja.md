@@ -371,6 +371,8 @@ Cargo と Nimble の metadata を共通 workspace model へ正規化し、言語
 
 `PlanningInput` と `ExecutionPlan` を安定化する。Nim で SCC analysis、constraint resolution、lazy variant expansion、pruning、critical-path computation を実装する。
 
+この契約の最初の実装スライス(issue #8/#6/#4)は `docs/self-build_ja.md` を参照: 本番Nim Planning Kernel、Rustサブプロセスクライアント、`laminaria self-build` の stage0/stage1 プロトコル。サイクル検出・決定的順序付け・構造化された却下は実装済み。SCCベースのvariant pruningとcritical-path computationは未着手。
+
 ### Phase 4: Unified action scheduler
 
 generated native compilation、binding、archive、linking を action として表現し、Rust runtime が global CPU / memory budget を強制する。
@@ -386,6 +388,8 @@ generated native compilation、binding、archive、linking を action として�
 ### Phase 7: Self-hosting
 
 LAMINARIA 自身の Rust host と Nim planning kernel を LAMINARIA で build する。連続 stage の plan と artifact を比較し、mixed-language architecture を継続的に検証する。
+
+`docs/self-build_ja.md` を参照: stage0(外部ツールでビルド)→ stage1(LAMINARIA自身のplan+executeパイプラインでビルドし、stage1自身のプランナーが動作することを独立に検証済み)は実装済み。stage1 → stage2 と世代間比較は未着手。
 
 ## 13. 評価計画
 
