@@ -148,3 +148,48 @@ the three newly-wired fields. `cargo test --workspace`: 259 passed (was
   here are this round's first fixed choice, not claimed final -- a future
   contract version may still change them, covered by the change tests
   above rather than left as an unstated assumption.
+
+## Third pass: a review's P1 finding -- identity propagation across a producer/consumer edge
+
+Grounded in Buck2's own artifact-identity model (`BuildArtifact`: an
+artifact's identity *is* its producing action's key,
+`app/buck2_artifact/src/artifact/build_artifact.rs`) -- one more real gap
+the second pass's own fixes left open, confirmed by reproducing it
+directly against `valid_transform_action()`'s own test fixture (its
+`outputs` named an unrelated literal string, `"out-1"`, with zero
+relationship to the action's own verified `id`):
+
+**`validate_compiler_work_action` verified `action.id` was internally
+self-consistent with its own descriptor, but never checked that
+`action.id` is actually *published* anywhere `action.outputs`
+declares.** Without this, a producer's own semantic (content) change --
+which does change its recomputed `action.id` -- would never propagate
+into what its output is actually *called* on the wire: a downstream
+consumer's stale reference to the producer's *old* identity could still
+silently resolve to this same action's current (but now semantically
+different) output, since nothing ties "the id I claim" to "the id I
+actually publish."
+
+Fixed with a new `CompilerWorkContractError::OutputIdentityNotPublished`,
+checked right after the existing `WorkIdMismatch` check: `action.outputs`
+must contain `ArtifactRef::Declared { artifact_id: action.id }` (an
+*additional* output alongside it is fine -- the requirement is presence,
+not exclusivity). This closes the loop with `validate::validate`'s
+already-existing producer/consumer matching: once a producer's own
+output id is *required* to be its real content-derived identity, a
+consumer still referencing a *stale* id (from before the producer's
+content changed) no longer resolves to any real producer in the plan at
+all, and the existing `UnknownProducer` check catches it structurally,
+without needing a bespoke cross-action check of its own.
+
+Every existing compiler-work test fixture across `compiler_work.rs`,
+`validate.rs`, and `nim_planner_client.rs` had this same
+non-self-referential `outputs` shape and needed the same one-line fix
+(publish the action's own `id`, not an unrelated literal) -- fixed
+consistently, plus 2 new dedicated tests (the rejection, and the positive
+control confirming an *additional* output alongside the published
+identity still validates).
+
+`cargo test -p laminaria-plan`: 40 passed (was 38). Workspace total: 311
+(was 304, combined with the `laminaria-ir` fixes in the same round).
+Clippy/fmt clean; real-planner-binary round-trip test still green.

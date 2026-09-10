@@ -552,7 +552,7 @@ mod tests {
             kind: ActionKind::TransformFunction,
             command_identity: "transform_function".to_string(),
             inputs: vec![ArtifactRef::declared("out-a")],
-            outputs: vec![ArtifactRef::declared("out-c")],
+            outputs: vec![ArtifactRef::declared(&id)],
             compiler_work: Some(descriptor.clone()),
         };
 
@@ -622,7 +622,7 @@ mod tests {
             kind: ActionKind::TransformFunction,
             command_identity: "transform_function".to_string(),
             inputs: vec![ArtifactRef::declared("out-a")],
-            outputs: vec![ArtifactRef::declared("out-c")],
+            outputs: vec![ArtifactRef::declared(&id)],
             compiler_work: Some(descriptor),
         };
 

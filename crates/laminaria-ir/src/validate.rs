@@ -66,6 +66,15 @@ pub enum ProgramValidationError {
     /// subset has no general boolean value, so a condition used as a
     /// value is exactly the "condition/value" distinction A2 names.
     ConditionUsedAsValue { function: String },
+    /// The reverse direction of the same distinction, caught by a review:
+    /// an `Stmt::If`'s own `cond` is *not* a `NotEqZero` at all (a bare
+    /// value used directly as a condition, e.g. `if x { .. }` with no
+    /// comparison). The interpreter's own `eval_stmt` would still treat
+    /// any value as an implicit `!= 0` test, so this was previously
+    /// accepted silently -- but this subset's own declared grammar has
+    /// exactly one condition form, and a real `if` position must actually
+    /// contain it, not merely be permitted to.
+    ValueUsedAsCondition { function: String },
 }
 
 impl std::fmt::Display for ProgramValidationError {
@@ -111,6 +120,12 @@ impl std::fmt::Display for ProgramValidationError {
                 f,
                 "function {function:?} uses a condition (NotEqZero) somewhere other than an \
                  if's own condition position -- this subset has no general boolean value"
+            ),
+            ProgramValidationError::ValueUsedAsCondition { function } => write!(
+                f,
+                "function {function:?} uses a bare value directly as an if's own condition, not \
+                 a NotEqZero comparison -- this subset's only condition form must actually \
+                 appear there"
             ),
         }
     }
@@ -193,6 +208,18 @@ fn validate_stmt(
         Stmt::If {
             cond, then, els, ..
         } => {
+            // A review caught this check was one-directional: it rejected
+            // a `NotEqZero` used as a value, but never required an `If`'s
+            // own `cond` to actually *be* one -- the interpreter's own
+            // `eval_stmt` implicitly treats any value as a `!= 0` test, so
+            // a bare value directly in condition position (never produced
+            // by either real frontend, but constructible at the IR level)
+            // previously validated successfully.
+            if !matches!(cond, Expr::NotEqZero(..)) {
+                return Err(ProgramValidationError::ValueUsedAsCondition {
+                    function: fn_name.to_string(),
+                });
+            }
             validate_expr(fn_name, cond, param_count, bound, program, true)?;
             validate_stmt(fn_name, then, param_count, bound, program)?;
             validate_stmt(fn_name, els, param_count, bound, program)
@@ -531,6 +558,33 @@ mod tests {
             },
         ));
         assert!(validate_program(&program).is_ok());
+    }
+
+    /// A review caught the reverse direction of the condition/value
+    /// distinction: a bare value (not a `NotEqZero`) used directly as an
+    /// `If`'s own `cond` -- the interpreter's own `eval_stmt` would still
+    /// treat it as an implicit `!= 0` test, so this previously validated
+    /// successfully despite this subset's declared grammar having exactly
+    /// one condition form.
+    #[test]
+    fn a_bare_value_used_directly_as_an_ifs_condition_is_rejected() {
+        let mut program = Program::default();
+        program.insert(fact(
+            "f",
+            1,
+            Stmt::If {
+                cond: Expr::Param(0, prov()),
+                then: Box::new(Stmt::Return(Expr::IntLit(1, IntWidth::I32, prov()), prov())),
+                els: Box::new(Stmt::Return(Expr::IntLit(0, IntWidth::I32, prov()), prov())),
+                provenance: prov(),
+            },
+        ));
+        assert_eq!(
+            validate_program(&program),
+            Err(ProgramValidationError::ValueUsedAsCondition {
+                function: "f".to_string(),
+            })
+        );
     }
 
     /// Source-level shadowing: two distinct `Let`s (distinct `LocalId`s,

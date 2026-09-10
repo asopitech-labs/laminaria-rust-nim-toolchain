@@ -368,6 +368,24 @@ pub enum CompilerWorkContractError {
         action_id: String,
         artifact_id: String,
     },
+    /// This action's own `outputs` never declares `ArtifactRef::Declared`
+    /// with `artifact_id == action.id` -- so `action.id` (already verified
+    /// to be the real, content-derived identity by `recompute_work_id`) is
+    /// never actually *published* as anything a consumer's dependency
+    /// wait, or `semantic_input_artifact_ids` reference, can resolve to.
+    /// Without this, a producer's own semantic (content) change -- which
+    /// does change its recomputed `action.id` -- would never propagate
+    /// into what its output is actually *called* on the wire, so a
+    /// downstream consumer's stale reference to the producer's *old*
+    /// identity could still silently resolve to this same action's
+    /// current output. Requiring the producer's own output artifact id to
+    /// *be* its verified identity is what makes a semantic change on one
+    /// side of an edge force a real mismatch on the other (Buck2's own
+    /// `BuildArtifact` model: an artifact's identity *is* its producing
+    /// action's key, `app/buck2_artifact/src/artifact/build_artifact.rs`).
+    OutputIdentityNotPublished {
+        action_id: String,
+    },
 }
 
 impl std::fmt::Display for CompilerWorkContractError {
@@ -412,6 +430,13 @@ impl std::fmt::Display for CompilerWorkContractError {
                 "action {action_id:?}'s compiler_work.semantic_input_artifact_ids names \
                  {artifact_id:?}, which is not among its own Action.inputs -- this work would \
                  read an artifact no dependency-readiness wait covers"
+            ),
+            CompilerWorkContractError::OutputIdentityNotPublished { action_id } => write!(
+                f,
+                "action {action_id:?}'s outputs never declares its own verified id \
+                 ({action_id:?}) as a Declared artifact -- a producer's own semantic (content) \
+                 change would never propagate into what a consumer can actually resolve its \
+                 output to"
             ),
         }
     }
@@ -544,7 +569,15 @@ fn recompute_work_id(
 ///    than trusted by convention (this crate's own doc comments
 ///    previously only *said* "the id is derived, not chosen," without
 ///    anything enforcing it).
-/// 4. **Semantic dependency correspondence**: every entry in
+/// 4. **The producer publishes its own identity**: `action.outputs` must
+///    declare `ArtifactRef::Declared` with `artifact_id == action.id` --
+///    otherwise a producer's own semantic (content) change, which does
+///    change its recomputed `action.id`, would never propagate into what
+///    a consumer's dependency wait/`semantic_input_artifact_ids`
+///    reference can actually resolve to (see
+///    [`CompilerWorkContractError::OutputIdentityNotPublished`]'s own doc
+///    comment).
+/// 5. **Semantic dependency correspondence**: every entry in
 ///    `descriptor.semantic_input_artifact_ids` must appear among
 ///    `action.inputs`'s own declared artifact ids -- ported directly from
 ///    Buck2's own invariant (`build_action_no_redirect`: `action.inputs()`
@@ -589,6 +622,23 @@ pub fn validate_compiler_work_action(action: &Action) -> Result<(), CompilerWork
         return Err(CompilerWorkContractError::WorkIdMismatch {
             action_id: action.id.clone(),
             recomputed,
+        });
+    }
+
+    // `action.id` is now a verified, content-derived identity -- but that
+    // alone doesn't propagate a producer's own semantic change to its
+    // consumers unless the producer actually *publishes* that identity as
+    // one of its own declared outputs. Without this, a consumer's
+    // `semantic_input_artifact_ids`/`inputs` could keep referencing a
+    // *stale* id even after the real producer's content (and therefore
+    // its real `action.id`) changed, with nothing catching the
+    // divergence. See this error variant's own doc comment.
+    let publishes_own_identity = action.outputs.iter().any(
+        |output| matches!(output, ArtifactRef::Declared { artifact_id } if *artifact_id == action.id),
+    );
+    if !publishes_own_identity {
+        return Err(CompilerWorkContractError::OutputIdentityNotPublished {
+            action_id: action.id.clone(),
         });
     }
 
@@ -814,11 +864,11 @@ mod tests {
                 "0.1.0",
             );
             Action {
+                outputs: vec![ArtifactRef::declared(&id)],
                 id,
                 kind: ActionKind::TransformFunction,
                 command_identity: "transform_function".to_string(),
                 inputs: vec![ArtifactRef::declared(&validated_program_id)],
-                outputs: vec![ArtifactRef::declared("out-1")],
                 compiler_work: Some(descriptor),
             }
         }
@@ -974,6 +1024,38 @@ mod tests {
                     artifact_id: "prog-1".to_string(),
                 })
             );
+        }
+
+        /// A review caught this exact gap: a producer's own verified,
+        /// content-derived `id` must actually be *published* as one of
+        /// its own declared outputs, or a producer's semantic change
+        /// (which does change its recomputed id) never propagates into
+        /// what a stale downstream reference would resolve to.
+        #[test]
+        fn a_producer_whose_outputs_never_publish_its_own_verified_id_is_rejected() {
+            let mut action = valid_transform_action();
+            // A real, unrelated logical name -- not this action's own
+            // verified id -- exactly the shape a real bug reproduced.
+            action.outputs = vec![ArtifactRef::declared("out-1")];
+            assert_eq!(
+                validate_compiler_work_action(&action),
+                Err(CompilerWorkContractError::OutputIdentityNotPublished {
+                    action_id: action.id.clone(),
+                })
+            );
+        }
+
+        /// The positive control: an *additional* output alongside the
+        /// action's own verified id is fine -- the requirement is that
+        /// the id is published *somewhere* in `outputs`, not that it is
+        /// the *only* one.
+        #[test]
+        fn an_additional_output_alongside_the_published_identity_still_validates() {
+            let mut action = valid_transform_action();
+            action
+                .outputs
+                .push(ArtifactRef::declared("a-secondary-output"));
+            assert_eq!(validate_compiler_work_action(&action), Ok(()));
         }
     }
 }

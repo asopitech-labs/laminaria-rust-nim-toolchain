@@ -578,3 +578,43 @@ the review's own "言語対応範囲を広げる指摘ではありません").
 
 `cargo test -p laminaria-ir`: 96 passed (was 65). Workspace total: 304
 (was 272). Clippy/fmt clean.
+
+## Seventh pass: a review's 2 P1 findings on the laminaria-ir side
+
+Grounded in rustc's own `StripUnconfigured::configure` (`cfg` acts at the
+crate-root level too, not only per-item) and the condition/value
+distinction A2 itself introduced -- 2 more real, confirmed bugs, both
+verified by reverting and re-running before restoring the fix:
+
+1. **P1: a file-level inner attribute (`#![cfg(..)]`) was never
+   checked.** `rust_frontend::lower_rust_source` only ever inspected
+   `file.items`, never `file.attrs` -- confirmed by reverting: a
+   `#![cfg(target_os = "linux")]` file silently `Ok(Program{..})`'d.
+   Fixed with the existing `reject_unsupported_attrs` helper, now also
+   called on `file.attrs` before any item is even looked at.
+2. **P1: a requested function declared twice in the same file was
+   silently collapsed to one definition.** `by_name: BTreeMap<String,
+   &ItemFn>` used a plain `insert`, so a duplicate name just overwrote
+   the earlier entry with no diagnostic -- confirmed by reverting: two
+   `fn f` definitions with different bodies silently lowered using
+   whichever happened to be scanned last. Real Rust rejects a duplicate
+   item definition outright. Fixed by grouping into `Vec<&ItemFn>` per
+   name and diagnosing when a *requested* name resolves to more than one
+   declaration.
+
+Plus a third, separate finding closed in `validate.rs`:
+
+3. **P2: the condition/value check A2 introduced was one-directional.**
+   It correctly rejected a `NotEqZero` used as a general value, but never
+   required an `Stmt::If`'s own `cond` to actually *be* one -- the
+   interpreter's own `eval_stmt` implicitly treats any value as a `!= 0`
+   test, so a bare value directly in condition position (not producible
+   by either real frontend, but constructible at the IR level) validated
+   successfully. Confirmed by reverting: `Stmt::If{cond: Expr::Param(0),
+   ..}` passed `validate_program` before this fix. New
+   `ProgramValidationError::ValueUsedAsCondition`, checked alongside the
+   existing `ConditionUsedAsValue`.
+
+5 new tests (4 in `rust_frontend.rs`, 1 in `validate.rs`), plus
+`SUBSET.md` row updates for both. `cargo test -p laminaria-ir`: 101
+passed (was 96). Workspace total: 311 (was 304). Clippy/fmt clean.

@@ -142,19 +142,44 @@ pub fn lower_rust_source(
         )]
     })?;
 
-    let mut by_name: BTreeMap<String, &ItemFn> = BTreeMap::new();
+    let mut diagnostics: Vec<Diagnostic> = Vec::new();
+
+    // A review caught a real gap: this module only ever inspects the
+    // *items* it's asked about, but a file-level inner attribute
+    // (`#![cfg(..)]`, `#![feature(..)]`, ...) can change what the file
+    // even means as a whole -- rustc's own `StripUnconfigured::configure`
+    // (issue #27's reference table) applies `cfg` at the crate-root level
+    // too, not only per-item. This subset implements no `cfg` at all, so
+    // a file-level attribute must be diagnosed the same way a function's/
+    // parameter's/let's/if's own attribute already is, not silently
+    // ignored because only `file.items` was ever walked.
+    let mut file_attr_errors = Vec::new();
+    reject_unsupported_attrs(&file.attrs, &mut file_attr_errors);
+    diagnostics.extend(
+        file_attr_errors
+            .into_iter()
+            .map(|e| Diagnostic::from_lowering_error(e, SourceLanguage::Rust)),
+    );
+
+    // Grouped by name (not overwritten) specifically so a duplicate
+    // declaration of a *requested* function can be diagnosed below,
+    // instead of `BTreeMap::insert` silently keeping whichever
+    // declaration happens to appear last in the file -- a review caught
+    // that this previously picked one definition with no diagnostic at
+    // all, even though real Rust rejects a duplicate item definition
+    // outright as a hard compile error.
+    let mut by_name: BTreeMap<String, Vec<&ItemFn>> = BTreeMap::new();
     for item in &file.items {
         if let Item::Fn(f) = item {
-            by_name.insert(f.sig.ident.to_string(), f);
+            by_name.entry(f.sig.ident.to_string()).or_default().push(f);
         }
     }
     let declared_functions: std::collections::BTreeSet<String> =
         requested_functions.iter().map(|s| s.to_string()).collect();
 
     let mut program = Program::default();
-    let mut diagnostics = Vec::new();
     for name in requested_functions {
-        let Some(item_fn) = by_name.get(*name) else {
+        let Some(candidates) = by_name.get(*name) else {
             diagnostics.push(Diagnostic::from_lowering_error(
                 LoweringError::UnsupportedShape {
                     detail: format!("requested function '{name}' is not declared in this file"),
@@ -167,6 +192,25 @@ pub fn lower_rust_source(
             ));
             continue;
         };
+        if candidates.len() > 1 {
+            diagnostics.push(Diagnostic::from_lowering_error(
+                LoweringError::UnsupportedShape {
+                    detail: format!(
+                        "'{name}' is declared {} times in this file -- real Rust rejects a \
+                         duplicate item definition outright, so this lowering does not pick one \
+                         arbitrarily either",
+                        candidates.len()
+                    ),
+                    span: SourceSpan {
+                        start: to_source_position(candidates[1].span().start()),
+                        end: to_source_position(candidates[1].span().end()),
+                    },
+                },
+                SourceLanguage::Rust,
+            ));
+            continue;
+        }
+        let item_fn = candidates[0];
         match lower_item_fn(source_file, item_fn, &declared_functions) {
             Ok(fact) => program.insert(fact),
             Err(errors) => diagnostics.extend(
@@ -918,6 +962,59 @@ mod tests {
         let source = "#[cfg(target_os = \"linux\")]\nfn f(x: i32) -> i32 { x }";
         let result = lower_rust_source(&path(), source, &["f"]);
         assert!(result.is_err());
+    }
+
+    /// A review caught a real gap: only `file.items` (and their own
+    /// attributes) were ever inspected -- a file-level *inner* attribute
+    /// (`#![cfg(..)]`), which can change what the whole file means
+    /// (rustc's own `StripUnconfigured::configure` applies `cfg` at the
+    /// crate-root level too, per issue #27's reference table), was never
+    /// checked at all.
+    #[test]
+    fn rejects_a_file_level_cfg_attribute() {
+        let source = "#![cfg(target_os = \"linux\")]\nfn f(x: i32) -> i32 { x }";
+        let result = lower_rust_source(&path(), source, &["f"]);
+        assert!(result.is_err(), "{result:?}");
+    }
+
+    /// A plain file-level doc comment (`//!`) carries no semantic effect
+    /// and must still be accepted, mirroring `accepts_a_plain_doc_comment`
+    /// at the item level.
+    #[test]
+    fn accepts_a_file_level_doc_comment() {
+        let source = "//! A file doc comment.\nfn f(x: i32) -> i32 { x }";
+        let result = lower_rust_source(&path(), source, &["f"]);
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    /// A review caught a real gap: two functions in the same file sharing
+    /// a *requested* function's name were silently collapsed to whichever
+    /// one `BTreeMap::insert` saw last, with no diagnostic at all -- real
+    /// Rust rejects a duplicate item definition outright as a hard
+    /// compile error, so this lowering must not pick one arbitrarily
+    /// either.
+    #[test]
+    fn rejects_a_duplicate_declaration_of_a_requested_function() {
+        let source = "fn f(x: i32) -> i32 { x }\nfn f(x: i32) -> i32 { x.wrapping_add(1) }";
+        let result = lower_rust_source(&path(), source, &["f"]);
+        assert!(
+            result.is_err(),
+            "a function declared twice must be rejected, not silently resolved to one definition"
+        );
+    }
+
+    /// The same duplicate must be caught even when it's a function another
+    /// requested function calls, not only when requested directly.
+    #[test]
+    fn rejects_a_duplicate_declaration_of_a_function_called_by_another_requested_function() {
+        let source =
+            "fn f(x: i32) -> i32 { x }\nfn f(x: i32) -> i32 { x }\nfn g(x: i32) -> i32 { f(x) }";
+        let result = lower_rust_source(&path(), source, &["f", "g"]);
+        assert!(
+            result.is_err(),
+            "'f', requested (transitively, via 'g') for lowering, is still declared twice and \
+             must be rejected"
+        );
     }
 
     /// A review caught that only `ItemFn.attrs` was ever checked -- `cfg`

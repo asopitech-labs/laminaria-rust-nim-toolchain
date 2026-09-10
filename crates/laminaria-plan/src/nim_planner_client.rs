@@ -384,7 +384,7 @@ mod tests {
             budget_token: "budget-1".to_string(),
         };
         let input = PlanningInput::new(
-            vec!["transformed-1".to_string()],
+            vec![transform_id.clone()],
             vec![
                 Action {
                     id: lower_id.clone(),
@@ -399,7 +399,12 @@ mod tests {
                     kind: ActionKind::TransformFunction,
                     command_identity: "transform_function".to_string(),
                     inputs: vec![ArtifactRef::declared(&lower_id)],
-                    outputs: vec![ArtifactRef::declared("transformed-1")],
+                    // A producer's own verified id must be one of its own
+                    // published outputs (issue #27 review:
+                    // `OutputIdentityNotPublished`) -- not an unrelated
+                    // logical name, or a producer's own semantic change
+                    // would never propagate to what a consumer resolves.
+                    outputs: vec![ArtifactRef::declared(&transform_id)],
                     compiler_work: Some(transform_descriptor.clone()),
                 },
             ],
