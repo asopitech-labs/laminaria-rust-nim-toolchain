@@ -641,14 +641,30 @@ jobs:
   # host's, and bootstraps its own Nim from C sources -- a large, risky
   # time investment for this session, versus this job's already-working
   # Linux binary).
+  # nlvm is Nim's existing LLVM-direct backend -- a reference/exploratory
+  # route this job observes for comparison, never LAMINARIA's own owned
+  # target-generation path (docs/compiler-ownership-contract.md governs
+  # that distinction). This job's own continuous-release asset used to be
+  # hardcoded by name; nlvm cuts a new "continuous" release under the
+  # same tag on every push to its own master, so that name goes stale the
+  # moment upstream rebuilds -- scripts/resolve_nlvm_asset.py resolves it
+  # freshly, verified, every run instead.
   nlvm-experiment:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
+      - name: Resolve nlvm's Linux native continuous-release asset
+        run: |
+          python3 scripts/resolve_nlvm_asset.py > nlvm-asset.env
+          cat nlvm-asset.env
+          cat nlvm-asset.env >> "$GITHUB_ENV"
+
       - name: Download nlvm (Linux continuous build)
         run: |
-          curl -fLo nlvm.tar.xz https://github.com/arnetheduck/nlvm/releases/download/continuous/nlvm-linux-a9c3397.tar.xz
+          echo "resolved nlvm asset: name=$NLVM_ASSET_NAME url=$NLVM_ASSET_URL sha256=$NLVM_ASSET_SHA256"
+          curl -fLo nlvm.tar.xz "$NLVM_ASSET_URL"
+          echo "$NLVM_ASSET_SHA256  nlvm.tar.xz" | sha256sum -c -
           tar xf nlvm.tar.xz
           find . -maxdepth 4 -iname 'nlvm*' -type f -exec chmod +x {} \;
           find . -maxdepth 4 -iname 'nlvm*' -type f
