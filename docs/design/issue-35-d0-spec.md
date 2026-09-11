@@ -3,7 +3,8 @@
 - 対象Issue: [#35](https://github.com/asopitech-labs/laminaria-rust-nim-toolchain/issues/35)（親: [#28](https://github.com/asopitech-labs/laminaria-rust-nim-toolchain/issues/28)）
 - 位置付け: 本書は **ゴール設定担当（Claude）による提出仕様案**。ユーザーから採否記録を依頼された指示者（Codex）がセクション6で判定する。本書単独でD1着手を許可しない。
 - 審査状態: **要改訂・D1未発行**（2026-09-11、提出commit `443b5f2959b1aa72be8cfb913f80fd92d79239f6`を審査、判定revision `issue35-d0-review-443b5f2-v1`）。セクション6は指示者の審査記録であり、提出者はこれを改変しない。
-- **改訂状態（本改訂）**: セクション6のR1〜R5に対応して本書・cases.yaml・D1草案の3点を改訂した。対応内容の一覧はセクション7に記す。セクション0〜5・付録Aは改訂後の提出案。セクション6は審査時点の記録として保持し、改変していない。
+- **改訂状態（第1回改訂、commit `217b0c1`）**: セクション6のR1〜R5に対応して本書・cases.yaml・D1草案の3点を改訂した。対応内容の一覧はセクション7に記す。
+- **改訂状態（第2回改訂、本改訂）**: 指示者による`217b0c1`の読み取りレビュー（発行を妨げる指摘6点、R1〜R5の残件）に対応した。対応内容の一覧はセクション8に記す。セクション0〜5・付録Aは改訂後の提出案。セクション6・7は各回の記録として保持し、改変していない。
 - 基準commit: `b875e43303a7ec9a5215897ed9dd08c98b45c812`（2026-09-11時点のHEAD、tree clean）
 - 併読ファイル:
   - [issue-35-d0-cases.yaml](issue-35-d0-cases.yaml) — 機械可読case定義（本書各節が参照するcase IDの実体）
@@ -85,7 +86,7 @@ nim-planner               (Nim; contract.nim + planning_kernel.nim + laminaria_p
 | **M1**（Rust-only、複数app→共有lib） | reference | **構成として自己充足**（Cargoの実挙動として） | `laminaria-rustc-wrapper`/`laminaria-cc-wrapper`（`crates/laminaria-run/Cargo.toml:10-16`の2 `[[bin]]`）が`laminaria-run`自身のlibモジュールを共有。加えて`laminaria-cli`が複数経路で`laminaria-fingerprint`/`laminaria-plan`へ到達する（§2.1） | 不要。case化のみ行う。Cargoの重複排除自体はLAMINARIA独自scheduler証拠として数えない |
 | **M2**（Nim-only、複数app→共有lib） | reference | **自己充足** | `nim-planner/src/laminaria_planner.nim`と`nim-planner/tests/test_planning_kernel.nim`がともに`contract.nim`+`planning_kernel.nim`を`import`（`laminaria_planner.nim:23-24`, `test_planning_kernel.nim:8-9`実測）。指示者はこのunittestバイナリを第2consumerとして採用した（付録A不要） | 不要 |
 | **M3-topology**（独立Rust群+独立Nim群、cross-edgeなし・構成のみ） | bootstrap | **自己充足（構成のみ）** | 自己ビルドの`SelfBuild`が構成する`PlanningInput`は`compile-rust-host`（`ActionKind::CargoBuild`）と`compile-nim-planner`（`ActionKind::NimBuild`）を互いのinputs/outputsで接続せず、`integrate`のみが両方を消費する（`nim_planner_client.rs::sample_input()`）。ただし`CargoBuild`/`NimBuild`は`compiler_work_executor`が扱わない委譲ビルド種別であり、この経路の並行実行はLAMINARIA独自scheduler証拠ではない | 不要（構成の証拠として） |
-| **M3-owned**（独立な2つの実言語鎖をowned schedulerがCPU budget 1/2で並行実行） | **owned** | **自己充足・実装済み** | `crates/laminaria-run/src/compiler_work_executor.rs`の`independent_rust_and_nim_chains_agree_across_cpu_budgets_and_run_concurrently_under_budget_two`が、実Rust source由来チェーンと実Nim source由来チェーンを`LowerSource→ValidateIr→TransformFunction→ValidateIr→EvaluateEvidence`で独立に並行実行し、budget1/2の結果一致と実測並行度(peak=1/2)を確認済み | 不要。既存テストをcase登録するのみ |
+| **M3-owned**（独立な2つの実言語鎖をowned schedulerがCPU budget 1/2で並行実行） | **owned** | **自己充足・実装済み** | `crates/laminaria-run/src/compiler_work_executor.rs`の`independent_rust_and_nim_chains_agree_across_cpu_budgets_and_run_concurrently_under_budget_two`（同ファイル1604行目付近）が、実Rust source由来チェーンと実Nim source由来チェーンをそれぞれ`LowerSource→ValidateIr→EvaluateEvidence`（3 Action、TransformFunctionは含まない、`plan.actions.len()==6`のassertで確認済み）で独立に並行実行し、budget1/2の結果一致と実測並行度(peak=1/2)を確認済み。**訂正（本改訂）**: 前版は別テスト（`the_full_lower_validate_transform_validate_evaluate_pipeline_runs_end_to_end`）が使う5段(Transform込み)のパイプラインと本テストの3段パイプラインを混同していた。新規Transform実装・テストは追加しない | 不要。既存テストをcase登録するのみ |
 | **M4**（Rust entry→Nim lib） | reference | 自身の製品コードでは未充足。**既存fixtureで充足（reference）**: `rust-nim-c-abi-baseline`（scalarのみ）、`mixed-rust-nim-executable`（配列ポインタ往復）、`boundary-heavy-workload`（100万回呼び出し） | Explore agent report; 各`main.rs`のassert定数 | 不要（既存資産を正式case化。owned証拠ではないと明記） |
 | **M5**（Nim entry→Rust lib） | reference | 同上、自身の製品コードでは未充足。**既存fixtureで充足（reference）**: `direct-native-link/nim-bin` | `fixtures/direct-native-link/NOTES.md`全体 | 不要（既存資産を正式case化。owned証拠ではないと明記） |
 | **M6**（複数経路が単一producerへ収束、重複要求の合流） | reference | **構成として自己充足（訂正版）** | `laminaria-cli`（単一の最上位要求）は`laminaria-plan`へ2経路（直接依存、および`laminaria-run`経由）、`laminaria-fingerprint`へ3経路以上で収束する。Cargoが`laminaria-plan`/`laminaria-fingerprint`を経路数に関わらず1回だけコンパイルすることを実測で確認できる（§2.1） | 不要 |
@@ -117,18 +118,73 @@ nim-planner               (Nim; contract.nim + planning_kernel.nim + laminaria_p
 | 中 | 8 | 4 | `stage-04` |
 | 大 | 16 | 8 | `stage-08` |
 
-**鎖側の実装（各規模共通の形）**: `stage-01..NN`は`deep-critical-path-graph`と同じ変換族（splitmix64風avalanche mix、popcount fold、modulus正規化を段番号で周期的に切り替え）を再実装する。`stage-NN::run(x: u64) -> u64`は`stage-(NN-1)::run(x)`を呼んだ結果に自段の変換を適用する形を維持し、`SEED: u64 = 20260909`を入力とする。
+**鎖側の実装（本改訂で完全に閉じた式として確定、P1/R3対応 — 「splitmix64風」のような非閉形式表現は用いない）**: `deep-critical-path-graph`は参照インスピレーションとしてのみ引用し、本fixture自身の変換は以下の3つの独立した変換として新規に定義する（`deep-critical-path-graph`の12段の具体的な各段実装を流用するのではない）。
 
-**分岐の実装**: 分岐点`stage-BB`（BBは上表）の出力を、鎖の継続（`stage-(BB+1)`）と、wide leaf群の共通入力の両方に渡す（`stage-BB`は2つのconsumerを持つ、実際のfan-outノード）。
+```text
+transform_0(x: u64) -> u64 {              // avalanche_mix
+    let mut z = x;
+    z ^= z >> 33;
+    z = z.wrapping_mul(0xff51afd7ed558ccd);
+    z ^= z >> 33;
+    z
+}
+transform_1(x: u64) -> u64 {              // popcount_fold
+    let p = x.count_ones() as u64;
+    x.wrapping_add(p.wrapping_mul(p))
+}
+transform_2(x: u64) -> u64 {              // modulus_normalize
+    (x % 1_000_000_007).wrapping_add(x.trailing_zeros() as u64)
+}
 
-**wide leaf側（不均等サイズを2つの独立軸で表現、R4対応）**:
-- 軸1（source/IR量、LAMINARIA所有の解析・変換コストに影響）: wide leafのうち1本（`leaf-matrix-sum`相当）は、他のleaf（`leaf-gcd`, `leaf-bubble-sort`, `leaf-binary-search`のうち規模に応じた本数）より**関数数・LOCを意図的に多く**する（具体的には、同じ計算を素朴な1関数ではなく4つの補助関数に分割した実装にし、IR側で扱うノード数を増やす）。
-- 軸2（実行時payload量、interpreter/実バイナリの実行時間に影響）: 同じ`leaf-matrix-sum`の入力行列サイズ（`N×N`）を、既定の`N=8`に対し大規模設定でのみ`N=80`（10倍）に拡大する。
-- この2軸は独立に変化させる。「行列を大きくしたので compiler work が重くなった」という主張はしない。軸1（source量）はLAMINARIA所有の解析コストの計測対象、軸2（payload量）はEvaluateEvidenceの実行時間の計測対象として、測定結果を別々の指標で記録する（`measurement`に`source_volume_axis`と`payload_volume_axis`を分けて記載、cases.yaml参照）。
+stage_01::run() -> u64 { transform_0(SEED) }             // SEED: u64 = 20260909
+stage_NN::run() -> u64 for NN >= 2 {
+    transform[(NN - 1) % 3](stage_(NN-1)::run())
+}
+```
 
-**編集シナリオ（具体的before/after）**: `M7-*-medium`のedit caseは、分岐点`stage-04`の変換式を1箇所変更する（例: `wrapping_mul`の定数を`0xff51afd7ed558ccd`から`0xc4ceb9fe1a85ec53`へ変更、これはMurmurHash3のfinalizer定数対で実在する値の入れ替えであり恣意的な値ではない）。この編集の結果、`stage-04`以降の鎖（`stage-05..08`）、`leaf-a/b/c/d`全4本（分岐点より下流）、`aggregator`が再コンパイル対象になり、`stage-01..03`は対象外になる。
+**分岐の実装**: 分岐点`stage-BB`（BBは上表）の出力を、鎖の継続（`stage-(BB+1)`）と、wide leaf群の入力の両方に渡す（`stage-BB`は2つ以上のconsumerを持つ、実際のfan-outノード。依存方向は「leaf-* は stage-BB に依存する」「stage-(BB+1) は stage-BB に依存する」であり、データがstage-BBの出力から下流へ流れる向きと、依存が指す向きは逆であることに注意する — cases.yamlの`dependency_edges`は依存方向のみを表す）。
 
-**期待値の扱い（既存fixtureと同じ確立済み方法論）**: 上記の式・分岐点・編集差分・分離軸はD0で確定した。実行結果の具体的な数値（`u64`の最終集約値）は、`deep-critical-path-graph`の`EXPECTED_RESULT`が実際にコードを実行して得た値を定数として固定したのと同じ方法で、D1が実装時に一度だけ実行して得た値をpinする。これは「期待値決定のD1への先送り」ではない — 決定すべきグラフ形状・分岐点・編集内容・数式は本節で確定済みであり、残るのは実行結果という機械的に導出される値のみである。
+**wide leaf側（本改訂で完全に閉じた式として確定）**:
+```text
+leaf_a::run(input: u64) -> u64 { gcd_u64(input, 97) }    // 実Euclidean算法
+leaf_b::run(input: u64) -> u64 {
+    // input.to_le_bytes()の8バイトを実bubble sortで昇順に並べ替え、
+    // 並べ替え後のバイト列をu64::from_le_bytesで再解釈する
+}
+leaf_c::run(input: u64) -> u64 {
+    // PRIMES_UNDER_256(固定の昇順ソート済みu8配列、2,3,5,7,...,251)から
+    // target=(input % 256) as u8 を実binary searchで検索し、
+    // 見つかった場合はindexをu64として、見つからない場合は255を返す
+}
+leaf_matrix_sum::run(input: u64, n: u64) -> u64 {
+    // n*n行列、matrix[i][j] = input.wrapping_add(i).wrapping_mul(j + 1)
+    // を構築し、全要素をwrapping_addで合計する(source側は4つの補助関数
+    // 「行生成」「セル計算」「行合計」「全体合計」に分割してIRノード数を
+    // 意図的に増やす。他のleafは単一関数のまま)
+}
+```
+
+不均等サイズは2つの独立軸で表現する（R4対応）:
+- 軸1（source/IR量、LAMINARIA所有の解析・変換コストに影響）: `leaf_matrix_sum`のみ4補助関数に分割（他leafは単一関数）。
+- 軸2（実行時payload量、interpreter/実バイナリの実行時間に影響）: `leaf_matrix_sum`の`n`を既定`n=8`、大規模設定でのみ選定された2本を`n=80`（10倍）に拡大する。
+- この2軸は独立に変化させる。「行列を大きくしたので compiler work が重くなった」という主張はしない。軸1（source量）はLAMINARIA所有の解析コストの計測対象、軸2（payload量）はEvaluateEvidenceの実行時間の計測対象として、測定結果を別々の指標で記録する。
+
+**大規模leafレシピ（8本、選定規則を完全に閉じる）**: `leaf-01`から`leaf-08`のうち、`leaf-01`/`leaf-02`は`leaf_matrix_sum(n=80)`（重い、軸1・軸2とも大）とし、`leaf-03`から`leaf-08`は`i mod 3`（`i`は`leaf-NN`のNNから3を引いた0始まり番号、すなわち`leaf-03`→`i=0`）で`leaf_a`/`leaf_b`/`leaf_c`のいずれかを選ぶ（`leaf_a`にはさらに`i`を定数へ加算し重複を避ける: `gcd_u64(input, 97 + i)`）。
+
+**aggregatorの集約式（本改訂で確定、P1/R3対応）**:
+```text
+aggregator::run() -> u64 {
+    let mut acc = stage_final::run();          // stage_04 (small), stage_08 (medium), stage_16 (large)
+    for leaf in leaves {                        // 分岐点の出力を各leafへ渡した結果
+        acc = acc.wrapping_add(leaf::run(branch_point_output));
+    }
+    acc
+}
+```
+
+**編集シナリオ（具体的before/after、閉じた式で確定）**: `M7-*-medium`のedit caseは、`stage-04`の変換式（`transform_0`、`(04-1) % 3 == 0`なのでavalanche_mixが選ばれる）に使う`wrapping_mul`定数を`0xff51afd7ed558ccd`から`0xc4ceb9fe1a85ec53`へ変更する（MurmurHash3のfinalizer定数対で実在する値の入れ替えであり恣意的な値ではない）。この編集の結果、`stage-04`以降の鎖（`stage-05..08`）、`leaf-a/b/c/leaf-matrix-sum`全4本（分岐点より下流）、`aggregator`が再コンパイル対象になり、`stage-01..03`は対象外になる。
+
+**期待値の扱い（既存fixtureと同じ確立済み方法論）**: 上記の式・分岐点・編集差分・分離軸・aggregator集約式・大規模leaf選定規則はすべて本節で閉じた形式として確定した。実行結果の具体的な数値（`u64`の最終集約値）のみ、`deep-critical-path-graph`の`EXPECTED_RESULT`が実際にコードを実行して得た値を定数として固定したのと同じ方法で、D1が実装時に一度だけ実行して得た値をpinする。「実装結果をそのままgoldenにすると誤実装まで正解になる」という懸念には、上記の閉じた式・regression test（各transform/leaf関数を個別にunit testする）をD1実装の必須要件として明記することで対応する — 誤実装は個別unit testで検出され、集約値のpinはunit test通過後にのみ行う。
 
 **検証する性質**: critical path長（鎖側の段数）、head-of-line blocking非発生（wide側の重いleafが他の軽いleafの実行を不必要にブロックしないこと、軸2の実行時間が長くても軸1の解析コストとは独立に扱われること）。
 
@@ -162,17 +218,20 @@ nim-planner               (Nim; contract.nim + planning_kernel.nim + laminaria_p
 |---|---|---|---|
 | N1 | Nim CLI（新規bin, 例: `nim-planner/src/fp_report_cli.nim`） | 引数解析(`--repo-root`, `--lock`, テスト時は`--fixed-snapshot <path>`)、N2〜N4を経て返る判定結果とダイジェストの整形出力、終了コード決定(0=Compatible/1=Incompatible/2=入力エラー) | 新規（orchestrationのみ） |
 | N2 | Rust staticlib（新規薄いFFI shim crate `laminaria-fingerprint-ffi`） | (a) 通常モード: `laminaria-fingerprint::env::detect`等を呼び出し**実環境**をsnapshotする。(b) **固定snapshotモード（本改訂で追加、R3対応）**: `--fixed-snapshot`経由で注入された固定値をそのまま採用し、ambient環境に依存しない決定的な入力を可能にする。加えて要求されたcapability集合を正規化する | (a)既存ロジックの再公開。(b)は新規（テストの決定性のために必須） |
-| N3 | Nim staticlib（新規, 例: `nim-planner/src/schema_compat.nim`） | **訂正（R3対応）**: 「toolchainバージョンとPlanSchemaVersionの比較」ではなく、「要求capability集合」対「提供capability集合」の**完全一致判定（2値: Compatible/Incompatible）**を行う。`nim-planner/src/planning_kernel.nim::planFromJson`が既に採用している厳密な文字列一致gate（SemVer範囲やDegradedの導入なし）と同じ規則を踏襲する | 新規だが実質を持つ（既存gateと同じ規則の新規適用箇所） |
+| N3 | Nim staticlib（新規, 例: `nim-planner/src/schema_compat.nim`） | **再訂正（本改訂、P1/R3対応）**: 前版は「capability完全一致」と書きつつ実装記述に部分集合(⊆)判定が残っており、かつ`contract.nim::PlanSchemaVersion`（実際の値は単一文字列`"0.2.0"`であり、capability集合ではない）とcapability集合を混同していた。正しくは**2つの独立した判定**: (判定1) `schema_version`の**単一文字列としての完全一致**（`PlanSchemaVersion`実値`"0.2.0"`との比較、`planFromJson`と同一のgate）。(判定2) `requested_capabilities`と`provided_capabilities`という別概念の**集合としての完全一致**（過不足なしの等価性、部分集合(⊆)では成立しない）。判定1が偽の場合は判定2を評価せず即座に構造化エラーを返す | 新規だが実質を持つ（既存gateと同じ「厳密一致」の考え方を、schema_versionとcapability集合という2つの別対象へそれぞれ適用） |
 | N4 | Rust staticlib（既存ロジック再公開） | N3の判定結果と正準化入力を受け取り、固定の正準化書式（下記）でSHA-256ダイジェストを計算する。**このダイジェストはN3→N2→N1へ返却される値の一部であり、装飾的な末端ではない**（結果に含まれ、N1の最終出力に表示される） | 既存の`sha2`依存（`laminaria-fingerprint`/`laminaria-run`の既存Cargo依存）を直接使う新規薄い関数 |
 
-**固定入力・正準化規則（R3対応、D0で確定）**:
-- 固定test snapshot: `repo_root`固定値、`provided_capabilities = ["env-fingerprint-v1", "toolchain-fingerprint-v1"]`（`contract.nim`の`PlanSchemaVersion`が実際に宣言する値と一致させる、D1実装時に`contract.nim`を確認して合わせる）。
-- 正準化書式: `requested_capabilities`と`provided_capabilities`をそれぞれ辞書順にソートし、`"|"`区切りで連結した文字列を`"REQ:{req}\nPROV:{prov}\nRESULT:{Compatible|Incompatible}"`の形にまとめ、UTF-8バイト列としてSHA-256にかける。この書式自体はD0で確定済み。実際の64桁16進ダイジェスト値は、既存fixtureと同じ方法論（D1が実装時に一度実行して得た値をpinする）で確定する。
-- 不適合系列: `requested_capabilities`に`provided_capabilities`に存在しない要素が1つでもあればIncompatible。
+**固定入力・正準化規則（本改訂で3系列に確定、P1/R3対応）**:
+- (a) 成功系列: `schema_version="0.2.0"`（実値と一致）、`requested_capabilities = provided_capabilities = ["env-fingerprint-v1", "toolchain-fingerprint-v1"]`（集合として完全一致） → 判定1=真・判定2=真 → exit 0, Compatible。
+- (b) capability不一致系列: `schema_version="0.2.0"`（一致）、`requested_capabilities = ["env-fingerprint-v1", "toolchain-fingerprint-v1", "unknown-capability-v1"]`、`provided_capabilities`は(a)と同じ2要素（部分集合にはなるが完全一致ではない） → 判定1=真・判定2=偽 → exit 1, Incompatible。
+- (c) 不正入力系列: `schema_version="0.1.0"`（`contract.nim`実値`"0.2.0"`と不一致） → 判定1=偽 → exit 2, 構造化エラー（`rrkInvalidContractVersion`相当）。判定2は評価されない。
+- 正準化書式（(a)(b)いずれの判定にも適用、(c)はN4に到達しない）: `requested_capabilities`と`provided_capabilities`をそれぞれ辞書順にソートし、`"|"`区切りで連結した文字列を`"SCHEMA:{schema_version}\nREQ:{req}\nPROV:{prov}\nRESULT:{Compatible|Incompatible}"`の形にまとめ、UTF-8バイト列としてSHA-256にかける。この書式自体はD0で確定済み。実際の64桁16進ダイジェスト値は、既存fixtureと同じ方法論（実装時に一度実行して得た値をpinする）で確定する。
 
-**検証すべき観測可能な性質**: 同一入力で2回実行して同一ダイジェストが得られること（決定性）、固定snapshotで`requested`が`provided`のsupersetを要求した場合にN3がIncompatibleを返しN1が終了コード1で報告すること、panicをN2内で`catch_unwind`により捕捉しFFI境界を越える前に構造化エラーへ変換すること。
+**検証すべき観測可能な性質**: 同一系列を2回実行して同一ダイジェストが得られること（決定性）、(b)系列でN3がIncompatibleを返しN1が終了コード1で報告すること、(c)系列でN1が終了コード2を返しN4に到達しないこと、panicをN2内で`catch_unwind`により捕捉しFFI境界を越える前に構造化エラーへ変換すること。
 
 **native/WASM区別**: M9は全ノードがhost=実行機と同一のnativeターゲットのみを対象とする（WASM生成物は扱わない）。
+
+**D1の範囲（本改訂、P1/R5対応）**: D1は上記3系列・正準化書式・期待出力をcase定義として確定するのみで、N1〜N4の実コード（`fp_report_cli.nim`/`laminaria-fingerprint-ffi`/`schema_compat.nim`/digest shim）とnative C-ABIリンクの実装は行わない。実装は確定した本設計を入力とする後続実装ステージの作業とする（reached_stage: configuration-definitionまでがD1の到達範囲）。
 
 ### 3.2 M10: Rust LSP側／WASM側 → Nim lib由来の共通機能
 
@@ -185,24 +244,34 @@ nim-planner               (Nim; contract.nim + planning_kernel.nim + laminaria_p
 | A（LSP） | Rust bin（新規, `laminaria-lsp`） | 編集中のmanifest記述ファイルに対し循環依存をLSP診断として提示する（下記の固定入力・期待診断を参照） | host=開発者機（native）、target=host自身 | native実行バイナリ + native静的link済みNim lib |
 | B（WASM） | Rust cdylib（新規, `laminaria-plan-wasm`） | 同一のNim実装（`plan_ffi`）が提供する循環検出/順序決定機能を、WASM側でも**同一実装**として利用する | host=ビルド機（native）、target=WASMランタイム | `.wasm`モジュール（Nim由来ロジックを含む） |
 
-**M10-lsp-nativeの固定入力・期待診断（R3対応、D0で確定）**:
+**M10-lsp-nativeの固定入力・期待診断（本改訂で行番号まで確定、P1/R3対応）**:
 
-入力manifest（YAML風の簡易記法、D1実装時にこのまま`PlanningInput`相当へマップする）:
+BEFORE（循環なし、1-indexed行番号）:
 ```text
-demand: [artifact-a]
-actions:
-  action-a: produces artifact-a, requires artifact-b
-  action-b: produces artifact-b, requires artifact-a
+1: demand: [artifact-a]
+2: actions:
+3:   action-a: produces artifact-a, requires artifact-b
+4:   action-b: produces artifact-b
 ```
-期待診断: `RejectionReasonKind::Cycle`、`cycle_path = ["action-a", "action-b", "action-a"]`（既存の`call_planner_reports_a_structured_cycle_rejection_from_the_real_binary`テストと同一形の循環）。LSP側の診断は、`action-a`が記述された行から`action-b`が記述された行までを`Diagnostic.range`として指す（具体的な行番号はD1が固定fixture manifestのテキストとして書き下ろした時点で確定する。circular参照であるという診断の正しさ自体は、上記`cycle_path`とgraph定義から導出され、native側出力との一致だけを根拠にしない）。
+AFTER（4行目を編集、`requires artifact-a`を追加して循環を導入）:
+```text
+1: demand: [artifact-a]
+2: actions:
+3:   action-a: produces artifact-a, requires artifact-b
+4:   action-b: produces artifact-b, requires artifact-a
+```
+期待診断（AFTER状態）: `RejectionReasonKind::Cycle`、`cycle_path = ["action-a", "action-b", "action-a"]`（既存の`call_planner_reports_a_structured_cycle_rejection_from_the_real_binary`テストと同一形の循環）。`Diagnostic.range`は3行目の先頭（`action-a`記述の開始位置）から4行目の行末（`action-b`記述の終端、AFTER状態の4行目）までとする。行番号はこのmanifestテキスト自体（本節に確定済み）から一意に導出され、D1が実装時に決定する余地はない。BEFORE状態では循環がなく、正常にplanされることも合わせて検証する（偽陽性の否定）。
+
+**D1の範囲（本改訂、P1/R5対応）**: D1は上記のBEFORE/AFTER manifest・cycle_path・Diagnostic.rangeをcase定義として確定するのみで、`laminaria-lsp`/`plan_ffi.nim`の実コードとnative linkの実装は行わない。実装は確定した本設計を入力とする後続実装ステージの作業とする（reached_stage: configuration-definitionまでがD1の到達範囲）。
 
 ### 3.3 Nim→WASM経路: 参照調査タスクとして分離（R2対応、フォールバック削除）
 
 **訂正（本改訂）**: 前版のスパイク→Rustフォールバック方式は撤回する。フォールバックはM10が検証すべき「Nim依存の共有」というedgeそのものを消してしまうため、合格規則として採用しない。
 
-- Nim→WASMの実現可否調査（`nim c -d:emscripten`または`--os:wasi`経由での`plan_ffi.nim`単体コンパイルと、対応するRust wasm32ターゲットとのリンク試行）は、**M10とは独立したreference調査タスク**として切り出す（execution_role: reference、M10の合格には数えない）。正確なrevision・target・command・成功/失敗の判定条件を固定した上でなければ実行指示として発行しない。
-- 調査の結果が肯定的であれば、M10-wasm-sideをD1（またはD1後続の確定した実装ステージ）で本実装する。
-- 調査の結果が否定的、または#5 T0のtarget/runtime契約確定を待つ必要がある場合、M10-wasm-sideは`subset_scope.future_work`に「不足している独自target生成能力」を具体的に記録した上で、**未達（not-yet-satisfied）として保持する**。D1はこれを完了扱いにしない。
+- Nim→WASMの実現可否調査（`nim c -d:emscripten`または`--os:wasi`経由での`plan_ffi.nim`単体コンパイルと、対応するRust wasm32ターゲットとのリンク試行）は、**M10とは独立したreference調査タスク**として切り出す（execution_role: reference、M10の合格には数えない）。**訂正（本改訂、P1/R2・R5対応）**: 前版はこの調査をD1の実行順序の一部（「最優先で実行」）に組み込んでいたが、これは誤りだった。この調査の実施自体をD1の着手・完了条件から外す。実施時期はD1完了後、指示者が別途判断する。実施する場合、正確なrevision・target・command・成功/失敗の判定条件を固定した上でなければ着手しない。
+- 調査の結果が肯定的であれば、M10-wasm-sideを（D1後続の確定した実装ステージで）本実装する。
+- 調査の結果が否定的、または#5 T0のtarget/runtime契約確定を待つ必要がある場合、M10-wasm-sideは`subset_scope.future_work`に「不足している独自target生成能力」を具体的に記録した上で、**未達（not-yet-satisfied）として保持する**。
+- **M10-lsp-native自体もD1では実コードを実装しない**（P1/R5対応）。D1は固定manifest・cycle_path・Diagnostic.rangeというcase定義の確定までを行う（reached_stage: configuration-definition）。native側の実コード実装も、WASM側と同じく後続実装ステージの作業である。
 
 ---
 
@@ -276,9 +345,9 @@ D1時点では、owned roleのcaseについてのみ1と2を取得する。M3-ow
 | M3-owned | owned | 既存テストのcase登録、CPU budget 1/2の計測データ取得 | 需要駆動実行との比較 |
 | M4, M5 | reference | 既存fixtureのcase化、実値照合の再確認 | M9実装後、自己構成での同型edgeとの比較（owned版） |
 | M7, M8 | 混在（本文参照） | 新規fixture実装、宣言済み期待closure/critical pathとの照合。M8のNim planner側判定はowned | ablation・distributed配置評価 |
-| M9 | self-planned（実装後owned/referenceへ分岐） | ノード実装（新規FFI shim含む）、決定性・診断値のテスト | 実行時計測（並行dispatchとの統合） |
-| M10-lsp-native | self-planned | 実装・診断値テスト | 実行時計測 |
-| M10-wasm-side | self-planned | **未着手可**（参照調査タスクの結果待ち）。実装するのは調査が肯定的な場合のみ | 調査結果に応じて実装、または不足能力の記録を保持 |
+| M9 | owned（origin: self-planned） | **訂正（本改訂、P1/R5対応）**: case定義（3系列の固定snapshot・正準化書式・期待exit code/診断）の確定のみ。N1〜N4の実コード（新規FFI shim含む）・native C-ABIリンクの実装は**D1では行わない**（reached_stage: configuration-definitionまで） | 後続実装ステージでN1〜N4を実装し、決定性・診断値のテスト、実行時計測（並行dispatchとの統合） |
+| M10-lsp-native | owned（origin: self-planned） | **訂正**: case定義（BEFORE/AFTER manifest・cycle_path・Diagnostic.range）の確定のみ。`laminaria-lsp`/`plan_ffi.nim`の実コード実装は**D1では行わない** | 後続実装ステージで実装、診断値テスト、実行時計測 |
+| M10-wasm-side | owned（origin: self-planned） | **訂正**: case定義（native側とバイト同一という期待値、フォールバック不採用の明記）の確定のみ。実装は行わない | 参照調査タスク（M10-wasm-feasibility-reference-spike、D1完了後に指示者が実施時期を判断）の結果に応じて後続実装ステージで実装、または不足能力の記録を保持 |
 
 ### 4.4 規模・seed・編集内容・組合せ選定規則（必須項目5）
 
@@ -384,6 +453,21 @@ R1〜R5について、修正箇所と満たした条件を一覧で提出する�
 | R3 | M9の4nodeをN1=Nim CLI I/O、N2=固定環境snapshot+要求正規化、N3=capability完全一致判定（`planFromJson`と同じ厳密規則）、N4=正準化digest（結果に含まれる、装飾的でない）として具体化。正準化書式を明記。M7の小/中/大を4/8/16段+2/4/8枝、分岐点stage-02/04/08に固定し、編集差分（定数入れ替え）と2軸分離（source量/payload量）を明記。M10診断の入力manifest全文・cycle_path・診断根拠を明記。YAMLの「同上」を`refs`フィールドによる明示参照へ置換 | §3.1, §3.2, §2.2, cases.yaml 全体 |
 | R4 | M1をcold/noop別caseに分離。M7の「行列拡大=compiler work増加」の混同を解消（軸分離）。owned比較はowned役割のcaseにのみ許可。反復・warmup・再現性判定を「独立した複数回の再実行間」に明記し自己比較を排除。D4は目標設定タスクへの委譲を明記 | §2.1, §2.2, §4.2, §5.2, cases.yaml measurement |
 | R5 | scopeを`execution_role`と`reached_stage`で「D1実装・実行」「reference保持」「後続能力待ち」に3分類。M9/M10の製品機能一式実装は確定済み契約を入力とする後続実装へ割当て。発行条件を「R1〜R5反映・3点一致・確定仕様revision記録」へ変更 | §4.3, D1草案の発行条件, cases.yaml `origin: self-planned`とD1適用範囲 |
+
+---
+
+## 8. 第2回改訂内容一覧（commit `217b0c1`の読み取りレビュー6点への対応）
+
+指示者は`217b0c1`をYAML解析・実コード照合により審査し、R1〜R5に対する「発行を妨げる指摘」6点（P1×3, P2×3）を残件として指摘した。以下は各指摘への対応。新しい要求への対応ではなく、既存R1〜R5の完全な反映を目的とする。
+
+| # | 指摘 | 対応 | 反映箇所 |
+|---|---|---|---|
+| 1 (P1/R2・R5) | D1草案がNim→WASM調査を最優先実行としつつM9/native LSPの製品実装も要求しており、R2「D1完了条件から外す」に反していた | Nim→WASM調査・M9(N1〜N4)・M10-lsp-nativeの実コード実装をすべてD1のスコープから除外した。D1はcase定義（固定snapshot・manifest・cycle_path・診断range等）の確定のみを行い、reached_stage: configuration-definitionまでで止める。実装は後続実装ステージへ完全に切り出した | §3.1末尾, §3.2末尾, §3.3, D1草案全体, cases.yaml M9/M10-*の`subset_scope`/`pass_criteria` |
+| 2 (P1/R3) | M9のN3判定規則が「capability完全一致」と書きつつYAMLは部分集合(⊆)判定になっており、かつcapabilityと`PlanSchemaVersion`(単一文字列`"0.2.0"`)を混同していた | schema_version一致(判定1、単一文字列の完全一致)とcapability集合一致(判定2、集合としての完全一致、部分集合は不可)を独立した2判定に分離した。固定snapshotを3系列(成功/capability不一致/schema不一致)へ具体化し、各系列の判定1・判定2の値とexit code/診断を明記した | §3.1「固定入力・正準化規則」, cases.yaml M9-fingerprint-compat-chain |
+| 3 (P1/R3) | M1のedit対象、M6の追加フィールド、M10の診断rangeがD1実装時の決定に委ねられており、M7の数式も「splitmix64風」等で閉じていなかった | M1editは`ENV_ALLOWLIST`配列への具体的な要素追加に確定。M6editは`EnvironmentFingerprint`構造体への具体的なフィールド名・型(`pub schema_note: Option<String>`)に確定。M10診断は4行のBEFORE/AFTER manifestテキストと行番号レベルのDiagnostic.rangeに確定。M7は`transform_0/1/2`・`leaf_a/b/c/matrix_sum`・aggregator集約式を閉じた擬似コードとして記載し、誤実装が個別unit testで検出されることを明記した | §2.2, §3.2, cases.yaml M1-fingerprint-leaf-edit/M6-diamond-fingerprint-plan/M10-lsp-native/M7-* |
+| 4 (P2/R1・R3・R5) | YAML中3件の`execution_role`が宣言外の`self-planned`、4件の`dependency_edges`が配列でなく説明文だった。M7は依存方向とデータ流方向を混在させ、M8はdemandと期待集合が不整合だった | M9/M10-lsp-native/M10-wasm-sideの`execution_role`を`owned`へ修正（`origin: self-planned`は維持、reached_stageで進捗段階を区別）。4件の`dependency_edges`を全て配列化した。M7の全edgeを「左が右に依存」の統一規則へ修正（データ流方向の注記と依存方向を明確に分離）。M8のNim planner側caseをdemand=fixture-bin-out(used-core/used-utilの両方を推移的に含む)に修正し、used-utilのみのdemandでused-coreも要求する矛盾を解消した | cases.yaml 全体（execution_role/dependency_edges/M7-*/M8-many-unrequested-nim-planner） |
+| 5 (P2/R1) | `independent_rust_and_nim_chains_agree_across_cpu_budgets_and_run_concurrently_under_budget_two`の実コードは各言語3 Action(`LowerSource→ValidateIr→EvaluateEvidence`)・合計6 Actionであり、改訂案の5段(Transform込み)という記述は別テストとの混同だった | 実コード(1604行目付近、`plan.actions.len()==6`のassert)を確認し、3 Action×2チェーン=6 Actionへ訂正した。新規Transform実装・テストは追加しない | §2 表(M3-owned行), cases.yaml M3-owned-independent-chains |
+| 6 (P2/R4) | M3の計測欄に反復数はあるがhost・状態復元・budget実行順・計測境界がなく、`Stats::from_samples`だけでは再現性の合否を決められなかった | `host`(単一host固定)・`state_restoration`(repetitionごとの新規ArtifactStore)・`execution_order`(budget1連続実行→budget2連続実行、インターリーブなし)・`measurement_boundary`(`run_compiler_work_plan_traced`呼び出し前後)の4項目を追加した。D4の速度目標確定は今回の対応範囲に含めない(既存方針を維持) | cases.yaml M3-owned-independent-chainsの`measurement` |
 
 ---
 

@@ -81,8 +81,18 @@ cases:
     origin: self
     refs: [M1-fingerprint-cold]
     source_layout: "M1-fingerprint-coldと同一ワークスペース。coldビルド完了後の状態から開始する別case(R4対応: coldとnoopを同一caseにしない)"
-    dependency_edges: "M1-fingerprint-coldのdependency_edgesを参照(refs)"
-    requested_artifacts: "M1-fingerprint-coldと同一"
+    dependency_edges:
+      - "laminaria-rustc-wrapper -> laminaria-run(lib)"
+      - "laminaria-cc-wrapper -> laminaria-run(lib)"
+      - "laminaria-plan -> laminaria-fingerprint"
+      - "laminaria-run -> laminaria-fingerprint"
+      - "laminaria-cli -> laminaria-fingerprint"
+      - "laminaria-cli -> laminaria-run"
+      - "laminaria-cli -> laminaria-plan"
+    requested_artifacts:
+      - "target/debug/laminaria"
+      - "target/debug/laminaria-rustc-wrapper"
+      - "target/debug/laminaria-cc-wrapper"
     demand_mode: full
     edit: { kind: none, target: null }
     forbidden_work:
@@ -117,12 +127,29 @@ cases:
     origin: self
     refs: [M1-fingerprint-cold]
     source_layout: "M1-fingerprint-coldと同一ワークスペース"
-    dependency_edges: "refs: M1-fingerprint-cold"
-    requested_artifacts: "M1-fingerprint-coldと同一"
+    dependency_edges:
+      - "laminaria-rustc-wrapper -> laminaria-run(lib)"
+      - "laminaria-cc-wrapper -> laminaria-run(lib)"
+      - "laminaria-plan -> laminaria-fingerprint"
+      - "laminaria-run -> laminaria-fingerprint"
+      - "laminaria-cli -> laminaria-fingerprint"
+      - "laminaria-cli -> laminaria-run"
+      - "laminaria-cli -> laminaria-plan"
+    requested_artifacts:
+      - "target/debug/laminaria"
+      - "target/debug/laminaria-rustc-wrapper"
+      - "target/debug/laminaria-cc-wrapper"
     demand_mode: full
     edit:
       kind: shared-lib-edit
-      target: "crates/laminaria-fingerprint/src/env.rs 内の既存関数の戻り値に使われるリテラル定数を1つ変更する(具体的な行・変更前後の値はD1実装時にファイル内容を確認して固定し、この差分自体をEDIT.md相当の記録として残す)"
+      target: >
+        crates/laminaria-fingerprint/src/env.rs の ENV_ALLOWLIST 配列
+        (現状16要素: PATH, HOME, SHELL, LANG, LC_ALL, TERM, CARGO_HOME,
+        RUSTUP_HOME, RUSTUP_TOOLCHAIN, NIMBLE_DIR, NIM_LIB_DIR, CI,
+        GITHUB_ACTIONS, GITHUB_RUN_ID, WSL_DISTRO_NAME, WSL_INTEROP)の
+        末尾(WSL_INTEROPの直後)に新規要素 "NIM_CONFIG_DIR" を1行追加する。
+        変更前後の完全な配列内容は本フィールドに記載済みであり、D1は
+        この差分をそのまま適用する(ファイル内容確認による決定は不要)。
     forbidden_work:
       - "laminaria-ir の再コンパイル（fingerprintと無関係）"
     required_work:
@@ -246,12 +273,20 @@ cases:
     source_layout: >
       crates/laminaria-run/src/compiler_work_executor.rs の既存テスト
       independent_rust_and_nim_chains_agree_across_cpu_budgets_and_run_concurrently_under_budget_two
-      が使う、実Rust source由来チェーンと実Nim source由来チェーン(いずれも
-      LowerSource->ValidateIr->TransformFunction->ValidateIr->EvaluateEvidence)。
+      (同ファイル1604行目付近)が使う、実Rust source由来チェーンと実Nim
+      source由来チェーン。訂正(R1/P2対応): 実コードは各言語チェーンにつき
+      LowerSource->ValidateIr->EvaluateEvidenceの3 Action(TransformFunctionは
+      含まない)、2言語で合計6 Action(実測: plan.actions.len()==6のassert)。
+      前版の「5段(Transform込み)」は別テスト
+      (the_full_lower_validate_transform_validate_evaluate_pipeline_runs_end_to_end)
+      の記述を誤って混用したもので訂正する。新しいTransform実装・テストの
+      追加は行わない(既存3段のみを対象とする)。
     dependency_edges:
-      - "rust-chain: 内部でLowerSource->ValidateIr->TransformFunction->ValidateIr->EvaluateEvidenceの直列依存"
-      - "nim-chain: 同上、rust-chainとは非依存"
-    non_dependency: "rust-chain と nim-chain の間に依存なし"
+      - "rust-chain-validate -> rust-chain-lower"
+      - "rust-chain-evaluate -> rust-chain-validate"
+      - "nim-chain-validate -> nim-chain-lower"
+      - "nim-chain-evaluate -> nim-chain-validate"
+    non_dependency: "rust-chain-* と nim-chain-* の間に依存なし(rust-chainとnim-chainは完全に独立な2本の3 Actionチェーン)"
     requested_artifacts: ["rust-chainの最終EvaluateEvidence結果", "nim-chainの最終EvaluateEvidence結果"]
     demand_mode: full
     edit: { kind: none, target: null }
@@ -277,6 +312,10 @@ cases:
       repetitions: 5
       noise_floor: "laminaria-run::scenario::NOISE_FLOOR_STDDEV_MULTIPLIER方式"
       reproducibility: "5回の独立した実行間でStats::from_samplesのstddevベース判定を行う。同一reportの自己比較はしない"
+      host: "単一の固定host(D1実装者のローカル開発機、またはCIのいずれか一方)で全repetitionを実施する。budget間でhostを変えない"
+      state_restoration: "各repetition開始前に新規のArtifactStore/SharedStoreを生成し、前repetitionの状態(store内容、ComputeConcurrencyProbeのカウンタ)を一切引き継がない"
+      execution_order: "budget=1で(warmup 1回+本計測5回)を連続実行してから、budget=2で(warmup 1回+本計測5回)を連続実行する。budget間のインターリーブはしない"
+      measurement_boundary: "計測開始はrun_compiler_work_plan_traced呼び出し直前、終了は同呼び出しの戻り値受領直後。PlanningInput構築・real_planner_binaryによるplan取得・ArtifactStore初期化は計測区間に含めない(ComputeConcurrencyProbeが計測する実計算区間と開始点を揃える)"
     pass_criteria:
       d1: "budget1/2の結果一致、budget2でpeak_concurrency==2が5回とも再現、ScenarioReportとして保存"
       d4: not-applicable-yet
@@ -439,7 +478,12 @@ cases:
     demand_mode: full
     edit:
       kind: shared-lib-edit
-      target: "crates/laminaria-fingerprint/src/types.rs に新規フィールドを1つ追加する(具体的なフィールド名・型はD1実装時に確定し記録する)"
+      target: >
+        crates/laminaria-fingerprint/src/types.rs の EnvironmentFingerprint構造体
+        (106行目付近)の最後のフィールド(現状 path_toolchain_shadow:
+        Option<String>)の直後に、新規フィールド
+        `pub schema_note: Option<String>` を追加する。型・フィールド名は
+        本フィールドで確定済みであり、D1実装時に決定する余地はない。
     forbidden_work:
       - "laminaria-fingerprintが複数回コンパイルされる(4経路収束点での重複コンパイル)"
       - "laminaria-planが複数回コンパイルされる(2経路収束点での重複コンパイル)"
@@ -465,19 +509,26 @@ cases:
     pass_criteria: { d1: "重複コンパイルがゼロ、伝播集合が期待通り", d4: not-applicable-yet }
 
   # ---------------------------------------------------------------- M7 ----
+  # 全formula/leafレシピはspec.md 2.2で完全に閉じた形式(擬似コード)として
+  # 確定済み。ここでは名前で参照するのみ(R3対応: "splitmix64風"のような
+  # 非閉形式表現は使わない)。依存方向は全edgeとも「左が右に依存する」の
+  # 統一規則に従う(R1/P2対応: データが流れる方向と混同しない)。
   - id: M7-long-chain-wide-branches-small
     pattern: M7
     execution_role: reference
     reached_stage: target-generation-execution
     origin: fixture-new
     refs: []
-    source_layout: "fixtures/long-chain-wide-branches (新規, 鎖4段+wide leaf2本、分岐点stage-02固定)"
+    source_layout: "fixtures/long-chain-wide-branches (新規, 鎖4段+wide leaf2本、分岐点stage-02固定、formula定義はspec.md 2.2)"
     dependency_edges:
       - "stage-02 -> stage-01"
-      - "stage-02 -> (鎖継続) stage-03, stage-04"
-      - "stage-02 -> (wide分岐) leaf-a, leaf-b"
-      - "stage-04 -> stage-03 -> stage-02"
-      - "aggregator -> stage-04, leaf-a, leaf-b"
+      - "stage-03 -> stage-02"
+      - "stage-04 -> stage-03"
+      - "leaf-a -> stage-02"
+      - "leaf-b -> stage-02"
+      - "aggregator -> stage-04"
+      - "aggregator -> leaf-a"
+      - "aggregator -> leaf-b"
     requested_artifacts: ["aggregator実行結果"]
     demand_mode: full
     edit: { kind: none, target: null }
@@ -485,13 +536,20 @@ cases:
     required_work: ["critical path(stage-01..04)の逐次実行、leaf-a/leaf-bの並行実行"]
     expected:
       kind: value
-      value_or_diagnostic: "SEED=20260909に対するaggregatorの最終集約値。数式・分岐点・edgeはspec.md 2.2で確定済み。実行結果の具体的な数値はD1が実装時に一度実行して得た値をpinする(deep-critical-path-graphのEXPECTED_RESULTと同じ確立済み方法論、期待値の未決定ではない)"
-      derivation: "stage-01..04はsplitmix64風avalanche mix/popcount fold/modulus正規化の周期的適用(deep-critical-path-graphと同型)、leaf-a/leaf-bはgcd/bubble-sort相当の実アルゴリズム"
+      value_or_diagnostic: >
+        SEED=20260909に対するaggregatorの最終集約値
+        = stage_04::run() .wrapping_add(leaf_a::run(stage_02::run()))
+                          .wrapping_add(leaf_b::run(stage_02::run()))。
+        stage_NN::runとleaf_a/leaf_bの正確な式はspec.md 2.2
+        「M7数式定義」節を参照(閉じた擬似コード)。実行結果の具体的な
+        数値はD1が実装時に一度実行して得た値をpinする(deep-critical-path-graphの
+        EXPECTED_RESULTと同じ確立済み方法論、期待値の未決定ではない)。
+      derivation: "spec.md 2.2で確定した transform_0/1/2 の周期適用(stage側)、gcd_u64/byte_bubble_sort(leaf側)の閉じた定義"
     subset_scope:
       d1_verifies: ["fixture実装、critical path長の実測、期待値との照合(実行後pin)"]
       future_work: ["head-of-line blocking回避の検証(medium/largeでの重いleaf導入後)"]
     scale:
-      small: { chain_stages: 4, wide_leaves: 2, branch_point: "stage-02", description: "全列挙" }
+      small: { chain_stages: 4, wide_leaves: 2, branch_point: "stage-02", leaves: ["leaf-a", "leaf-b"], description: "全列挙" }
       medium: null
       large: null
       seed: 20260909
@@ -514,25 +572,39 @@ cases:
     reached_stage: target-generation-execution
     origin: fixture-new
     refs: [M7-long-chain-wide-branches-small]
-    source_layout: "fixtures/long-chain-wide-branches (中規模設定、鎖8段+wide4本、分岐点stage-04固定)"
+    source_layout: "fixtures/long-chain-wide-branches (中規模設定、鎖8段+wide4本、分岐点stage-04固定、formula定義はspec.md 2.2)"
     dependency_edges:
-      - "stage-04 -> stage-03 -> stage-02 -> stage-01"
-      - "stage-04 -> (鎖継続) stage-05..08"
-      - "stage-04 -> (wide分岐) leaf-a, leaf-b, leaf-c, leaf-matrix-sum"
-      - "aggregator -> stage-08, leaf-a, leaf-b, leaf-c, leaf-matrix-sum"
+      - "stage-02 -> stage-01"
+      - "stage-03 -> stage-02"
+      - "stage-04 -> stage-03"
+      - "stage-05 -> stage-04"
+      - "stage-06 -> stage-05"
+      - "stage-07 -> stage-06"
+      - "stage-08 -> stage-07"
+      - "leaf-a -> stage-04"
+      - "leaf-b -> stage-04"
+      - "leaf-c -> stage-04"
+      - "leaf-matrix-sum -> stage-04"
+      - "aggregator -> stage-08"
+      - "aggregator -> leaf-a"
+      - "aggregator -> leaf-b"
+      - "aggregator -> leaf-c"
+      - "aggregator -> leaf-matrix-sum"
     requested_artifacts: ["aggregator実行結果"]
     demand_mode: full
     edit:
       kind: shared-lib-edit
       target: >
-        stage-04の変換式に使うwrapping_mul定数を0xff51afd7ed558ccdから
+        stage-04の変換式(transform_{(04-1) mod 3} = transform_0 = avalanche_mix、
+        spec.md 2.2参照)に使うwrapping_mul定数を0xff51afd7ed558ccdから
         0xc4ceb9fe1a85ec53へ変更する(MurmurHash3 finalizerの定数対の一方から
-        他方への実在する入れ替え、恣意的な値ではない)。
+        他方への実在する入れ替え、恣意的な値ではない)。変更前後の完全な式は
+        spec.md 2.2に記載済み。
     forbidden_work: ["stage-01/stage-02/stage-03の再コンパイル(分岐点より上流で無関係)"]
     required_work: ["stage-04以降の鎖(stage-05..08)、leaf-a/b/c/matrix-sum全4本、aggregatorが再コンパイルされる"]
     expected:
       kind: diagnostic
-      value_or_diagnostic: "宣言済み再ビルド集合(stage-04..08 + 4leaf + aggregator)との一致。編集前後の集約値差分はD1が実行して得た2値をpinする"
+      value_or_diagnostic: "宣言済み再ビルド集合(stage-04..08 + 4leaf + aggregator)との一致。編集前後の集約値差分はD1が実行して得た2値をpinする(数式自体はspec.md 2.2で確定済み)"
       derivation: "incremental-semantic-edit方式の適用。分岐点・編集内容はspec.md 2.2で確定済み"
     subset_scope:
       d1_verifies: ["編集シナリオの実装・再ビルド集合の照合"]
@@ -543,7 +615,8 @@ cases:
         chain_stages: 8
         wide_leaves: 4
         branch_point: "stage-04"
-        source_volume_axis: "leaf-matrix-sumのみ4補助関数に分割(他leafは単一関数)"
+        leaves: ["leaf-a", "leaf-b", "leaf-c", "leaf-matrix-sum"]
+        source_volume_axis: "leaf-matrix-sumのみ4補助関数に分割(他leafは単一関数、spec.md 2.2のleafレシピ参照)"
         payload_volume_axis: "leaf-matrix-sumの行列サイズN=8(既定)"
         description: "既定値"
       large: null
@@ -565,16 +638,48 @@ cases:
     reached_stage: target-generation-execution
     origin: fixture-new
     refs: [M7-long-chain-wide-branches-medium]
-    source_layout: "fixtures/long-chain-wide-branches (大規模設定、鎖16段+wide8本、分岐点stage-08固定)"
-    dependency_edges: "M7-long-chain-wide-branches-mediumと同型構造をchain_stages=16, wide_leaves=8へ拡大"
+    source_layout: "fixtures/long-chain-wide-branches (大規模設定、鎖16段+wide8本、分岐点stage-08固定、formula定義はspec.md 2.2)"
+    dependency_edges:
+      - "stage-02 -> stage-01"
+      - "stage-03 -> stage-02"
+      - "stage-04 -> stage-03"
+      - "stage-05 -> stage-04"
+      - "stage-06 -> stage-05"
+      - "stage-07 -> stage-06"
+      - "stage-08 -> stage-07"
+      - "stage-09 -> stage-08"
+      - "stage-10 -> stage-09"
+      - "stage-11 -> stage-10"
+      - "stage-12 -> stage-11"
+      - "stage-13 -> stage-12"
+      - "stage-14 -> stage-13"
+      - "stage-15 -> stage-14"
+      - "stage-16 -> stage-15"
+      - "leaf-01 -> stage-08"
+      - "leaf-02 -> stage-08"
+      - "leaf-03 -> stage-08"
+      - "leaf-04 -> stage-08"
+      - "leaf-05 -> stage-08"
+      - "leaf-06 -> stage-08"
+      - "leaf-07 -> stage-08"
+      - "leaf-08 -> stage-08"
+      - "aggregator -> stage-16"
+      - "aggregator -> leaf-01"
+      - "aggregator -> leaf-02"
+      - "aggregator -> leaf-03"
+      - "aggregator -> leaf-04"
+      - "aggregator -> leaf-05"
+      - "aggregator -> leaf-06"
+      - "aggregator -> leaf-07"
+      - "aggregator -> leaf-08"
     requested_artifacts: ["aggregator実行結果"]
     demand_mode: full
     edit: { kind: none, target: null }
     forbidden_work: []
-    required_work: ["軸2(payload量)をleaf-matrix-sumでN=80(既定の10倍)へ拡大した場合の実行時間計測が、軸1(source量、解析コスト)の計測と独立に記録される"]
+    required_work: ["軸2(payload量)をleaf-01/leaf-02(選定規則で指定される最初の2本)でN=80(既定の10倍)へ拡大した場合の実行時間計測が、軸1(source量、解析コスト)の計測と独立に記録される"]
     expected:
       kind: value
-      value_or_diagnostic: "critical path長=16、D1が実行して得た集約値をpinする"
+      value_or_diagnostic: "critical path長=16、D1が実行して得た集約値をpinする。leaf-01..08の割当規則はspec.md 2.2「大規模leafレシピ」を参照(i番目のleafはi<2ならmatrix-sum(重い), それ以外はi mod 3で軽量関数を選ぶ、という決定的な規則)"
       derivation: "spec.md 2.2の選定規則(重いleafを2本のみ導入、残り6本は既存同様軽量)"
     subset_scope:
       d1_verifies: ["大規模構成でのgraph正当性"]
@@ -586,8 +691,9 @@ cases:
         chain_stages: 16
         wide_leaves: 8
         branch_point: "stage-08"
-        selection_rule: "重いleaf(source量axis)を2本のみ導入、残り6本は既存同様軽量"
-        payload_volume_axis: "leaf-matrix-sumのうち1本のみN=80、他は既定N=8"
+        leaves: ["leaf-01","leaf-02","leaf-03","leaf-04","leaf-05","leaf-06","leaf-07","leaf-08"]
+        selection_rule: "leaf-01/leaf-02が重い(matrix-sum axis)、leaf-03..08は軽量(spec.md 2.2のi mod 3規則)"
+        payload_volume_axis: "leaf-01/leaf-02のみN=80、他は既定N=8(該当しないleafはpayload軸自体を持たない)"
         description: "固定seed代表組合せ"
       seed: 20260909
     measurement:
@@ -612,8 +718,9 @@ cases:
     refs: []
     source_layout: "fixtures/many-unrequested-targets (新規, 非要求4/10/30package)"
     dependency_edges:
-      - "fixture-bin -> used-core, used-util"
-    non_dependency: "fixture-bin と unused-pkg-01..NN の間に依存なし"
+      - "fixture-bin -> used-core"
+      - "fixture-bin -> used-util"
+    non_dependency: "fixture-bin と unused-pkg-01..NN の間に依存なし。used-core と used-util の間にも依存なし(兄弟関係)"
     requested_artifacts: ["fixture-bin(要求される[[bin]]の1つのみ)"]
     demand_mode: partial
     edit: { kind: none, target: null }
@@ -653,20 +760,30 @@ cases:
     origin: fixture-new
     refs: [M8-many-unrequested-cargo]
     source_layout: >
-      M8-many-unrequested-cargoと同型の依存形状(used-core/used-util + 未要求
-      unused-pkg-*)を、Cargo workspaceではなく PlanningInput として直接構成する
-      (実ファイルシステムのビルドを伴わない、軽量なNim planner向けcase)。
-    dependency_edges: "M8-many-unrequested-cargoと同型、PlanningInputのAction間inputs/outputsとして表現"
-    requested_artifacts: ["used-utilに対応するArtifactRefのみをdemandへ含める"]
+      M8-many-unrequested-cargoと同型の依存形状を、Cargo workspaceではなく
+      PlanningInput として直接構成する(実ファイルシステムのビルドを伴わない、
+      軽量なNim planner向けcase)。3つのAction: "used-core"(入力なし、
+      used-core-outを産出)、"used-util"(入力なし、used-util-outを産出)、
+      "fixture-bin"(inputs=[used-core-out, used-util-out]、fixture-bin-outを
+      産出)。used-utilはused-coreに依存しない(兄弟関係、R1/P2訂正:
+      used-utilのみをdemandしながらused-coreも要求集合に含めるという
+      矛盾を解消するため、demandは常にfixture-bin-outとする)。
+      加えて未要求のunused-pkg-*系列(fixture-bin/used-core/used-utilの
+      いずれとも入出力で接続されない独立Action群)を配置する。
+    dependency_edges:
+      - "fixture-bin -> used-core"
+      - "fixture-bin -> used-util"
+    non_dependency: "used-core と used-util の間に依存なし(兄弟関係)、unused-pkg-* はfixture-bin/used-core/used-utilのいずれとも非依存"
+    requested_artifacts: ["fixture-bin-out (demandはこの1つのみ、used-core/used-utilは単独ではdemandしない)"]
     demand_mode: partial
     edit: { kind: none, target: null }
     forbidden_work:
       - "unused-pkg-*に対応するActionがExecutionPlan.ordered_actionsに含まれる"
     required_work:
-      - "planning_kernel.planのdemand_closureがunused-pkg-*系列を一切辿らない"
+      - "planning_kernel.planのdemand_closureが fixture-bin-out から used-core/used-util まで遡り、unused-pkg-*系列は一切辿らない"
     expected:
       kind: diagnostic
-      value_or_diagnostic: "ExecutionPlan.ordered_actionsがused-core/used-util(+demandそのもの)に対応するAction IDのみを含む"
+      value_or_diagnostic: "ExecutionPlan.ordered_actionsが {used-core, used-util, fixture-bin} の3 Action IDのみを含む(この3つはfixture-bin-out demandの真の推移閉包そのものであり、used-core/used-utilは互いに依存しないため順序はtie-break規則のみで決まる)"
       derivation: "issue#27で実装済みのdemand_closureロジック(nim-planner/src/planning_kernel.nim)の実測確認。既存のnim_planner_clientテスト群を土台にできる"
     subset_scope:
       d1_verifies: ["実PlanningInputでの非展開確認"]
@@ -677,13 +794,13 @@ cases:
       large: { unused_actions: 30, description: "固定seed代表組合せ" }
       seed: 20260909
     measurement:
-      comparison_modes: [1]
-      cpu_budget: [1]
+      comparison_modes: []
+      cpu_budget: []
       memory_state: [normal]
       cache_state: [cold]
       warmup_runs: 0
       repetitions: 3
-      noise_floor: "laminaria-run::scenario::NOISE_FLOOR_STDDEV_MULTIPLIER方式"
+      noise_floor: "not-applicable(構造正当性の確認であり、timing比較を行わないためcomparison_modes/cpu_budgetは空にする)"
       reproducibility: "3回の独立実行でordered_actionsの非展開を確認"
     pass_criteria:
       d1: "forbidden_workがゼロ、ordered_actionsが期待集合と一致"
@@ -692,14 +809,19 @@ cases:
   # ---------------------------------------------------------------- M9 ----
   - id: M9-fingerprint-compat-chain
     pattern: M9
-    execution_role: self-planned
+    execution_role: owned
+    # (訂正, P2/R1: "self-planned"はexecution_roleの宣言値ではない。
+    # この機能は実装されればLAMINARIA自身の新規owned logicになるため owned とする。
+    # 「D1では未実装、configuration-definition段階までしか進めない」という区別は
+    # reached_stage自体が担う。origin: self-planned は維持する。)
     reached_stage: configuration-definition
     origin: self-planned
     refs: []
     source_layout: >
-      新規: nim-planner/src/fp_report_cli.nim (N1),
+      計画中(未実装、D1はこのcase定義自体の確定のみを行い、コード実装は
+      後続実装ステージへ割り当てる、R1/P1/R5対応): 新規 nim-planner/src/fp_report_cli.nim (N1),
       新規crate crates/laminaria-fingerprint-ffi (N2, 既存laminaria-fingerprintを再公開+固定snapshotモード),
-      新規 nim-planner/src/schema_compat.nim (N3, capability完全一致判定),
+      新規 nim-planner/src/schema_compat.nim (N3, schema一致判定とcapability一致判定を別項目として実装),
       新規薄いFFI shim (N4, 既存sha2依存を使った正準化digest計算)。
       各edgeの抽象意味契約(所有・失敗)はspec.md 3.1の表を正とし、
       native C-ABIは#5 T0確定までの参照実装候補として扱う。
@@ -713,47 +835,64 @@ cases:
     forbidden_work:
       - "panicまたはNim例外がFFI境界を越えてN1プロセス全体を予期しない状態にする(決定的なエラー終了コード以外の挙動)"
       - "by-value集約体・seq/Vec値がいずれかのFFI境界を越える"
-      - "N3がSemVer範囲互換やDegraded分類を導入する(planFromJsonと同じ厳密一致のみ許可)"
+      - "schema_versionの一致判定にSemVer範囲互換やDegraded分類を導入する(planFromJsonと同じ厳密文字列一致のみ許可)"
+      - "capability集合の一致判定に部分集合(subset)判定を使う(訂正, P1/R3対応: 完全一致(集合の等価性)のみを許可し、部分集合成立での成功を認めない)"
+      - "schema_versionの一致判定とcapability集合の一致判定を1つの条件式に混在させる(2つの独立した判定項目として実装する)"
       - "N4を経由しない判定結果がN1へ到達する(装飾的edgeの禁止)"
     required_work:
-      - "N1が固定snapshotモードで requested_capabilities ⊆ provided_capabilities のとき終了コード0を返す"
-      - "N1が requested_capabilities に provided_capabilities 外の要素を含む場合、終了コード1・Incompatible診断を返す"
+      - "N3は次の2判定を独立に行う: (判定1)schema_version一致 — 単一文字列の完全一致(contract.nim::PlanSchemaVersionの実際の値'0.2.0'とplanFromJsonと同じ文字列比較)。(判定2)capability集合一致 — requested_capabilitiesとprovided_capabilitiesの集合としての完全一致(要素の過不足なし、部分集合では不可)"
+      - "固定snapshot(下記expected参照)で判定1・判定2がともに真のとき終了コード0・Compatible"
+      - "判定1が偽(schema_version不一致)のとき終了コード2・構造化エラー(rrkInvalidContractVersion相当)"
+      - "判定1が真・判定2が偽(capability集合が完全一致しない)のとき終了コード1・Incompatible診断"
       - "同一固定snapshot入力の2回実行でN4のダイジェストが一致する(決定性)"
     expected:
       kind: value
       value_or_diagnostic: >
-        固定snapshot: provided_capabilities=["env-fingerprint-v1","toolchain-fingerprint-v1"]
-        (contract.nimのPlanSchemaVersionが実際に宣言する値とD1実装時に一致させる)。
-        正準化書式: "REQ:{req}\nPROV:{prov}\nRESULT:{Compatible|Incompatible}"
+        固定snapshot(3系列、D1がこのまま採用する):
+        (a) 成功系列: schema_version="0.2.0"(一致), requested_capabilities=["env-fingerprint-v1","toolchain-fingerprint-v1"],
+            provided_capabilities=["env-fingerprint-v1","toolchain-fingerprint-v1"](完全一致)
+            -> 判定1=真, 判定2=真, exit=0, Compatible。
+        (b) capability不一致系列: schema_version="0.2.0"(一致), requested_capabilities=["env-fingerprint-v1","toolchain-fingerprint-v1","unknown-capability-v1"],
+            provided_capabilities=["env-fingerprint-v1","toolchain-fingerprint-v1"](部分集合になるが完全一致ではない)
+            -> 判定1=真, 判定2=偽, exit=1, Incompatible。
+        (c) 不正入力系列: schema_version="0.1.0"(不一致、旧バージョン)
+            -> 判定1=偽, exit=2, 構造化エラー。
+        正準化書式(N4向け、(a)(b)いずれの判定にも適用): "SCHEMA:{schema_version}\nREQ:{req}\nPROV:{prov}\nRESULT:{Compatible|Incompatible}"
         (reqとprovは辞書順ソート後"|"区切り連結)。この書式に対するSHA-256ダイジェストは
-        D1が実装時に一度実行して得た値をpinする(既存fixtureと同じ方法論)。
-        決定性: digest(run1) == digest(run2)。不適合時: exit=1, N3がIncompatibleを返す。
-      derivation: "N3はplanning_kernel.nim::planFromJsonの既存厳密一致gateと同じ規則。N4は既存sha2依存の直接使用"
+        D1が実装時に一度実行して得た値をpinする(既存fixtureと同じ方法論、(c)は判定1で拒否されるためN4に到達しない)。
+        決定性: 同一系列を2回実行したdigest(run1) == digest(run2)。
+      derivation: "判定1はplanning_kernel.nim::planFromJsonの既存厳密一致gate(単一文字列比較)と同一規則。判定2は新規だが同じ厳密一致の考え方を集合へ適用したもの(SemVer範囲・Degradedは導入しない)。N4は既存sha2依存の直接使用"
     subset_scope:
-      d1_verifies: ["4ノードの実装、native C-ABIリンク成立(参照実装として)、決定性テスト、正準化書式どおりのdigest計算"]
-      future_work: ["#5 T0確定後の正式target境界選定、compiler_work_executor統合による並行実行計測"]
-    scale: { small: { description: "単一固定snapshot, 単一capability集合" }, medium: null, large: null, seed: null }
+      d1_verifies: >
+        D1はこのcase定義(固定snapshot3系列・正準化書式・期待exit code/診断)を確定するのみ。
+        N1(fp_report_cli.nim)/N2(laminaria-fingerprint-ffi)/N3(schema_compat.nim)/N4(digest shim)の
+        実コード実装、native C-ABIリンクの実現は後続実装ステージへ割り当てる(P1/R5対応、
+        本caseはreached_stage: configuration-definitionまでしか到達しない)。
+      future_work: ["N1-N4の実コード実装(後続実装ステージ)", "#5 T0確定後の正式target境界選定", "compiler_work_executor統合による並行実行計測"]
+    scale: { small: { description: "固定snapshot3系列(成功/capability不一致/schema不一致)" }, medium: null, large: null, seed: null }
     measurement:
       comparison_modes: []
       cpu_budget: []
       memory_state: [normal]
       cache_state: [cold]
       warmup_runs: 0
-      repetitions: 5
-      noise_floor: "not-applicable (self-planned機能実装段階、owned比較はまだ対象外)"
-      reproducibility: "5回の独立実行でdigest決定性を確認"
+      repetitions: 0
+      noise_floor: "not-applicable (D1はconfiguration-definition段階、実行計測は後続実装ステージ)"
+      reproducibility: "not-applicable (D1では未実装のため)"
     pass_criteria:
-      d1: "決定性テスト・不適合診断テストの双方が通過、panic/例外の境界越え非発生"
+      d1: "3系列の固定snapshot・正準化書式・期待exit code/診断がcase定義として確定していること(コード実装・実行は求めない)"
       d4: not-applicable-yet
 
   # --------------------------------------------------------------- M10 ----
   - id: M10-lsp-native
     pattern: M10
-    execution_role: self-planned
+    execution_role: owned
+    # (訂正, P2/R1: "self-planned"はexecution_roleの宣言値ではない。owned とする。)
     reached_stage: configuration-definition
     origin: self-planned
     refs: []
     source_layout: >
+      計画中(未実装、D1はこのcase定義自体の確定のみを行う、R1/P1/R5対応):
       新規 laminaria-lsp (Rust bin, native), 新規 nim-planner/src/plan_ffi.nim
       (既存planning_kernel.plan/findCycleを再公開、native C-ABIは参照実装候補)。
     dependency_edges:
@@ -763,46 +902,60 @@ cases:
     edit:
       kind: config-change
       target: >
-        固定入力manifest(下記value_or_diagnostic参照)に対し、action-bのrequiresを
-        artifact-aへ変更する編集(循環を導入する具体的な1行変更)。
-    forbidden_work: ["循環が実際には存在しないのに診断を出す(偽陽性)"]
-    required_work: ["循環導入直後にDiagnostic.rangeが循環を構成するノードを指す"]
+        BEFORE(1-indexed行番号、D0で確定・以後変更しない):
+        line1="demand: [artifact-a]"
+        line2="actions:"
+        line3="  action-a: produces artifact-a, requires artifact-b"
+        line4="  action-b: produces artifact-b"
+        (循環なし: action-bはrequiresを持たない)。
+        AFTER: line4のみを "  action-b: produces artifact-b, requires artifact-a"
+        へ変更する(action-bにrequires artifact-aを追加、これにより循環が生じる)。
+        line1-3は編集前後で不変。
+    forbidden_work: ["循環が実際には存在しないのに診断を出す(偽陽性)、BEFORE状態で誤って循環を報告する"]
+    required_work: ["AFTER状態への編集直後にDiagnostic.rangeが循環を構成するノードを指す"]
     expected:
       kind: diagnostic
       value_or_diagnostic: >
-        固定入力manifest:
-        "demand: [artifact-a]\nactions:\n  action-a: produces artifact-a, requires artifact-b\n  action-b: produces artifact-b, requires artifact-a"
-        期待診断: RejectionReasonKind::Cycle, cycle_path=["action-a","action-b","action-a"]
+        BEFORE状態: 循環なし、正常にplanされる(action-a, action-bの2 actionを含むplan)。
+        AFTER状態の期待診断: RejectionReasonKind::Cycle, cycle_path=["action-a","action-b","action-a"]
         (既存call_planner_reports_a_structured_cycle_rejection_from_the_real_binaryテストと同一形)。
-        Diagnostic.rangeはaction-a記述行からaction-b記述行まで(具体的行番号はD1がfixture manifestテキストを
-        書き下ろした時点で確定、正しさの根拠はcycle_pathとgraph定義そのもの)。
-      derivation: "既存テストcall_planner_reports_a_structured_cycle_rejection_from_the_real_binary(crates/laminaria-plan/src/nim_planner_client.rs)と同一ロジックの再利用"
+        Diagnostic.range = line3の先頭(action-a記述の開始位置)からline4の行末
+        (action-b記述の終端、AFTER状態のline4)まで。行番号はこのcase定義そのものが
+        持つ固定manifestテキストから直接導出され、D1が実装時に決定する余地はない。
+      derivation: "既存テストcall_planner_reports_a_structured_cycle_rejection_from_the_real_binary(crates/laminaria-plan/src/nim_planner_client.rs)と同一ロジックの再利用。行番号は本fieldのmanifestテキスト自体から一意に導出される"
     subset_scope:
-      d1_verifies: ["native linkの成立(参照実装として)、循環診断の一致確認"]
-      future_work: ["実エディタ(LSPクライアント)経由の統合テスト、#5 T0確定後の正式target境界選定"]
-    scale: { small: { description: "単一manifest, 単一循環" }, medium: null, large: null, seed: null }
+      d1_verifies: >
+        D1はこのcase定義(固定manifest4行・cycle_path・診断range)を確定するのみ。
+        laminaria-lsp/plan_ffi.nimの実コード実装、native linkの実現は後続実装
+        ステージへ割り当てる(P1/R5対応、本caseはreached_stage:
+        configuration-definitionまでしか到達しない)。
+      future_work: ["laminaria-lsp/plan_ffi.nimの実コード実装(後続実装ステージ)", "実エディタ(LSPクライアント)経由の統合テスト", "#5 T0確定後の正式target境界選定"]
+    scale: { small: { description: "単一manifest(4行固定), 単一循環" }, medium: null, large: null, seed: null }
     measurement:
       comparison_modes: []
       cpu_budget: []
       memory_state: [normal]
       cache_state: [cold]
       warmup_runs: 0
-      repetitions: 3
-      noise_floor: "not-applicable"
-      reproducibility: "3回の独立実行で診断一致を確認"
+      repetitions: 0
+      noise_floor: "not-applicable (D1はconfiguration-definition段階、実行計測は後続実装ステージ)"
+      reproducibility: "not-applicable (D1では未実装のため)"
     pass_criteria:
-      d1: "診断一致、偽陽性ゼロ"
+      d1: "固定manifest4行・cycle_path・診断rangeがcase定義として確定していること(コード実装・実行は求めない)"
       d4: not-applicable-yet
 
   - id: M10-wasm-side
     pattern: M10
-    execution_role: self-planned
+    execution_role: owned
+    # (訂正, P2/R1: "self-planned"はexecution_roleの宣言値ではない。owned とする。)
     reached_stage: configuration-definition
     origin: self-planned
     refs: [M10-lsp-native, M10-wasm-feasibility-reference-spike]
     source_layout: >
-      M10-wasm-feasibility-reference-spikeの判定結果に依存する。肯定的な場合のみ
-      D1(または確定した後続実装ステージ)で本実装する。Rust再実装によるフォールバックは
+      M10-wasm-feasibility-reference-spikeは独立したreference調査タスクであり、
+      D1の着手・完了条件には含まれない(訂正, P1/R2・R5対応: 本caseの実装着手も
+      D1の対象外とし、後続実装ステージへ完全に切り出す)。spikeの結果が出た時点で、
+      肯定的なら後続実装ステージで本実装する。Rust再実装によるフォールバックは
       削除済み(R2対応) — Nim実装への実依存を維持できない場合はM10-wasm-sideを
       未達として保持する。
     dependency_edges:
@@ -813,16 +966,20 @@ cases:
     forbidden_work:
       - "WASM側の実装をRust再実装で代替する"
       - "native側(M10-lsp-native)と異なる循環判定結果を返す"
-    required_work: ["M10-wasm-feasibility-reference-spikeが肯定的な場合にのみ、同一PlanningInputに対しM10-lsp-nativeと同一の診断/順序を返す実装を行う"]
+    required_work: []
+    # (訂正, P1/R2・R5: D1はこのcaseの実装に一切着手しない。spikeの実施も
+    # D1の着手・完了条件ではない。spikeとM10-wasm-side本体はともに後続実装
+    # ステージの管理対象であり、D1はこのcase定義自体を確定するのみ。)
     expected:
       kind: value
       value_or_diagnostic: "M10-lsp-nativeの入力(M10-lsp-nativeのvalue_or_diagnostic参照)に対し、バイト同一の診断結果を返す(同一Nim実装のため)"
       derivation: "M10-lsp-nativeと同一のNim plan_ffi実装を参照するため"
     subset_scope:
-      d1_verifies: []
+      d1_verifies: ["このcase定義自体(期待値がM10-lsp-nativeとバイト同一であること、フォールバックを使わないこと)の確定のみ"]
       future_work:
-        - "M10-wasm-feasibility-reference-spikeが否定的な場合: 不足している独自target/runtime生成能力(Nim->wasm32コンパイルパス、または#5 T0のtarget契約)を具体的に記録し、未達(not-yet-satisfied)として保持する"
-        - "肯定的な場合: 実装・native側との一致確認"
+        - "M10-wasm-feasibility-reference-spikeの実施(後続実装ステージ、D1には含まれない)"
+        - "spikeが否定的な場合: 不足している独自target/runtime生成能力(Nim->wasm32コンパイルパス、または#5 T0のtarget契約)を具体的に記録し、未達(not-yet-satisfied)として保持する"
+        - "spikeが肯定的な場合: 実装・native側との一致確認(後続実装ステージ)"
     scale: { small: null, medium: null, large: null, seed: null }
     measurement:
       comparison_modes: []
@@ -832,9 +989,9 @@ cases:
       warmup_runs: 0
       repetitions: 0
       noise_floor: "not-applicable"
-      reproducibility: "not-applicable (spike結果待ちのため未実行)"
+      reproducibility: "not-applicable (D1では未着手のため)"
     pass_criteria:
-      d1: "spike結果が肯定的な場合のみ実装・一致確認まで完了。否定的な場合はfuture_workへの記録をもって本case自体は未達のまま保持(D1の完了条件には数えない)"
+      d1: "本caseのD1範囲はcase定義自体の確定のみ。実装着手はD1に含まれず、D1の完了条件からも除外する(spike結果を待たない)"
       d4: not-applicable-yet
 
   - id: M10-wasm-feasibility-reference-spike
@@ -845,23 +1002,30 @@ cases:
     refs: []
     source_layout: >
       独立したreference調査タスク(M10本体の合格条件には数えない、R2対応)。
-      専用ディレクトリ(例: fixtures/nim-wasm-spike、D1着手時に確定)で実施する。
+      D1の着手・完了条件にも含めない(訂正, P1/R2・R5対応: 前版はこの調査を
+      「最優先で実行」しM9/native LSP実装と並べてD1実行順序に組み込んで
+      いたが、これはR2「D1の完了条件から外す」という指示に反していたため
+      削除する)。実施時期はD1完了後、指示者が別途判断する。実施する場合の
+      専用ディレクトリ(例: fixtures/nim-wasm-spike)、正確なrevision・target・
+      commandは、実施を判断する時点で固定してから着手する。
     dependency_edges: []
-    requested_artifacts: ["単体.wasmまたはリンク失敗の診断ログ"]
+    requested_artifacts: ["単体.wasmまたはリンク失敗の診断ログ(実施する場合)"]
     demand_mode: full
     edit: { kind: none, target: null }
     forbidden_work:
       - "この調査結果をもってM10-wasm-sideを暗黙に完了扱いにする"
-    required_work:
-      - "nim c --os:linux -d:emscripten (または--os:wasi) で最小のexportc関数(plan_ffiの1関数)をコンパイルする"
-      - "得られた成果物を対応するRust wasm32ターゲット(wasm32-unknown-emscriptenまたはwasm32-wasip1)cdylibとリンクし、1回の往復呼び出し(空のPlanningInput->空のPlanOutcome相当)を試みる"
+      - "この調査の実施・完了をD1の着手・完了条件にする"
+    required_work: []
+    # (D1では実施しない。実施する場合の具体的な手順は future_work に記す。)
     expected:
       kind: diagnostic
-      value_or_diagnostic: "肯定(リンク成功・往復呼び出し成功)または否定(具体的な失敗理由・使用したrevision/target/commandの記録)のいずれか"
-      derivation: "調査タスク自体の実施記録。正確なrevision・target・command・成功/失敗判定条件はD1着手時に固定してから実行する"
+      value_or_diagnostic: "実施する場合: 肯定(リンク成功・往復呼び出し成功)または否定(具体的な失敗理由・使用したrevision/target/commandの記録)のいずれか"
+      derivation: "調査タスク自体の実施記録。実施する場合、正確なrevision・target・command・成功/失敗判定条件は着手前に固定する"
     subset_scope:
-      d1_verifies: ["判定結果の記録"]
-      future_work: ["判定結果に応じたM10-wasm-side本実装、または不足能力の記録"]
+      d1_verifies: []
+      future_work:
+        - "実施する場合の手順: nim c --os:linux -d:emscripten (または--os:wasi) で最小のexportc関数(plan_ffiの1関数)をコンパイルし、対応するRust wasm32ターゲット(wasm32-unknown-emscriptenまたはwasm32-wasip1)cdylibとリンクして1回の往復呼び出し(空のPlanningInput->空のPlanOutcome相当)を試みる"
+        - "判定結果に応じたM10-wasm-side本実装、または不足能力の記録(いずれも後続実装ステージ)"
     scale: { small: { description: "最小往復1関数のみ" }, medium: null, large: null, seed: null }
     measurement:
       comparison_modes: []
@@ -870,8 +1034,8 @@ cases:
       cache_state: [cold]
       warmup_runs: 0
       repetitions: 1
-      noise_floor: "not-applicable (feasibility調査のため計測対象外)"
+      noise_floor: "not-applicable (feasibility調査のため計測対象外、D1では実施しない)"
       reproducibility: "not-applicable"
     pass_criteria:
-      d1: "肯定/否定いずれかの判定が具体的な根拠とともに記録される(未決着のまま放置しない)"
+      d1: "D1の完了条件には含まれない。実施する場合、肯定/否定いずれかの判定が具体的な根拠とともに記録されること(未決着のまま放置しない)"
       d4: not-applicable-yet
