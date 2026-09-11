@@ -1,6 +1,6 @@
 # D1実装指示（草案・未発行）
 
-- 状態: **要改訂・未発行（第2回改訂反映済み）** — 提出commit `443b5f2`を審査し、[issue-35-d0-spec.md](issue-35-d0-spec.md)セクション6に採否と修正指示R1〜R5を記録した。第1回改訂commit `217b0c1`の読み取りレビューで、外部WASM調査がD1着手条件に残っていた点・M9/native LSPの製品実装をD1に含めていた点等、6件の残件（発行を妨げる指摘）が指摘された。以下の本文はその6件に対応した第2回改訂版であり、D1はcase定義（構成・入力・期待結果）の確定のみを行い、M9/M10の製品コード（FFI shim/Nim CLI/LSP/WASM）の実装は一切含まない。指示者が本改訂を確認し、[issue-35-d0-spec.md](issue-35-d0-spec.md)セクション6・7・8と[issue-35-d0-cases.yaml](issue-35-d0-cases.yaml)（`schema_version: 0.2.0-draft`）の3点一致を確定仕様revisionとして記録するまで、本書は実行指示として発行しない。
+- 状態: **要改訂・未発行（第3回改訂反映済み）** — 提出commit `443b5f2`を審査し、[issue-35-d0-spec.md](issue-35-d0-spec.md)セクション6に採否と修正指示R1〜R5を記録した。第1回改訂commit `217b0c1`の読み取りレビューで6件の残件、第2回改訂commit `99a0f5c`の読み取りレビューで3件の残件（D1合格条件の範囲、M6editのコンパイル可否、M7/M9のgolden値未確定）が指摘され、いずれも本改訂で対応した（設計の再検討は不要と確認済み）。D1はcase定義（構成・入力・期待結果）の確定のみを行い、M9/M10の製品コード（FFI shim/Nim CLI/LSP/WASM）の実装は一切含まない。CPU budget=1のbaseline計測を実際に取得するのは`M3-owned-independent-chains`と`M8-many-unrequested-nim-planner`の2caseに限る。指示者が本改訂を確認し、[issue-35-d0-spec.md](issue-35-d0-spec.md)セクション6〜9と[issue-35-d0-cases.yaml](issue-35-d0-cases.yaml)（`schema_version: 0.2.0-draft`）の3点一致を確定仕様revisionとして記録するまで、本書は実行指示として発行しない。
 - 発行条件: 指示者がR1〜R5反映内容（本改訂を含む）を確認し、3点(本書/spec.md/cases.yaml)の一致と確定仕様revisionを記録すること。採否欄・改訂内容一覧への記入だけでは発行しない。
 - 参照する仕様revision: `docs/design/issue-35-d0-spec.md`（本改訂）、`docs/design/issue-35-d0-cases.yaml` @ `schema_version: 0.2.0-draft`（確定後は指示者が具体的なgit commit hashをここに追記する）。
 
@@ -10,7 +10,7 @@
 
 D1実装者は`issue-35-d0-cases.yaml`の各caseを次の3種のいずれかとして扱い、種別を実装者が変更しない。
 
-1. **D1で実装・実行する（execution_role: reference または owned、reached_stage: target-generation-executionまたはsource-ir-evaluation）**: manifest・fixture source・規模生成器・coverage表と、宣言済みの`expected`/`forbidden_work`/`required_work`を実装・検証する。owned roleのcaseは`laminaria-run`の既存計測基盤でCPU budget=1（該当caseは1と2）のbaseline計測も取得する。
+1. **D1で実装・実行する（execution_role: reference または owned、reached_stage: target-generation-executionまたはsource-ir-evaluation）**: manifest・fixture source・規模生成器・coverage表と、宣言済みの`expected`/`forbidden_work`/`required_work`を実装・検証する。**訂正（P1対応、本改訂）**: このうちCPU budget=1（該当caseは1と2）のbaseline計測を`laminaria-run`の既存計測基盤で取得するのは、execution_role: ownedかつD1でsource-ir-evaluationまで到達する`M3-owned-independent-chains`と`M8-many-unrequested-nim-planner`の2caseに限る。他のreference role caseは参照timingの記録に留め、owned baselineとして扱わない。
 2. **referenceとして保持する**: 既存fixture（M4/M5各case）は、fixture本体のソース・アサーションを変更せず、case定義用のメタデータ・検証スクリプトのみを追加する。M4-rust-nim-c-abi-callcount等の実行時間は「参照timing」として記録し、owned baselineとして扱わない。
 3. **case定義の確定のみを行い、実装は一切含めない（origin: self-planned、reached_stage: configuration-definition、`M9-fingerprint-compat-chain`/`M10-lsp-native`/`M10-wasm-side`）**: 訂正（P1/R2・R5対応、第2回改訂）。前版はこれらのcaseの実コード実装（新規FFI shim crate、Nim CLI、LSPバイナリ）をD1の実装順序・成果物表に含めていたが、これはR5「M9/M10の製品CLI/FFI/LSP/WASM機能一式の実装は…後続実装へ割り当てる」に反していた。D1はcase定義（固定snapshot値・manifest全文・cycle_path・正準化書式・期待exit code/診断）の確定のみを行う。実コードは一切書かない。`M10-wasm-feasibility-reference-spike`の実施もD1には含まれない（後述）。
 
@@ -51,7 +51,7 @@ D1実装者は`issue-35-d0-cases.yaml`の各caseを次の3種のいずれかと�
 - 各caseの`forbidden_work`がゼロ回であることをビルドツールの実測ログ（`cargo build -v`、Nimコンパイラの詳細出力）で確認する。
 - owned roleのcaseについて、`required_work`が実際に実行されたことを`ComputeConcurrencyProbe`（opt-in設定）等の実行区間トレースで確認する。M3-owned-independent-chainsは`host`固定・`state_restoration`（repetitionごとの新規ArtifactStore）・`execution_order`（budget1連続実行→budget2連続実行）・`measurement_boundary`（`run_compiler_work_plan_traced`呼び出し前後）を仕様通り再現する。
 - 決定性が要求されるcase（M2）は同一入力の2回以上の**独立した**再実行結果の一致を確認する。同一`ScenarioReport`の自己比較は使用しない。
-- 速度改善は測定しない（D1のスコープ外）。owned roleのcaseについてのみCPU budget=1（該当するcaseは1と2）のbaseline計測を取得し、`ScenarioReport`として保存する。reference roleのcaseは参照timingとして記録するのみで、owned baselineとして扱わない。
+- 速度改善は測定しない（D1のスコープ外）。CPU budget=1（該当するcaseは1と2）のbaseline計測は`M3-owned-independent-chains`と`M8-many-unrequested-nim-planner`の2caseについてのみ取得し、`ScenarioReport`として保存する。他のreference roleのcaseは参照timingとして記録するのみで、owned baselineとして扱わない。M9/M10-lsp-native/M10-wasm-sideはD1では実行・計測を一切行わない。
 
 ## 6. 停止条件
 
@@ -63,7 +63,7 @@ D1実装者は`issue-35-d0-cases.yaml`の各caseを次の3種のいずれかと�
 - [ ] 各`origin: self`のcaseについて、新規fixtureを追加していないこと（既存の実コード・実ワークスペースのみを使っていること）を差分レビューで確認する。
 - [ ] 各`origin: fixture-existing`のcaseについて、既存fixtureのソース・アサーションが変更されていないこと（メタデータ・検証スクリプトの追加のみ）を差分レビューで確認する。
 - [ ] `M3-topology`の`compile-rust-host`/`compile-nim-planner`が`compiler_work_executor`へ渡されていないこと、`M3-owned-independent-chains`が新規Transform実装を追加していないことをコードレビューで確認する。
-- [ ] owned roleの全caseについてCPU budget=1（該当するcaseは1と2）のbaseline計測が`ScenarioReport`として保存され、再生成可能である。
+- [ ] **訂正（P1対応、本改訂）**: `M3-owned-independent-chains`と`M8-many-unrequested-nim-planner`（D1で実行される唯一のownedケース2件）についてCPU budget=1（該当するcaseは1と2）のbaseline計測が`ScenarioReport`として保存され、再生成可能である。M9/M10-lsp-native/M10-wasm-sideはこの基準の対象外（D1では未実行）。
 - [ ] 仕様不備が見つかった場合、D0（`issue-35-d0-spec.md`/`issue-35-d0-cases.yaml`）への改版が行われている（D1実装者自身が期待値・測定条件・合格基準を変更していない）。
 
 ## 7. 未解決事項の扱い

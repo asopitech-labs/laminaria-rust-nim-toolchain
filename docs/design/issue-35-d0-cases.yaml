@@ -479,11 +479,16 @@ cases:
     edit:
       kind: shared-lib-edit
       target: >
-        crates/laminaria-fingerprint/src/types.rs の EnvironmentFingerprint構造体
-        (106行目付近)の最後のフィールド(現状 path_toolchain_shadow:
-        Option<String>)の直後に、新規フィールド
-        `pub schema_note: Option<String>` を追加する。型・フィールド名は
-        本フィールドで確定済みであり、D1実装時に決定する余地はない。
+        訂正(本改訂、P1対応): 前版のEnvironmentFingerprint構造体への
+        新規フィールド追加は撤回する。crates/laminaria-fingerprint/src/env.rs
+        のdetect()関数(38行目付近)がEnvironmentFingerprintを構築する箇所
+        (63-84行目付近)は全フィールドを明示的に列挙する構造体リテラルであり
+        (`..Default::default()`は使われていない)、フィールド追加には対応する
+        初期化式の追加が伴わなければコンパイルが失敗する。目的(依存伝播・
+        重複排除の検証)には構造体変更は不要であるため、M1-fingerprint-leaf-edit
+        (refs参照)と同一の差分——ENV_ALLOWLIST配列の末尾(WSL_INTEROPの直後)への
+        新規要素"NIM_CONFIG_DIR"追加——を共用する。要求対象は laminaria-cli
+        のまま維持する。
     forbidden_work:
       - "laminaria-fingerprintが複数回コンパイルされる(4経路収束点での重複コンパイル)"
       - "laminaria-planが複数回コンパイルされる(2経路収束点での重複コンパイル)"
@@ -537,14 +542,13 @@ cases:
     expected:
       kind: value
       value_or_diagnostic: >
-        SEED=20260909に対するaggregatorの最終集約値
+        SEED=20260909に対するaggregatorの最終集約値 = 152668892010644049
+        (独立実装(Python)による計算値、本改訂で確定、P2対応)。
         = stage_04::run() .wrapping_add(leaf_a::run(stage_02::run()))
                           .wrapping_add(leaf_b::run(stage_02::run()))。
         stage_NN::runとleaf_a/leaf_bの正確な式はspec.md 2.2
-        「M7数式定義」節を参照(閉じた擬似コード)。実行結果の具体的な
-        数値はD1が実装時に一度実行して得た値をpinする(deep-critical-path-graphの
-        EXPECTED_RESULTと同じ確立済み方法論、期待値の未決定ではない)。
-      derivation: "spec.md 2.2で確定した transform_0/1/2 の周期適用(stage側)、gcd_u64/byte_bubble_sort(leaf側)の閉じた定義"
+        「M7数式定義」節を参照(閉じた擬似コード)。
+      derivation: "spec.md 2.2で確定した transform_0/1/2 の周期適用(stage側)、gcd_u64/byte_bubble_sort(leaf側)の閉じた定義から独立に計算(実装結果の採用ではない)"
     subset_scope:
       d1_verifies: ["fixture実装、critical path長の実測、期待値との照合(実行後pin)"]
       future_work: ["head-of-line blocking回避の検証(medium/largeでの重いleaf導入後)"]
@@ -604,8 +608,11 @@ cases:
     required_work: ["stage-04以降の鎖(stage-05..08)、leaf-a/b/c/matrix-sum全4本、aggregatorが再コンパイルされる"]
     expected:
       kind: diagnostic
-      value_or_diagnostic: "宣言済み再ビルド集合(stage-04..08 + 4leaf + aggregator)との一致。編集前後の集約値差分はD1が実行して得た2値をpinする(数式自体はspec.md 2.2で確定済み)"
-      derivation: "incremental-semantic-edit方式の適用。分岐点・編集内容はspec.md 2.2で確定済み"
+      value_or_diagnostic: >
+        宣言済み再ビルド集合(stage-04..08 + 4leaf + aggregator)との一致。
+        編集前の集約値=975184859065030187、編集後の集約値=15936356680776682716
+        (独立実装(Python)による計算値、本改訂で確定、P2対応。数式自体はspec.md 2.2で確定済み)。
+      derivation: "incremental-semantic-edit方式の適用。分岐点・編集内容はspec.md 2.2で確定済み、値は閉じた式から独立に計算(実装結果の採用ではない)"
     subset_scope:
       d1_verifies: ["編集シナリオの実装・再ビルド集合の照合"]
       future_work: ["軸2(payload量)拡大時の実行時間支配プロファイリング"]
@@ -679,8 +686,16 @@ cases:
     required_work: ["軸2(payload量)をleaf-01/leaf-02(選定規則で指定される最初の2本)でN=80(既定の10倍)へ拡大した場合の実行時間計測が、軸1(source量、解析コスト)の計測と独立に記録される"]
     expected:
       kind: value
-      value_or_diagnostic: "critical path長=16、D1が実行して得た集約値をpinする。leaf-01..08の割当規則はspec.md 2.2「大規模leafレシピ」を参照(i番目のleafはi<2ならmatrix-sum(重い), それ以外はi mod 3で軽量関数を選ぶ、という決定的な規則)"
-      derivation: "spec.md 2.2の選定規則(重いleafを2本のみ導入、残り6本は既存同様軽量)"
+      value_or_diagnostic: >
+        critical path長=16、aggregatorの最終集約値=233828575729373081
+        (独立実装(Python)による計算値、本改訂で確定、P2対応)。
+        leaf-01..08の割当規則(本改訂で表記を一本化、spec.md 2.2「大規模leafレシピ」
+        と同一の定義に統一): leaf-01/leaf-02は常にleaf_matrix_sum(input, n=80)。
+        leaf-03..08は i = NN - 3 (leaf-03→i=0, ..., leaf-08→i=5) として、
+        i mod 3 が0ならleaf_a(input, 97+i)、1ならleaf_b、2ならleaf_cを選ぶ
+        (前版に残っていた「iをleaf番号から直接0始まりで数える」という
+        別解釈は撤回する)。
+      derivation: "spec.md 2.2の選定規則(重いleafを2本のみ導入、残り6本は既存同様軽量)から独立に計算(実装結果の採用ではない)"
     subset_scope:
       d1_verifies: ["大規模構成でのgraph正当性"]
       future_work: ["ablation・distributed配置評価(D2以降)"]
@@ -794,16 +809,24 @@ cases:
       large: { unused_actions: 30, description: "固定seed代表組合せ" }
       seed: 20260909
     measurement:
-      comparison_modes: []
-      cpu_budget: []
+      # 訂正(本改訂, P1対応): この2つ(M3-owned-independent-chainsと本case)は
+      # D1で実際に計測・baseline取得を行う唯一のownedケースとして指示者が
+      # 明示した。構造正当性(ordered_actionsの非展開)に加え、CPU budget=1の
+      # baseline計測も取得する。
+      comparison_modes: [1]
+      cpu_budget: [1]
       memory_state: [normal]
       cache_state: [cold]
-      warmup_runs: 0
+      warmup_runs: 1
       repetitions: 3
-      noise_floor: "not-applicable(構造正当性の確認であり、timing比較を行わないためcomparison_modes/cpu_budgetは空にする)"
-      reproducibility: "3回の独立実行でordered_actionsの非展開を確認"
+      noise_floor: "laminaria-run::scenario::NOISE_FLOOR_STDDEV_MULTIPLIER方式"
+      reproducibility: "3回の独立した実行間でordered_actionsの非展開とbaseline計測の一致を確認する。同一reportの自己比較はしない"
+      host: "M3-owned-independent-chainsと同一の固定host"
+      state_restoration: "各repetition開始前に新規のPlanningInputから計画を取得し直す(前repetitionの状態を引き継がない)"
+      execution_order: "warmup 1回の後、本計測3回を連続実行する"
+      measurement_boundary: "計測開始はplanning_kernel.plan呼び出し直前、終了はExecutionPlan受領直後"
     pass_criteria:
-      d1: "forbidden_workがゼロ、ordered_actionsが期待集合と一致"
+      d1: "forbidden_workがゼロ、ordered_actionsが期待集合と一致、CPU budget=1のbaseline計測が`ScenarioReport`として保存される"
       d4: not-applicable-yet
 
   # ---------------------------------------------------------------- M9 ----
@@ -857,10 +880,12 @@ cases:
             -> 判定1=真, 判定2=偽, exit=1, Incompatible。
         (c) 不正入力系列: schema_version="0.1.0"(不一致、旧バージョン)
             -> 判定1=偽, exit=2, 構造化エラー。
-        正準化書式(N4向け、(a)(b)いずれの判定にも適用): "SCHEMA:{schema_version}\nREQ:{req}\nPROV:{prov}\nRESULT:{Compatible|Incompatible}"
+        正準化書式(N4向け、(a)(b)いずれの判定にも適用、末尾改行なし): "SCHEMA:{schema_version}\nREQ:{req}\nPROV:{prov}\nRESULT:{Compatible|Incompatible}"
         (reqとprovは辞書順ソート後"|"区切り連結)。この書式に対するSHA-256ダイジェストは
-        D1が実装時に一度実行して得た値をpinする(既存fixtureと同じ方法論、(c)は判定1で拒否されるためN4に到達しない)。
-        決定性: 同一系列を2回実行したdigest(run1) == digest(run2)。
+        独立実装(Python)で計算し確定済み(本改訂、P2対応、(c)は判定1で拒否されるためN4に到達しない):
+        (a)成功系列 -> 9b541417be6e7a89f2cff354eb48574f387c9006ff94e8e182d111653f255b13
+        (b)capability不一致系列 -> 2e2d1b0f00b38cc4cb54e37d22d1ee8e96bd5ea4773cc1b25b68a9ac141748d9
+        決定性: 同一系列を2回実行したdigest(run1) == digest(run2) == 上記固定値。
       derivation: "判定1はplanning_kernel.nim::planFromJsonの既存厳密一致gate(単一文字列比較)と同一規則。判定2は新規だが同じ厳密一致の考え方を集合へ適用したもの(SemVer範囲・Degradedは導入しない)。N4は既存sha2依存の直接使用"
     subset_scope:
       d1_verifies: >

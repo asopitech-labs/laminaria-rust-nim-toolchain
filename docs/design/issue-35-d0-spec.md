@@ -4,7 +4,8 @@
 - 位置付け: 本書は **ゴール設定担当（Claude）による提出仕様案**。ユーザーから採否記録を依頼された指示者（Codex）がセクション6で判定する。本書単独でD1着手を許可しない。
 - 審査状態: **要改訂・D1未発行**（2026-09-11、提出commit `443b5f2959b1aa72be8cfb913f80fd92d79239f6`を審査、判定revision `issue35-d0-review-443b5f2-v1`）。セクション6は指示者の審査記録であり、提出者はこれを改変しない。
 - **改訂状態（第1回改訂、commit `217b0c1`）**: セクション6のR1〜R5に対応して本書・cases.yaml・D1草案の3点を改訂した。対応内容の一覧はセクション7に記す。
-- **改訂状態（第2回改訂、本改訂）**: 指示者による`217b0c1`の読み取りレビュー（発行を妨げる指摘6点、R1〜R5の残件）に対応した。対応内容の一覧はセクション8に記す。セクション0〜5・付録Aは改訂後の提出案。セクション6・7は各回の記録として保持し、改変していない。
+- **改訂状態（第2回改訂、commit `99a0f5c`）**: 指示者による`217b0c1`の読み取りレビュー（発行を妨げる指摘6点、R1〜R5の残件）に対応した。対応内容の一覧はセクション8に記す。
+- **改訂状態（第3回改訂、本改訂）**: 指示者による`99a0f5c`の読み取りレビュー（残件3点: D1合格条件の範囲、M6editのコンパイル可否、M7/M9のgolden値未確定）に対応した。対応内容の一覧はセクション9に記す。セクション0〜5・付録Aは改訂後の提出案。セクション6・7・8は各回の記録として保持し、改変していない。
 - 基準commit: `b875e43303a7ec9a5215897ed9dd08c98b45c812`（2026-09-11時点のHEAD、tree clean）
 - 併読ファイル:
   - [issue-35-d0-cases.yaml](issue-35-d0-cases.yaml) — 機械可読case定義（本書各節が参照するcase IDの実体）
@@ -184,7 +185,18 @@ aggregator::run() -> u64 {
 
 **編集シナリオ（具体的before/after、閉じた式で確定）**: `M7-*-medium`のedit caseは、`stage-04`の変換式（`transform_0`、`(04-1) % 3 == 0`なのでavalanche_mixが選ばれる）に使う`wrapping_mul`定数を`0xff51afd7ed558ccd`から`0xc4ceb9fe1a85ec53`へ変更する（MurmurHash3のfinalizer定数対で実在する値の入れ替えであり恣意的な値ではない）。この編集の結果、`stage-04`以降の鎖（`stage-05..08`）、`leaf-a/b/c/leaf-matrix-sum`全4本（分岐点より下流）、`aggregator`が再コンパイル対象になり、`stage-01..03`は対象外になる。
 
-**期待値の扱い（既存fixtureと同じ確立済み方法論）**: 上記の式・分岐点・編集差分・分離軸・aggregator集約式・大規模leaf選定規則はすべて本節で閉じた形式として確定した。実行結果の具体的な数値（`u64`の最終集約値）のみ、`deep-critical-path-graph`の`EXPECTED_RESULT`が実際にコードを実行して得た値を定数として固定したのと同じ方法で、D1が実装時に一度だけ実行して得た値をpinする。「実装結果をそのままgoldenにすると誤実装まで正解になる」という懸念には、上記の閉じた式・regression test（各transform/leaf関数を個別にunit testする）をD1実装の必須要件として明記することで対応する — 誤実装は個別unit testで検出され、集約値のpinはunit test通過後にのみ行う。
+**大規模leaf選定規則（本改訂で表記を一本化、P2対応）**: `leaf-NN`（NN=03..08）の選定インデックスは `i = NN - 3`（`leaf-03`→`i=0`, `leaf-04`→`i=1`, ..., `leaf-08`→`i=5`）と定義し、`i mod 3`が0なら`leaf_a(input, 97 + i)`、1なら`leaf_b`、2なら`leaf_c`を選ぶ。`leaf-01`/`leaf-02`は常に`leaf_matrix_sum(input, n=80)`。cases.yamlの記述もこの定義に統一する（前版に残っていた「`i`をleaf番号から直接0始まりで数える」という別解釈は撤回する）。
+
+**期待値（本改訂で確定、P2対応）**: 上記の式・分岐点・編集差分・分離軸・aggregator集約式・大規模leaf選定規則から、独立した実装（Python）で計算し確定した値は以下（M7-*-medium editの前後を含む）。`deep-critical-path-graph`の`EXPECTED_RESULT`が実際にコードを実行して得た値を定数として固定したのと同じ立場で、これらは"D1の実装結果をそのまま採用した値"ではなく、閉じた式からの独立計算値である。
+
+| case | 集約値（`u64`） |
+|---|---:|
+| M7-long-chain-wide-branches-small | `152668892010644049` |
+| M7-long-chain-wide-branches-medium（編集前） | `975184859065030187` |
+| M7-long-chain-wide-branches-medium（編集後） | `15936356680776682716` |
+| M7-long-chain-wide-branches-large | `233828575729373081` |
+
+D1実装者は、各transform/leaf関数を個別にunit testした上で、実装がこれらの値と一致することを確認する（「実装結果をそのままgoldenにすると誤実装まで正解になる」という懸念への対応: 個別unit testが誤実装を検出し、集約値は本節の独立計算値と照合される。実装値と一致しない場合はD0（本表）への差し戻し対象とする）。
 
 **検証する性質**: critical path長（鎖側の段数）、head-of-line blocking非発生（wide側の重いleafが他の軽いleafの実行を不必要にブロックしないこと、軸2の実行時間が長くても軸1の解析コストとは独立に扱われること）。
 
@@ -225,7 +237,11 @@ aggregator::run() -> u64 {
 - (a) 成功系列: `schema_version="0.2.0"`（実値と一致）、`requested_capabilities = provided_capabilities = ["env-fingerprint-v1", "toolchain-fingerprint-v1"]`（集合として完全一致） → 判定1=真・判定2=真 → exit 0, Compatible。
 - (b) capability不一致系列: `schema_version="0.2.0"`（一致）、`requested_capabilities = ["env-fingerprint-v1", "toolchain-fingerprint-v1", "unknown-capability-v1"]`、`provided_capabilities`は(a)と同じ2要素（部分集合にはなるが完全一致ではない） → 判定1=真・判定2=偽 → exit 1, Incompatible。
 - (c) 不正入力系列: `schema_version="0.1.0"`（`contract.nim`実値`"0.2.0"`と不一致） → 判定1=偽 → exit 2, 構造化エラー（`rrkInvalidContractVersion`相当）。判定2は評価されない。
-- 正準化書式（(a)(b)いずれの判定にも適用、(c)はN4に到達しない）: `requested_capabilities`と`provided_capabilities`をそれぞれ辞書順にソートし、`"|"`区切りで連結した文字列を`"SCHEMA:{schema_version}\nREQ:{req}\nPROV:{prov}\nRESULT:{Compatible|Incompatible}"`の形にまとめ、UTF-8バイト列としてSHA-256にかける。この書式自体はD0で確定済み。実際の64桁16進ダイジェスト値は、既存fixtureと同じ方法論（実装時に一度実行して得た値をpinする）で確定する。
+- 正準化書式（(a)(b)いずれの判定にも適用、(c)はN4に到達しない）: `requested_capabilities`と`provided_capabilities`をそれぞれ辞書順にソートし、`"|"`区切りで連結した文字列を`"SCHEMA:{schema_version}\nREQ:{req}\nPROV:{prov}\nRESULT:{Compatible|Incompatible}"`の形にまとめる（末尾改行なし）。UTF-8バイト列としてSHA-256にかけた値は、独立した実装（Python）で計算し確定済み（本改訂、P2対応）:
+  - (a) 成功系列: `"SCHEMA:0.2.0\nREQ:env-fingerprint-v1|toolchain-fingerprint-v1\nPROV:env-fingerprint-v1|toolchain-fingerprint-v1\nRESULT:Compatible"` → `9b541417be6e7a89f2cff354eb48574f387c9006ff94e8e182d111653f255b13`
+  - (b) capability不一致系列: `"SCHEMA:0.2.0\nREQ:env-fingerprint-v1|toolchain-fingerprint-v1|unknown-capability-v1\nPROV:env-fingerprint-v1|toolchain-fingerprint-v1\nRESULT:Incompatible"` → `2e2d1b0f00b38cc4cb54e37d22d1ee8e96bd5ea4773cc1b25b68a9ac141748d9`
+
+  これらは"実装結果をそのまま採用した値"ではなく、上記の正準化書式から独立に計算し確定した値である。D1（後続実装ステージ）の実装がこれと一致しない場合、実装側の誤りとしてD0（本表）への差し戻し対象とする。
 
 **検証すべき観測可能な性質**: 同一系列を2回実行して同一ダイジェストが得られること（決定性）、(b)系列でN3がIncompatibleを返しN1が終了コード1で報告すること、(c)系列でN1が終了コード2を返しN4に到達しないこと、panicをN2内で`catch_unwind`により捕捉しFFI境界を越える前に構造化エラーへ変換すること。
 
@@ -362,13 +378,12 @@ D1時点では、owned roleのcaseについてのみ1と2を取得する。M3-ow
 
 ### 5.1 D1合格条件（再現性・正当性・比較基準の取得）
 
-- 各caseについて、宣言された依存/非依存関係が実際のビルドツール出力（`cargo build -v`のCompiling/Fresh行、Nimのコンパイル呼び出しログ）と一致すること。execution_role: ownedのcaseは、実測を`ComputeConcurrencyProbe`等の実行区間トレースで確認する。
+- 各caseについて、宣言された依存/非依存関係が実際のビルドツール出力（`cargo build -v`のCompiling/Fresh行、Nimのコンパイル呼び出しログ）と一致すること。execution_role: ownedかつreached_stageがD1で到達するcaseは、実測を`ComputeConcurrencyProbe`等の実行区間トレースで確認する。
 - 宣言された「実行してはいけない仕事」が実測でゼロ回であること。
-- 期待値/期待診断が、導出根拠と一致すること。M7等の実行結果golden値は、D0確定済みの形状・数式・分岐点・編集差分から、D1が一度実行して得た値としてpinされる。
-- execution_role: ownedのcaseについて、CPU budget=1の逐次baseline計測が取得されること。**再現性は独立した複数回の再実行間の一致で判定し、同一`ScenarioReport`の自己比較は使用しない。**
-- M10-wasm-sideの参照調査タスクの結果（肯定/否定いずれか）が記録されること。否定の場合、不足能力がsubset_scope.future_workに具体的に記録され、M10-wasm-sideは未達として保持されること。
+- 期待値/期待診断が、導出根拠と一致すること。M7の実行結果golden値（小=`152668892010644049`、中・編集前=`975184859065030187`、中・編集後=`15936356680776682716`、大=`233828575729373081`）とM9の正準化digest（Compatible=`9b541417be6e7a89f2cff354eb48574f387c9006ff94e8e182d111653f255b13`、Incompatible=`2e2d1b0f00b38cc4cb54e37d22d1ee8e96bd5ea4773cc1b25b68a9ac141748d9`）は、いずれもD0が確定した閉じた式・正準化書式から独立に計算され確定した値であり、D1実装結果をそのままgoldenとして採用するものではない（詳細は§2.2/§3.1参照）。
+- **訂正（本改訂、P1対応）**: D1がCPU budget=1（該当する場合は1と2）のbaseline計測を実際に取得するのは、`M3-owned-independent-chains`と`M8-many-unrequested-nim-planner`の2caseに限る。この2caseはexecution_role: ownedかつD1でreached_stage: source-ir-evaluationまで到達する（実コードが既存または新規に実行される）唯一の対象である。M9/M10-lsp-native/M10-wasm-sideはexecution_role: ownedだがreached_stage: configuration-definitionまでで、D1では実行・計測を行わないため、この基準の対象外とする。**再現性は独立した複数回の再実行間の一致で判定し、同一`ScenarioReport`の自己比較は使用しない。**
 
-D1は速度改善そのものを判定しない（#28本文に従う）。
+D1は速度改善そのものを判定しない（#28本文に従う）。M10-wasm-feasibility-reference-spikeの実施・結果はD1の合格条件に含まれない（§3.3参照、実施時期はD1完了後に指示者が判断する）。
 
 ### 5.2 D4合格条件（速度改善・回帰許容幅）
 
@@ -470,6 +485,18 @@ R1〜R5について、修正箇所と満たした条件を一覧で提出する�
 | 6 (P2/R4) | M3の計測欄に反復数はあるがhost・状態復元・budget実行順・計測境界がなく、`Stats::from_samples`だけでは再現性の合否を決められなかった | `host`(単一host固定)・`state_restoration`(repetitionごとの新規ArtifactStore)・`execution_order`(budget1連続実行→budget2連続実行、インターリーブなし)・`measurement_boundary`(`run_compiler_work_plan_traced`呼び出し前後)の4項目を追加した。D4の速度目標確定は今回の対応範囲に含めない(既存方針を維持) | cases.yaml M3-owned-independent-chainsの`measurement` |
 
 ---
+
+## 9. 第3回改訂内容一覧（commit `99a0f5c`の読み取りレビュー3点への対応）
+
+指示者は`99a0f5c`を審査し、「M3の3段構成、M9のschema/capability分離、M7の依存方向、M8の要求集合は修正済み」と確認した上で、残件3点（発行を妨げる指摘、うちP1が2点）を指摘した。設計の再検討は不要と明記されている。以下は各指摘への対応。
+
+| # | 指摘 | 対応 | 反映箇所 |
+|---|---|---|---|
+| 1 (P1) | §5.1がWASM調査結果の記録をD1合格条件に残しており、D1草案の「owned全caseのbaseline取得」がM9/M10（実装しない）にも適用される記述だった | WASM調査結果の記録をD1合格条件から削除した。CPU budget=1のbaseline計測対象を`M3-owned-independent-chains`と`M8-many-unrequested-nim-planner`の2caseに明示的に限定し、`M8-many-unrequested-nim-planner`の`measurement`ブロックにも実際の計測（comparison_modes/cpu_budget/host等）を追加した。M9/M10-lsp-native/M10-wasm-sideはexecution_role: ownedだがreached_stage: configuration-definitionのため対象外であることを明記した | §5.1, D1草案§1/§5/§6, cases.yaml M8-many-unrequested-nim-planner |
+| 2 (P1) | M6の`schema_note`フィールド追加は、`env.rs::detect()`の構造体リテラル(全フィールド明示、`..Default::default()`なし)に対応する初期化式が伴わずコンパイルが失敗する | env.rs:38-84行目を確認し指摘を検証した。M6の構造体変更を撤回し、M1-fingerprint-leaf-editと同一の差分（`ENV_ALLOWLIST`配列への`"NIM_CONFIG_DIR"`追加）を共用する形へ変更した。要求対象は`laminaria-cli`のまま維持し、依存伝播・重複排除の検証目的は変わらない | cases.yaml M6-diamond-fingerprint-plan |
+| 3 (P2) | M7・M9の期待値がD1実装結果をgoldenにする記述のままで、個別unit testだけでは集約部分の誤りを排除できなかった | 指示者が提示した4つのM7集約値・2つのM9ダイジェストを、独立実装（Python、既存コード非依存で本セッションが新規に書いたスクリプト）で再計算し、全て一致することを確認した上でD0の確定値として採用した。あわせてcases.yaml内に残っていたM7大規模leaf選定規則の別解釈（「iを直接0始まりで数える」）を、spec.mdの定義（`i = NN - 3`）へ統一した | §2.2(golden値表、大規模leaf選定規則), §3.1(digest値), cases.yaml M7-*/M9-fingerprint-compat-chain |
+
+**検証方法（本改訂固有）**: 上記3.の再計算は、spec.mdが確定した閉じた式（`transform_0/1/2`、`leaf_a/b/c/matrix_sum`、aggregator集約式、M9正準化書式）をそのままPythonで実装し、指示者提示の値と独立に一致することを確認する形で行った（この session が新規に書いた検証スクリプトであり、リポジトリの既存実装コードは一切参照していない）。
 
 ## 付録A: M2（解決済み）
 
