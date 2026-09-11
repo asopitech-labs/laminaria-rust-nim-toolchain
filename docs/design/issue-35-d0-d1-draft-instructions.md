@@ -1,8 +1,16 @@
-# D1実装指示（草案・未発行）
+# D1実装指示（発行済み・D1完了）
 
-- 状態: **要改訂・未発行（第3回改訂反映済み）** — 提出commit `443b5f2`を審査し、[issue-35-d0-spec.md](issue-35-d0-spec.md)セクション6に採否と修正指示R1〜R5を記録した。第1回改訂commit `217b0c1`の読み取りレビューで6件の残件、第2回改訂commit `99a0f5c`の読み取りレビューで3件の残件（D1合格条件の範囲、M6editのコンパイル可否、M7/M9のgolden値未確定）が指摘され、いずれも本改訂で対応した（設計の再検討は不要と確認済み）。D1はcase定義（構成・入力・期待結果）の確定のみを行い、M9/M10の製品コード（FFI shim/Nim CLI/LSP/WASM）の実装は一切含まない。CPU budget=1のbaseline計測を実際に取得するのは`M3-owned-independent-chains`と`M8-many-unrequested-nim-planner`の2caseに限る。指示者が本改訂を確認し、[issue-35-d0-spec.md](issue-35-d0-spec.md)セクション6〜9と[issue-35-d0-cases.yaml](issue-35-d0-cases.yaml)（`schema_version: 0.2.0-draft`）の3点一致を確定仕様revisionとして記録するまで、本書は実行指示として発行しない。
-- 発行条件: 指示者がR1〜R5反映内容（本改訂を含む）を確認し、3点(本書/spec.md/cases.yaml)の一致と確定仕様revisionを記録すること。採否欄・改訂内容一覧への記入だけでは発行しない。
-- 参照する仕様revision: `docs/design/issue-35-d0-spec.md`（本改訂）、`docs/design/issue-35-d0-cases.yaml` @ `schema_version: 0.2.0-draft`（確定後は指示者が具体的なgit commit hashをここに追記する）。
+- **現在の状態（本追記、履歴は下記の旧状態欄を含め一切改変していない）**:
+  本書は`docs/design/issue-35-d0-spec.md`セクション10「採否確定記録」
+  （採用commit `c812d70`、判定revision `issue35-d0-accepted-c812d70-v1`）
+  をもって発行済みとなった。D1（D1-a/D1-b1/D1-b2）は実装・検証が完了し、
+  `docs/design/issue-28-d1-completion-audit.md`に20 case全件の一次資料
+  突き合わせによる完了検収を記録している。下記の「旧状態」欄は、発行
+  条件の3点一致（本書/spec.md/cases.yaml）が確定する前の審査経緯の記録
+  として、当時のまま保持する。
+- **旧状態（第3回改訂時点の記録、以後の履歴として保持）**: 要改訂・未発行（第3回改訂反映済み） — 提出commit `443b5f2`を審査し、[issue-35-d0-spec.md](issue-35-d0-spec.md)セクション6に採否と修正指示R1〜R5を記録した。第1回改訂commit `217b0c1`の読み取りレビューで6件の残件、第2回改訂commit `99a0f5c`の読み取りレビューで3件の残件（D1合格条件の範囲、M6editのコンパイル可否、M7/M9のgolden値未確定）が指摘され、いずれも本改訂で対応した（設計の再検討は不要と確認済み）。D1はcase定義（構成・入力・期待結果）の確定のみを行い、M9/M10の製品コード（FFI shim/Nim CLI/LSP/WASM）の実装は一切含まない。CPU budget=1のbaseline計測を実際に取得するのは`M3-owned-independent-chains`と`M8-many-unrequested-nim-planner`の2caseに限る。指示者が本改訂を確認し、[issue-35-d0-spec.md](issue-35-d0-spec.md)セクション6〜9と[issue-35-d0-cases.yaml](issue-35-d0-cases.yaml)（`schema_version: 0.2.0-draft`）の3点一致を確定仕様revisionとして記録するまで、本書は実行指示として発行しない。
+- 発行条件（満たされた）: 指示者がR1〜R5反映内容（本改訂を含む）を確認し、3点(本書/spec.md/cases.yaml)の一致と確定仕様revisionを記録すること。採否欄・改訂内容一覧への記入だけでは発行しない。
+- 参照する仕様revision: `docs/design/issue-35-d0-spec.md`（セクション10、採用commit `c812d70`）、`docs/design/issue-35-d0-cases.yaml` @ `schema_version: 0.2.0-draft`。
 
 ---
 
@@ -57,14 +65,19 @@ D1実装者は`issue-35-d0-cases.yaml`の各caseを次の3種のいずれかと�
 
 以下がすべて満たされた時点でD1は完了とする。速度改善そのものはD4で判定するため、D1の停止条件には含まない。
 
-- [ ] `issue-35-d0-cases.yaml`の「D1で実装・実行する」区分の全case（セクション1の分類1）についてmanifest/fixture/検証テストが実装され、`pass_criteria.d1`を満たす。
-- [ ] `M3-owned-independent-chains`が既存テストの登録として`ScenarioReport`化され、`pass_criteria.d1`を満たす（測定手順が§5記載の通り再現可能である）。
-- [ ] `M9-fingerprint-compat-chain`/`M10-lsp-native`/`M10-wasm-side`について、case定義（固定snapshot値・manifest・cycle_path・正準化書式・期待exit code/診断）が確定していることのみを確認する。実コードの実装・実行は求めない（`M10-wasm-feasibility-reference-spike`の実施も含めない）。
-- [ ] 各`origin: self`のcaseについて、新規fixtureを追加していないこと（既存の実コード・実ワークスペースのみを使っていること）を差分レビューで確認する。
-- [ ] 各`origin: fixture-existing`のcaseについて、既存fixtureのソース・アサーションが変更されていないこと（メタデータ・検証スクリプトの追加のみ）を差分レビューで確認する。
-- [ ] `M3-topology`の`compile-rust-host`/`compile-nim-planner`が`compiler_work_executor`へ渡されていないこと、`M3-owned-independent-chains`が新規Transform実装を追加していないことをコードレビューで確認する。
-- [ ] **訂正（P1対応、本改訂）**: `M3-owned-independent-chains`と`M8-many-unrequested-nim-planner`（D1で実行される唯一のownedケース2件）についてCPU budget=1（該当するcaseは1と2）のbaseline計測が`ScenarioReport`として保存され、再生成可能である。M9/M10-lsp-native/M10-wasm-sideはこの基準の対象外（D1では未実行）。
-- [ ] 仕様不備が見つかった場合、D0（`issue-35-d0-spec.md`/`issue-35-d0-cases.yaml`）への改版が行われている（D1実装者自身が期待値・測定条件・合格基準を変更していない）。
+**充足確認済み（本追記）**: 下記7項目すべてを`docs/design/issue-28-d1-completion-audit.md`
+（20 case全件の一次資料突き合わせによる検収）で確認した。チェックは
+本追記時点の状態を反映するものであり、各項目のオリジナル文面（訂正注記
+含む）は変更していない。
+
+- [x] `issue-35-d0-cases.yaml`の「D1で実装・実行する」区分の全case（セクション1の分類1）についてmanifest/fixture/検証テストが実装され、`pass_criteria.d1`を満たす。
+- [x] `M3-owned-independent-chains`が既存テストの登録として`ScenarioReport`化され、`pass_criteria.d1`を満たす（測定手順が§5記載の通り再現可能である）。
+- [x] `M9-fingerprint-compat-chain`/`M10-lsp-native`/`M10-wasm-side`について、case定義（固定snapshot値・manifest・cycle_path・正準化書式・期待exit code/診断）が確定していることのみを確認する。実コードの実装・実行は求めない（`M10-wasm-feasibility-reference-spike`の実施も含めない）。
+- [x] 各`origin: self`のcaseについて、新規fixtureを追加していないこと（既存の実コード・実ワークスペースのみを使っていること）を差分レビューで確認する。
+- [x] 各`origin: fixture-existing`のcaseについて、既存fixtureのソース・アサーションが変更されていないこと（メタデータ・検証スクリプトの追加のみ）を差分レビューで確認する。
+- [x] `M3-topology`の`compile-rust-host`/`compile-nim-planner`が`compiler_work_executor`へ渡されていないこと、`M3-owned-independent-chains`が新規Transform実装を追加していないことをコードレビューで確認する。
+- [x] **訂正（P1対応、本改訂）**: `M3-owned-independent-chains`と`M8-many-unrequested-nim-planner`（D1で実行される唯一のownedケース2件）についてCPU budget=1（該当するcaseは1と2）のbaseline計測が`ScenarioReport`として保存され、再生成可能である。M9/M10-lsp-native/M10-wasm-sideはこの基準の対象外（D1では未実行）。
+- [x] 仕様不備が見つかった場合、D0（`issue-35-d0-spec.md`/`issue-35-d0-cases.yaml`）への改版が行われている（D1実装者自身が期待値・測定条件・合格基準を変更していない）。※D1-a/b1/b2を通じてD0改版を要する仕様不備は発見されなかった（該当なし、というかたちで充足）。
 
 ## 7. 未解決事項の扱い
 
