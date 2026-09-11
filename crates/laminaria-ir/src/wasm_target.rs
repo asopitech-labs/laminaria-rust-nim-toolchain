@@ -14,6 +14,7 @@ const I32: u8 = 0x7f;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodegenError {
     TooManyItems(&'static str),
+    InconsistentFunctionIdentity { map_key: String, fact_name: String },
     MissingFunction(String),
     MissingLocal(LocalId),
 }
@@ -22,6 +23,10 @@ impl fmt::Display for CodegenError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::TooManyItems(kind) => write!(f, "too many {kind} for a WebAssembly u32 index"),
+            Self::InconsistentFunctionIdentity { map_key, fact_name } => write!(
+                f,
+                "function map key `{map_key}` does not match function name `{fact_name}`"
+            ),
             Self::MissingFunction(name) => {
                 write!(
                     f,
@@ -44,6 +49,14 @@ impl std::error::Error for CodegenError {}
 /// structured conditionals, locals, calls, and wrapping arithmetic.
 pub fn generate_wasm_module(program: &ValidatedProgram) -> Result<Vec<u8>, CodegenError> {
     let program = program.program();
+    for (map_key, function) in &program.functions {
+        if map_key != &function.name {
+            return Err(CodegenError::InconsistentFunctionIdentity {
+                map_key: map_key.clone(),
+                fact_name: function.name.clone(),
+            });
+        }
+    }
     let function_count = u32_len(program.functions.len(), "functions")?;
     let function_indices: BTreeMap<&str, u32> = program
         .functions
@@ -409,8 +422,10 @@ mod tests {
 
     #[test]
     fn generated_module_starts_with_wasm_mvp_magic_and_version() {
-        let bytes = generate_wasm_module(&fixture_program()).unwrap();
+        let program = fixture_program();
+        let bytes = generate_wasm_module(&program).unwrap();
         assert_eq!(&bytes[..8], b"\0asm\x01\0\0\0");
+        assert_eq!(bytes, generate_wasm_module(&program).unwrap());
     }
 
     #[test]
@@ -522,5 +537,76 @@ mod tests {
         });
 
         assert_eq!(execute_one_i32(&program, "countdown", 5), 5);
+    }
+
+    #[test]
+    fn nested_reuse_of_a_local_id_restores_the_outer_binding() {
+        let p = provenance();
+        let mut program = Program::default();
+        program.insert(FnFact {
+            name: "shadow".to_string(),
+            params: vec![],
+            return_width: IntWidth::I32,
+            provenance: p.clone(),
+            body: Stmt::Let {
+                local: LocalId(0),
+                value: Expr::IntLit(5, IntWidth::I32, p.clone()),
+                body: Box::new(Stmt::Return(
+                    Expr::WrappingAdd(
+                        Box::new(Expr::Let {
+                            local: LocalId(0),
+                            value: Box::new(Expr::IntLit(10, IntWidth::I32, p.clone())),
+                            body: Box::new(Expr::Local(LocalId(0), p.clone())),
+                            provenance: p.clone(),
+                        }),
+                        Box::new(Expr::Local(LocalId(0), p.clone())),
+                        p.clone(),
+                    ),
+                    p.clone(),
+                )),
+                provenance: p,
+            },
+        });
+
+        let validated = validate_program(&program).unwrap();
+        let bytes = generate_wasm_module(&validated).unwrap();
+        let engine = Engine::default();
+        let module = Module::new(&engine, bytes).unwrap();
+        let mut store = Store::new(&engine, ());
+        let instance = Instance::new(&mut store, &module, &[]).unwrap();
+        let generated = instance
+            .get_typed_func::<(), i32>(&mut store, "shadow")
+            .unwrap()
+            .call(&mut store, ())
+            .unwrap();
+
+        assert_eq!(generated, 15);
+        assert_eq!(
+            eval_function(&program, "shadow", &[]).unwrap().value,
+            i64::from(generated)
+        );
+    }
+
+    #[test]
+    fn inconsistent_function_map_key_and_source_name_fail_closed() {
+        let p = provenance();
+        let fact = FnFact {
+            name: "source_name".to_string(),
+            params: vec![],
+            return_width: IntWidth::I32,
+            provenance: p.clone(),
+            body: Stmt::Return(Expr::IntLit(1, IntWidth::I32, p.clone()), p),
+        };
+        let mut program = Program::default();
+        program.functions.insert("map_key".to_string(), fact);
+        let validated = validate_program(&program).unwrap();
+
+        assert_eq!(
+            generate_wasm_module(&validated),
+            Err(CodegenError::InconsistentFunctionIdentity {
+                map_key: "map_key".to_string(),
+                fact_name: "source_name".to_string(),
+            })
+        );
     }
 }
