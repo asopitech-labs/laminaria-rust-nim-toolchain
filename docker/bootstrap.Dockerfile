@@ -14,8 +14,9 @@
 # (crates/laminaria-fingerprint/src/comparability.rs) refuses to silently
 # treat a container Run as comparable to a native one.
 #
-# Build:  docker build -f docker/bootstrap.Dockerfile -t laminaria-bootstrap .
-# Run:    docker run --rm -it laminaria-bootstrap doctor
+# Windows development uses wslc exclusively:
+# Build:  wslc build --progress plain -f docker/bootstrap.Dockerfile -t laminaria-bootstrap .
+# Run:    wslc run --rm --pull never laminaria-bootstrap doctor
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -31,11 +32,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       binaryen \
     && rm -rf /var/lib/apt/lists/*
 
-# Left at rustup/choosenim's defaults under $HOME (/root here, running as
-# root) so the ~/.cargo, ~/.rustup, ~/.choosenim paths this repo's own lock
-# file and doctor code already expect (see exec::expand_tilde) just work,
-# with no container-specific path overrides to keep in sync by hand.
-ENV PATH=/root/.cargo/bin:/root/.nimble/bin:$PATH
+# Build and run as an unprivileged user. Apart from avoiding root-owned build
+# artifacts, this preserves permission-sensitive tests that intentionally make
+# a directory unreadable. The UID/GID can be overridden when a future bind-mount
+# workflow needs to match a host account; the standard COPY-based workflow uses
+# the deterministic defaults.
+ARG LAMINARIA_UID=1000
+ARG LAMINARIA_GID=1000
+RUN groupadd --gid "${LAMINARIA_GID}" laminaria \
+    && useradd --create-home --uid "${LAMINARIA_UID}" --gid "${LAMINARIA_GID}" --shell /bin/bash laminaria
+
+USER laminaria
+ENV HOME=/home/laminaria
+
+# Leave rustup/choosenim at their defaults under the unprivileged user's home so
+# the ~/.cargo, ~/.rustup, ~/.choosenim paths this repository's lock and doctor
+# code expect (see exec::expand_tilde) work without container-only overrides.
+ENV PATH=/home/laminaria/.cargo/bin:/home/laminaria/.nimble/bin:$PATH
 
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable \
     && rustup component add llvm-tools
@@ -46,7 +59,7 @@ RUN curl https://nim-lang.org/choosenim/init.sh -sSf | sh -s -- -y \
 RUN cargo install wasm-tools --version 1.255.0
 
 WORKDIR /workspace
-COPY . .
+COPY --chown=laminaria:laminaria . .
 
 RUN cargo build --workspace
 

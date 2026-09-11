@@ -58,10 +58,19 @@ Named toolchain selectors live in [`toolchains.lock.toml`](toolchains.lock.toml)
 
 `scripts/bootstrap.sh` prefers exact, non-system-package-manager sources where one exists (`rustup` toolchains + its `llvm-tools` component, `choosenim` for exact Nim versions, `cargo install --version` for pure-Rust CLI tools); a system package manager is only used for the couple of tools with no such alternative (`clang`/`llvm-config`, Binaryen's `wasm-opt`). For a fully reproducible bootstrap independent of any one host's package manager state — e.g. to sanity-check the toolchain set on a clean machine — [`docker/bootstrap.Dockerfile`](docker/bootstrap.Dockerfile) builds and runs the same stack in a container:
 
-```bash
-docker build -f docker/bootstrap.Dockerfile -t laminaria-bootstrap .
-docker run --rm laminaria-bootstrap doctor
+### Required Windows development path
+
+Development initiated from Windows must use the `wslc` container path for all
+builds, tests, checks, linting, formatting checks, and toolchain diagnostics.
+Do not run the host Windows Rust or Nim toolchain directly for this project.
+
+```powershell
+wslc build --progress plain -f docker/bootstrap.Dockerfile -t laminaria-bootstrap .
+wslc run --rm --pull never laminaria-bootstrap doctor
 ```
+
+The complete lifecycle and canonical commands are in the
+[Windows `wslc` container development procedure](docs/windows-wslc-development.md).
 
 Per `docs/measurement-foundation.md` §2, this is for bootstrap/correctness reproduction only — canonical performance measurements should run natively on the host being measured, and `doctor` records `environment_class = "container"` so such runs are never silently compared to a native baseline.
 
@@ -87,6 +96,7 @@ Windows commands, destination selection, recovery, and revision updates.
 
 ### Research and implementation documents
 
+- [Windows `wslc` container development procedure](docs/windows-wslc-development.md)
 - [Agent-oriented toolchain UX and bounded planning (English)](docs/agent-oriented-toolchain-ux.md)
 - [エージェント指向ツールチェーンUX・探索抑制方針 (日本語)](docs/agent-oriented-toolchain-ux_ja.md)
 - [Validated toolchain profiles and progressive configuration (English)](docs/validated-toolchain-profiles.md)
