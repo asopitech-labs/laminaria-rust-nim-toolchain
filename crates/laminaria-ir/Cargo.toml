@@ -10,3 +10,6 @@ description = "Source-derived owned IR for a declared Rust/Nim subset (issues #2
 [dependencies]
 syn = { version = "2", features = ["full", "extra-traits"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
+
+[dev-dependencies]
+wasmtime = { version = "=18.0.4", default-features = false, features = ["cranelift", "runtime"] }

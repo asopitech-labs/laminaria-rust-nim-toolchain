@@ -52,6 +52,7 @@ pub mod rust_frontend;
 pub mod transform;
 pub mod types;
 pub mod validate;
+pub mod wasm_target;
 
 // `#[cfg(all(test, unix))]` on the whole module, not `#[cfg(unix)]` on each
 // test function individually -- a CI failure caught the difference
@@ -87,7 +88,10 @@ mod fixture_parity_tests {
 
     use crate::interpreter::eval_function;
     use crate::rust_frontend::lower_rust_source;
+    use crate::validate::validate_program;
+    use crate::wasm_target::generate_wasm_module;
     use std::path::PathBuf;
+    use wasmtime::{Engine, Instance, Module, Store};
 
     fn repo_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -97,6 +101,22 @@ mod fixture_parity_tests {
     }
 
     const TEST_INPUTS: &[(i32, i32, i32)] = &[(3, 4, 0), (3, 4, 1), (i32::MAX, 1, 0), (-5, 10, 1)];
+
+    fn wasm_results(program: &crate::types::Program, function_name: &str) -> Vec<i32> {
+        let validated = validate_program(program).unwrap();
+        let bytes = generate_wasm_module(&validated).unwrap();
+        let engine = Engine::default();
+        let module = Module::new(&engine, bytes).unwrap();
+        let mut store = Store::new(&engine, ());
+        let instance = Instance::new(&mut store, &module, &[]).unwrap();
+        let function = instance
+            .get_typed_func::<(i32, i32, i32), i32>(&mut store, function_name)
+            .unwrap();
+        TEST_INPUTS
+            .iter()
+            .map(|&(a, b, use_double)| function.call(&mut store, (a, b, use_double)).unwrap())
+            .collect()
+    }
 
     #[test]
     #[cfg(unix)]
@@ -129,14 +149,16 @@ mod fixture_parity_tests {
         let output = std::process::Command::new(&binary).output().unwrap();
         let real_stdout = String::from_utf8(output.stdout).unwrap();
 
+        let wasm = wasm_results(&program, "add_or_double");
         let mut derived_stdout = String::new();
-        for &(a, b, use_double) in TEST_INPUTS {
+        for (&(a, b, use_double), wasm_value) in TEST_INPUTS.iter().zip(wasm) {
             let outcome = eval_function(
                 &program,
                 "add_or_double",
                 &[a as i64, b as i64, use_double as i64],
             )
             .unwrap();
+            assert_eq!(outcome.value as i32, wasm_value);
             derived_stdout.push_str(&format!("{a},{b},{use_double},{}\n", outcome.value as i32));
         }
 
@@ -183,14 +205,16 @@ mod fixture_parity_tests {
         let output = std::process::Command::new(&binary).output().unwrap();
         let real_stdout = String::from_utf8(output.stdout).unwrap();
 
+        let wasm = wasm_results(&program, "addOrDouble");
         let mut derived_stdout = String::new();
-        for &(a, b, use_double) in TEST_INPUTS {
+        for (&(a, b, use_double), wasm_value) in TEST_INPUTS.iter().zip(wasm) {
             let outcome = eval_function(
                 &program,
                 "addOrDouble",
                 &[a as i64, b as i64, use_double as i64],
             )
             .unwrap();
+            assert_eq!(outcome.value as i32, wasm_value);
             derived_stdout.push_str(&format!("{a},{b},{use_double},{}\n", outcome.value as i32));
         }
 
