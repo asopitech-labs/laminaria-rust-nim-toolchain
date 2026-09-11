@@ -5,6 +5,7 @@
 //! See `docs/design/issue-35-d0-spec.md` section 10 for the accepted
 //! D0 scope this crate implements against.
 
+pub mod d1b1_planner_cases;
 pub mod d1b1_reference_cases;
 pub mod m3_baseline;
 pub mod m8_baseline;

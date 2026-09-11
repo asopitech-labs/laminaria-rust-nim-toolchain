@@ -8,13 +8,20 @@
 //! only, never the sole evidence.
 
 fn main() {
-    let results = match laminaria_experiment::d1b1_reference_cases::run_all() {
+    let mut results = match laminaria_experiment::d1b1_reference_cases::run_all() {
         Ok(r) => r,
         Err(e) => {
             eprintln!("D1-b1 reference-case runner failed before completing: {e}");
             std::process::exit(1);
         }
     };
+    match laminaria_experiment::d1b1_planner_cases::run_all() {
+        Ok(more) => results.extend(more),
+        Err(e) => {
+            eprintln!("D1-b1 planner-case runner failed before completing: {e}");
+            std::process::exit(1);
+        }
+    }
 
     let mut any_failed = false;
     for case in &results {
