@@ -96,6 +96,7 @@ Windows commands, destination selection, recovery, and revision updates.
 
 ### Research and implementation documents
 
+- [Hike極小Wasmコンパイラのエンジニアリング研究](docs/hike-micro-wasm-engineering-research_ja.md)
 - [Windows `wslc` container development procedure](docs/windows-wslc-development.md)
 - [Agent-oriented toolchain UX and bounded planning (English)](docs/agent-oriented-toolchain-ux.md)
 - [エージェント指向ツールチェーンUX・探索抑制方針 (日本語)](docs/agent-oriented-toolchain-ux_ja.md)
