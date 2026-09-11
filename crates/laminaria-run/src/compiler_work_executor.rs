@@ -243,6 +243,148 @@ pub fn compute_source_snapshot_id(source_text: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+/// Builds the `LowerSource -> ValidateIr -> EvaluateEvidence` action
+/// triple for one language's chain -- the exact three-action, no-
+/// `TransformFunction` shape `plan.actions.len() == 6` asserts on below
+/// (issue #35 D0's own review corrected an earlier design draft that had
+/// conflated this with the different, five-step
+/// `the_full_lower_validate_transform_validate_evaluate_pipeline_runs_end_to_end`
+/// test's pipeline). Returns the three actions plus the final
+/// `EvaluateEvidence` artifact id a caller demands.
+pub fn independent_chain_actions(
+    language: &str,
+    source_path: &str,
+    source_text: &str,
+    function_name: &str,
+    test_inputs: &[Vec<i64>],
+) -> (Vec<Action>, String) {
+    use laminaria_plan::compiler_work::{SourceProvenanceRef, COMPILER_WORK_SCHEMA_VERSION};
+
+    let operation_version = "0.1.0";
+    let subset_version = "0.1.0";
+    let semantic_contract_version = "0.1.0";
+    let observation_contract_version = "0.1.0";
+    let snapshot_id = compute_source_snapshot_id(source_text);
+
+    let lower_id = laminaria_plan::lower_source_artifact_id(
+        operation_version,
+        language,
+        &snapshot_id,
+        &[function_name],
+        subset_version,
+    );
+    let lower_action = Action {
+        id: lower_id.clone(),
+        kind: ActionKind::LowerSource,
+        command_identity: "lower_source".to_string(),
+        inputs: vec![ArtifactRef::source(source_path)],
+        outputs: vec![ArtifactRef::declared(&lower_id)],
+        compiler_work: Some(CompilerWorkDescriptor {
+            descriptor_schema_version: COMPILER_WORK_SCHEMA_VERSION.to_string(),
+            operation_version: operation_version.to_string(),
+            semantic_input_artifact_ids: vec![],
+            requested_functions: vec![function_name.to_string()],
+            language: Some(language.to_string()),
+            contract_version: Some(subset_version.to_string()),
+            transform: None,
+            source_provenance: Some(SourceProvenanceRef {
+                source_file: source_path.to_string(),
+                source_snapshot_id: snapshot_id,
+            }),
+            test_inputs: vec![],
+            resource_request: laminaria_plan::compiler_work::ResourceRequest::minimal(),
+            budget_token: "budget-1".to_string(),
+        }),
+    };
+
+    let validate_id = laminaria_plan::validate_ir_artifact_id(
+        operation_version,
+        &lower_id,
+        semantic_contract_version,
+    );
+    let validate_action = Action {
+        id: validate_id.clone(),
+        kind: ActionKind::ValidateIr,
+        command_identity: "validate_ir".to_string(),
+        inputs: vec![ArtifactRef::declared(&lower_id)],
+        outputs: vec![ArtifactRef::declared(&validate_id)],
+        compiler_work: Some(CompilerWorkDescriptor {
+            descriptor_schema_version: COMPILER_WORK_SCHEMA_VERSION.to_string(),
+            operation_version: operation_version.to_string(),
+            semantic_input_artifact_ids: vec![lower_id.clone()],
+            requested_functions: vec![],
+            language: None,
+            contract_version: Some(semantic_contract_version.to_string()),
+            transform: None,
+            source_provenance: None,
+            test_inputs: vec![],
+            resource_request: laminaria_plan::compiler_work::ResourceRequest::minimal(),
+            budget_token: "budget-1".to_string(),
+        }),
+    };
+
+    let evaluate_id = laminaria_plan::evaluate_evidence_artifact_id(
+        operation_version,
+        &validate_id,
+        function_name,
+        test_inputs,
+        observation_contract_version,
+    );
+    let evaluate_action = Action {
+        id: evaluate_id.clone(),
+        kind: ActionKind::EvaluateEvidence,
+        command_identity: "evaluate_evidence".to_string(),
+        inputs: vec![ArtifactRef::declared(&validate_id)],
+        outputs: vec![ArtifactRef::declared(&evaluate_id)],
+        compiler_work: Some(CompilerWorkDescriptor {
+            descriptor_schema_version: COMPILER_WORK_SCHEMA_VERSION.to_string(),
+            operation_version: operation_version.to_string(),
+            semantic_input_artifact_ids: vec![validate_id.clone()],
+            requested_functions: vec![function_name.to_string()],
+            language: None,
+            contract_version: Some(observation_contract_version.to_string()),
+            transform: None,
+            source_provenance: None,
+            test_inputs: test_inputs.to_vec(),
+            resource_request: laminaria_plan::compiler_work::ResourceRequest::minimal(),
+            budget_token: "budget-1".to_string(),
+        }),
+    };
+
+    (
+        vec![lower_action, validate_action, evaluate_action],
+        evaluate_id,
+    )
+}
+
+/// Assembles the two independent (Rust, Nim) chains
+/// [`independent_chain_actions`] builds into one `PlanningInput`
+/// demanding both chains' final evidence -- the exact construction
+/// issue #28 D1-a's `M3-owned-independent-chains` case reuses (not a
+/// parallel reimplementation) and the existing concurrency test below
+/// now calls too. Returns the input plus each chain's own evidence
+/// artifact id.
+pub fn independent_rust_and_nim_chains_planning_input(
+    rust_source_path: &str,
+    rust_source_text: &str,
+    nim_source_path: &str,
+    nim_source_text: &str,
+    test_inputs: &[Vec<i64>],
+) -> (laminaria_plan::PlanningInput, String, String) {
+    let (rust_actions, rust_evidence_id) =
+        independent_chain_actions("rust", rust_source_path, rust_source_text, "f", test_inputs);
+    let (nim_actions, nim_evidence_id) =
+        independent_chain_actions("nim", nim_source_path, nim_source_text, "g", test_inputs);
+
+    let mut all_actions = rust_actions;
+    all_actions.extend(nim_actions);
+    let input = laminaria_plan::PlanningInput::new(
+        vec![rust_evidence_id.clone(), nim_evidence_id.clone()],
+        all_actions,
+    );
+    (input, rust_evidence_id, nim_evidence_id)
+}
+
 /// The Rust-side in-memory artifact store for `laminaria-ir`'s own
 /// values -- issue #27 B's own "IR payloadは初期sliceではRust側の
 /// in-memory storeで管理"; the Nim planner never sees any of this, only
@@ -596,17 +738,18 @@ pub fn run_compiler_work_plan(
     run_compiler_work_plan_inner(plan, store, cpu_budget, false).0
 }
 
-/// Test-only entry point that also returns the peak number of real
+/// Opt-in-traced entry point that also returns the peak number of real
 /// `laminaria_ir` computations [`ComputeConcurrencyProbe`] ever observed
-/// running at once, so a concurrency test can directly confirm two
-/// independent actions' *computations* -- not merely their dispatch
-/// calls -- genuinely overlapped. `#[cfg(unix)]` because its only caller
-/// needs the real `laminaria-planner` binary, same as this module's
-/// other real-binary tests -- Windows CI never provisions Nim, so an
-/// ungated `#[cfg(test)]` alone would leave this with no caller there
-/// and fail as dead code.
-#[cfg(all(test, unix))]
-fn run_compiler_work_plan_traced(
+/// running at once, so a caller can directly confirm two independent
+/// actions' *computations* -- not merely their dispatch calls --
+/// genuinely overlapped. `pub` (not test-gated): issue #28 D1-a's owned
+/// baseline measurement (`crate::experiment::run_m3_owned_baseline`)
+/// needs this same opt-in observation outside of `#[cfg(test)]` builds,
+/// per the same "opt-in, never unconditionally live" discipline this
+/// probe was already built with (see `SharedStore::new`'s
+/// `trace_compute_concurrency` flag) -- tracing is only ever turned on
+/// by a caller that asked for it, in production exactly as in tests.
+pub fn run_compiler_work_plan_with_concurrency_trace(
     plan: &ExecutionPlan,
     store: &mut ArtifactStore,
     cpu_budget: NonZeroUsize,
@@ -1476,8 +1619,6 @@ mod tests {
     #[cfg(unix)]
     fn independent_rust_and_nim_chains_agree_across_cpu_budgets_and_run_concurrently_under_budget_two(
     ) {
-        use laminaria_plan::compiler_work::SourceProvenanceRef;
-
         let dir = std::env::temp_dir().join(format!(
             "laminaria-compiler-work-executor-concurrency-test-{}",
             std::process::id()
@@ -1502,121 +1643,18 @@ mod tests {
         // rather than an artificial delay proves genuine overlap.
         let test_inputs: Vec<Vec<i64>> = (0..60_000i64).map(|n| vec![n]).collect();
 
-        fn chain(
-            language: &str,
-            source_path: &str,
-            source_text: &str,
-            function_name: &str,
-            test_inputs: &[Vec<i64>],
-        ) -> (Vec<Action>, String) {
-            let operation_version = "0.1.0";
-            let subset_version = "0.1.0";
-            let semantic_contract_version = "0.1.0";
-            let observation_contract_version = "0.1.0";
-            let snapshot_id = compute_source_snapshot_id(source_text);
-
-            let lower_id = laminaria_plan::lower_source_artifact_id(
-                operation_version,
-                language,
-                &snapshot_id,
-                &[function_name],
-                subset_version,
+        // Shared with issue #28 D1-a's `M3-owned-independent-chains`
+        // baseline (`crate::experiment::run_m3_owned_baseline`) via
+        // `independent_rust_and_nim_chains_planning_input` -- not a
+        // parallel reimplementation of this exact chain shape.
+        let (input, rust_evidence_id, nim_evidence_id) =
+            independent_rust_and_nim_chains_planning_input(
+                &rust_path_str,
+                rust_text,
+                &nim_path_str,
+                nim_text,
+                &test_inputs,
             );
-            let lower_action = Action {
-                id: lower_id.clone(),
-                kind: ActionKind::LowerSource,
-                command_identity: "lower_source".to_string(),
-                inputs: vec![ArtifactRef::source(source_path)],
-                outputs: vec![ArtifactRef::declared(&lower_id)],
-                compiler_work: Some(CompilerWorkDescriptor {
-                    descriptor_schema_version: COMPILER_WORK_SCHEMA_VERSION.to_string(),
-                    operation_version: operation_version.to_string(),
-                    semantic_input_artifact_ids: vec![],
-                    requested_functions: vec![function_name.to_string()],
-                    language: Some(language.to_string()),
-                    contract_version: Some(subset_version.to_string()),
-                    transform: None,
-                    source_provenance: Some(SourceProvenanceRef {
-                        source_file: source_path.to_string(),
-                        source_snapshot_id: snapshot_id,
-                    }),
-                    test_inputs: vec![],
-                    resource_request: ResourceRequest::minimal(),
-                    budget_token: "budget-1".to_string(),
-                }),
-            };
-
-            let validate_id = laminaria_plan::validate_ir_artifact_id(
-                operation_version,
-                &lower_id,
-                semantic_contract_version,
-            );
-            let validate_action = Action {
-                id: validate_id.clone(),
-                kind: ActionKind::ValidateIr,
-                command_identity: "validate_ir".to_string(),
-                inputs: vec![ArtifactRef::declared(&lower_id)],
-                outputs: vec![ArtifactRef::declared(&validate_id)],
-                compiler_work: Some(CompilerWorkDescriptor {
-                    descriptor_schema_version: COMPILER_WORK_SCHEMA_VERSION.to_string(),
-                    operation_version: operation_version.to_string(),
-                    semantic_input_artifact_ids: vec![lower_id.clone()],
-                    requested_functions: vec![],
-                    language: None,
-                    contract_version: Some(semantic_contract_version.to_string()),
-                    transform: None,
-                    source_provenance: None,
-                    test_inputs: vec![],
-                    resource_request: ResourceRequest::minimal(),
-                    budget_token: "budget-1".to_string(),
-                }),
-            };
-
-            let evaluate_id = laminaria_plan::evaluate_evidence_artifact_id(
-                operation_version,
-                &validate_id,
-                function_name,
-                test_inputs,
-                observation_contract_version,
-            );
-            let evaluate_action = Action {
-                id: evaluate_id.clone(),
-                kind: ActionKind::EvaluateEvidence,
-                command_identity: "evaluate_evidence".to_string(),
-                inputs: vec![ArtifactRef::declared(&validate_id)],
-                outputs: vec![ArtifactRef::declared(&evaluate_id)],
-                compiler_work: Some(CompilerWorkDescriptor {
-                    descriptor_schema_version: COMPILER_WORK_SCHEMA_VERSION.to_string(),
-                    operation_version: operation_version.to_string(),
-                    semantic_input_artifact_ids: vec![validate_id.clone()],
-                    requested_functions: vec![function_name.to_string()],
-                    language: None,
-                    contract_version: Some(observation_contract_version.to_string()),
-                    transform: None,
-                    source_provenance: None,
-                    test_inputs: test_inputs.to_vec(),
-                    resource_request: ResourceRequest::minimal(),
-                    budget_token: "budget-1".to_string(),
-                }),
-            };
-
-            (
-                vec![lower_action, validate_action, evaluate_action],
-                evaluate_id,
-            )
-        }
-
-        let (rust_actions, rust_evidence_id) =
-            chain("rust", &rust_path_str, rust_text, "f", &test_inputs);
-        let (nim_actions, nim_evidence_id) =
-            chain("nim", &nim_path_str, nim_text, "g", &test_inputs);
-
-        let mut all_actions = rust_actions;
-        all_actions.extend(nim_actions);
-        let input = laminaria_plan::PlanningInput::new(
-            vec![rust_evidence_id.clone(), nim_evidence_id.clone()],
-            all_actions,
-        );
 
         let bin = real_planner_binary();
         let outcome = laminaria_plan::call_planner(&bin, &input).unwrap();
@@ -1630,7 +1668,7 @@ mod tests {
         validate(&plan, &input).expect("a well-formed compiler-work plan must validate");
 
         let mut store_budget_1 = ArtifactStore::new();
-        let (result_1, peak_1) = run_compiler_work_plan_traced(
+        let (result_1, peak_1) = run_compiler_work_plan_with_concurrency_trace(
             &plan,
             &mut store_budget_1,
             NonZeroUsize::new(1).unwrap(),
@@ -1638,7 +1676,7 @@ mod tests {
         result_1.expect("budget 1 must succeed");
 
         let mut store_budget_2 = ArtifactStore::new();
-        let (result_2, peak_2) = run_compiler_work_plan_traced(
+        let (result_2, peak_2) = run_compiler_work_plan_with_concurrency_trace(
             &plan,
             &mut store_budget_2,
             NonZeroUsize::new(2).unwrap(),
