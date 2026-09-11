@@ -1,0 +1,292 @@
+# #36 T0 — 機械可読case定義
+#
+# 対応する設計文書: docs/design/issue-36-t0-incremental-contract.md
+# 基準commit: 09a997c
+#
+# 全caseが共有する固定fixture(source-derived owned compiler workの証明、
+# issue #36の境界「sleepだけの疑似workではなく...実行を証明する」対応):
+#
+#   branch-ready (既に全依存が既知、即座にreadyになる枝):
+#     rust: "fn f(x: i32) -> i32 { x }"                     (crates/laminaria-run
+#     nim:  "proc g(x: int32): int32 =\n  x\n"                のcompiler_work_executor
+#                                                              テストが使う既存の
+#                                                              最小fixtureと同一形)
+#     action鎖: LowerSource(rust-f) -> ValidateIr(rust-f) -> EvaluateEvidence(rust-f)
+#               LowerSource(nim-g)  -> ValidateIr(nim-g)  -> EvaluateEvidence(nim-g)
+#     期待値: f(5)=5, g(5)=5 (恒等関数、独立実装での再導出不要なほど自明)
+#
+#   branch-discovering (発見中に新規依存が判明する枝):
+#     fixtures/laminaria-semantic-substrate-prototype/rust-src/add_or_double.rs
+#     の `double`/`add_or_double` (issue #35 D0で確定済み、crates/laminaria-ir/
+#     src/lib.rs:99-150で実rustcとのbyte-for-byte一致を検証済みの既存fixture)。
+#     初期IncrementalPlanningInputは `add_or_double` のLowerSourceのみを含み、
+#     `double` を未知とする——LowerSource完了後のIR解析で
+#     Expr::Call(FnId("double"), ...) が判明し、DependencyDiscoveredが発行される
+#     という想定(発見メカニズム自体の実装はT1、ここではeventとして所与とする)。
+#     期待値(D0確定済み、再導出しない): add_or_double(3,4,1)=6
+#     (fixtures/laminaria-semantic-substrate-prototype/rust-src/add_or_double.rsの
+#     TEST_INPUTS、crates/laminaria-ir/src/rust_frontend.rs:830-835で確定)。
+#
+# schema_version: "incremental-planning-input/0.1.0" (IncrementalPlanningInput)
+#                  "incremental-planning-event/0.1.0" (PlanningEvent)
+
+schema_version: "0.1.0-draft"
+
+fixtures:
+  branch_ready:
+    rust_source: "fn f(x: i32) -> i32 { x }"
+    nim_source: "proc g(x: int32): int32 =\n  x\n"
+    expected_rust_result: 5
+    expected_nim_result: 5
+    test_input: 5
+  branch_discovering:
+    rust_source_file: "fixtures/laminaria-semantic-substrate-prototype/rust-src/add_or_double.rs"
+    functions: ["double", "add_or_double"]
+    test_input: { a: 3, b: 4, use_double: 1 }
+    expected_result: 6
+    derivation: "D0確定済み(issue #35)、crates/laminaria-ir/src/rust_frontend.rs:830-835"
+
+cases:
+  # ------------------------------------------------------------ case 1 ----
+  - id: T0-incremental-ready-branch-proceeds-during-discovery
+    purpose: "別枝の依存発見中にready枝が実compiler workを開始する"
+    initial_state:
+      planning_generation: 0
+      known_satisfied_artifacts: []
+      actions:
+        - { id: "rust-f-lower", kind: LowerSource, state: discovered }
+        - { id: "add-or-double-lower", kind: LowerSource, state: discovered }
+      demands:
+        - { semantic_key: "branch-ready-rust-f", requested_by: "consumer-a" }
+        - { semantic_key: "branch-discovering-add-or-double", requested_by: "consumer-b" }
+    input_events:
+      - { seq: 1, kind: DemandRequested, semantic_key: "branch-ready-rust-f", requested_by: "consumer-a" }
+      - { seq: 2, kind: DemandRequested, semantic_key: "branch-discovering-add-or-double", requested_by: "consumer-b" }
+      - { seq: 3, kind: DependencyDiscovered, action_id: "add-or-double-lower", newly_required_artifact_ids: ["double-out"] }
+        # ↑ add-or-doubleのLowerSource完了後にdoubleへの依存が判明、rust-f枝には無関係
+    expected_graph:
+      after_seq_3:
+        - { id: "rust-f-lower", state: ready }        # doubleの発見と無関係に進行可能
+        - { id: "rust-f-validate", state: discovered }
+        - { id: "rust-f-evidence", state: discovered }
+        - { id: "add-or-double-lower", state: completed }
+        - { id: "add-or-double-validate", state: blocked_dependency, blocked_on: ["double-lower"] }
+        - { id: "double-lower", state: discovered }    # 新規追加されたaction
+    expected_trace:
+      assertion: "rust-f-lowerがrunningへ遷移した時刻 < add-or-double側のblocked_dependency解消時刻"
+      time_to_first_useful_work: "rust-f-lowerのrunning遷移時刻(session開始からの経過)"
+    diagnostic_reason: null
+    measurement:
+      dynamic_expansion_count_after_seq_3: 1
+      cpu_budget: 2
+    pass_criteria:
+      d1: "rust-f枝がdouble依存の発見と独立にreadyからrunningへ進む(blocked_dependency状態のactionがCPU実行枠を消費しないことをtraceで示す)"
+
+  # ------------------------------------------------------------ case 2 ----
+  - id: T0-incremental-late-dependency-single-resume
+    purpose: "後からproducer依存が追加され、一度だけ待機・再開する"
+    initial_state:
+      planning_generation: 1   # case1のseq3を経た状態から継続
+      known_satisfied_artifacts: ["add-or-double-lower-out"]
+      actions:
+        - { id: "add-or-double-validate", state: blocked_dependency, blocked_on: ["double-lower"] }
+        - { id: "double-lower", state: discovered }
+    input_events:
+      - { seq: 4, kind: DependencyDiscovered, action_id: "add-or-double-validate", newly_required_artifact_ids: ["double-out"] }
+        # 同じproducerへの重複した発見通知(blocking集合は変化しない、冪等)
+      - { seq: 5, kind: ProducerCompleted, artifact_id: "double-out", produced_by_action_id: "double-evidence" }
+    expected_graph:
+      after_seq_5:
+        - { id: "add-or-double-validate", state: ready }
+    expected_trace:
+      assertion: "add-or-double-validateについて、blocked_dependency -> ready の遷移が正確に1回だけ記録される(seq4はblocking集合を変化させず、状態遷移イベントを発生させない)"
+      transition_count_blocked_to_ready: 1
+    diagnostic_reason: null
+    measurement:
+      dynamic_expansion_count_after_seq_5: 0   # seq4は既知のblocking関係の再通知であり新規拡張ではない
+    pass_criteria:
+      d1: "blocking producer完了時に一度だけready化する。重複した依存発見通知が二重の待機/再開を起こさない"
+
+  # ------------------------------------------------------------ case 3 ----
+  - id: T0-incremental-semantic-key-merge
+    purpose: "同一semantic keyへの同時要求が一計算へ合流する"
+    initial_state:
+      planning_generation: 0
+      actions: []
+      demands: []
+    input_events:
+      - { seq: 1, kind: DemandRequested, semantic_key: "branch-ready-rust-f", requested_by: "consumer-a" }
+      - { seq: 2, kind: DemandRequested, semantic_key: "branch-ready-rust-f", requested_by: "consumer-c" }
+        # consumer-a/consumer-cは異なる要求元だが、semantic_keyが同一
+        # (同一source_snapshot_id・同一command_identity・同一target_identity)
+    expected_graph:
+      after_seq_2:
+        - { id: "rust-f-lower", state: discovered, reference_count: 2 }
+    expected_trace:
+      assertion: "rust-f-lowerに対応するactionが1つだけ作られる(2つ目のDemandRequestedは既存actionの参照カウント+1のみを行い、新規actionを作らない)"
+      action_count_for_semantic_key: 1
+    diagnostic_reason: null
+    measurement:
+      dynamic_expansion_count: 0
+    pass_criteria:
+      d1: "同一semantic_keyの2つのDemandRequestedがちょうど1つのactionに合流し、参照カウントが2になる"
+
+  # ------------------------------------------------------------ case 4 ----
+  - id: T0-incremental-event-reorder-duplicate-delay-stable-result
+    purpose: "eventの重複・遅延・順序入替で最終graphと公開結果が変化しない"
+    initial_state:
+      planning_generation: 0
+      actions:
+        - { id: "rust-f-lower", state: ready }
+    input_event_orderings:
+      # 同じ3イベントを3つの異なる到着順で与え、いずれも最終状態が一致することを確認する
+      - name: canonical_order
+        events:
+          - { seq: 1, kind: ProducerCompleted, artifact_id: "rust-f-lower-out", produced_by_action_id: "rust-f-lower" }
+          - { seq: 2, kind: ProducerCompleted, artifact_id: "rust-f-lower-out", produced_by_action_id: "rust-f-lower" }  # 重複
+          - { seq: 3, kind: DemandRequested, semantic_key: "branch-ready-rust-f", requested_by: "consumer-a" }
+      - name: duplicate_first
+        events:
+          - { seq: 1, kind: ProducerCompleted, artifact_id: "rust-f-lower-out", produced_by_action_id: "rust-f-lower" }
+          - { seq: 3, kind: DemandRequested, semantic_key: "branch-ready-rust-f", requested_by: "consumer-a" }
+          - { seq: 2, kind: ProducerCompleted, artifact_id: "rust-f-lower-out", produced_by_action_id: "rust-f-lower" }  # 遅延・順序入替
+      - name: delayed_duplicate_last
+        events:
+          - { seq: 3, kind: DemandRequested, semantic_key: "branch-ready-rust-f", requested_by: "consumer-a" }
+          - { seq: 1, kind: ProducerCompleted, artifact_id: "rust-f-lower-out", produced_by_action_id: "rust-f-lower" }
+          - { seq: 2, kind: ProducerCompleted, artifact_id: "rust-f-lower-out", produced_by_action_id: "rust-f-lower" }
+    expected_graph:
+      # 3つのorderingすべてで同一
+      final: [{ id: "rust-f-lower", state: completed }]
+    expected_trace:
+      assertion: "3つのeven順序すべてで、最終graphのbyte-for-byte一致(JSON表現の完全一致)を確認する"
+    diagnostic_reason: null
+    measurement: {}
+    pass_criteria:
+      d1: "3通りの到着順(正順・重複先行・遅延重複)すべてで最終公開結果が同一である"
+
+  # ------------------------------------------------------------ case 5 ----
+  - id: T0-incremental-cancel-survives-shared-producer
+    purpose: "一consumerの取消後も共有producerが生存する"
+    initial_state:
+      planning_generation: 0
+      actions:
+        - { id: "double-lower", state: discovered, reference_count: 2 }
+      demands:
+        - { semantic_key: "double-fn", requested_by: "consumer-a" }
+        - { semantic_key: "double-fn", requested_by: "consumer-b" }
+    input_events:
+      - { seq: 1, kind: DemandCancelled, semantic_key: "double-fn", requested_by: "consumer-a" }
+    expected_graph:
+      after_seq_1:
+        - { id: "double-lower", state: discovered, reference_count: 1 }  # 取消後もconsumer-bのため生存
+    expected_trace:
+      assertion: "double-lowerがcancelledへ遷移しない(参照カウントが1のまま残る)"
+    diagnostic_reason: null
+    measurement: {}
+    pass_criteria:
+      d1: "参照カウントが0に達しない限りproducerは生存する"
+
+  # ------------------------------------------------------------ case 6 (診断1/5) ----
+  - id: T0-incremental-diagnostic-stale-generation
+    purpose: "古いgenerationのeventを拒否する"
+    initial_state:
+      planning_generation: 2   # 既に2回再計画済み
+      actions:
+        - { id: "add-or-double-validate", state: ready }  # generation2で既にready化済み
+    input_events:
+      - { seq: 10, kind: DependencyDiscovered, planning_generation: 0, action_id: "add-or-double-validate", newly_required_artifact_ids: ["double-out"] }
+        # generation0由来の遅延event。generation2の時点でこの情報は既に
+        # 反映済み(add-or-double-validateは既にready)であり、新たな情報を
+        # 含まないため stale_generation として拒否する
+    expected_graph:
+      after_seq_10: [{ id: "add-or-double-validate", state: ready }]   # 変化なし
+    expected_trace:
+      assertion: "seq10の処理結果としてIncrementalDiagnosticReason::stale_generationが記録され、状態遷移は発生しない"
+    diagnostic_reason: stale_generation
+    measurement: {}
+    pass_criteria:
+      d1: "planning_generationが現在より古く、かつ内容が反映済みのeventはstale_generationとして拒否され、graphを変化させない"
+
+  # ------------------------------------------------------------ case 7 (診断2/5) ----
+  - id: T0-incremental-diagnostic-cancelled-result
+    purpose: "取消後に完了した結果を診断する"
+    initial_state:
+      planning_generation: 0
+      actions:
+        - { id: "rust-f-evidence", state: running, reference_count: 0 }  # 実行開始後に参照カウント0化
+      demands: []   # 実行開始後、唯一のconsumerがDemandCancelledで撤回済み
+    input_events:
+      - { seq: 1, kind: ProducerCompleted, artifact_id: "rust-f-evidence-out", produced_by_action_id: "rust-f-evidence" }
+    expected_graph:
+      after_seq_1:
+        - { id: "rust-f-evidence", state: completed, published: false }
+          # ArtifactStoreへは記録するが、公開(demand解決)はしない(§6.3)
+    expected_trace:
+      assertion: "rust-f-evidenceの結果はArtifactStoreに保存されるが、どのconsumerへも公開されない"
+    diagnostic_reason: cancelled_result
+    measurement: {}
+    pass_criteria:
+      d1: "runningへ遷移した後に参照カウントが0になったactionの結果は、完了時にcancelled_resultとして記録され、証拠は保持されつつ公開されない(黙って破棄しない、黙って公開しない)"
+
+  # ------------------------------------------------------------ case 8 (診断3/5) ----
+  - id: T0-incremental-diagnostic-missing-producer
+    purpose: "増分session内でのmissing producerを診断する"
+    initial_state:
+      planning_generation: 1
+      known_satisfied_artifacts: []
+      actions:
+        - { id: "add-or-double-validate", state: blocked_dependency, blocked_on: ["double-lower"] }
+    input_events:
+      - { seq: 6, kind: DependencyDiscovered, action_id: "add-or-double-validate", newly_required_artifact_ids: ["triple-out"] }
+        # "triple"というproducerがどのactionにも存在しない(意図的な欠落)
+    expected_graph:
+      after_seq_6: "IncrementalPlanningInputの再送出がRejected(reason_kind=missing_producer)で返る"
+    expected_trace:
+      assertion: "Nim plannerのplan*がRejected/MissingProducerを返し、Rust runtimeはそれをそのまま(生成せず)転記する(§5表)"
+    diagnostic_reason: missing_producer
+    measurement: {}
+    pass_criteria:
+      d1: "新規発見された依存にproducerが存在しない場合、既存RejectionReasonKind::MissingProducerが増分session内でも正しく報告される"
+
+  # ------------------------------------------------------------ case 9 (診断4/5) ----
+  - id: T0-incremental-diagnostic-dependency-failed
+    purpose: "blocking producerの失敗を診断する"
+    initial_state:
+      planning_generation: 1
+      actions:
+        - { id: "add-or-double-validate", state: blocked_dependency, blocked_on: ["double-lower"] }
+        - { id: "double-lower", state: running }
+    input_events:
+      - { seq: 7, kind: ProducerFailed, artifact_id: "double-out", produced_by_action_id: "double-lower", failure_reason: "SourceSnapshotMismatch" }
+    expected_graph:
+      after_seq_7:
+        - { id: "double-lower", state: failed }
+        - { id: "add-or-double-validate", state: failed, diagnostic: dependency_failed }
+    expected_trace:
+      assertion: "add-or-double-validateはproducer失敗を検知した時点で即座にfailedへ遷移し、readyを経由しない(既存compiler_work_executor.rs:679-696の『producer失敗時にはconsumerを開始しない』原則を増分文脈でも維持する)"
+    diagnostic_reason: dependency_failed
+    measurement: {}
+    pass_criteria:
+      d1: "blocking producerがfailedで終わった場合、blocked_dependency中のconsumerはdependency_failedとして即座にfailedへ遷移する"
+
+  # ------------------------------------------------------------ case 10 (診断5/5) ----
+  - id: T0-incremental-diagnostic-cycle
+    purpose: "新規発見された依存が既存graphとcycleを構成する場合を診断する"
+    initial_state:
+      planning_generation: 1
+      known_satisfied_artifacts: []
+      actions:
+        - { id: "action-a", state: ready }
+        - { id: "action-b", state: blocked_dependency, blocked_on: ["action-a"] }
+    input_events:
+      - { seq: 8, kind: DependencyDiscovered, action_id: "action-a", newly_required_artifact_ids: ["action-b-out"] }
+        # action-aが(新たに)action-bの出力に依存すると判明 -> a->b->aのcycle
+    expected_graph:
+      after_seq_8: "IncrementalPlanningInputの再送出がRejected(reason_kind=cycle, cycle_path=[action-a, action-b, action-a])で返る"
+    expected_trace:
+      assertion: "Nim plannerのplan*がRejected/Cycleをcycle_path付きで返し、Rust runtimeはこの世代への更新を採用しない(直前の有効なgeneration状態を保持する)"
+    diagnostic_reason: cycle
+    measurement: {}
+    pass_criteria:
+      d1: "新規発見依存が既存グラフとcycleを構成する場合、既存RejectionReasonKind::Cycle+cycle_pathが増分session内でも正しく報告され、グラフは更新前の状態に留まる"
