@@ -22,7 +22,7 @@
 ##   "same input -> identical output" a structural guarantee rather than
 ##   an accident of table/hash iteration order.
 
-import std/[tables, algorithm, strutils, hashes, json]
+import std/[tables, algorithm, strutils, hashes, json, options]
 import ./contract
 
 proc findCycle(actionIds: seq[string], deps: Table[string, seq[string]]): seq[string] =
@@ -241,18 +241,36 @@ proc plan*(input: PlanningInput): PlanOutcome =
     actions: neededActionsById,
   ))
 
-proc planFromJson*(root: JsonNode): PlanOutcome =
-  ## Step 1: the `schema_version` gate, checked directly on the raw JSON
-  ## node *before* any other field is decoded into a `PlanningInput` --
-  ## so a mismatched contract version is reported as
+proc decodePlanningInputOrReject*(root: JsonNode): tuple[input: Option[PlanningInput], rejection: Option[PlanOutcome]] =
+  ## Step 1 of `planFromJson`, split out (issue #28 D1-a's own
+  ## measurement review): the `schema_version` gate, checked directly on
+  ## the raw JSON node *before* any other field is decoded into a
+  ## `PlanningInput` -- so a mismatched contract version is reported as
   ## `invalid_contract_version` even when the rest of the document is
   ## otherwise malformed, per issue #8's "invalid contract versions"
-  ## rejection requirement and this plan's explicit ordering guarantee.
+  ## rejection requirement and this plan's explicit ordering guarantee --
+  ## plus the actual JSON decode. Exported separately from `plan` itself
+  ## so a caller that needs to measure `plan`'s own wall time exclusively
+  ## (`docs/design/issue-35-d0-cases.yaml`'s `M8-many-unrequested-nim-planner`
+  ## case's confirmed `measurement_boundary`) can call this decode step
+  ## and the timed `plan` call separately, rather than timing the
+  ## combined `planFromJson` (schema gate + decode + plan), which is a
+  ## wider interval than what that case actually specifies.
   let versionNode = root{"schema_version"}
   if versionNode.isNil or versionNode.kind != JString or versionNode.getStr() != PlanSchemaVersion:
     let got = if versionNode.isNil: "<missing>" else: $versionNode
-    return rejected(reject(
+    return (none(PlanningInput), some(rejected(reject(
       rrkInvalidContractVersion,
       "expected schema_version '" & PlanSchemaVersion & "', got " & got,
-    ))
-  plan(root.planningInputFromJson)
+    ))))
+  (some(root.planningInputFromJson), none(PlanOutcome))
+
+proc planFromJson*(root: JsonNode): PlanOutcome =
+  ## Unchanged behavior/signature -- every existing caller (this
+  ## binary's own `main`, `tests/test_planning_kernel.nim`) keeps working
+  ## exactly as before. Internally now just the schema gate/decode
+  ## (`decodePlanningInputOrReject`) followed by `plan` itself.
+  let (input, rejection) = decodePlanningInputOrReject(root)
+  if rejection.isSome:
+    return rejection.get
+  plan(input.get)

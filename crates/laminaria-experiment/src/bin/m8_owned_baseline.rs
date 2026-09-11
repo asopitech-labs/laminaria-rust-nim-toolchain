@@ -2,11 +2,12 @@
 //!
 //! Issue #28 D1-a: `M8-many-unrequested-nim-planner` owned baseline
 //! (unused_actions in {4, 10, 30}, warmup 1 + 3 measured repetitions
-//! each). Every repetition is persisted as its own `Run` under
-//! `runs/<run_id>/`; the round-trip `ScenarioReport` and the separate
-//! Nim-kernel-only `kernel_nanos_stats` are both derived from those
-//! files plus each repetition's own recorded `kernel_nanos`, never from
-//! in-memory-only samples.
+//! each). Every repetition is persisted as its own `Run` (including its
+//! judgment data, in `Run.compiler_telemetry`) under `runs/<run_id>/`;
+//! the round-trip `ScenarioReport` and the separate Nim-kernel-only
+//! `kernel_nanos_stats` are both a *pointer* into those files --
+//! `laminaria_experiment::m8_baseline::regenerate` is the authority for
+//! what the evidence actually says.
 
 use laminaria_experiment::m8_baseline;
 
@@ -34,11 +35,13 @@ fn main() {
         };
         println!(
             "unused_actions={} repetitions={} failed={} round_trip_wall_seconds({round_trip}) \
-             kernel_nanos({kernel}) needed_set_matches_in_every_successful_rep={}",
+             kernel_nanos({kernel}) needed_set_matches_in_every_successful_rep={} \
+             kernel_nanos_present_in_every_successful_rep={}",
             scale.unused_actions,
             scale.repetitions.len(),
             failed,
-            scale.needed_set_matches_in_every_successful_rep()
+            scale.needed_set_matches_in_every_successful_rep(),
+            scale.kernel_nanos_present_in_every_successful_rep(),
         );
     }
 
@@ -55,21 +58,34 @@ fn main() {
     }
     println!("wrote {}", out_path.display());
     println!(
-        "per-repetition Run evidence under {}",
+        "per-repetition Run evidence (including judgment data, in compiler_telemetry) under {}",
         report.runs_root.display()
     );
 
-    let all_ok = report.scales.iter().all(|s| {
-        !s.repetitions.is_empty()
-            && s.repetitions.iter().all(|r| r.success)
-            && s.needed_set_matches_in_every_successful_rep()
-    });
-    if !all_ok {
+    // Prove regeneration from disk actually reproduces the same
+    // judgment, not merely the wall-time summary.
+    let regenerated = match m8_baseline::regenerate(report) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("FAIL: regenerate() could not rebuild the report from disk: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let all_ok = regenerated.scales.iter().all(|s| s.is_a_valid_baseline());
+    let comparable_ok = regenerated
+        .owned_baseline_comparable_across_scales()
+        .is_ok();
+
+    if !all_ok || !comparable_ok {
         eprintln!(
-            "FAIL: at least one scale had a failed repetition or an ordered_actions set that \
-             included an unused-pkg-* action"
+            "FAIL: at least one scale was not a valid baseline, or scales were not comparable \
+             (all_ok={all_ok}, comparable_ok={comparable_ok})"
         );
+        if let Err(e) = regenerated.owned_baseline_comparable_across_scales() {
+            eprintln!("  comparability error: {e}");
+        }
         std::process::exit(1);
     }
-    println!("pass_criteria.d1: OK");
+    println!("pass_criteria.d1: OK (verified from regenerate()'d, disk-derived evidence)");
 }

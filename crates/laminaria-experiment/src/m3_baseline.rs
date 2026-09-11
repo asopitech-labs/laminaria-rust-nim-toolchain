@@ -13,20 +13,27 @@
 //! concurrency counter per repetition, warmup discarded before the
 //! measured repetitions.
 //!
-//! **Revised per a code-review round** (issue #28 D1-a, findings R1-R3):
-//! a failed repetition is recorded (never dropped from the report by an
-//! early `?`), evidence is compared *across* CPU budgets (not only
-//! within one budget's own repetitions), and every repetition is
-//! persisted as a genuine `laminaria_run::types::Run` under its own
-//! `run_id` (via `store::write_run`), so the per-budget aggregate is a
-//! real `laminaria_run::scenario::ScenarioReport` built by
-//! `regenerate_report_from_disk` -- environment/toolchain-comparability
-//! checked, all-repetitions-failed rejected, and reproducible purely
-//! from the on-disk `runs/<run_id>/run.json` evidence, with no re-
-//! execution and no fields fabricated to fill the schema (this
-//! measurement's `root_command`/`process_trace` honestly describe an
-//! in-process dispatch, not a real OS subprocess -- see
-//! `ProcessRecord::coverage_note` below).
+//! **Revised across two review rounds** (issue #28 D1-a):
+//! - Round 1 (R1-R3): a failed repetition is recorded (never dropped by
+//!   an early `?`), evidence is compared *across* CPU budgets (not only
+//!   within one budget's own repetitions), and every repetition is
+//!   persisted as a genuine `laminaria_run::types::Run` (`store::write_run`),
+//!   so the per-budget aggregate is a real `ScenarioReport` built by
+//!   `regenerate_report_from_disk`.
+//! - Round 2: the judgment data itself (`peak_concurrency`,
+//!   `evidence_digest`, success/failure) lived only in the in-memory/
+//!   serialized `M3Report`, not in the persisted `Run`s -- so
+//!   `regenerate` could rebuild `wall_seconds` from disk but not the
+//!   pass/fail verdict, and a stale or hand-edited report JSON (with the
+//!   `Run` files deleted) could still "pass." Fixed: each repetition's
+//!   judgment is now serialized into its own `Run.compiler_telemetry`
+//!   (the schema's own designated adapter-specific extension point), and
+//!   `regenerate` rebuilds every `RepetitionRecord` field by reading
+//!   that back from disk, discarding whatever the input report claimed.
+//!   Also added: an owned-code identity (`crate::owned_identity`, git
+//!   commit + dirty flag, never an external rustc/Nim toolchain digest)
+//!   recorded per repetition and required to match, cleanly, across both
+//!   budgets before a comparison is treated as valid.
 
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
@@ -40,7 +47,7 @@ use laminaria_run::compiler_work_executor::{
     ArtifactStore,
 };
 use laminaria_run::scenario::{regenerate_report_from_disk, ScenarioReport};
-use laminaria_run::store::write_run;
+use laminaria_run::store::{read_run, write_run};
 use laminaria_run::types::{
     CacheState, ExitStatusRecord, PreparationRecord, ProbeLevel, ProcessRecord, ProcessTrace,
     ResourceUsage, RootCommand, Run, RunResult,
@@ -48,6 +55,7 @@ use laminaria_run::types::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::owned_identity::{identities_comparable, OwnedIdentity};
 use crate::planner_binary::resolve_or_build_planner_binary;
 
 /// Identical to the existing concurrency test's own fixture source --
@@ -60,6 +68,8 @@ pub const NIM_SOURCE_TEXT: &str = "proc g(x: int32): int32 =\n  x\n";
 /// Names the case + accepted spec revision this measurement is evidence
 /// for (`docs/design/issue-35-d0-spec.md` section 10).
 pub const WORKLOAD_ID: &str = "M3-owned-independent-chains@issue35-d0-accepted-c812d70-v1";
+
+const TELEMETRY_KIND: &str = "m3-owned-baseline-v1";
 
 fn unsupported_resource_fields() -> Vec<String> {
     [
@@ -95,6 +105,20 @@ fn digest_evidence<T: std::fmt::Debug>(rust_evidence: &[T], nim_evidence: &[T]) 
     format!("{:x}", hasher.finalize())
 }
 
+/// What's actually persisted into each repetition's `Run.compiler_telemetry`
+/// -- the single source of truth `regenerate` reads back, never trusted
+/// from an in-memory/serialized `M3Report` alone.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct M3Telemetry {
+    kind: String,
+    cpu_budget: usize,
+    success: bool,
+    failure_reason: Option<String>,
+    peak_concurrency: Option<usize>,
+    evidence_digest: Option<String>,
+    owned_identity: OwnedIdentity,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepetitionRecord {
     pub run_id: String,
@@ -105,6 +129,7 @@ pub struct RepetitionRecord {
     pub failure_reason: Option<String>,
     pub peak_concurrency: Option<usize>,
     pub evidence_digest: Option<String>,
+    pub owned_identity: OwnedIdentity,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -146,6 +171,38 @@ impl BudgetOutcome {
             None
         }
     }
+
+    /// `Some(identity)` only if every successful repetition recorded the
+    /// identical owned identity; `None` if there were zero successful
+    /// repetitions or they disagreed (e.g. the tree was edited mid-run).
+    pub fn owned_identity_if_consistent(&self) -> Option<&OwnedIdentity> {
+        let mut identities = self
+            .repetitions
+            .iter()
+            .filter(|r| r.success)
+            .map(|r| &r.owned_identity);
+        let first = identities.next()?;
+        if identities.all(|i| i == first) {
+            Some(first)
+        } else {
+            None
+        }
+    }
+
+    /// A complete, ready-for-comparison budget: it produced a
+    /// `ScenarioReport` (no repetition failed, environment/toolchain
+    /// consistent per that function's own checks), its evidence was
+    /// internally consistent, and its owned identity was resolved and
+    /// internally consistent. All three must hold for this budget's
+    /// numbers to mean anything.
+    pub fn is_a_valid_baseline(&self) -> bool {
+        !self.repetitions.is_empty()
+            && self.scenario_report.is_some()
+            && self.evidence_digest_if_consistent().is_some()
+            && self
+                .owned_identity_if_consistent()
+                .is_some_and(|id| id.repo_commit.is_some() && id.repo_dirty == Some(false))
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -174,32 +231,107 @@ impl M3Report {
             && digests.len() == self.budgets.len()
             && digests.windows(2).all(|w| w[0] == w[1])
     }
-}
 
-/// Rebuilds every budget's `ScenarioReport` purely from the `Run` files
-/// already written under `report.runs_root` -- no re-execution. Returns
-/// `Err` if `runs_root` no longer holds the referenced `run_id`s (e.g.
-/// the caller cleaned up `runs/` in between).
-pub fn regenerate(mut report: M3Report) -> Result<M3Report, String> {
-    for budget in &mut report.budgets {
-        let scenario_id = format!("budget-{}", budget.cpu_budget);
-        let run_ids: Vec<String> = budget
-            .repetitions
-            .iter()
-            .map(|r| r.run_id.clone())
-            .collect();
-        match regenerate_report_from_disk(&report.runs_root, &scenario_id, &run_ids) {
-            Ok(scenario_report) => {
-                budget.scenario_report = Some(scenario_report);
-                budget.scenario_report_error = None;
-            }
-            Err(e) => {
-                budget.scenario_report = None;
-                budget.scenario_report_error = Some(e.to_string());
+    /// `Ok(())` only if every budget is `is_a_valid_baseline()` and every
+    /// pair of budgets' owned identities are `identities_comparable`
+    /// (same, clean repo commit) -- the gate a genuine budget-1-vs-
+    /// budget-2 comparison must pass before its numbers are trusted.
+    pub fn owned_baseline_comparable_across_budgets(&self) -> Result<(), String> {
+        for budget in &self.budgets {
+            if !budget.is_a_valid_baseline() {
+                return Err(format!(
+                    "budget {}: not a valid baseline (scenario_report={:?}, evidence_consistent={}, \
+                     identity_consistent={})",
+                    budget.cpu_budget,
+                    budget.scenario_report_error,
+                    budget.evidence_digest_if_consistent().is_some(),
+                    budget.owned_identity_if_consistent().is_some()
+                ));
             }
         }
+        for pair in self.budgets.windows(2) {
+            let a = pair[0]
+                .owned_identity_if_consistent()
+                .expect("already checked is_a_valid_baseline above");
+            let b = pair[1]
+                .owned_identity_if_consistent()
+                .expect("already checked is_a_valid_baseline above");
+            identities_comparable(a, b).map_err(|e| {
+                format!(
+                    "budgets {} and {} not comparable: {e}",
+                    pair[0].cpu_budget, pair[1].cpu_budget
+                )
+            })?;
+        }
+        Ok(())
     }
-    Ok(report)
+}
+
+/// Rebuilds an `M3Report` purely from the `Run` files already written
+/// under `report.runs_root` (using only `report`'s own `run_id`s as
+/// pointers) -- every `RepetitionRecord` field (success, peak_concurrency,
+/// evidence_digest, owned_identity) is re-read from each `Run`'s own
+/// `compiler_telemetry`, not trusted from the input report's own claims,
+/// and `scenario_report` is rebuilt by `regenerate_report_from_disk`.
+/// Returns `Err` if a referenced `run_id` (or its `compiler_telemetry`)
+/// no longer exists (e.g. the caller cleaned up `runs/` in between) --
+/// this must never silently fall back to the input report's own stale
+/// data.
+pub fn regenerate(report: M3Report) -> Result<M3Report, String> {
+    let mut budgets = Vec::new();
+    for budget in &report.budgets {
+        let mut repetitions = Vec::new();
+        for old in &budget.repetitions {
+            let run = read_run(&report.runs_root, &old.run_id)
+                .map_err(|e| format!("failed to read run {}: {e}", old.run_id))?;
+            let telemetry_value = run.compiler_telemetry.ok_or_else(|| {
+                format!(
+                    "run {} has no compiler_telemetry -- cannot regenerate its judgment from disk",
+                    old.run_id
+                )
+            })?;
+            let telemetry: M3Telemetry = serde_json::from_value(telemetry_value)
+                .map_err(|e| format!("run {}: malformed compiler_telemetry: {e}", old.run_id))?;
+            if telemetry.kind != TELEMETRY_KIND {
+                return Err(format!(
+                    "run {}: compiler_telemetry.kind {:?} is not {TELEMETRY_KIND:?}",
+                    old.run_id, telemetry.kind
+                ));
+            }
+            repetitions.push(RepetitionRecord {
+                run_id: old.run_id.clone(),
+                success: telemetry.success,
+                failure_reason: telemetry.failure_reason,
+                peak_concurrency: telemetry.peak_concurrency,
+                evidence_digest: telemetry.evidence_digest,
+                owned_identity: telemetry.owned_identity,
+            });
+        }
+
+        let scenario_id = format!("budget-{}", budget.cpu_budget);
+        let run_ids: Vec<String> = repetitions.iter().map(|r| r.run_id.clone()).collect();
+        let (scenario_report, scenario_report_error) =
+            match regenerate_report_from_disk(&report.runs_root, &scenario_id, &run_ids) {
+                Ok(sr) => (Some(sr), None),
+                Err(e) => (None, Some(e.to_string())),
+            };
+
+        budgets.push(BudgetOutcome {
+            cpu_budget: budget.cpu_budget,
+            warmup_runs: budget.warmup_runs,
+            repetitions,
+            scenario_report,
+            scenario_report_error,
+        });
+    }
+
+    Ok(M3Report {
+        schema_version: report.schema_version,
+        case_id: report.case_id,
+        plan_action_count: report.plan_action_count,
+        runs_root: report.runs_root,
+        budgets,
+    })
 }
 
 pub fn run(warmup: usize, repetitions: usize) -> Result<M3Report, String> {
@@ -207,6 +339,12 @@ pub fn run(warmup: usize, repetitions: usize) -> Result<M3Report, String> {
     let runs_root = repo_root.join("runs");
     let environment_fingerprint =
         laminaria_fingerprint::env::detect(&repo_root, "laminaria-m3-owned-baseline", "0.1.0");
+    // M3 dispatches already-compiled owned Rust code in-process -- there
+    // is no single separately-built artifact file to hash (unlike M8's
+    // `laminaria-planner` binary), so `artifact_content_sha256` is
+    // honestly `None`; the repo commit is the identity that matters here.
+    let owned_identity =
+        OwnedIdentity::from_environment_fingerprint(&environment_fingerprint, None);
 
     // `process::id()` alone collides when this crate's own tests call
     // `run()` concurrently from multiple threads of the same test
@@ -304,7 +442,17 @@ pub fn run(warmup: usize, repetitions: usize) -> Result<M3Report, String> {
                 Err(e) => (false, Some(format!("{e:?}")), None, None),
             };
 
-            let run_id = laminaria_run::generate_run_id();
+            let telemetry = M3Telemetry {
+                kind: TELEMETRY_KIND.to_string(),
+                cpu_budget: budget,
+                success,
+                failure_reason: failure_reason.clone(),
+                peak_concurrency,
+                evidence_digest: evidence_digest.clone(),
+                owned_identity: owned_identity.clone(),
+            };
+
+            let run_id = crate::unique_run_id();
             let run = Run {
                 run_id: run_id.clone(),
                 schema_version: laminaria_run::types::SCHEMA_VERSION.to_string(),
@@ -367,7 +515,9 @@ pub fn run(warmup: usize, repetitions: usize) -> Result<M3Report, String> {
                             .to_string(),
                     ],
                 },
-                compiler_telemetry: None,
+                compiler_telemetry: Some(
+                    serde_json::to_value(&telemetry).expect("telemetry always serializes"),
+                ),
                 artifact_delta: None,
                 measurement_overhead: None,
             };
@@ -380,6 +530,7 @@ pub fn run(warmup: usize, repetitions: usize) -> Result<M3Report, String> {
                 failure_reason,
                 peak_concurrency,
                 evidence_digest,
+                owned_identity: owned_identity.clone(),
             });
         }
 
@@ -406,7 +557,7 @@ pub fn run(warmup: usize, repetitions: usize) -> Result<M3Report, String> {
     std::fs::remove_dir_all(&dir).ok();
 
     Ok(M3Report {
-        schema_version: "0.2.0".to_string(),
+        schema_version: "0.3.0".to_string(),
         case_id: "M3-owned-independent-chains".to_string(),
         plan_action_count: plan.actions.len(),
         runs_root,

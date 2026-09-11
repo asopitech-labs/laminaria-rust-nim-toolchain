@@ -130,3 +130,137 @@ fn a_report_is_reproducible_from_its_own_persisted_runs_without_re_planning_anyt
         );
     }
 }
+
+#[test]
+fn regenerate_rebuilds_judgment_from_disk_and_ignores_a_tampered_input_report() {
+    let mut report = m8_baseline::run(&[4], 1, 2).expect("M8 owned baseline must succeed");
+    let real_kernel_nanos: Vec<Option<u64>> = report.scales[0]
+        .repetitions
+        .iter()
+        .map(|r| r.kernel_nanos)
+        .collect();
+    let real_needed_set_matches: Vec<Option<bool>> = report.scales[0]
+        .repetitions
+        .iter()
+        .map(|r| r.needed_set_matches)
+        .collect();
+
+    for repetition in &mut report.scales[0].repetitions {
+        repetition.success = false;
+        repetition.kernel_nanos = None;
+        repetition.needed_set_matches = Some(false);
+    }
+
+    let regenerated =
+        m8_baseline::regenerate(report).expect("regenerate must read the persisted Runs");
+    let regenerated_kernel_nanos: Vec<Option<u64>> = regenerated.scales[0]
+        .repetitions
+        .iter()
+        .map(|r| r.kernel_nanos)
+        .collect();
+    let regenerated_needed_set_matches: Vec<Option<bool>> = regenerated.scales[0]
+        .repetitions
+        .iter()
+        .map(|r| r.needed_set_matches)
+        .collect();
+    assert_eq!(
+        regenerated_kernel_nanos, real_kernel_nanos,
+        "regenerate() must recover the real kernel_nanos from disk, ignoring the tampered input"
+    );
+    assert_eq!(
+        regenerated_needed_set_matches, real_needed_set_matches,
+        "regenerate() must recover the real needed_set_matches from disk, ignoring the tampered \
+         input"
+    );
+    assert!(regenerated.scales[0].repetitions.iter().all(|r| r.success));
+}
+
+#[test]
+fn regenerate_fails_closed_when_a_referenced_run_no_longer_exists() {
+    let report = m8_baseline::run(&[4], 1, 1).expect("M8 owned baseline must succeed");
+    let run_id = report.scales[0].repetitions[0].run_id.clone();
+    let run_dir = report.runs_root.join(&run_id);
+    std::fs::remove_dir_all(&run_dir).expect("must be able to delete the run dir for this test");
+
+    let result = m8_baseline::regenerate(report);
+    assert!(
+        result.is_err(),
+        "regenerate() must fail closed when a referenced run_id no longer exists on disk"
+    );
+}
+
+#[test]
+fn a_scale_missing_kernel_nanos_on_any_successful_rep_is_not_a_valid_baseline() {
+    // Direct regression test for the review's own reproduction:
+    // dropping kernel_nanos from every repetition must not leave the
+    // pass criteria reading true.
+    let mut report = m8_baseline::run(&[4], 1, 2).expect("M8 owned baseline must succeed");
+    // Force a clean identity first -- the real ambient working tree is
+    // dirty during this session's own development, which
+    // `is_a_valid_baseline` correctly refuses on its own (a separate,
+    // dedicated concern from the kernel_nanos check this test isolates).
+    for repetition in &mut report.scales[0].repetitions {
+        repetition.owned_identity.repo_commit =
+            Some("1111111111111111111111111111111111111111".to_string());
+        repetition.owned_identity.repo_dirty = Some(false);
+    }
+    assert!(report.scales[0].is_a_valid_baseline());
+
+    for repetition in &mut report.scales[0].repetitions {
+        repetition.kernel_nanos = None;
+    }
+    assert!(
+        !report.scales[0].kernel_nanos_present_in_every_successful_rep(),
+        "dropping kernel_nanos from every repetition must be reflected immediately"
+    );
+    assert!(
+        !report.scales[0].is_a_valid_baseline(),
+        "a scale missing kernel_nanos on its successful repetitions must never be a valid \
+         baseline"
+    );
+}
+
+#[test]
+fn owned_baseline_comparable_across_scales_rejects_a_genuine_identity_mismatch() {
+    // Forces every scale onto the same fixed, clean commit first -- the
+    // real ambient working tree is dirty during this session's own
+    // development (covered by the dedicated dirty-tree test below), so
+    // this isolates just the "same artifact content" comparison.
+    let mut report = m8_baseline::run(&[4, 10], 1, 2).expect("M8 owned baseline must succeed");
+    for scale in &mut report.scales {
+        for repetition in &mut scale.repetitions {
+            repetition.owned_identity.repo_commit =
+                Some("1111111111111111111111111111111111111111".to_string());
+            repetition.owned_identity.repo_dirty = Some(false);
+        }
+    }
+    assert!(
+        report.owned_baseline_comparable_across_scales().is_ok(),
+        "two scales recording the identical, clean repo commit and planner binary content must \
+         be comparable"
+    );
+
+    for repetition in &mut report.scales[1].repetitions {
+        repetition.owned_identity.artifact_content_sha256 = Some("0".repeat(64));
+    }
+    assert!(
+        report.owned_baseline_comparable_across_scales().is_err(),
+        "a scale whose owned identity names a different planner binary content digest must \
+         never be treated as comparable to another scale's"
+    );
+}
+
+#[test]
+fn owned_baseline_comparable_across_scales_rejects_a_dirty_working_tree() {
+    let mut report = m8_baseline::run(&[4], 1, 1).expect("M8 owned baseline must succeed");
+    for scale in &mut report.scales {
+        for repetition in &mut scale.repetitions {
+            repetition.owned_identity.repo_commit = Some("clean-fixture-commit".to_string());
+            repetition.owned_identity.repo_dirty = Some(true);
+        }
+    }
+    assert!(
+        report.owned_baseline_comparable_across_scales().is_err(),
+        "a dirty working tree must never be accepted as a comparable, reproducible baseline"
+    );
+}

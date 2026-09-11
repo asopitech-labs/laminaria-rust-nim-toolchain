@@ -19,7 +19,7 @@
 ## stdout themselves -- everything the kernel needs is already inside
 ## the parsed `PlanningInput` (issue #8's "no side effects" requirement).
 
-import std/[json, monotimes, times]
+import std/[json, monotimes, times, options]
 import ./contract
 import ./planning_kernel
 
@@ -38,26 +38,38 @@ proc main() =
       stderr.writeLine("laminaria-planner: stdin is not valid JSON: " & e.msg)
       quit(1)
 
-  ## Wall time spent inside `planFromJson`/`plan` itself, excluding stdin
-  ## read and JSON parse/serialize -- issue #28 D1-a's own measurement
-  ## review: the round-trip time `nim_planner_client::call_planner`
-  ## already reports includes process spawn/IPC/JSON overhead, which is
-  ## not the same interval as `docs/design/issue-35-d0-cases.yaml`'s
+  ## Schema-version gate + JSON decode first (same order/behavior
+  ## `planFromJson` itself uses), *outside* the timed interval below --
+  ## issue #28 D1-a's own measurement review found the previous version
+  ## of this file timed the combined `planFromJson` (gate + decode +
+  ## `plan`), wider than `docs/design/issue-35-d0-cases.yaml`'s
   ## `M8-many-unrequested-nim-planner` case's own confirmed
   ## `measurement_boundary` ("計測開始はplanning_kernel.plan呼び出し直前、
-  ## 終了はExecutionPlan受領直後"). Reported on stderr as an additive
-  ## observation only -- the stdout `PlanOutcome` JSON wire contract is
-  ## byte-for-byte unchanged, so this changes nothing for any existing
-  ## caller/test that only reads stdout.
-  let kernelStart = getMonoTime()
-  let outcome =
+  ## 終了はExecutionPlan受領直後"). `decodePlanningInputOrReject` is the
+  ## same schema-gate/decode step `planFromJson` uses internally, split
+  ## out so it can run un-timed here.
+  let (maybeInput, maybeRejection) =
     try:
-      planFromJson(root)
+      decodePlanningInputOrReject(root)
     except ContractError as e:
       stderr.writeLine("laminaria-planner: malformed PlanningInput: " & e.msg)
       quit(1)
-  let kernelElapsed = getMonoTime() - kernelStart
-  stderr.writeLine("laminaria-planner: kernel_nanos=" & $inNanoseconds(kernelElapsed))
+
+  let outcome =
+    if maybeRejection.isSome:
+      maybeRejection.get
+    else:
+      ## Wall time spent inside `plan` itself only -- excludes stdin
+      ## read, JSON parse, the schema gate, and `PlanningInput` decode
+      ## above. Reported on stderr as an additive observation only --
+      ## the stdout `PlanOutcome` JSON wire contract is byte-for-byte
+      ## unchanged, so this changes nothing for any existing caller/test
+      ## that only reads stdout.
+      let kernelStart = getMonoTime()
+      let planned = plan(maybeInput.get)
+      let kernelElapsed = getMonoTime() - kernelStart
+      stderr.writeLine("laminaria-planner: kernel_nanos=" & $inNanoseconds(kernelElapsed))
+      planned
 
   stdout.writeLine($outcome.toJson)
   quit(0)

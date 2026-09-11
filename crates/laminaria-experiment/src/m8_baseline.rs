@@ -8,41 +8,49 @@
 //! both, they don't depend on each other); `unused-pkg-*` never connects
 //! to `fixture-bin-out`'s demand at all.
 //!
-//! **Revised per a code-review round** (issue #28 D1-a, findings R2-R4):
-//! a failed repetition is recorded (never dropped by an early `?`, and
-//! `needed_set_matches_in_every_successful_rep` is explicitly `false`
-//! when there are zero successful repetitions, never vacuously `true`);
-//! every repetition is persisted as a genuine
-//! `laminaria_run::types::Run` (`store::write_run`), so the round-trip
-//! wall time is a real `ScenarioReport` (`regenerate_report_from_disk`),
-//! identified by the actual `laminaria-planner` binary path used and a
-//! real environment fingerprint; and the case's own confirmed
-//! `measurement_boundary` ("計測開始はplanning_kernel.plan呼び出し直前、
-//! 終了はExecutionPlan受領直後", `docs/design/issue-35-d0-cases.yaml`)
-//! is now actually measured -- `nim-planner/src/laminaria_planner.nim`
-//! reports its own internal `planFromJson`-only wall time on stderr as
-//! `kernel_nanos`, captured here as a value distinct from the Run's own
-//! round-trip time (which still includes process spawn/IPC/JSON, kept
-//! as its own separate measurement, not replaced).
+//! **Revised across two review rounds** (issue #28 D1-a):
+//! - Round 1 (R2-R4): a failed repetition is recorded (never dropped by
+//!   an early `?`); every repetition is persisted as a genuine
+//!   `laminaria_run::types::Run` (`store::write_run`), so the round-trip
+//!   wall time is a real `ScenarioReport`; and
+//!   `nim-planner/src/laminaria_planner.nim` reports its own internal
+//!   `planFromJson`-only wall time on stderr as `kernel_nanos`.
+//! - Round 2: (a) the judgment data (`kernel_nanos`, `needed_set_matches`)
+//!   lived only in the in-memory/serialized report, not in the
+//!   persisted `Run`s, so `regenerate` couldn't rebuild the pass/fail
+//!   verdict from disk alone -- fixed by serializing it into each
+//!   `Run.compiler_telemetry` and having `regenerate` read it back,
+//!   discarding the input report's own claims; (b) `kernel_nanos`'s
+//!   *interval* was still `planFromJson` as a whole (schema gate +
+//!   decode + `plan`), wider than the case's own confirmed
+//!   `measurement_boundary` -- `laminaria_planner.nim` now times only
+//!   `plan` itself, via `planning_kernel.decodePlanningInputOrReject`
+//!   run un-timed beforehand; (c) an owned-code identity (git commit +
+//!   dirty flag, plus the actual planner binary's own content SHA-256 --
+//!   never an external Nim *compiler*'s identity) is now recorded per
+//!   repetition and required before a cross-scale comparison is trusted.
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use laminaria_plan::{Action, ActionKind, ArtifactRef, PlanOutcome, PlanningInput};
 use laminaria_run::clock::RunClock;
 use laminaria_run::scenario::{regenerate_report_from_disk, ScenarioReport, Stats};
-use laminaria_run::store::write_run;
+use laminaria_run::store::{read_run, write_run};
 use laminaria_run::types::{
     CacheState, ExitStatusRecord, PreparationRecord, ProbeLevel, ProcessRecord, ProcessTrace,
     ResourceUsage, RootCommand, Run, RunResult,
 };
 use serde::{Deserialize, Serialize};
 
+use crate::owned_identity::{content_sha256, identities_comparable, OwnedIdentity};
 use crate::planner_binary::resolve_or_build_planner_binary;
 
 pub const WORKLOAD_ID: &str = "M8-many-unrequested-nim-planner@issue35-d0-accepted-c812d70-v1";
+
+const TELEMETRY_KIND: &str = "m8-owned-baseline-v1";
 
 /// `ActionKind::Integrate` with no `compiler_work` descriptor: a
 /// structural placeholder action (this case tests demand-closure
@@ -134,6 +142,21 @@ fn call_planner_with_kernel_timing(
     Ok((outcome, kernel_nanos))
 }
 
+/// What's actually persisted into each repetition's `Run.compiler_telemetry`
+/// -- the single source of truth `regenerate` reads back, never trusted
+/// from an in-memory/serialized `M8Report` alone.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct M8Telemetry {
+    kind: String,
+    unused_actions: usize,
+    success: bool,
+    failure_reason: Option<String>,
+    needed_set_matches: Option<bool>,
+    ordered_action_count: Option<usize>,
+    kernel_nanos: Option<u64>,
+    owned_identity: OwnedIdentity,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepetitionRecord {
     pub run_id: String,
@@ -144,11 +167,14 @@ pub struct RepetitionRecord {
     /// `{used-core, used-util, fixture-bin}`.
     pub needed_set_matches: Option<bool>,
     pub ordered_action_count: Option<usize>,
-    /// The Nim kernel's own self-reported `planFromJson`-only wall time
-    /// -- `None` if the planner failed before reporting it, or (on an
-    /// older planner binary predating this instrumentation) never
-    /// emitted the line at all.
+    /// The Nim kernel's own self-reported `plan`-only wall time (issue
+    /// #28 D1-a review round 2: previously `planFromJson` as a whole,
+    /// which also covers the schema gate and JSON decode -- narrowed to
+    /// match the case's own confirmed `measurement_boundary`). `None` if
+    /// the planner failed before reporting it, or rejected the input at
+    /// the schema gate (never reaching `plan` at all).
     pub kernel_nanos: Option<u64>,
+    pub owned_identity: OwnedIdentity,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -180,49 +206,168 @@ impl ScaleOutcome {
             .filter(|r| r.success)
             .all(|r| r.needed_set_matches == Some(true))
     }
+
+    /// `false` unless every successful repetition actually recorded a
+    /// `kernel_nanos` value -- a review round reproduced this exact gap
+    /// directly: dropping `kernel_nanos` from every repetition still
+    /// left the overall pass criteria reading `true`.
+    pub fn kernel_nanos_present_in_every_successful_rep(&self) -> bool {
+        let mut successful = self.repetitions.iter().filter(|r| r.success);
+        let any = successful.next().is_some();
+        any && self
+            .repetitions
+            .iter()
+            .filter(|r| r.success)
+            .all(|r| r.kernel_nanos.is_some())
+    }
+
+    pub fn owned_identity_if_consistent(&self) -> Option<&OwnedIdentity> {
+        let mut identities = self
+            .repetitions
+            .iter()
+            .filter(|r| r.success)
+            .map(|r| &r.owned_identity);
+        let first = identities.next()?;
+        if identities.all(|i| i == first) {
+            Some(first)
+        } else {
+            None
+        }
+    }
+
+    /// A complete, ready-for-comparison scale: it produced a
+    /// `ScenarioReport`, every successful repetition's needed-set and
+    /// kernel timing were present, and its owned identity was resolved
+    /// and internally consistent.
+    pub fn is_a_valid_baseline(&self) -> bool {
+        !self.repetitions.is_empty()
+            && self.scenario_report.is_some()
+            && self.needed_set_matches_in_every_successful_rep()
+            && self.kernel_nanos_present_in_every_successful_rep()
+            && self
+                .owned_identity_if_consistent()
+                .is_some_and(|id| id.repo_commit.is_some() && id.repo_dirty == Some(false))
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct M8Report {
     pub schema_version: String,
     pub case_id: String,
-    pub runs_root: std::path::PathBuf,
+    pub runs_root: PathBuf,
     pub scales: Vec<ScaleOutcome>,
 }
 
-/// Rebuilds every scale's `ScenarioReport` (round-trip time) purely from
-/// the `Run` files already written under `report.runs_root` -- no
-/// re-planning. `kernel_nanos_stats` is likewise re-derived from each
-/// repetition's already-recorded `kernel_nanos`, not from a fresh
-/// subprocess call.
-pub fn regenerate(mut report: M8Report) -> Result<M8Report, String> {
-    for scale in &mut report.scales {
-        let scenario_id = format!("unused-actions-{}", scale.unused_actions);
-        let run_ids: Vec<String> = scale.repetitions.iter().map(|r| r.run_id.clone()).collect();
-        match regenerate_report_from_disk(&report.runs_root, &scenario_id, &run_ids) {
-            Ok(scenario_report) => {
-                scale.scenario_report = Some(scenario_report);
-                scale.scenario_report_error = None;
-            }
-            Err(e) => {
-                scale.scenario_report = None;
-                scale.scenario_report_error = Some(e.to_string());
+impl M8Report {
+    /// `Ok(())` only if every scale is `is_a_valid_baseline()` and every
+    /// pair of scales' owned identities are `identities_comparable`
+    /// (same clean repo commit *and* the identical planner binary
+    /// content) -- the gate a genuine cross-scale comparison must pass.
+    pub fn owned_baseline_comparable_across_scales(&self) -> Result<(), String> {
+        for scale in &self.scales {
+            if !scale.is_a_valid_baseline() {
+                return Err(format!(
+                    "unused_actions={}: not a valid baseline (scenario_report_error={:?}, \
+                     needed_set_ok={}, kernel_nanos_present={}, identity_consistent={})",
+                    scale.unused_actions,
+                    scale.scenario_report_error,
+                    scale.needed_set_matches_in_every_successful_rep(),
+                    scale.kernel_nanos_present_in_every_successful_rep(),
+                    scale.owned_identity_if_consistent().is_some()
+                ));
             }
         }
-        let kernel_samples: Vec<f64> = scale
-            .repetitions
+        for pair in self.scales.windows(2) {
+            let a = pair[0]
+                .owned_identity_if_consistent()
+                .expect("already checked is_a_valid_baseline above");
+            let b = pair[1]
+                .owned_identity_if_consistent()
+                .expect("already checked is_a_valid_baseline above");
+            identities_comparable(a, b).map_err(|e| {
+                format!(
+                    "unused_actions={} and unused_actions={} not comparable: {e}",
+                    pair[0].unused_actions, pair[1].unused_actions
+                )
+            })?;
+        }
+        Ok(())
+    }
+}
+
+/// Rebuilds an `M8Report` purely from the `Run` files already written
+/// under `report.runs_root` (using only `report`'s own `run_id`s as
+/// pointers) -- every `RepetitionRecord` field is re-read from each
+/// `Run`'s own `compiler_telemetry`, not trusted from the input report's
+/// own claims, and `scenario_report`/`kernel_nanos_stats` are rebuilt
+/// from that freshly-read data.
+pub fn regenerate(report: M8Report) -> Result<M8Report, String> {
+    let mut scales = Vec::new();
+    for scale in &report.scales {
+        let mut repetitions = Vec::new();
+        for old in &scale.repetitions {
+            let run = read_run(&report.runs_root, &old.run_id)
+                .map_err(|e| format!("failed to read run {}: {e}", old.run_id))?;
+            let telemetry_value = run.compiler_telemetry.ok_or_else(|| {
+                format!(
+                    "run {} has no compiler_telemetry -- cannot regenerate its judgment from disk",
+                    old.run_id
+                )
+            })?;
+            let telemetry: M8Telemetry = serde_json::from_value(telemetry_value)
+                .map_err(|e| format!("run {}: malformed compiler_telemetry: {e}", old.run_id))?;
+            if telemetry.kind != TELEMETRY_KIND {
+                return Err(format!(
+                    "run {}: compiler_telemetry.kind {:?} is not {TELEMETRY_KIND:?}",
+                    old.run_id, telemetry.kind
+                ));
+            }
+            repetitions.push(RepetitionRecord {
+                run_id: old.run_id.clone(),
+                success: telemetry.success,
+                failure_reason: telemetry.failure_reason,
+                needed_set_matches: telemetry.needed_set_matches,
+                ordered_action_count: telemetry.ordered_action_count,
+                kernel_nanos: telemetry.kernel_nanos,
+                owned_identity: telemetry.owned_identity,
+            });
+        }
+
+        let scenario_id = format!("unused-actions-{}", scale.unused_actions);
+        let run_ids: Vec<String> = repetitions.iter().map(|r| r.run_id.clone()).collect();
+        let (scenario_report, scenario_report_error) =
+            match regenerate_report_from_disk(&report.runs_root, &scenario_id, &run_ids) {
+                Ok(sr) => (Some(sr), None),
+                Err(e) => (None, Some(e.to_string())),
+            };
+        let kernel_samples: Vec<f64> = repetitions
             .iter()
             .filter(|r| r.success)
             .filter_map(|r| r.kernel_nanos)
             .map(|n| n as f64)
             .collect();
-        scale.kernel_nanos_stats = if kernel_samples.is_empty() {
+        let kernel_nanos_stats = if kernel_samples.is_empty() {
             None
         } else {
             Some(Stats::from_samples(kernel_samples))
         };
+
+        scales.push(ScaleOutcome {
+            unused_actions: scale.unused_actions,
+            warmup_runs: scale.warmup_runs,
+            repetitions,
+            scenario_report,
+            scenario_report_error,
+            kernel_nanos_stats,
+        });
     }
-    Ok(report)
+
+    Ok(M8Report {
+        schema_version: report.schema_version,
+        case_id: report.case_id,
+        runs_root: report.runs_root,
+        scales,
+    })
 }
 
 pub fn run(
@@ -235,6 +380,11 @@ pub fn run(
     let environment_fingerprint =
         laminaria_fingerprint::env::detect(&repo_root, "laminaria-m8-owned-baseline", "0.1.0");
     let planner_bin = resolve_or_build_planner_binary()?;
+    let planner_binary_sha256 = content_sha256(&planner_bin)?;
+    let owned_identity = OwnedIdentity::from_environment_fingerprint(
+        &environment_fingerprint,
+        Some(planner_binary_sha256),
+    );
 
     let mut scales = Vec::new();
 
@@ -292,7 +442,18 @@ pub fn run(
                     Err(e) => (false, Some(e), None, None, None),
                 };
 
-            let run_id = laminaria_run::generate_run_id();
+            let telemetry = M8Telemetry {
+                kind: TELEMETRY_KIND.to_string(),
+                unused_actions,
+                success,
+                failure_reason: failure_reason.clone(),
+                needed_set_matches,
+                ordered_action_count,
+                kernel_nanos,
+                owned_identity: owned_identity.clone(),
+            };
+
+            let run_id = crate::unique_run_id();
             let run = Run {
                 run_id: run_id.clone(),
                 schema_version: laminaria_run::types::SCHEMA_VERSION.to_string(),
@@ -364,7 +525,9 @@ pub fn run(
                             .to_string(),
                     ],
                 },
-                compiler_telemetry: None,
+                compiler_telemetry: Some(
+                    serde_json::to_value(&telemetry).expect("telemetry always serializes"),
+                ),
                 artifact_delta: None,
                 measurement_overhead: None,
             };
@@ -378,6 +541,7 @@ pub fn run(
                 needed_set_matches,
                 ordered_action_count,
                 kernel_nanos,
+                owned_identity: owned_identity.clone(),
             });
         }
 
@@ -414,7 +578,7 @@ pub fn run(
     }
 
     Ok(M8Report {
-        schema_version: "0.2.0".to_string(),
+        schema_version: "0.3.0".to_string(),
         case_id: "M8-many-unrequested-nim-planner".to_string(),
         runs_root,
         scales,

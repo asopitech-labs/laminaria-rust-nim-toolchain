@@ -132,3 +132,111 @@ fn a_report_is_reproducible_from_its_own_persisted_runs_without_re_executing_any
         );
     }
 }
+
+#[test]
+fn regenerate_rebuilds_judgment_from_disk_and_ignores_a_tampered_input_report() {
+    // Direct regression test for the review's own reproduction: a
+    // report whose in-memory/serialized RepetitionRecord fields have
+    // been hand-edited (or are simply stale) must not fool regenerate()
+    // -- it must re-derive everything from each Run's own persisted
+    // compiler_telemetry, not trust what's passed in.
+    let mut report = m3_baseline::run(1, 2).expect("M3 owned baseline must succeed");
+    let real_peak_concurrency = report.budgets[0].successful_peak_concurrency_values();
+    let real_evidence_digest = report.budgets[0]
+        .evidence_digest_if_consistent()
+        .map(|s| s.to_string());
+
+    // Tamper with the in-memory report: flip success, blank the digest,
+    // zero the concurrency -- exactly the kind of stale/edited aggregate
+    // the review reproduced.
+    for repetition in &mut report.budgets[0].repetitions {
+        repetition.success = false;
+        repetition.evidence_digest = None;
+        repetition.peak_concurrency = Some(0);
+    }
+
+    let regenerated =
+        m3_baseline::regenerate(report).expect("regenerate must read the persisted Runs");
+    assert_eq!(
+        regenerated.budgets[0].successful_peak_concurrency_values(),
+        real_peak_concurrency,
+        "regenerate() must recover the real peak_concurrency from disk, ignoring the tampered \
+         input"
+    );
+    assert_eq!(
+        regenerated.budgets[0]
+            .evidence_digest_if_consistent()
+            .map(|s| s.to_string()),
+        real_evidence_digest,
+        "regenerate() must recover the real evidence_digest from disk, ignoring the tampered \
+         input"
+    );
+    assert!(
+        regenerated.budgets[0].repetitions.iter().all(|r| r.success),
+        "regenerate() must recover the real success flag from disk, ignoring the tampered input"
+    );
+}
+
+#[test]
+fn regenerate_fails_closed_when_a_referenced_run_no_longer_exists() {
+    let report = m3_baseline::run(1, 1).expect("M3 owned baseline must succeed");
+    let run_id = report.budgets[0].repetitions[0].run_id.clone();
+    let run_dir = report.runs_root.join(&run_id);
+    std::fs::remove_dir_all(&run_dir).expect("must be able to delete the run dir for this test");
+
+    let result = m3_baseline::regenerate(report);
+    assert!(
+        result.is_err(),
+        "regenerate() must fail closed (never silently fall back to the input report's own \
+         stale data) when a referenced run_id no longer exists on disk"
+    );
+}
+
+#[test]
+fn owned_baseline_comparable_across_budgets_rejects_a_genuine_identity_mismatch() {
+    // Forces both budgets onto the same fixed, clean commit first -- the
+    // real ambient working tree is dirty during this session's own
+    // development, which `is_a_valid_baseline` correctly refuses on its
+    // own (covered by the dedicated dirty-tree test below), so this test
+    // isolates just the "same commit" comparison from that separate
+    // check rather than depending on the repo actually being clean when
+    // the test suite happens to run.
+    let mut report = m3_baseline::run(1, 2).expect("M3 owned baseline must succeed");
+    let fixed_commit = "1111111111111111111111111111111111111111".to_string();
+    for budget in &mut report.budgets {
+        for repetition in &mut budget.repetitions {
+            repetition.owned_identity.repo_commit = Some(fixed_commit.clone());
+            repetition.owned_identity.repo_dirty = Some(false);
+        }
+    }
+    assert!(
+        report.owned_baseline_comparable_across_budgets().is_ok(),
+        "two budgets recording the identical, clean repo commit must be comparable"
+    );
+
+    for repetition in &mut report.budgets[1].repetitions {
+        repetition.owned_identity.repo_commit =
+            Some("0000000000000000000000000000000000000000".to_string());
+    }
+    assert!(
+        report.owned_baseline_comparable_across_budgets().is_err(),
+        "a budget whose owned identity names a different repo commit must never be treated as \
+         comparable to another budget's"
+    );
+}
+
+#[test]
+fn owned_baseline_comparable_across_budgets_rejects_a_dirty_working_tree() {
+    let mut report = m3_baseline::run(1, 1).expect("M3 owned baseline must succeed");
+    for budget in &mut report.budgets {
+        for repetition in &mut budget.repetitions {
+            repetition.owned_identity.repo_commit = Some("clean-fixture-commit".to_string());
+            repetition.owned_identity.repo_dirty = Some(true);
+        }
+    }
+    assert!(
+        report.owned_baseline_comparable_across_budgets().is_err(),
+        "a dirty working tree must never be accepted as a comparable, reproducible baseline, \
+         even when both sides agree on the commit"
+    );
+}
