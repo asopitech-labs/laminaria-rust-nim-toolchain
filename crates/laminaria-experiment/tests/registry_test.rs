@@ -143,22 +143,70 @@ fn an_undeclared_execution_role_is_caught() {
 #[test]
 fn a_golden_value_that_drifts_from_the_d0_confirmed_value_is_caught() {
     // Simulates exactly the class of defect a prior review round found:
-    // an M7 case whose `expected` no longer contains the independently
-    // confirmed aggregate value.
+    // an M7 case whose `expected` no longer carries the independently
+    // confirmed aggregate value under its label.
     let yaml = MINIMAL_VALID_YAML
         .replace("id: A", "id: M7-long-chain-wide-branches-small")
         .replace(
             "value_or_diagnostic: \"42\"",
-            "value_or_diagnostic: \"999999999999999999\"",
+            "value_or_diagnostic: \"最終集約値=999999999999999999\"",
         );
     let registry = parse(&yaml);
     let errors = registry.validate();
     assert!(
-        errors.contains(&ValidationError::MissingConfirmedValueSubstring {
+        errors.contains(&ValidationError::ConfirmedValueMismatch {
             case_id: "M7-long-chain-wide-branches-small".to_string(),
-            expected_substring: "152668892010644049".to_string(),
+            label: "最終集約値".to_string(),
+            expected_value: "152668892010644049".to_string(),
+            found_value: Some("999999999999999999".to_string()),
         }),
-        "expected a MissingConfirmedValueSubstring error, got: {errors:?}"
+        "expected a ConfirmedValueMismatch error, got: {errors:?}"
+    );
+}
+
+#[test]
+fn swapping_a_before_and_after_value_between_two_labels_is_caught() {
+    // The exact defect a later review round reproduced directly: a bare
+    // substring-presence check let this through, since both numbers
+    // were still present *somewhere* in the text, just under each
+    // other's label.
+    let yaml = MINIMAL_VALID_YAML
+        .replace("id: A", "id: M7-long-chain-wide-branches-medium")
+        .replace(
+            "value_or_diagnostic: \"42\"",
+            "value_or_diagnostic: \"編集前の集約値=15936356680776682716、編集後の集約値=975184859065030187\"",
+        );
+    let registry = parse(&yaml);
+    let errors = registry.validate();
+    assert!(
+        errors.iter().any(|e| matches!(
+            e,
+            ValidationError::ConfirmedValueMismatch { case_id, label, .. }
+                if case_id == "M7-long-chain-wide-branches-medium" && label == "編集前の集約値"
+        )),
+        "expected a ConfirmedValueMismatch for the swapped 編集前 label, got: {errors:?}"
+    );
+    assert!(
+        errors.iter().any(|e| matches!(
+            e,
+            ValidationError::ConfirmedValueMismatch { case_id, label, .. }
+                if case_id == "M7-long-chain-wide-branches-medium" && label == "編集後の集約値"
+        )),
+        "expected a ConfirmedValueMismatch for the swapped 編集後 label, got: {errors:?}"
+    );
+}
+
+#[test]
+fn an_unsupported_schema_version_is_caught() {
+    let yaml = MINIMAL_VALID_YAML.replace("0.2.0-draft", "0.1.0-stale");
+    let registry = parse(&yaml);
+    let errors = registry.validate();
+    assert!(
+        errors.contains(&ValidationError::UnsupportedSchemaVersion {
+            found: "0.1.0-stale".to_string(),
+            expected: "0.2.0-draft".to_string(),
+        }),
+        "expected an UnsupportedSchemaVersion error, got: {errors:?}"
     );
 }
 
@@ -169,9 +217,9 @@ fn the_real_registry_actually_contains_every_d0_confirmed_case() {
     // this file don't spuriously fail) -- this test is what actually
     // guards against the real design file quietly dropping one of the
     // named D0-confirmed cases.
-    use laminaria_experiment::registry::d0_confirmed_value_substrings;
+    use laminaria_experiment::registry::d0_confirmed_values;
     let registry = real_registry();
-    for case_id in d0_confirmed_value_substrings().keys() {
+    for case_id in d0_confirmed_values().keys() {
         assert!(
             registry.get(case_id).is_some(),
             "the real registry is missing D0-confirmed case {case_id:?}"

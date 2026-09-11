@@ -207,11 +207,13 @@ dependencies = [
 name = "laminaria-experiment"
 version = "0.1.0"
 dependencies = [
+ "laminaria-fingerprint",
  "laminaria-plan",
  "laminaria-run",
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2",
 ]
 
 [[package]]

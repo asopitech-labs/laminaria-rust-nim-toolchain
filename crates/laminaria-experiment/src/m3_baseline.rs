@@ -12,17 +12,41 @@
 //! executor, at CPU budget 1 and 2, a fresh `ArtifactStore` and
 //! concurrency counter per repetition, warmup discarded before the
 //! measured repetitions.
+//!
+//! **Revised per a code-review round** (issue #28 D1-a, findings R1-R3):
+//! a failed repetition is recorded (never dropped from the report by an
+//! early `?`), evidence is compared *across* CPU budgets (not only
+//! within one budget's own repetitions), and every repetition is
+//! persisted as a genuine `laminaria_run::types::Run` under its own
+//! `run_id` (via `store::write_run`), so the per-budget aggregate is a
+//! real `laminaria_run::scenario::ScenarioReport` built by
+//! `regenerate_report_from_disk` -- environment/toolchain-comparability
+//! checked, all-repetitions-failed rejected, and reproducible purely
+//! from the on-disk `runs/<run_id>/run.json` evidence, with no re-
+//! execution and no fields fabricated to fill the schema (this
+//! measurement's `root_command`/`process_trace` honestly describe an
+//! in-process dispatch, not a real OS subprocess -- see
+//! `ProcessRecord::coverage_note` below).
 
+use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
-use std::time::Instant;
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use laminaria_plan::PlanOutcome;
+use laminaria_run::clock::RunClock;
 use laminaria_run::compiler_work_executor::{
     independent_rust_and_nim_chains_planning_input, run_compiler_work_plan_with_concurrency_trace,
     ArtifactStore,
 };
-use laminaria_run::scenario::Stats;
+use laminaria_run::scenario::{regenerate_report_from_disk, ScenarioReport};
+use laminaria_run::store::write_run;
+use laminaria_run::types::{
+    CacheState, ExitStatusRecord, PreparationRecord, ProbeLevel, ProcessRecord, ProcessTrace,
+    ResourceUsage, RootCommand, Run, RunResult,
+};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::planner_binary::resolve_or_build_planner_binary;
 
@@ -33,28 +57,95 @@ use crate::planner_binary::resolve_or_build_planner_binary;
 pub const RUST_SOURCE_TEXT: &str = "fn f(x: i32) -> i32 { x }";
 pub const NIM_SOURCE_TEXT: &str = "proc g(x: int32): int32 =\n  x\n";
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct BudgetSample {
+/// Names the case + accepted spec revision this measurement is evidence
+/// for (`docs/design/issue-35-d0-spec.md` section 10).
+pub const WORKLOAD_ID: &str = "M3-owned-independent-chains@issue35-d0-accepted-c812d70-v1";
+
+fn unsupported_resource_fields() -> Vec<String> {
+    [
+        "user_cpu_seconds",
+        "system_cpu_seconds",
+        "peak_rss_bytes",
+        "block_input_ops",
+        "block_output_ops",
+        "minor_faults",
+        "major_faults",
+        "voluntary_context_switches",
+        "involuntary_context_switches",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect()
+}
+
+/// A stable digest over one repetition's evidence -- `EvalOutcome`/
+/// `CallEvent` (`laminaria-ir`) don't implement `Serialize` (that crate
+/// stays free of a serde dependency on purpose), so the report stores a
+/// SHA-256 of their `Debug` rendering rather than the structured values
+/// themselves. Two digests differing means the underlying evidence
+/// (`Vec<EvalOutcome>`) differed; two digests matching is exactly as
+/// strong a claim as the direct `==` comparison the source test itself
+/// uses, since `Debug`'s output for these types is a lossless rendering
+/// of every field.
+fn digest_evidence<T: std::fmt::Debug>(rust_evidence: &[T], nim_evidence: &[T]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(format!("{rust_evidence:?}").as_bytes());
+    hasher.update(b"|");
+    hasher.update(format!("{nim_evidence:?}").as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepetitionRecord {
+    pub run_id: String,
     pub success: bool,
-    pub wall_seconds: f64,
-    pub peak_concurrency: usize,
+    /// `None` on success. Set (and `peak_concurrency`/`evidence_digest`
+    /// left `None`) on a genuine dispatch failure -- the repetition is
+    /// still recorded, never silently dropped.
+    pub failure_reason: Option<String>,
+    pub peak_concurrency: Option<usize>,
+    pub evidence_digest: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct BudgetReport {
+pub struct BudgetOutcome {
     pub cpu_budget: usize,
     pub warmup_runs: usize,
-    /// Raw per-repetition samples -- kept alongside the `Stats` summary
-    /// so the report can be regenerated (re-run `Stats::from_samples`
-    /// over `samples`) without re-executing anything.
-    pub samples: Vec<BudgetSample>,
-    pub wall_seconds: Stats,
-    pub peak_concurrency_values: Vec<usize>,
-    /// True only if every repetition's Rust-chain evidence was
-    /// bit-for-bit identical to every other -- scheduling must never
-    /// change what a pure computation produces.
-    pub rust_evidence_matches_across_all_reps: bool,
-    pub nim_evidence_matches_across_all_reps: bool,
+    /// One entry per measured repetition, success or failure -- never
+    /// filtered before being recorded.
+    pub repetitions: Vec<RepetitionRecord>,
+    /// `None` only if every repetition in this budget failed (`build_report`'s
+    /// own "no valid wall-time sample" rejection) -- see
+    /// `scenario_report_error` for why.
+    pub scenario_report: Option<ScenarioReport>,
+    pub scenario_report_error: Option<String>,
+}
+
+impl BudgetOutcome {
+    pub fn successful_peak_concurrency_values(&self) -> Vec<usize> {
+        self.repetitions
+            .iter()
+            .filter(|r| r.success)
+            .filter_map(|r| r.peak_concurrency)
+            .collect()
+    }
+
+    /// `Some(digest)` only if every successful repetition in this budget
+    /// produced the identical evidence digest; `None` if there were zero
+    /// successful repetitions or they disagreed with each other.
+    pub fn evidence_digest_if_consistent(&self) -> Option<&str> {
+        let mut digests = self
+            .repetitions
+            .iter()
+            .filter(|r| r.success)
+            .filter_map(|r| r.evidence_digest.as_deref());
+        let first = digests.next()?;
+        if digests.all(|d| d == first) {
+            Some(first)
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -62,24 +153,61 @@ pub struct M3Report {
     pub schema_version: String,
     pub case_id: String,
     pub plan_action_count: usize,
-    pub budgets: Vec<BudgetReport>,
+    /// Where each repetition's `Run` was written -- `regenerate` reads
+    /// back from here.
+    pub runs_root: PathBuf,
+    pub budgets: Vec<BudgetOutcome>,
 }
 
-/// Re-derives every `Stats` summary from a report's own already-recorded
-/// raw `samples` -- the "reproducible without re-executing anything"
-/// requirement, mirroring `laminaria_run::scenario::regenerate_report_from_disk`'s
-/// own raw-data-in, summary-out shape.
-pub fn regenerate(mut report: M3Report) -> M3Report {
-    for budget in &mut report.budgets {
-        budget.wall_seconds =
-            Stats::from_samples(budget.samples.iter().map(|s| s.wall_seconds).collect());
-        budget.peak_concurrency_values =
-            budget.samples.iter().map(|s| s.peak_concurrency).collect();
+impl M3Report {
+    /// The actual cross-budget comparison R1's review demanded: every
+    /// budget must have a *consistent* evidence digest, and every
+    /// budget's digest must equal every other budget's -- not merely
+    /// "each budget agrees with itself."
+    pub fn evidence_matches_across_budgets(&self) -> bool {
+        let digests: Vec<&str> = self
+            .budgets
+            .iter()
+            .filter_map(|b| b.evidence_digest_if_consistent())
+            .collect();
+        !digests.is_empty()
+            && digests.len() == self.budgets.len()
+            && digests.windows(2).all(|w| w[0] == w[1])
     }
-    report
+}
+
+/// Rebuilds every budget's `ScenarioReport` purely from the `Run` files
+/// already written under `report.runs_root` -- no re-execution. Returns
+/// `Err` if `runs_root` no longer holds the referenced `run_id`s (e.g.
+/// the caller cleaned up `runs/` in between).
+pub fn regenerate(mut report: M3Report) -> Result<M3Report, String> {
+    for budget in &mut report.budgets {
+        let scenario_id = format!("budget-{}", budget.cpu_budget);
+        let run_ids: Vec<String> = budget
+            .repetitions
+            .iter()
+            .map(|r| r.run_id.clone())
+            .collect();
+        match regenerate_report_from_disk(&report.runs_root, &scenario_id, &run_ids) {
+            Ok(scenario_report) => {
+                budget.scenario_report = Some(scenario_report);
+                budget.scenario_report_error = None;
+            }
+            Err(e) => {
+                budget.scenario_report = None;
+                budget.scenario_report_error = Some(e.to_string());
+            }
+        }
+    }
+    Ok(report)
 }
 
 pub fn run(warmup: usize, repetitions: usize) -> Result<M3Report, String> {
+    let repo_root = crate::planner_binary::repo_root();
+    let runs_root = repo_root.join("runs");
+    let environment_fingerprint =
+        laminaria_fingerprint::env::detect(&repo_root, "laminaria-m3-owned-baseline", "0.1.0");
+
     // `process::id()` alone collides when this crate's own tests call
     // `run()` concurrently from multiple threads of the same test
     // binary (a real race this session's own test run caught: one
@@ -137,7 +265,9 @@ pub fn run(warmup: usize, repetitions: usize) -> Result<M3Report, String> {
         let nz_budget = NonZeroUsize::new(budget).expect("budget is always >= 1");
 
         // Warmup: discarded, but still a real, fresh-store dispatch --
-        // never a sleep-only stand-in.
+        // never a sleep-only stand-in. A warmup failure aborts the
+        // whole run (a setup/environment problem), unlike a measured
+        // repetition's failure below, which is recorded, not fatal.
         for _ in 0..warmup {
             let mut store = ArtifactStore::new();
             let (result, _peak) =
@@ -145,58 +275,141 @@ pub fn run(warmup: usize, repetitions: usize) -> Result<M3Report, String> {
             result.map_err(|e| format!("warmup dispatch failed at budget {budget}: {e:?}"))?;
         }
 
-        let mut samples = Vec::new();
-        let mut rust_evidences = Vec::new();
-        let mut nim_evidences = Vec::new();
+        let mut repetition_records = Vec::new();
         for _ in 0..repetitions {
+            let clock = RunClock::start();
             let mut store = ArtifactStore::new();
-            let start = Instant::now();
+            let start_elapsed_ns = clock.elapsed_ns();
             let (result, peak) =
                 run_compiler_work_plan_with_concurrency_trace(&plan, &mut store, nz_budget);
-            let wall_seconds = start.elapsed().as_secs_f64();
-            let success = result.is_ok();
-            result.map_err(|e| format!("dispatch failed at budget {budget}: {e:?}"))?;
-            rust_evidences.push(
-                store
-                    .evidence(&rust_evidence_id)
-                    .expect("rust evidence must be present after a successful dispatch")
-                    .to_vec(),
-            );
-            nim_evidences.push(
-                store
-                    .evidence(&nim_evidence_id)
-                    .expect("nim evidence must be present after a successful dispatch")
-                    .to_vec(),
-            );
-            samples.push(BudgetSample {
+            let end_elapsed_ns = clock.elapsed_ns();
+            let run_ended_at_unix_ns = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+
+            let (success, failure_reason, peak_concurrency, evidence_digest) = match result {
+                Ok(()) => {
+                    let rust_evidence = store
+                        .evidence(&rust_evidence_id)
+                        .expect("rust evidence must be present after a successful dispatch")
+                        .to_vec();
+                    let nim_evidence = store
+                        .evidence(&nim_evidence_id)
+                        .expect("nim evidence must be present after a successful dispatch")
+                        .to_vec();
+                    let digest = digest_evidence(&rust_evidence, &nim_evidence);
+                    (true, None, Some(peak), Some(digest))
+                }
+                Err(e) => (false, Some(format!("{e:?}")), None, None),
+            };
+
+            let run_id = laminaria_run::generate_run_id();
+            let run = Run {
+                run_id: run_id.clone(),
+                schema_version: laminaria_run::types::SCHEMA_VERSION.to_string(),
+                workload_id: WORKLOAD_ID.to_string(),
+                scenario_id: format!("budget-{budget}"),
+                requested_artifact: Some(format!(
+                    "rust:{rust_evidence_id},nim:{nim_evidence_id}"
+                )),
+                environment_fingerprint: environment_fingerprint.clone(),
+                requested_toolchain_selector: None,
+                resolved_toolchain_fingerprint: None,
+                preparation_record: PreparationRecord::default(),
+                cache_state: CacheState::default(),
+                root_command: RootCommand {
+                    program:
+                        "laminaria_run::compiler_work_executor::run_compiler_work_plan_with_concurrency_trace"
+                            .to_string(),
+                    args: vec![format!("cpu_budget={budget}")],
+                    cwd: None,
+                    env_overrides: BTreeMap::new(),
+                },
+                run_started_at_unix_ns: clock.anchor_unix_ns(),
+                run_ended_at_unix_ns: Some(run_ended_at_unix_ns),
+                result: Some(RunResult {
+                    success,
+                    root_exit_status: ExitStatusRecord {
+                        success,
+                        code: None,
+                        signal: None,
+                    },
+                }),
+                process_trace: ProcessTrace {
+                    processes: vec![ProcessRecord {
+                        pid: None,
+                        parent_pid: None,
+                        executable: None,
+                        argv: vec![],
+                        cwd: None,
+                        start_elapsed_ns,
+                        end_elapsed_ns: Some(end_elapsed_ns),
+                        exit_status: Some(ExitStatusRecord {
+                            success,
+                            code: None,
+                            signal: None,
+                        }),
+                        resource_usage: ResourceUsage {
+                            unsupported_fields: unsupported_resource_fields(),
+                            ..Default::default()
+                        },
+                        probe_level: ProbeLevel::Level0Lifecycle,
+                        coverage_note: "in-process compiler_work_executor dispatch -- no OS \
+                                        subprocess was spawned for this measurement, only \
+                                        wall-clock timing (via RunClock) is captured; pid and \
+                                        resource_usage are honestly absent, not fabricated"
+                            .to_string(),
+                    }],
+                    known_gaps: vec![
+                        "no OS-level pid/resource_usage: this Run measures an in-process \
+                         dispatch, not a spawned subprocess"
+                            .to_string(),
+                    ],
+                },
+                compiler_telemetry: None,
+                artifact_delta: None,
+                measurement_overhead: None,
+            };
+            write_run(&runs_root, &run)
+                .map_err(|e| format!("failed to write run {run_id}: {e}"))?;
+
+            repetition_records.push(RepetitionRecord {
+                run_id,
                 success,
-                wall_seconds,
-                peak_concurrency: peak,
+                failure_reason,
+                peak_concurrency,
+                evidence_digest,
             });
         }
 
-        let rust_evidence_matches_across_all_reps = rust_evidences.windows(2).all(|w| w[0] == w[1]);
-        let nim_evidence_matches_across_all_reps = nim_evidences.windows(2).all(|w| w[0] == w[1]);
-        let wall_seconds = Stats::from_samples(samples.iter().map(|s| s.wall_seconds).collect());
-        let peak_concurrency_values = samples.iter().map(|s| s.peak_concurrency).collect();
+        let scenario_id = format!("budget-{budget}");
+        let run_ids: Vec<String> = repetition_records
+            .iter()
+            .map(|r| r.run_id.clone())
+            .collect();
+        let (scenario_report, scenario_report_error) =
+            match regenerate_report_from_disk(&runs_root, &scenario_id, &run_ids) {
+                Ok(report) => (Some(report), None),
+                Err(e) => (None, Some(e.to_string())),
+            };
 
-        budgets.push(BudgetReport {
+        budgets.push(BudgetOutcome {
             cpu_budget: budget,
             warmup_runs: warmup,
-            samples,
-            wall_seconds,
-            peak_concurrency_values,
-            rust_evidence_matches_across_all_reps,
-            nim_evidence_matches_across_all_reps,
+            repetitions: repetition_records,
+            scenario_report,
+            scenario_report_error,
         });
     }
 
     std::fs::remove_dir_all(&dir).ok();
 
     Ok(M3Report {
-        schema_version: "0.1.0".to_string(),
+        schema_version: "0.2.0".to_string(),
         case_id: "M3-owned-independent-chains".to_string(),
         plan_action_count: plan.actions.len(),
+        runs_root,
         budgets,
     })
 }

@@ -90,33 +90,80 @@ pub const VALID_ORIGINS: [&str; 4] = ["self", "fixture-existing", "fixture-new",
 pub const VALID_PATTERNS: [&str; 10] =
     ["M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9", "M10"];
 
-/// D0-confirmed values (`issue35-d0-accepted-c812d70-v1`): every
-/// substring that must appear verbatim in the named case's
-/// `expected.value_or_diagnostic`. A case not listed here has no
-/// numeric-golden cross-check (its `expected` is a diagnostic/structural
-/// claim, checked only for presence).
-pub fn d0_confirmed_value_substrings() -> HashMap<&'static str, Vec<&'static str>> {
+/// The one schema revision this registry validates against. Bumped
+/// alongside `docs/design/issue-35-d0-cases.yaml`'s own
+/// `schema_version` field.
+pub const EXPECTED_SCHEMA_VERSION: &str = "0.2.0-draft";
+
+/// D0-confirmed values (`issue35-d0-accepted-c812d70-v1`), each keyed by
+/// (case id, label) rather than a bare substring -- a bare substring
+/// search let a genuine defect through (a prior review round
+/// reproduced it directly: swapping M7-medium's before/after values in
+/// the text still "validated" cleanly, since both numbers were still
+/// present *somewhere*, just under each other's label). `label` is the
+/// exact text immediately preceding the value in `expected.
+/// value_or_diagnostic` (e.g. `"編集前の集約値"`); the checker requires
+/// the alphanumeric-hex token immediately following that label (after
+/// skipping only separator punctuation/whitespace, not other digits) to
+/// equal `expected_value` exactly -- so a swap changes what follows
+/// each label and is caught, not merely a missing/extra digit somewhere
+/// in the paragraph. A case not listed here has no numeric-golden
+/// cross-check (its `expected` is a diagnostic/structural claim).
+pub fn d0_confirmed_values() -> HashMap<&'static str, Vec<(&'static str, &'static str)>> {
     let mut m = HashMap::new();
     m.insert(
         "M7-long-chain-wide-branches-small",
-        vec!["152668892010644049"],
+        vec![("最終集約値", "152668892010644049")],
     );
     m.insert(
         "M7-long-chain-wide-branches-medium",
-        vec!["975184859065030187", "15936356680776682716"],
+        vec![
+            ("編集前の集約値", "975184859065030187"),
+            ("編集後の集約値", "15936356680776682716"),
+        ],
     );
     m.insert(
         "M7-long-chain-wide-branches-large",
-        vec!["233828575729373081"],
+        vec![("最終集約値", "233828575729373081")],
     );
     m.insert(
         "M9-fingerprint-compat-chain",
         vec![
-            "9b541417be6e7a89f2cff354eb48574f387c9006ff94e8e182d111653f255b13",
-            "2e2d1b0f00b38cc4cb54e37d22d1ee8e96bd5ea4773cc1b25b68a9ac141748d9",
+            (
+                "(a)成功系列 ->",
+                "9b541417be6e7a89f2cff354eb48574f387c9006ff94e8e182d111653f255b13",
+            ),
+            (
+                "(b)capability不一致系列 ->",
+                "2e2d1b0f00b38cc4cb54e37d22d1ee8e96bd5ea4773cc1b25b68a9ac141748d9",
+            ),
         ],
     );
     m
+}
+
+/// Reads the alphanumeric-hex token (`[0-9a-f]+`, which decimal
+/// aggregate values are also a subset of) that immediately follows
+/// `label` in `haystack`, skipping up to a handful of non-alphanumeric
+/// separator characters (`=`, spaces, `->`) in between but never
+/// skipping over another digit run to find a later one -- so the value
+/// bound to a label is always the *very next* token after it, never
+/// some other number elsewhere in the text.
+fn value_immediately_after_label(haystack: &str, label: &str) -> Option<String> {
+    let after_label = &haystack[haystack.find(label)? + label.len()..];
+    let value_start = after_label.find(|c: char| c.is_ascii_hexdigit())?;
+    if value_start > 8 {
+        // The nearest hex-looking token is implausibly far past the
+        // label (more than a handful of separator characters) -- treat
+        // this as "no value bound to this label" rather than risk
+        // picking up an unrelated number later in the paragraph.
+        return None;
+    }
+    let value_tail = &after_label[value_start..];
+    let value_end = value_tail
+        .find(|c: char| !c.is_ascii_hexdigit())
+        .unwrap_or(value_tail.len());
+    Some(value_tail[..value_end].to_string())
 }
 
 /// One of three mutually exclusive D1 dispositions -- never conflated
@@ -171,9 +218,20 @@ pub enum ValidationError {
         case_id: String,
         value: String,
     },
-    MissingConfirmedValueSubstring {
+    UnsupportedSchemaVersion {
+        found: String,
+        expected: String,
+    },
+    /// The value bound to `label` (the token immediately following it,
+    /// per `value_immediately_after_label`) didn't equal `expected_value`
+    /// exactly -- either the label wasn't found, no value immediately
+    /// followed it, or the wrong value did (e.g. a swap between two
+    /// labels' values).
+    ConfirmedValueMismatch {
         case_id: String,
-        expected_substring: String,
+        label: String,
+        expected_value: String,
+        found_value: Option<String>,
     },
 }
 
@@ -200,13 +258,19 @@ impl std::fmt::Display for ValidationError {
                 f,
                 "{case_id}: pattern {value:?} is not one of {VALID_PATTERNS:?}"
             ),
-            ValidationError::MissingConfirmedValueSubstring {
+            ValidationError::UnsupportedSchemaVersion { found, expected } => write!(
+                f,
+                "cases.yaml schema_version {found:?} does not match the expected {expected:?}"
+            ),
+            ValidationError::ConfirmedValueMismatch {
                 case_id,
-                expected_substring,
+                label,
+                expected_value,
+                found_value,
             } => write!(
                 f,
-                "{case_id}: expected.value_or_diagnostic does not contain the D0-confirmed \
-                 value {expected_substring:?}"
+                "{case_id}: the value bound to label {label:?} is {found_value:?}, expected the \
+                 D0-confirmed value {expected_value:?}"
             ),
         }
     }
@@ -215,13 +279,17 @@ impl std::fmt::Display for ValidationError {
 impl std::error::Error for ValidationError {}
 
 pub struct Registry {
+    pub schema_version: String,
     pub cases: Vec<Case>,
 }
 
 impl Registry {
     pub fn load_from_str(yaml: &str) -> Result<Self, serde_yaml::Error> {
         let file: CasesFile = serde_yaml::from_str(yaml)?;
-        Ok(Registry { cases: file.cases })
+        Ok(Registry {
+            schema_version: file.schema_version,
+            cases: file.cases,
+        })
     }
 
     pub fn load_from_path(path: &std::path::Path) -> Result<Self, String> {
@@ -240,6 +308,14 @@ impl Registry {
     /// particular -- callers report them all.
     pub fn validate(&self) -> Vec<ValidationError> {
         let mut errors = Vec::new();
+
+        if self.schema_version != EXPECTED_SCHEMA_VERSION {
+            errors.push(ValidationError::UnsupportedSchemaVersion {
+                found: self.schema_version.clone(),
+                expected: EXPECTED_SCHEMA_VERSION.to_string(),
+            });
+        }
+
         let mut seen_ids: HashMap<&str, usize> = HashMap::new();
         for case in &self.cases {
             *seen_ids.entry(case.id.as_str()).or_insert(0) += 1;
@@ -293,15 +369,22 @@ impl Registry {
         // this table names cases from the real design file, but the
         // validator must stay usable against smaller synthetic
         // registries (tests) without reporting "case not present" as a
-        // structural defect. `full_registry_is_missing_a_d0_confirmed_case`
-        // (below) is the dedicated check for the real file specifically.
-        for (case_id, substrings) in d0_confirmed_value_substrings() {
+        // structural defect. `the_real_registry_actually_contains_every_d0_confirmed_case`
+        // (in tests/registry_test.rs) is the dedicated check for the
+        // real file specifically. Equality is checked per (label, value)
+        // pair, not substring presence -- see `value_immediately_after_label`'s
+        // own doc comment for why (a swapped before/after pair must fail).
+        for (case_id, labeled_values) in d0_confirmed_values() {
             if let Some(case) = self.get(case_id) {
-                for substring in substrings {
-                    if !case.expected.value_or_diagnostic.contains(substring) {
-                        errors.push(ValidationError::MissingConfirmedValueSubstring {
+                for (label, expected_value) in labeled_values {
+                    let found_value =
+                        value_immediately_after_label(&case.expected.value_or_diagnostic, label);
+                    if found_value.as_deref() != Some(expected_value) {
+                        errors.push(ValidationError::ConfirmedValueMismatch {
                             case_id: case_id.to_string(),
-                            expected_substring: substring.to_string(),
+                            label: label.to_string(),
+                            expected_value: expected_value.to_string(),
+                            found_value,
                         });
                     }
                 }
