@@ -2,10 +2,11 @@
 
 - 対象Issue: [#35](https://github.com/asopitech-labs/laminaria-rust-nim-toolchain/issues/35)（親: [#28](https://github.com/asopitech-labs/laminaria-rust-nim-toolchain/issues/28)）
 - 位置付け: 本書は **ゴール設定担当（Claude）による提出仕様案**。ユーザーから採否記録を依頼された指示者（Codex）がセクション6で判定する。本書単独でD1着手を許可しない。
-- 審査状態: **要改訂・D1未発行**（2026-09-11、提出commit `443b5f2959b1aa72be8cfb913f80fd92d79239f6`を審査、判定revision `issue35-d0-review-443b5f2-v1`）。セクション6は指示者の審査記録であり、提出者はこれを改変しない。
+- 審査状態: **採否確定・D1着手可**（判定revision `issue35-d0-accepted-c812d70-v1`、詳細はセクション10）。セクション6は第1回審査時点の記録であり、提出者はこれを改変しない。
 - **改訂状態（第1回改訂、commit `217b0c1`）**: セクション6のR1〜R5に対応して本書・cases.yaml・D1草案の3点を改訂した。対応内容の一覧はセクション7に記す。
 - **改訂状態（第2回改訂、commit `99a0f5c`）**: 指示者による`217b0c1`の読み取りレビュー（発行を妨げる指摘6点、R1〜R5の残件）に対応した。対応内容の一覧はセクション8に記す。
-- **改訂状態（第3回改訂、本改訂）**: 指示者による`99a0f5c`の読み取りレビュー（残件3点: D1合格条件の範囲、M6editのコンパイル可否、M7/M9のgolden値未確定）に対応した。対応内容の一覧はセクション9に記す。セクション0〜5・付録Aは改訂後の提出案。セクション6・7・8は各回の記録として保持し、改変していない。
+- **改訂状態（第3回改訂、commit `c812d70`）**: 指示者による`99a0f5c`の読み取りレビュー（残件3点: D1合格条件の範囲、M6editのコンパイル可否、M7/M9のgolden値未確定）に対応した。対応内容の一覧はセクション9に記す。
+- **採否確定（本改訂）**: 指示者が`c812d70`を採用し、#28 D1-a（本書§10・D1実装指示参照）の着手を指示した。旧「D1実行結果からgoldenを生成する」という文言は「D1はD0確定値を登録し実装結果と照合する。実装結果から期待値を生成・上書きしない」へ統一した。セクション0〜5・付録Aは確定仕様。セクション6〜9は各回の記録として保持し、改変していない。
 - 基準commit: `b875e43303a7ec9a5215897ed9dd08c98b45c812`（2026-09-11時点のHEAD、tree clean）
 - 併読ファイル:
   - [issue-35-d0-cases.yaml](issue-35-d0-cases.yaml) — 機械可読case定義（本書各節が参照するcase IDの実体）
@@ -316,7 +317,7 @@ AFTER（4行目を編集、`requires artifact-a`を追加して循環を導入�
   required_work: [...]
   expected:
     kind: value | diagnostic
-    value_or_diagnostic: string     # 具体値または"D1実装時に一度実行して得た値をpinする"旨+その導出規則への参照
+    value_or_diagnostic: string     # D0が確定した具体値そのもの。D1は実装結果からこの値を生成・上書きしない
     derivation: string
   subset_scope:
     d1_verifies: [...]
@@ -497,6 +498,26 @@ R1〜R5について、修正箇所と満たした条件を一覧で提出する�
 | 3 (P2) | M7・M9の期待値がD1実装結果をgoldenにする記述のままで、個別unit testだけでは集約部分の誤りを排除できなかった | 指示者が提示した4つのM7集約値・2つのM9ダイジェストを、独立実装（Python、既存コード非依存で本セッションが新規に書いたスクリプト）で再計算し、全て一致することを確認した上でD0の確定値として採用した。あわせてcases.yaml内に残っていたM7大規模leaf選定規則の別解釈（「iを直接0始まりで数える」）を、spec.mdの定義（`i = NN - 3`）へ統一した | §2.2(golden値表、大規模leaf選定規則), §3.1(digest値), cases.yaml M7-*/M9-fingerprint-compat-chain |
 
 **検証方法（本改訂固有）**: 上記3.の再計算は、spec.mdが確定した閉じた式（`transform_0/1/2`、`leaf_a/b/c/matrix_sum`、aggregator集約式、M9正準化書式）をそのままPythonで実装し、指示者提示の値と独立に一致することを確認する形で行った（この session が新規に書いた検証スクリプトであり、リポジトリの既存実装コードは一切参照していない）。
+
+## 10. 採否確定記録
+
+- 指示者: Codex
+- 採否日: 2026-09-11
+- 採用commit: `c812d70`（本書・cases.yaml・D1草案の第3回改訂）
+- 判定revision: `issue35-d0-accepted-c812d70-v1`
+- 判定: **採用。D0確定、D1（D1-a/D1-bに分割）着手可。**
+
+構成・役割・期待値の設計判断（自身の実構成での充足、M4/M5のreference扱い、M7/M8補完サンプル、M9/M10のnode設計とNim依存の維持、execution_role/reached_stageによる3分類）はすべて採用された。残っていた「D1実行結果からgoldenを生成する」という旧文言は、指示者により次の一文へ統一する判断が示された（これは採否記録に伴う文言整合であり、再提出・再審査は不要）:
+
+> D1はD0確定値を登録し、実装結果と照合する。実装結果から期待値を生成・上書きしない。M9/M10の製品コードはD1で実装・実行しない。
+
+この一文を反映した箇所: `docs/design/issue-35-d0-d1-draft-instructions.md`「4. 期待結果」節、`docs/design/issue-35-d0-cases.yaml` M7-long-chain-wide-branches-smallの`subset_scope.d1_verifies`、本書§4.1のschemaコメント。
+
+**D1は`D1-a`と`D1-b`の2実装単位に分割して進める**（指示者の指示、issue #28への実装コメントとして記録）:
+- **D1-a**（着手対象）: 20 case全件の登録・検証機構の実装、`M3-owned-independent-chains`と`M8-many-unrequested-nim-planner`のowned baseline実装・計測。詳細は#28へのコメントおよびcommit履歴を参照（本書はD1-aの実装内容そのものを管理しない — D1-aはコードの追加・変更を伴う実装タスクであり、その進捗はコミット履歴とissue #28上のコメントで追跡する）。
+- **D1-b**（D1-a完了後）: 確定済みM1/M2/M4〜M8の構成・補完fixture（`fixtures/long-chain-wide-branches`本体、`fixtures/many-unrequested-targets`本体）・編集試験を実装し、D1全体を終える。
+
+D1-a/D1-bのいずれもM7等の新規fixture本体（fixture sourceのファイル一式）・プル型実行（D2）・M9/M10の製品コード実装・独自コード生成・速度改善の達成を含まない。これらは後続の実装単位（D1-b、D2、D3、D4）で扱う。
 
 ## 付録A: M2（解決済み）
 

@@ -550,7 +550,7 @@ cases:
         「M7数式定義」節を参照(閉じた擬似コード)。
       derivation: "spec.md 2.2で確定した transform_0/1/2 の周期適用(stage側)、gcd_u64/byte_bubble_sort(leaf側)の閉じた定義から独立に計算(実装結果の採用ではない)"
     subset_scope:
-      d1_verifies: ["fixture実装、critical path長の実測、期待値との照合(実行後pin)"]
+      d1_verifies: ["fixture実装、critical path長の実測、D0確定値(152668892010644049)との照合(D1は実装結果からこの値を生成・上書きしない)"]
       future_work: ["head-of-line blocking回避の検証(medium/largeでの重いleaf導入後)"]
     scale:
       small: { chain_stages: 4, wide_leaves: 2, branch_point: "stage-02", leaves: ["leaf-a", "leaf-b"], description: "全列挙" }

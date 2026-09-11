@@ -44,7 +44,7 @@ D1実装者は`issue-35-d0-cases.yaml`の各caseを次の3種のいずれかと�
 
 ## 4. 期待結果
 
-`docs/design/issue-35-d0-cases.yaml`の各caseの`expected`/`pass_criteria.d1`フィールドをそのまま適用する。D1実装者はここに新しい期待値を追加してはならない。M7の実行結果golden値（`u64`集約値）は、spec.mdが確定した`transform_0/1/2`・`leaf_a/b/c/matrix_sum`・aggregator集約式に基づき、各関数のunit testが通過した後にD1が実装時に一度実行して得た値をpinする。これは既存fixture（`deep-critical-path-graph`の`EXPECTED_RESULT`等）と同じ確立済み方法論であり、期待値決定の先送りではない。M9/M10-lsp-native/M10-wasm-sideのgolden値（SHA-256ダイジェスト等）はD1では計算しない（該当caseの実コードがD1に含まれないため）。
+`docs/design/issue-35-d0-cases.yaml`の各caseの`expected`/`pass_criteria.d1`フィールドをそのまま適用する。**訂正（本改訂、採否記録`issue35-d0-accepted-c812d70-v1`対応）**: D1は、D0が確定した値（M7の4つの集約値、M9の2つのSHA-256ダイジェスト、いずれもcases.yamlに固定値として記載済み）を`expected`としてそのまま登録し、実装結果をこれと照合する。**実装結果から期待値を生成・上書きすることはしない。** 各transform/leaf関数の個別unit testは、実装がこれらの固定値と一致するかを検証する目的で書く（誤実装の検出手段であり、期待値の決定手段ではない）。M9/M10-lsp-native/M10-wasm-sideの製品コードはD1では実装・実行しない（該当caseの期待値はcases.yamlに固定値として記載済みだが、D1では照合対象がない）。
 
 ## 5. 検証方法
 
