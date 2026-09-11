@@ -40,8 +40,11 @@ runs/
 # Local clones of reference/prior-art projects named in docs/ (e.g.
 # rust-lang/cargo, nim-lang/Nim, nim-lang/nimony, rust-lang/rustc-perf) --
 # kept locally for actually reading real implementations before writing
-# LAMINARIA's own, never committed. See .reference/README.md.
+# LAMINARIA's own, never committed. See docs/reference-projects.md.
 .reference/
+
+# Python reference-setup test caches
+__pycache__/
 
 # Fixture build output (fixtures/llvm-rediscovery-semantic-workload/trace.sh)
 fixtures/llvm-rediscovery-semantic-workload/trace-out/

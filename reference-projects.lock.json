@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "submodules": "none",
+  "projects": [
+    {"name": "Nim", "url": "https://github.com/nim-lang/Nim.git", "revision": "0ed883ef11dcf76e980aba4d15add106df3cfb39"},
+    {"name": "bazel", "url": "https://github.com/bazelbuild/bazel.git", "revision": "d4c275b89348663ec7b84e58f75ec8ab46f62101"},
+    {"name": "buck2", "url": "https://github.com/facebook/buck2.git", "revision": "967164d58a6eac6716eea4c60e81fe85516efbd0"},
+    {"name": "cargo", "url": "https://github.com/rust-lang/cargo.git", "revision": "e7506208ff1b7f01062e410c419f95628dfdb31b"},
+    {"name": "linux", "url": "https://github.com/torvalds/linux.git", "revision": "893e11787f78e43b534e252249ac3fff4d1333f8", "requires_case_sensitive_fs": true},
+    {"name": "llvm-project", "url": "https://github.com/llvm/llvm-project.git", "revision": "4f1d2ab0a9e57909a30b9fdce73afb00d7e7d686"},
+    {"name": "nimony", "url": "https://github.com/nim-lang/nimony.git", "revision": "1b592f15c934aedad87e11df0cc6047c88b353d1"},
+    {"name": "nlvm", "url": "https://github.com/arnetheduck/nlvm.git", "revision": "a9c33970768a5a706d4e7d97bb3f892bc734b684"},
+    {"name": "nx", "url": "https://github.com/nrwl/nx.git", "revision": "9e9dbb256b7ad774fc58b22b991fc785ae03fd9e"},
+    {"name": "pants", "url": "https://github.com/pantsbuild/pants.git", "revision": "b04b46fa03f331d4eecb0297643284811babdf79"},
+    {"name": "rust", "url": "https://github.com/rust-lang/rust.git", "revision": "55c4dfed758e741620e3320ed472ff5c4140856a"},
+    {"name": "rustc-perf", "url": "https://github.com/rust-lang/rustc-perf.git", "revision": "9fab1ec75a348ee9cd503d4d1de0011248ea3443"}
+  ]
+}

@@ -67,6 +67,26 @@ Per `docs/measurement-foundation.md` §2, this is for bootstrap/correctness repr
 
 ## Documentation
 
+### Reference-project source setup
+
+The 12 locally used prior-art repositories are pinned by full commit SHA in
+[`reference-projects.lock.json`](reference-projects.lock.json). With Python 3.11+
+and Git, reproduce their source checkouts without installing any compiler:
+
+```sh
+python3 scripts/reference_projects.py setup buck2 bazel pants nx  # selected projects
+python3 scripts/reference_projects.py setup                     # all 12
+python3 scripts/reference_projects.py status                    # offline verification
+```
+
+Existing clones are verified, never reset or overwritten. Linux's source tree
+requires a case-sensitive volume; use `--exclude linux` on other volumes and
+set up Linux separately with `--root`. Submodules are not fetched.
+See [the setup procedure and reference map](docs/reference-projects.md) for
+Windows commands, destination selection, recovery, and revision updates.
+
+### Research and implementation documents
+
 - [Agent-oriented toolchain UX and bounded planning (English)](docs/agent-oriented-toolchain-ux.md)
 - [エージェント指向ツールチェーンUX・探索抑制方針 (日本語)](docs/agent-oriented-toolchain-ux_ja.md)
 - [Validated toolchain profiles and progressive configuration (English)](docs/validated-toolchain-profiles.md)

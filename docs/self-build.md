@@ -27,8 +27,8 @@ The following records the implemented planning/driver protocol. Independent comp
 `docs/project-proposal.md` section 7/11 names four reference projects
 for exactly this Action-Graph/planner problem: **Buck2**, **Bazel**,
 **Pants**, and **Nx**. All four were shallow-cloned into `.reference/`
-(see `.reference/README.md`) and their real source was read before any
-of this was designed. Concretely:
+(see [the pinned reference setup](reference-projects.md)) and their real source
+was read before any of this was designed. Concretely:
 
 - **Dependency edges are artifact-mediated, not a hand-declared
   `depends_on` list.** Buck2's `BuildArtifact` carries the `ActionKey` of
