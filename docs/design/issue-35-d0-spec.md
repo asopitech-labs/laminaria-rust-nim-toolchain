@@ -1,7 +1,8 @@
 # #35 D0 仕様案 — LAMINARIA自身の複雑な混成ビルド構成と補完サンプルの仕様
 
 - 対象Issue: [#35](https://github.com/asopitech-labs/laminaria-rust-nim-toolchain/issues/35)（親: [#28](https://github.com/asopitech-labs/laminaria-rust-nim-toolchain/issues/28)）
-- 位置付け: 本書は **ゴール設定担当（Claude）による提出仕様案**であり、#35本文が定義する「指示者」（ユーザー）の採否記録をもって初めて「仕様確定」となる。本書単独でD1着手を許可しない。
+- 位置付け: 本書は **ゴール設定担当（Claude）による提出仕様案**。ユーザーから採否記録を依頼された指示者（Codex）がセクション6で判定する。本書単独でD1着手を許可しない。
+- 審査状態: **要改訂・D1未発行**（2026-09-11、提出commit `443b5f2959b1aa72be8cfb913f80fd92d79239f6`を審査）。セクション0〜5・付録Aとcase YAMLは提出案として保持している。採否・修正指示はセクション6が優先する。採否欄が埋まっただけでは仕様確定にならない。
 - 基準commit: `b875e43303a7ec9a5215897ed9dd08c98b45c812`（2026-09-11時点のHEAD、tree clean）
 - 併読ファイル:
   - [issue-35-d0-cases.yaml](issue-35-d0-cases.yaml) — 機械可読case定義（本書各節が参照するcase IDの実体）
@@ -249,20 +250,71 @@ D1は速度改善そのものを判定しない（#28本文に従う）。
 
 ---
 
-## 6. 指示者の採否記録欄（必須項目8への接続）
+## 6. 指示者の採否記録（必須項目8への接続）
 
-以下は本書提出時点では空欄。指示者が採否と仕様revisionをここに記録した時点で、本書は「仕様確定」に昇格し、[issue-35-d0-d1-draft-instructions.md](issue-35-d0-d1-draft-instructions.md)がD1実装指示として発行可能になる。
+- 審査者: Codex（ユーザーから本節の記入を依頼された指示者）
+- 審査日: 2026-09-11
+- 審査対象: 提出commit `443b5f2959b1aa72be8cfb913f80fd92d79239f6`の3点
+- 判定: **要改訂。D0未確定、D1指示は未発行。**
+- 判定revision: `issue35-d0-review-443b5f2-v1`。これは審査記録の版であり、確定実装仕様の版ではない。
 
-| 論点 | 提案内容 | 指示者の採否 | 備考 |
-|---|---|---|---|
-| M1/M2/M3/M6は自己充足、新規サンプル不要 | 採用推奨 | （未記入） | |
-| M4/M5は既存fixtureをそのままcase化 | 採用推奨 | （未記入） | |
-| M7/M8は新規補完サンプルを追加 | 採用推奨（§2.2/§2.3の設計） | （未記入） | |
-| M9の言語間契約はnative C-ABI（既存subprocess契約は使わない） | 採用推奨 | （未記入） | |
-| M9のnode実機能割当て（環境適合性レポート） | 採用推奨（§3.1） | （未記入） | |
-| M10のnode実機能割当て（planning_kernel.plan/findCycleの共有） | 採用推奨（§3.2） | （未記入） | |
-| M10のWASM経路: スパイク実施→フォールバック規則 | 採用推奨（§3.3、(i)案をデフォルト） | （未記入） | (ii)案（フォールバック直行）も選択可 |
-| D4合格条件はD1実測後に別途確定 | 採用推奨 | （未記入） | |
+自身の実機能を使う構成案は保持する。一方、構成の出典、既存compilerによる比較実績、LAMINARIA自身によるコンパイル・実行の達成度を同じ「充足」にまとめた点、および実装者に期待値決定を残した点は修正が必要である。既存fixtureを全て再実行することは、この設計審査の修正条件にしない。
+
+| 論点 | 指示者の採否 | 確定判断・理由 |
+|---|---|---|
+| M1/M2/M3/M6は自己充足、新規サンプル不要 | 構成出典の再利用を採用。「独自経路も充足」は不採用 | 既存source/module構成を使う。M2のテストbinは第2のconsumerとして認め、付録Aの第2bin追加は不要。M1/M6のconsumer同士にも依存があるので「3独立consumer」は訂正する。Cargo/Nimによるbuild結果は独自schedulerの証拠に数えない。 |
+| M4/M5は既存fixtureをそのままcase化 | source・比較資料の再利用を採用。主経路の充足扱いは不採用 | reference/bootstrapとownedのcaseを識別する。既存fixtureの外部compiler成功でM4/M5の独自コンパイルを合格にしない。自身のM9から得る同型edgeとの対応も保持する。 |
+| M7/M8は新規補完サンプルを追加 | 構成の目的・追加方針を採用。case仕様は要改訂 | 長鎖＋独立枝、非要求集合の補完を行う。M7の数値・正確なedge・編集差分が未確定。生成プログラムの計算量とcompiler workの量を区別する。M8はCargoの非buildとNim plannerの非展開を別に判定する。 |
+| M9の言語間契約はnative C-ABI | 限定したnative比較境界の候補として採用。本経路の必須semantic境界としては不採用 | C ABI自体を禁止する判断ではない。独自IR内の呼出・型・所有・失敗の意味契約を先に定義し、採用するtarget境界は#5 T0に対応付ける。既存compilerで作ったstaticlibのlink成功は参考証拠である。 |
+| M9の実機能割当て（適合性レポート） | 題材と4段の言語配置を採用。現行のnode契約は要改訂 | N3がtoolchain versionとPlanSchemaVersionを混同している。下記R3の責務と固定入力に改訂する。単なるFFI公開だけで各edgeの実機能を検証したとは扱わない。 |
+| M10の実機能割当て（Nim planning kernelの共有） | 採用 | native LSPとWASMの両consumerが同じNim source機能を利用する。native/WASMのartifactは分ける。具体的入力、循環pathとsource range、target/runtimeは要固定。 |
+| M10のWASM経路: スパイク→Rustフォールバック | 不採用（A/Bとも本経路の合格規則として不採用） | Nim compiler→C→Emscriptenはreference実験に限る。Rustへの置換はM10の検証対象のedgeを消す。失敗時は未対応理由と必要な独自生成能力を記録し、M10は未達とする。3回の試行終了は実現不能の証明にならない。 |
+| D4条件はD1実測後に確定 | 条件設定の順序を採用。現行の測定合格規則は不採用 | 独自経路のbaselineを先に取得し、指示者が別の目標設定タスクでD4閾値を確定する。チューニングはその後。同一runとの自己比較を再現性の証拠にしない。 |
+
+### 6.1 再提出に必要な修正（R1〜R5）
+
+これは#35の既存必須項目1〜8を満たすためのD0改訂指示である。実装タスクではなく、元の3提出物を改訂する。以下の判断を実装者へ再選択させない。
+
+**R1 — 実行経路と構成の充足度を分ける（必須項目1〜4、6）**
+
+- 全caseに`execution_role`（`owned` / `reference` / `bootstrap`）と到達段階（構成定義、source/IR評価、target生成・実行）を明示する。共有するsourceとgraphにcase間の参照を付け、役割の異なる測定を混ぜない。
+- #28の比較方式1/2は同じLAMINARIA-owned演算の予算1/並列実行である。Cargo/Nim buildのcaseに`comparison_modes: [1]`を割り当てない。比較用compiler結果は別roleで保持する。
+- M3の`CargoBuild`/`NimBuild`を`compiler_work_executor`へ渡す指定は削除する。同executorはその2種類を`UnsupportedActionKind`として拒否する。既存#27のsource-derived Rust/Nim経路と対応付け、扱えない製品sourceは不足を明記する。拒否を解除して外部compiler実行を追加しない。
+- inventoryの「実Nim planner未接続」は訂正する。`compiler_work_executor.rs`の`the_full_lower_validate_transform_validate_evaluate_pipeline_runs_end_to_end`と`independent_rust_and_nim_chains_agree_across_cpu_budgets_and_run_concurrently_under_budget_two`には、実planner→validate→dispatchが既に存在する。研究用CLI不足と接続自体の不足は区別する。
+- `laminaria-plan → fingerprint`、`laminaria-run → plan/fingerprint/ir`、`laminaria-cli → run/plan/fingerprint`を全て含めてgraphを訂正する。fan-out/diamondの出典として採用するが、plan/run/cliは独立した実行枝ではない。M2では共有sourceを使う複数consumerの構成と、共有compiler workの一回実行を別の主張にする。
+
+**R2 — M10の必須依存を維持する（必須項目1〜4、8）**
+
+- 同じNim機能をnativeとWASMへ生成するM10を維持し、WASM側のRust再実装による代替合格は削除する。A/B選択をD1へ渡さない。
+- 本経路の設計は#5 T0の独自生成契約へ接続する。必要なIR・target/runtime能力が不足する場合は、対象caseと不足能力を固定して後続待ちとして記録する。D1でM10全機能を実装し終える条件は削除する。
+- 外部Nim/Rust/Emscriptenの調査を残すなら、独立したreference設計・実験タスクにする。正確なrevision、target、command、成功・失敗の判定条件が固定されるまで実行指示として発行しない。可否結果でM10のゴールを変更しない。
+
+**R3 — 期待結果とデータの流れをD0で閉じる（必須項目2〜5、8）**
+
+- M9の4段を、N1=Nim CLIの入出力・終了コード、N2=Rustの固定環境snapshotと要求の正規化、N3=Nimの要求schema/capabilityと提供schema/capabilityの適合性判定、N4=Rustの正準化された判定入力・結果のSHA-256、として設計を具体化する。環境収集そのものの実機能への接続は保持し、期待値試験はambient toolchainに左右されない固定snapshotで行う。
+- N3は要求schemaと提供schema、要求capabilityと提供capabilityを比較する。compiler versionとwire schema versionを比較しない。初回は既存の厳密なschema一致規則を踏襲し、根拠のないSemVer範囲互換やDegraded分類は導入しない。既存のversion gateは`planning_kernel.nim::planFromJson`にある。
+- N3で判定した結果と入力をN4へ渡し、digest付き判定をN3→N2→N1へ返す。N4を通らなくても成立する装飾的edgeや、結果計算に循環するデータ依存にしない。正準化規則、固定入力、成功・不適合・不正入力時の正確な出力をD0で記載する。
+- M7は小=4段/2枝、中=8段/4枝、大=16段/8枝を保持し、分岐点をそれぞれstage-02/04/08へ固定する。全edge、各nodeの処理、aggregate式、入力、編集のbefore/after、数値期待結果をD0で記載する。YAMLの「D1実装時に確定」と「1行編集」を具体値・差分へ置き換える。
+- M10の診断試験は入力manifest全文、編集差分、期待cycle path、診断code/rangeを固定する。LSP側との一致だけで正解を定義せず、graphからの導出根拠を併記する。
+- YAMLの「同上」「同一」「同型」等は、同じ型を保つ明示的なcase参照とoverride規則、または完全な値に置き換える。node/edge/需要/期待集合を読取り可能な構造として表す。M9/M10のoriginは自身の予定機能であることを表し、補完fixtureと区別する。
+
+**R4 — 比較対象・cache状態・仕事量を固定する（必須項目5〜7）**
+
+- M1のcoldとwarm/no-opは別実行caseにする。coldでfingerprintの生成1回を要求しながら「未変更なので生成禁止」を同時に要求しない。各caseの前処理・snapshot・期待実行集合を固定する。
+- M7の行列を大きくして生成プログラムのruntimeを増やしただけではcompiler workを重くした証拠にならない。source/IRの量で増やす計算と、EvaluateEvidenceで評価する計算を指定し、計測対象を分ける。実測前に「重い枝」「最長時間のcritical path」を確定した事実にしない。
+- D1のowned比較は同じ対応済みsource/IR処理について予算1と2を取得する。非対応caseを全て走らせる指示や、Cargo側の並列性をowned方式へ帰属させる指示は削除する。
+- 反復ごとの状態復元、warmupの扱い、測定順・開始終了境界・適用hostを固定する。再現性は別の実行で取得したraw samplesで判断し、同一reportの自己比較は使用しない。
+- D4の数値閾値は現時点で推測して埋めない。対象baseline・必要な証拠・指示者の判定成果物・チューニング前という期限を指定した目標設定タスクとして明示する。
+
+**R5 — D1の範囲と発行条件を3点で一致させる（必須項目4、8）**
+
+- D1は確定したsource構成・manifest・期待graph/result・規模生成・対応表と、実行可能なowned比較基準を実装する。M9/M10の製品CLI/FFI/LSP/WASM機能一式の実装は、確定した機能・生成契約を入力とする後続実装へ割り当てる。自身を対象にする目的とM9/M10の必須構成は維持する。
+- caseごとにD1で実装・実行、referenceとして保持、後続能力待ちのいずれかを明記し、草案の「全case実装」と本文の段階分けの矛盾を解消する。後続待ちを合格と数えない。
+- 発行条件を「採否が記入済み」から「R1〜R5が反映され、3点が一致し、指示者が確定仕様revisionを記録したこと」へ変更する。ユーザーへゴールの再設定を求めない。
+
+### 6.2 修正確認の停止条件
+
+R1〜R5について、修正箇所と満たした条件を一覧で提出する。3点が同じcase・role・段階・期待結果を指し、実装担当に対象や期待値の決定が残らないことを指示者が確認して確定する。既存の構成再利用、M2の第2consumer、M9/M10の題材選定は上表の判断を再審議する必要はない。今回、compiler実装の追加や既存全テストの再実行は要求しない。
 
 ---
 

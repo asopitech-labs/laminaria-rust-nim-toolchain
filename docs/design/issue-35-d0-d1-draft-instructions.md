@@ -1,8 +1,7 @@
 # D1実装指示（草案・未発行）
 
-- 状態: **DRAFT** — [issue-35-d0-spec.md](issue-35-d0-spec.md)セクション6の採否記録欄が指示者によって埋められ、
-  同ファイルおよび[issue-35-d0-cases.yaml](issue-35-d0-cases.yaml)の該当revisionが確定するまで、本書はD1着手を許可しない。
-- 発行条件: セクション6の全論点に「採用」または明示的な代替案の指定が記録されること。
+- 状態: **要改訂・未発行** — 提出commit `443b5f2`を審査し、[issue-35-d0-spec.md](issue-35-d0-spec.md)セクション6に採否と修正指示R1〜R5を記録した。以下の本文は提出草案として保持しており、外部compilerによる比較方式の混同、M10のRust代替、D1範囲の不整合を含むため実行指示として使用しない。
+- 発行条件: R1〜R5が仕様書・case YAML・本草案へ反映され、指示者が3点の一致と確定仕様revisionを記録すること。採否欄への記入だけでは発行しない。
 - 参照する仕様revision: `docs/design/issue-35-d0-spec.md` @ 本commit、`docs/design/issue-35-d0-cases.yaml` @ `schema_version: 0.1.0-draft`（確定後は指示者が具体的なgit commit hashをここに追記する）。
 
 ---
