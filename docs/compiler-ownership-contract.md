@@ -11,13 +11,17 @@ The project itself is implemented in Rust and Nim and must ultimately compile it
 The required direction is:
 
 ```text
-Rust source / Nim source / both + resolved dependency sources
+Rust source / Nim source / both + resolved Rust/Nim dependency sources
   → LAMINARIA language processing and semantic analysis
   → LAMINARIA-owned IR(s), semantic facts and provenance
   → LAMINARIA analysis / transformations / partition decisions
   → LAMINARIA planning and resource-aware compiler-work scheduling
   → LAMINARIA target lowering and code generation
-  → target artifacts with explicit runtime / assembly / link contracts
+  → LAMINARIA-produced target objects
+declared C/C++ dependencies
+  → prebuilt native artifacts or explicit C/C++ compile/adapter actions
+LAMINARIA-produced objects + foreign native artifacts
+  → target artifacts through explicit runtime / assembly / link contracts
 ```
 
 This is an ownership contract, not a fixed sequence of passes. Planning, analysis and execution may interact incrementally. The number/form of IRs, SSA/CFG use, partition granularity and backend boundaries remain research questions. The build Action Graph and `PlanningInput -> ExecutionPlan` alone are not a language IR.
@@ -28,14 +32,29 @@ LAMINARIA must derive semantic facts from supported source constructs, not requi
 
 | Role | Permitted use of existing tools | What it proves |
 | --- | --- | --- |
-| Package/dependency resolution | Cargo/Nim ecosystem metadata, manifests, lockfiles, source acquisition and resolution | Dependency inputs, not compilation |
+| Package/dependency resolution | Cargo/Nim/C/C++ ecosystem metadata, manifests, lockfiles, source acquisition and resolution | Dependency inputs, not compilation |
 | Lexical/syntactic parsing | A parsing library, a parser generator, or an existing compiler's own lexer/parser logic, used purely as a syntax-only component (tokens, concrete/abstract syntax tree, source positions) | A syntax tree, not meaning |
 | Reference / baseline | Existing compilers, LLVM and build systems in explicitly selected comparison experiments | Behavior and costs under the tested reference contract |
 | External bootstrap | Existing tools build the initial research executable | A starting executable, not independent compiler self-hosting |
 | Delegated-build baseline | Current coarse Cargo/Nim project-build and self-build experiments | Planner/process integration and baseline measurements only |
+| Declared foreign-native dependency | Compile an explicitly modeled C/C++ source/adapter unit, or consume an identified object/archive/shared library, as a dependency of LAMINARIA-produced target code | The foreign artifact and link input, not delegated Rust/Nim compilation |
 | Independent compilation | LAMINARIA owns source semantics, IR, transformations, code generation and compiler-work scheduling | Candidate evidence for the project goal |
 
-Resolution must not silently run compilation through a build script, procedural macro, plugin or transitive tool invocation. Such work needs an explicit LAMINARIA-supported implementation contract; unsupported constructs/dependencies return a diagnostic. Dependency acquisition is not permission to invoke `cargo build`, `rustc`, `nim c`, `nim cpp`, nlvm, Nimony, or C/LLVM compilation on the target-production path.
+Resolution must not silently run compilation through a build script, procedural macro, plugin or transitive tool invocation. Such work needs an explicit LAMINARIA-supported implementation contract; unsupported constructs/dependencies return a diagnostic. Dependency acquisition is not permission to invoke `cargo build`, `rustc`, `nim c`, `nim cpp`, nlvm or Nimony for Rust/Nim target compilation, nor to route LAMINARIA-owned Rust/Nim semantics through generated C/C++ or another existing compiler backend.
+
+This restriction does **not** prohibit C/C++ compilation required by a declared foreign-native library dependency. LAMINARIA must preserve the distinction: an external C/C++ compiler may compile an identified foreign source or generated adapter unit, but it must not compile C/C++ emitted as the implementation of the Rust/Nim target unit. The foreign inputs, headers, flags, toolchain, outputs and link edges must be visible in the Program/Action Graph rather than hidden inside package resolution or an opaque outer build.
+
+## C/C++ library reuse is a first-class requirement
+
+Nim's practical ecosystem advantage includes direct use of C and C++ libraries. LAMINARIA must preserve that advantage even when its owned Nim path lowers source directly to LAMINARIA IR and skips Nim-generated C/C++.
+
+LAMINARIA's own Rust/Nim implementation should prefer an established, suitable C/C++ library over reimplementing equivalent functionality when the dependency's correctness, portability, licensing, maintenance, security and measured cost satisfy the project requirements. This is a design decision subject to evidence, not a requirement to rewrite the library in Nim or Rust merely to keep all source in those languages.
+
+For target projects, supported `importc`/`importcpp`-style declarations must lower to explicit foreign declarations and calls while retaining symbol identity, type/layout, calling convention, ownership/lifetime, exception/unwind and runtime obligations. The resulting LAMINARIA-produced object must be linkable with separately produced or prebuilt foreign objects, archives and shared libraries.
+
+Some C++ facilities have no pre-existing linkable symbol. Templates, inline/header-only APIs, overload resolution, constructors/destructors and ABI-specific calls may require an explicit C++ instantiation or adapter unit. LAMINARIA may generate and compile that unit as a foreign dependency action. The generated source, reason, compiler/standard-library ABI, flags and output object remain inspectable; it is not an implicit fallback for Nim target compilation.
+
+The canonical requirements, graph model and vertical-slice acceptance are defined in [Nim C/C++ library integration](nim-c-cpp-library-integration.md).
 
 **Lexical/syntactic parsing reuse, precisely bounded.** Reuse limited to producing
 tokens, a concrete/abstract syntax tree, and source positions is permitted —

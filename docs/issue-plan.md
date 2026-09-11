@@ -6,13 +6,13 @@ This file maps the GitHub issue set to the research program. The GitHub issues a
 
 The [compiler ownership contract](compiler-ownership-contract.md) governs this plan. The goal is an independent Rust/Nim compiler, IR and scheduler that ultimately compile LAMINARIA itself. External-compiler orchestration/self-build is reference/bootstrap evidence, not the primary delivery milestone.
 
-1. **#25 + #3 + #6 + #8 together:** declare a supported source subset, derive and implement its semantic IR/transformations, connect compiler work to the production Nim planner/Rust runtime, and implement a narrow owned target-generation path.
+1. **#25 + #3 + #6 + #8 together:** declare a supported source subset, derive and implement its semantic IR/transformations, connect compiler work to the production Nim planner/Rust runtime, and implement a narrow owned target-generation path. Preserve foreign declarations as semantic inputs rather than discarding them or requiring Nim-generated C/C++.
 2. **#10/#11/#18–#21 in parallel:** minimum source/IR/producer/path/resource evidence, separate from external reference/bootstrap runs. Full measurement/profile coverage is not a serial gate.
 3. **#7/#12:** sound identity, invalidation, reuse and work elimination in the owned compiler; retain existing coarse experiments as baselines.
-4. **#26:** Rust-only/Nim-only/mixed public inputs all use that same owned path, never fall back to the respective existing compiler.
+4. **#26:** Rust-only/Nim-only/mixed public inputs all use that same owned path, never fall back to the respective existing compiler. A Nim input with a supported C/C++ dependency remains a valid Nim project: its Nim unit follows the owned path while separately modeled foreign source/artifact and link actions satisfy the native dependency.
 5. **#2:** expand supported language/dependency coverage to compile the real Rust + Nim implementation through independent stage0 → stage1 → stage2 generations.
 
-#4 runtime/ABI integration supports delivery but is not a replacement for compiler development. #5/#13 define owned target routes and compiler-work boundaries; #14–#17 remain prior-art/comparison experiments feeding #25. #22–#24 distinguish owned compiler profiles from external reference/bootstrap matrices.
+#4 runtime/ABI integration supports delivery but is not a replacement for compiler development. #5/#13 define owned target routes and compiler-work boundaries; #44, defined by `nim-c-cpp-library-integration.md`, owns foreign declarations, native dependency production, explicit adapter generation and final-link participation. #14–#17 remain prior-art/comparison experiments feeding #25. #22–#24 distinguish owned compiler profiles from external reference/bootstrap matrices.
 
 ## Measurement foundation — supporting track
 
@@ -49,15 +49,16 @@ Kbuild, distcc/icecream, LLVM ThinLTO/DTLTO and Bazel Remote Execution are prior
 2. Compiler pipeline decomposition across supported toolchain versions — #3
 3. Rust–Nim native linking without mandatory C ABI boundary — #4
 4. Backend route selection and capability constraints — #5
-5. Unified Action Graph and resource-aware scheduling — #6
-6. Artifact identity, incremental invalidation and CAS — #7
-7. Variant-space control in the Nim Planning Kernel — #8
-8. WASM mixed-language integration/topology — #9
-9. Agent-oriented explainability and evidence schema — #10
-10. Work elimination, execution correctness and no-op build invariants — #12
-11. Multi-version Rust/Nim toolchain selection and artifact compatibility — #22
-12. Validated toolchain profiles and progressive configuration — #23
-13. Agent-oriented bounded/explainable toolchain planning and UX — #24
+5. Nim C/C++ library reuse, foreign declarations and native dependency/link integration — #44
+6. Unified Action Graph and resource-aware scheduling — #6
+7. Artifact identity, incremental invalidation and CAS — #7
+8. Variant-space control in the Nim Planning Kernel — #8
+9. WASM mixed-language integration/topology — #9
+10. Agent-oriented explainability and evidence schema — #10
+11. Work elimination, execution correctness and no-op build invariants — #12
+12. Multi-version Rust/Nim toolchain selection and artifact compatibility — #22
+13. Validated toolchain profiles and progressive configuration — #23
+14. Agent-oriented bounded/explainable toolchain planning and UX — #24
 
 ## Backend pipeline white-boxing expansion
 
@@ -111,6 +112,10 @@ Later research may extend these schemas with backend-specific data, but must not
 ### #5 versus #13
 
 #5 answers **which backend route is valid and selected**. #13 answers **how the selected backend expands into internal computation and which boundaries become observable/checkpoint/execution nodes**.
+
+### Nim C/C++ integration versus #4/#5/#26
+
+#44 preserves Nim's ability to reuse foreign libraries when LAMINARIA skips Nim-generated C/C++. It owns `importc`/`importcpp`-style semantic declarations, foreign source/prebuilt artifact/adapter actions, native toolchain identity and final-link edges. #4 owns Rust–Nim cross-language runtime/ABI research; #5 owns the target-generation route for LAMINARIA-produced code; #26 owns public project compilation through the common owned path. C/C++ compilation of a declared foreign dependency is not a fallback implementation of the Nim target unit.
 
 ### #9 versus #16
 

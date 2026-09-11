@@ -11,12 +11,16 @@ LAMINARIA自身をRustとNimで実装し、最終的には同じ独自コンパ�
 必要なのは次の経路である。
 
 ```text
-Rustソース / Nimソース / 両方 + 解決済み依存ソース
+Rustソース / Nimソース / 両方 + 解決済みRust/Nim依存ソース
   → LAMINARIA自身の言語処理・意味解析
   → LAMINARIA独自IR群・意味情報・由来
   → LAMINARIA自身の解析・変換・計算分割
   → LAMINARIAの計画・資源認識スケジューリング
   → LAMINARIA自身のターゲットlowering・コード生成
+  → LAMINARIA生成ターゲットobject
+宣言済みC/C++依存
+  → 構成を特定した既存native成果物、または明示的なC/C++ compile/adapter Action
+LAMINARIA生成object + foreign native成果物
   → runtime・assembly・link契約を明示したターゲット成果物
 ```
 
@@ -28,14 +32,29 @@ Rustソース / Nimソース / 両方 + 解決済み依存ソース
 
 | 役割 | 既存ツールを使う範囲 | 証明できること |
 | --- | --- | --- |
-| パッケージ管理・依存解決 | Cargo/Nim ecosystemのmetadata、manifest、lockfile、ソース取得と依存解決 | コンパイルへの入力 |
+| パッケージ管理・依存解決 | Cargo/Nim/C/C++ ecosystemのmetadata、manifest、lockfile、ソース取得と依存解決 | コンパイルへの入力 |
 | 字句・構文解析 | パーサーライブラリ、パーサージェネレータ、または既存コンパイラ自身の字句解析・構文解析ロジックを、構文専用の部品(トークン・具象/抽象構文木・ソース位置)としてのみ使用する | 構文木であり、意味ではない |
 | 比較・観測baseline | 明示的に選んだ実験で既存コンパイラ、LLVM、build systemを実行 | その比較条件での挙動・コスト |
 | 外部bootstrap | 最初の研究実行ファイルを既存ツールで作る | 開始点の用意のみ |
 | 外部委譲ビルドbaseline | 現行のCargo/Nim単位のproject-build/self-build実験 | planner・process連携と比較計測のみ |
+| 宣言済みforeign-native依存 | 明示されたC/C++ source/adapter unitをcompileする、またはidentityを持つobject/archive/shared libraryをLAMINARIA生成コードの依存として取り込む | foreign成果物とlink入力。Rust/Nim compile委譲ではない |
 | 独自コンパイル | 意味解析・IR・変換・コード生成・内部計算のscheduleをLAMINARIAが担う | 本来の研究目標の候補証拠 |
 
-依存解決を口実にbuild script、procedural macro、plugin、推移的ツール呼び出しからコンパイルを隠れて実行してはならない。これらにはLAMINARIAで対応する明示的な実装契約が必要であり、未対応の構文や依存は診断して停止する。ソース取得の許可は、本成果物を `cargo build`、`rustc`、`nim c`、`nim cpp`、nlvm、Nimony、C/LLVM compilationへ委譲する許可ではない。
+依存解決を口実にbuild script、procedural macro、plugin、推移的ツール呼び出しからコンパイルを隠れて実行してはならない。これらにはLAMINARIAで対応する明示的な実装契約が必要であり、未対応の構文や依存は診断して停止する。ソース取得の許可は、Rust/Nim本体のtarget compilationを `cargo build`、`rustc`、`nim c`、`nim cpp`、nlvm、Nimonyへ委譲する許可ではなく、LAMINARIAが所有するRust/Nim意味をgenerated C/C++や既存backendへ逃がす許可でもない。
+
+この制限は、宣言済みforeign-native library依存に必要なC/C++ compilationを禁止しない。外部C/C++ compilerは、identityを持つforeign sourceまたは生成adapter unitをcompileできるが、Rust/Nim target unitの実装として生成されたC/C++をcompileしてはならない。foreign入力、header、flag、toolchain、出力、link edgeはProgram/Action Graphに表れ、package resolutionやopaqueなouter buildに隠さない。
+
+## C/C++ library再利用をfirst-class requirementとする
+
+Nimの実用上の重要な利点は、C/C++ libraryを直接利用できることにある。LAMINARIAは、Nim sourceからLAMINARIA IRへ直接loweringし、Nimのgenerated C/C++をskipする場合でもこの利点を保つ。
+
+LAMINARIA自身のRust/Nim実装では、同等の機能を持つ成熟したC/C++ libraryがあり、正しさ、portability、license、maintenance、security、計測コストがプロジェクト要件を満たす場合、原則として再実装より再利用を優先する。これは証拠に基づく設計選択であり、sourceをRust/Nimだけにするためのlibrary再実装を要求しない。
+
+target projectでは、対応済みの`importc`/`importcpp`相当宣言を、symbol identity、type/layout、calling convention、ownership/lifetime、exception/unwind、runtime obligationを保つforeign declaration/callへloweringする。LAMINARIAが生成したobjectは、別経路で生成した、または既存のforeign object、archive、shared libraryとlinkできなければならない。
+
+C++では、事前にlink可能なsymbolが存在しない場合がある。template、inline/header-only API、overload resolution、constructor/destructor、ABI依存callには、明示的なC++ instantiationまたはadapter unitが必要になり得る。LAMINARIAはこのunitをforeign dependency Actionとして生成・compileできる。generated source、生成理由、compiler/standard-library ABI、flag、出力objectを観測可能にし、Nim target compilationの暗黙fallbackにしない。
+
+正準要件、graph model、vertical sliceの完了条件は[Nim C/C++ library統合](nim-c-cpp-library-integration_ja.md)に定める。
 
 **字句・構文解析の再利用は、範囲を厳密に限定して認める。** トークン・具象/抽象構文木・ソース位置の取得に限定した再利用は許可する — パーサーライブラリ(例: Rustの`syn`)、パーサージェネレータ、あるいは既存コンパイラ自身の字句解析・構文解析ロジックを研究し構文専用の部品として適合させたものを含む。これ自体は独自コンパイラの所有を成立させるものではなく、名前解決、型推論・型検査、所有権・effectの解釈、定数評価、独自IRの構築、解析、変換、処理分割、スケジューリング、コード生成には及ばない — これらはすべてLAMINARIA自身の責務であり続ける。既に意味解析済みの表現(型付きAST、HIR、MIR、あるいはそれに相当するもの)は「構文解析だけ」には含まれず、必須の入力にしてはならない。`rustc`やNim自身のコンパイラを実行してASTを取得することは、本番経路で必須の入口には決してならない — 再利用する構文解析部品は、実行単位・並列度・メモリ寿命を含めてLAMINARIAが直接制御できるもの(プロセス内、またはLAMINARIA自身が呼び出すライブラリ依存)でなければならず、制御できない外部コンパイラプロセスであってはならない。マクロ展開やコンパイル時実行は「構文解析だけ」には含まれない — 別途明示的な実装契約が必要であり、未対応の場合は黙ってスキップしたり委譲したりせず診断で拒否する。構文層に位置するという理由だけで、再利用した構文解析の依存がLAMINARIA自身の最終的なself-build対象から除外されることはない。
 
