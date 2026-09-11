@@ -117,9 +117,11 @@ LAMINARIA自身が持つこと」ではない。** 実行主体(CPU、OS、WASM 
 文字列・ポインタなし、浮動小数点なし、グローバル可変状態なし、
 `WrappingAdd/Sub/Mul`はすべて2の補数・オーバーフロートラップなしの意味論
 (`types.rs:98-99`のコメントで明記、rustcの`wrapping_add`/Nimの`+%`と対応)。
-再帰呼び出しが`validate_program`/`interpreter::eval_function`で許容される
-かどうかは未確認(このIRの現行テストでは確認していない) — T1で明示的に
-検証すべき項目として`subset_scope`未確定事項に記録する(推測で断定しない)。
+再帰呼び出しは許容される(**訂正**: 前版は未確認としていたが、
+`interpreter.rs`冒頭コメントの「A direct recursive reference
+evaluator」という自己記述と、`Expr::Call`評価が単なる素のRust関数
+再帰であってサイクル検出を一切持たないことを直接読んで確認した——
+詳細と、WASM側の対応方針の確定は§9参照)。
 
 **target候補の比較**(この制約下で実装コストが現実的な候補のみ):
 
@@ -171,8 +173,16 @@ LAMINARIA自身が持つこと」ではない。** 実行主体(CPU、OS、WASM 
 - **成果物形式**: WebAssembly Core Spec 1.0のバイナリ形式そのもの
   (magic `\0asm` + version `\x01\x00\x00\x00`、続けてType section /
   Function section / Export section / Code sectionのみ)。LAMINARIA自身の
-  純粋なRust関数`fn generate_wasm_module(program: &Program) -> Result<Vec<u8>, CodegenError>`
-  がバイト列を直接構築する。`wat2wasm`・`wasm-ld`・`binaryen`(`wasm-opt`)
+  純粋なRust関数
+  `fn generate_wasm_module(program: &ValidatedProgram) -> Result<Vec<u8>, CodegenError>`
+  がバイト列を直接構築する(訂正: 前版は`&Program`としていたが、
+  `crates/laminaria-ir/src/validate.rs:136-142`の`ValidatedProgram`型
+  ——公開コンストラクタを持たず、`validate_program`を実際に通過した
+  ものしか得られない——が、実行境界に渡してよい唯一の型として既に
+  確立された契約である。`compiler_work_executor.rs`の
+  `dispatch_transform_function`/`dispatch_evaluate_evidence`も未検証の
+  `Program`を直接受け取らず、この型を経由する。target生成もこの既存の
+  実行境界契約に従う)。`wat2wasm`・`wasm-ld`・`binaryen`(`wasm-opt`)
   ・`nim -d:emscripten`等、外部WASMツールチェインは生成経路のどこにも
   呼び出さない(§6で検証方法を確定)。
 
@@ -199,11 +209,30 @@ LAMINARIA自身が持つこと」ではない。** 実行主体(CPU、OS、WASM 
   exportを引いて、i32引数を渡し、i32戻り値を読む — これだけがこの
   境界の全体である。メモリ共有・ポインタ受け渡し・構造体レイアウトは
   一切発生しない(現行IRにそれらが存在しないため)。
-- ローカル変数のWASMインデックス割当: 関数本体を1回走査し、出現する
-  すべての`LocalId`を収集して`LocalId`の`u32`値の昇順でソートし、
-  パラメータの後(インデックス`params.len()`以降)に順番に割り当てる
-  (走査順ではなく数値順にソートすることで、木の辿り方に依存しない
-  決定的な割当にする)。
+- **ローカル変数のWASMインデックス割当(訂正)**: 前版は「`LocalId`の
+  値ごとに1つのWASM localを割り当てる」としていたが、これは誤り。
+  `crates/laminaria-ir/src/interpreter.rs:203-218`の`Expr::Let`評価は、
+  内側scope終了後に**同じ`LocalId`の以前の値を復元する**
+  (`state.locals.insert`の戻り値`previous`を保存し、bodyの評価後に
+  `Some(p)`なら再insert、`None`なら`remove`)。これは、同一`LocalId`が
+  異なる束縛(意味的には別物)のために**再利用されうる**ことをIRの
+  契約自体が許容している証拠であり、`LocalId`値ごとに1つのWASM local
+  を対応付けると、字句的に異なる束縛が誤って同じスロットを共有し
+  (再利用が入れ子内で起きた場合、外側の値を内側の評価後に正しく
+  「復元」できず)意味を壊しうる。
+  正しい割当は、**`LocalId`の値ごとではなく、`Expr::Let`/`Stmt::Let`の
+  出現ごとに**新規のWASM localスロットを割り当てる(1関数内のLet出現数
+  がWASM local宣言数になる — `LocalId`の再利用があれば出現数は distinct
+  な`LocalId`値の数より多くなりうる)。コード生成は
+  `scope: Vec<(LocalId, u32 wasm_local_index)>`というスタックを保持し、
+  `Let`のbodyに入る直前に`(local, 新規index)`をpushし、body評価後に
+  popする——ちょうどinterpreterの`insert`→評価→`insert(previous)`/
+  `remove`と同じ形を、WASM側の静的local配列に対して行う。
+  `Expr::Local(id)`の解決は、このスタックを**末尾(最も内側)から**
+  走査して最初に一致した`id`のWASM indexを使う(shadowingの意味論)。
+  出現順(木の辿り方=ソース上の出現順、`BTreeMap`の名前順イテレートと
+  組み合わせても決定的)でスロットを新規発行するため、この割当は
+  決定的である。
 
 ---
 
@@ -220,13 +249,22 @@ LAMINARIA自身が持つこと」ではない。** 実行主体(CPU、OS、WASM 
 パターンの踏襲):
 
 1. **生成関数の純粋性**: `generate_wasm_module`はファイルシステム・
-   ネットワーク・サブプロセスに一切触れない、`&Program -> Vec<u8>`の
-   純粋関数として実装する(シグネチャ自体が`std::process::Command`を
-   受け取れないことで構造的に保証される)。
-2. **ソース内の禁止文字列テスト**: T0モジュールの実ソーステキストに
-   `Command::new`が一切出現しないことをテストで確認する
-   (`compiler_work_executor.rs`冒頭コメント「No external compiler
-   fallback anywhere in this module」と同じ主張を、テストとして固定する)。
+   ネットワーク・サブプロセスに一切触れない、
+   `&ValidatedProgram -> Vec<u8>`の純粋関数として実装する。**訂正**:
+   前版は「シグネチャ自体が`std::process::Command`を受け取れないことで
+   構造的に保証される」としていたが、これは誤った主張だった——関数の
+   *引数*にサブプロセス起動用の型が現れないことは、関数の*本体*が
+   `std::process::Command::new(...)`を自由に呼び出せないことを一切
+   証明しない(Rustの型システムはIO副作用を型シグネチャで禁止しない)。
+   実際に効いているのは次の2番のソースレベル検査(回帰guard)だけであり、
+   構造的証明ではない——この訂正自体もその区別を明確にするためのもの。
+2. **ソース内の禁止文字列テスト(回帰guardであり、構造的証明ではない)**:
+   T0モジュールの実ソーステキストに`Command::new`が一切出現しないことを
+   テストで確認する(`compiler_work_executor.rs`冒頭コメント「No
+   external compiler fallback anywhere in this module」と同じ主張を、
+   テストとして固定する)。文字列検査である以上、難読化・別名importで
+   回避可能な**回帰の早期検出**であって、コンパイル時に保証される
+   構造的証明ではない——1番の訂正と合わせて、この限界を正直に記録する。
 3. **バイト列の直接検査**: 生成された`.wasm`の先頭8バイトが
    `\0asm\x01\x00\x00\x00`(WASMマジック+version)と一致することを
    テストで確認する — `wat2wasm`等の外部ツールの出力を右から左に
@@ -234,9 +272,18 @@ LAMINARIA自身が持つこと」ではない。** 実行主体(CPU、OS、WASM 
 4. **実行検証は明確に分離された別ステップとして行う**: `.wasm`の実行
    (=検証目的のみ)には`wasmtime`crateを使う(Bytecode Allianceが
    保守する、Rustで最も広く使われるWASM runtime。現時点でこのワーク
-   スペースに依存関係なし、`grep`で確認済み)。**T1で追加するときは
-   コンパイルを行うクレートの`[dependencies]`ではなく、検証テストのみが
-   参照する`[dev-dependencies]`として追加する** — 本番のコンパイル経路
+   スペースに依存関係なし、`grep`で確認済み)。**バージョン固定
+   (crates.io APIで直接確認済み)**: `wasmtime = "=18.0.4"`
+   (`default-features = false`, `features = ["cranelift", "runtime"]`)。
+   このバージョンの`rust_version`は`1.73.0`で、workspaceのMSRV
+   `1.74`(ルート`Cargo.toml`の`rust-version.workspace`)を満たす。
+   `cranelift`/`runtime`とも同バージョンが実際に公開しているfeature名
+   であることを確認済み(コンパイルのみで実行しない用途には`cranelift`
+   ——コード生成バックエンド——と`runtime`のみで足り、`async`/
+   `component-model`/`cache`等デフォルトfeatureの残りは不要)。
+   **T1で追加するときはコンパイルを行うクレートの`[dependencies]`
+   ではなく、検証テストのみが参照する`[dev-dependencies]`として
+   追加する** — 本番のコンパイル経路
    から`wasmtime`への依存が絶対に生じないようにする。
 
 ---
@@ -309,7 +356,7 @@ LAMINARIA自身が持つこと」ではない。** 実行主体(CPU、OS、WASM 
    境界(`lib.rs:30-46`)を維持できる。issue境界上の理由で別クレートに
    分離すべきという判断があれば、それは指示者の確定事項として本書の
    この一点のみ上書き可能)。
-2. `fn generate_wasm_module(program: &Program) -> Result<Vec<u8>, CodegenError>`
+2. `fn generate_wasm_module(program: &ValidatedProgram) -> Result<Vec<u8>, CodegenError>`
    本体(§4-§7の契約通り)。
 3. テスト4件: (a) マジックバイト一致、(b) §8の3方向一致、(c) §6-2の
    禁止文字列テスト、(d) `IntWidth`網羅的match(ワイルドカードなし)を
@@ -331,7 +378,19 @@ LAMINARIA自身が持つこと」ではない。** 実行主体(CPU、OS、WASM 
   配線)には進まない — それは同スペック§3.3が明示的に「D1完了後、
   指示者が別途判断」としている独立タスクのまま維持する。
 - 速度・性能に関する主張は一切行わない。
-- 再帰呼び出しの挙動(§2で未確認と記録した項目)について、T1は
-  「現行`validate_program`/`interpreter::eval_function`が再帰をどう
-  扱うか」をまず確認し、もしIR側が未対応/未定義なら、その事実を
-  記録するに留め、IR側の拡張はこのタスクのスコープ外として扱う。
+- **再帰呼び出し(訂正: 前版はT1の調査事項として未確定のまま残していた
+  が、ここでT0自身の決定として確定する)**: `crates/laminaria-ir/src/
+  interpreter.rs`のモジュール冒頭コメント(1行目)は自身を「A direct
+  recursive reference evaluator」と明記しており、`Expr::Call`の評価
+  (interpreter.rs内)は`eval_function`を素のRust関数呼び出しとして
+  再帰的に呼び出すだけで、サイクル検出・呼び出し深度の特別扱いは一切
+  ない(`validate.rs`/`interpreter.rs`を直接読んで確認済み、再帰を
+  拒否する検査はどこにも存在しない)。したがって: **有限回で終了する
+  再帰呼び出しは、他のどの`Call`とも変わらない通常のWASM `call`命令
+  として対応する**——WASM自身もこの点で対称であり、`call`は自身の
+  呼び出し中のWASM関数を再帰的に呼び出すことを何ら特別扱いしない
+  (WASM engine自身のcall stackを使う点はRustのcall stackを使う
+  interpreterと同型)。特別なIR拡張・特別なcodegenロジックは一切不要。
+  無限再帰(終了しない再帰)はinterpreter側もWASM側も等しくスタック
+  枯渇で停止する——これは意味論上の相違ではなく、両実行系に共通する
+  資源制約であり、T0/T1のいずれの対応も要求しない。
