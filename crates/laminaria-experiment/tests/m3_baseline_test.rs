@@ -240,3 +240,97 @@ fn owned_baseline_comparable_across_budgets_rejects_a_dirty_working_tree() {
          even when both sides agree on the commit"
     );
 }
+
+#[test]
+fn owned_baseline_comparable_across_budgets_rejects_a_stale_measurement_or_planner_digest() {
+    // Direct regression test for the correction instruction's own gap
+    // ("M3の実行体identityが実物を識別していない"): M3's owned identity
+    // previously never bound to any hash of the code actually running
+    // the measurement, so two budgets could "compare" even if one ran a
+    // stale/rebuilt binary. Now `measurement_executable_sha256` and
+    // `planner_binary_sha256` must both resolve and agree.
+    let mut report = m3_baseline::run(1, 1).expect("M3 owned baseline must succeed");
+    let fixed_commit = "1111111111111111111111111111111111111111".to_string();
+    for budget in &mut report.budgets {
+        for repetition in &mut budget.repetitions {
+            repetition.owned_identity.repo_commit = Some(fixed_commit.clone());
+            repetition.owned_identity.repo_dirty = Some(false);
+        }
+    }
+    assert!(report.owned_baseline_comparable_across_budgets().is_ok());
+
+    for repetition in &mut report.budgets[1].repetitions {
+        repetition.owned_identity.measurement_executable_sha256 = Some("stale-digest".to_string());
+    }
+    assert!(
+        report.owned_baseline_comparable_across_budgets().is_err(),
+        "a budget whose owned identity names a stale/different measurement executable digest \
+         must never be treated as comparable to another budget's"
+    );
+
+    let real_measurement_executable_sha256 = report.budgets[0].repetitions[0]
+        .owned_identity
+        .measurement_executable_sha256
+        .clone();
+    for repetition in &mut report.budgets[1].repetitions {
+        repetition.owned_identity.measurement_executable_sha256 =
+            real_measurement_executable_sha256.clone();
+        repetition.owned_identity.planner_binary_sha256 = Some("stale-planner-digest".to_string());
+    }
+    assert!(
+        report.owned_baseline_comparable_across_budgets().is_err(),
+        "a budget whose owned identity names a stale/different planner binary digest must never \
+         be treated as comparable to another budget's"
+    );
+}
+
+#[test]
+fn owned_baseline_comparable_across_budgets_rejects_a_missing_or_duplicated_budget_group() {
+    // Direct regression test for the correction instruction's own
+    // reproduction case ("M3のbudgetを99へ変更"): renaming budget 2's
+    // outer `cpu_budget` label to 99 (missing the required 2, adding an
+    // unrequired 99) must be rejected, not silently compared.
+    let mut report = m3_baseline::run(1, 1).expect("M3 owned baseline must succeed");
+    report.budgets[1].cpu_budget = 99;
+    assert!(
+        report.owned_baseline_comparable_across_budgets().is_err(),
+        "a budget set missing a required group (here: 2) and adding an unrequired one (here: 99) \
+         must never be treated as comparable"
+    );
+}
+
+#[test]
+fn regenerate_rejects_a_run_id_reused_across_different_budget_groups() {
+    // Direct regression test for the correction instruction's own
+    // reproduction case ("異なるgroupで同じrun IDを再利用"): a report
+    // whose two budget groups both point at the same run_id must be
+    // rejected by regenerate(), never silently treated as two distinct
+    // repetitions.
+    let mut report = m3_baseline::run(1, 1).expect("M3 owned baseline must succeed");
+    let reused_run_id = report.budgets[0].repetitions[0].run_id.clone();
+    report.budgets[1].repetitions[0].run_id = reused_run_id;
+    let result = m3_baseline::regenerate(report);
+    assert!(
+        result.is_err(),
+        "regenerate() must reject a report where the same run_id is referenced from two \
+         different budget groups"
+    );
+}
+
+#[test]
+fn regenerate_rejects_a_budget_whose_outer_group_label_does_not_match_its_own_scenario_id() {
+    // Direct regression test for the correction instruction's own
+    // reproduction case: mutating a budget's outer `cpu_budget` label
+    // (without touching the underlying Run files) must be rejected by
+    // regenerate(), since the Run's own `scenario_id` (and the
+    // telemetry's own `cpu_budget`) no longer matches the label it's
+    // filed under.
+    let mut report = m3_baseline::run(1, 1).expect("M3 owned baseline must succeed");
+    report.budgets[0].cpu_budget = 99;
+    let result = m3_baseline::regenerate(report);
+    assert!(
+        result.is_err(),
+        "regenerate() must reject a budget whose outer cpu_budget label doesn't match the \
+         scenario_id/telemetry recorded in its own referenced Runs"
+    );
+}

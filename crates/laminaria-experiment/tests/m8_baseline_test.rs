@@ -225,8 +225,11 @@ fn owned_baseline_comparable_across_scales_rejects_a_genuine_identity_mismatch()
     // Forces every scale onto the same fixed, clean commit first -- the
     // real ambient working tree is dirty during this session's own
     // development (covered by the dedicated dirty-tree test below), so
-    // this isolates just the "same artifact content" comparison.
-    let mut report = m8_baseline::run(&[4, 10], 1, 2).expect("M8 owned baseline must succeed");
+    // this isolates just the "same artifact content" comparison. Uses
+    // the full required {4, 10, 30} scale set -- comparability now also
+    // requires exactly that set (see the dedicated scale-set tests
+    // below), so a partial set would never reach `.is_ok()`.
+    let mut report = m8_baseline::run(&[4, 10, 30], 1, 2).expect("M8 owned baseline must succeed");
     for scale in &mut report.scales {
         for repetition in &mut scale.repetitions {
             repetition.owned_identity.repo_commit =
@@ -236,16 +239,45 @@ fn owned_baseline_comparable_across_scales_rejects_a_genuine_identity_mismatch()
     }
     assert!(
         report.owned_baseline_comparable_across_scales().is_ok(),
-        "two scales recording the identical, clean repo commit and planner binary content must \
-         be comparable"
+        "three scales recording the identical, clean repo commit and identical executable/planner \
+         digests must be comparable: {:?}",
+        report.owned_baseline_comparable_across_scales()
     );
 
     for repetition in &mut report.scales[1].repetitions {
-        repetition.owned_identity.artifact_content_sha256 = Some("0".repeat(64));
+        repetition.owned_identity.planner_binary_sha256 = Some("0".repeat(64));
     }
     assert!(
         report.owned_baseline_comparable_across_scales().is_err(),
         "a scale whose owned identity names a different planner binary content digest must \
+         never be treated as comparable to another scale's"
+    );
+}
+
+#[test]
+fn owned_baseline_comparable_across_scales_rejects_a_stale_measurement_executable_digest() {
+    // Direct regression test for the correction instruction's own
+    // reproduction case ("古い／異なる実行体digest"): even with matching
+    // commit, dirty flag, and planner binary digest, a scale whose
+    // owned identity names a different *measurement executable* digest
+    // (e.g. produced by a stale/rebuilt binary) must never be treated as
+    // comparable.
+    let mut report = m8_baseline::run(&[4, 10, 30], 1, 2).expect("M8 owned baseline must succeed");
+    for scale in &mut report.scales {
+        for repetition in &mut scale.repetitions {
+            repetition.owned_identity.repo_commit =
+                Some("1111111111111111111111111111111111111111".to_string());
+            repetition.owned_identity.repo_dirty = Some(false);
+        }
+    }
+    assert!(report.owned_baseline_comparable_across_scales().is_ok());
+
+    for repetition in &mut report.scales[2].repetitions {
+        repetition.owned_identity.measurement_executable_sha256 = Some("stale-digest".to_string());
+    }
+    assert!(
+        report.owned_baseline_comparable_across_scales().is_err(),
+        "a scale whose owned identity names a stale/different measurement executable digest must \
          never be treated as comparable to another scale's"
     );
 }
@@ -262,5 +294,57 @@ fn owned_baseline_comparable_across_scales_rejects_a_dirty_working_tree() {
     assert!(
         report.owned_baseline_comparable_across_scales().is_err(),
         "a dirty working tree must never be accepted as a comparable, reproducible baseline"
+    );
+}
+
+#[test]
+fn owned_baseline_comparable_across_scales_rejects_a_missing_or_duplicated_scale_group() {
+    // Direct regression test for the correction instruction's own
+    // reproduction case ("M8の4を30へ変更"): renaming one scale's
+    // outer `unused_actions` label so the required {4, 10, 30} set is no
+    // longer present (here: {10, 30, 30}, missing 4 and duplicating 30)
+    // must be rejected, not silently compared.
+    let mut report = m8_baseline::run(&[4, 10, 30], 1, 1).expect("M8 owned baseline must succeed");
+    report.scales[0].unused_actions = 30;
+    assert!(
+        report.owned_baseline_comparable_across_scales().is_err(),
+        "a scale set missing a required group (here: 4) and duplicating another (here: 30) must \
+         never be treated as comparable"
+    );
+}
+
+#[test]
+fn regenerate_rejects_a_run_id_reused_across_different_scale_groups() {
+    // Direct regression test for the correction instruction's own
+    // reproduction case ("異なるgroupで同じrun IDを再利用"): a report
+    // whose two scale groups both point at the same run_id must be
+    // rejected by regenerate(), never silently treated as two distinct
+    // repetitions.
+    let mut report = m8_baseline::run(&[4, 10], 1, 1).expect("M8 owned baseline must succeed");
+    let reused_run_id = report.scales[0].repetitions[0].run_id.clone();
+    report.scales[1].repetitions[0].run_id = reused_run_id;
+    let result = m8_baseline::regenerate(report);
+    assert!(
+        result.is_err(),
+        "regenerate() must reject a report where the same run_id is referenced from two \
+         different scale groups"
+    );
+}
+
+#[test]
+fn regenerate_rejects_a_run_whose_outer_group_label_does_not_match_its_own_scenario_id() {
+    // Direct regression test for the correction instruction's own
+    // reproduction case: mutating a scale's outer `unused_actions` label
+    // (without touching the underlying Run files) must be rejected by
+    // regenerate(), since the Run's own `scenario_id` (and the
+    // telemetry's own `unused_actions`) no longer matches the label it's
+    // filed under.
+    let mut report = m8_baseline::run(&[4], 1, 1).expect("M8 owned baseline must succeed");
+    report.scales[0].unused_actions = 30;
+    let result = m8_baseline::regenerate(report);
+    assert!(
+        result.is_err(),
+        "regenerate() must reject a scale whose outer unused_actions label doesn't match the \
+         scenario_id/telemetry recorded in its own referenced Runs"
     );
 }

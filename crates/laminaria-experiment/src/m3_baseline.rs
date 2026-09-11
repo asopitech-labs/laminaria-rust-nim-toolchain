@@ -55,7 +55,9 @@ use laminaria_run::types::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::owned_identity::{identities_comparable, OwnedIdentity};
+use crate::owned_identity::{
+    content_sha256, current_exe_sha256, identities_comparable, OwnedIdentity,
+};
 use crate::planner_binary::resolve_or_build_planner_binary;
 
 /// Identical to the existing concurrency test's own fixture source --
@@ -70,6 +72,13 @@ pub const NIM_SOURCE_TEXT: &str = "proc g(x: int32): int32 =\n  x\n";
 pub const WORKLOAD_ID: &str = "M3-owned-independent-chains@issue35-d0-accepted-c812d70-v1";
 
 const TELEMETRY_KIND: &str = "m3-owned-baseline-v1";
+const EXPECTED_CASE_ID: &str = "M3-owned-independent-chains";
+const EXPECTED_SCHEMA_VERSION: &str = "0.3.0";
+/// The exact CPU budget set this case's `pass_criteria.d1` requires --
+/// no missing, duplicate, or extra budget group is ever a valid baseline
+/// (a review round's own reproduction: mutating one budget's `cpu_budget`
+/// to 99 must be rejected, not silently compared as "budget 99").
+const REQUIRED_BUDGETS: [usize; 2] = [1, 2];
 
 fn unsupported_resource_fields() -> Vec<String> {
     [
@@ -199,10 +208,32 @@ impl BudgetOutcome {
         !self.repetitions.is_empty()
             && self.scenario_report.is_some()
             && self.evidence_digest_if_consistent().is_some()
-            && self
-                .owned_identity_if_consistent()
-                .is_some_and(|id| id.repo_commit.is_some() && id.repo_dirty == Some(false))
+            && self.owned_identity_if_consistent().is_some_and(|id| {
+                id.repo_commit.is_some()
+                    && id.repo_dirty == Some(false)
+                    && id.measurement_executable_sha256.is_some()
+                    && id.planner_binary_sha256.is_some()
+            })
     }
+}
+
+/// `Ok(())` only if `budgets` is exactly the required `{1, 2}` set -- no
+/// budget missing, none duplicated, none extra. Checked structurally,
+/// before any per-budget validity or identity comparison, so a tampered
+/// group label (e.g. `cpu_budget` changed from `2` to `99`) is rejected
+/// for exactly that reason.
+fn budget_set_matches_required(budgets: &[BudgetOutcome]) -> Result<(), String> {
+    let mut found: Vec<usize> = budgets.iter().map(|b| b.cpu_budget).collect();
+    found.sort_unstable();
+    let mut required = REQUIRED_BUDGETS.to_vec();
+    required.sort_unstable();
+    if found != required {
+        return Err(format!(
+            "budget set {found:?} does not exactly match the required {{1, 2}} set -- missing, \
+             duplicate, or extra cpu_budget groups are never a valid baseline"
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -237,6 +268,7 @@ impl M3Report {
     /// (same, clean repo commit) -- the gate a genuine budget-1-vs-
     /// budget-2 comparison must pass before its numbers are trusted.
     pub fn owned_baseline_comparable_across_budgets(&self) -> Result<(), String> {
+        budget_set_matches_required(&self.budgets)?;
         for budget in &self.budgets {
             if !budget.is_a_valid_baseline() {
                 return Err(format!(
@@ -278,13 +310,51 @@ impl M3Report {
 /// this must never silently fall back to the input report's own stale
 /// data.
 pub fn regenerate(report: M3Report) -> Result<M3Report, String> {
+    if report.case_id != EXPECTED_CASE_ID {
+        return Err(format!(
+            "case_id {:?} is not {EXPECTED_CASE_ID:?} -- refusing to regenerate a report for a \
+             different case",
+            report.case_id
+        ));
+    }
+    if report.schema_version != EXPECTED_SCHEMA_VERSION {
+        return Err(format!(
+            "schema_version {:?} is not {EXPECTED_SCHEMA_VERSION:?} -- refusing to regenerate an \
+             unsupported schema",
+            report.schema_version
+        ));
+    }
+
+    let mut seen_run_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut budgets = Vec::new();
     for budget in &report.budgets {
+        let expected_scenario_id = format!("budget-{}", budget.cpu_budget);
         let mut repetitions = Vec::new();
         for old in &budget.repetitions {
+            if !seen_run_ids.insert(old.run_id.clone()) {
+                return Err(format!(
+                    "run_id {} is referenced more than once across budgets/repetitions -- a \
+                     genuine measurement never reuses a run_id",
+                    old.run_id
+                ));
+            }
             let run = read_run(&report.runs_root, &old.run_id)
                 .map_err(|e| format!("failed to read run {}: {e}", old.run_id))?;
-            let telemetry_value = run.compiler_telemetry.ok_or_else(|| {
+            if run.workload_id != WORKLOAD_ID {
+                return Err(format!(
+                    "run {}: workload_id {:?} is not {WORKLOAD_ID:?}",
+                    old.run_id, run.workload_id
+                ));
+            }
+            if run.scenario_id != expected_scenario_id {
+                return Err(format!(
+                    "run {}: scenario_id {:?} does not match its outer group cpu_budget={} \
+                     (expected {expected_scenario_id:?}) -- a run belonging to one budget group \
+                     must never be attributed to another",
+                    old.run_id, run.scenario_id, budget.cpu_budget
+                ));
+            }
+            let telemetry_value = run.compiler_telemetry.clone().ok_or_else(|| {
                 format!(
                     "run {} has no compiler_telemetry -- cannot regenerate its judgment from disk",
                     old.run_id
@@ -296,6 +366,21 @@ pub fn regenerate(report: M3Report) -> Result<M3Report, String> {
                 return Err(format!(
                     "run {}: compiler_telemetry.kind {:?} is not {TELEMETRY_KIND:?}",
                     old.run_id, telemetry.kind
+                ));
+            }
+            if telemetry.cpu_budget != budget.cpu_budget {
+                return Err(format!(
+                    "run {}: telemetry.cpu_budget={} does not match its outer group cpu_budget={} \
+                     -- a repetition must never be attributed to a different budget than the one \
+                     it actually measured",
+                    old.run_id, telemetry.cpu_budget, budget.cpu_budget
+                ));
+            }
+            let run_result_success = run.result.as_ref().map(|r| r.success);
+            if run_result_success != Some(telemetry.success) {
+                return Err(format!(
+                    "run {}: telemetry.success={} does not match Run.result.success={:?}",
+                    old.run_id, telemetry.success, run_result_success
                 ));
             }
             repetitions.push(RepetitionRecord {
@@ -339,12 +424,18 @@ pub fn run(warmup: usize, repetitions: usize) -> Result<M3Report, String> {
     let runs_root = repo_root.join("runs");
     let environment_fingerprint =
         laminaria_fingerprint::env::detect(&repo_root, "laminaria-m3-owned-baseline", "0.1.0");
-    // M3 dispatches already-compiled owned Rust code in-process -- there
-    // is no single separately-built artifact file to hash (unlike M8's
-    // `laminaria-planner` binary), so `artifact_content_sha256` is
-    // honestly `None`; the repo commit is the identity that matters here.
-    let owned_identity =
-        OwnedIdentity::from_environment_fingerprint(&environment_fingerprint, None);
+    // M3 still spawns the real Nim planner once (to obtain and validate
+    // the plan below) even though the timed dispatch itself is in-process
+    // Rust -- resolve it up front so its content can be bound into this
+    // measurement's owned identity, not just the repo commit.
+    let planner_bin = resolve_or_build_planner_binary()?;
+    let planner_binary_sha256 = content_sha256(&planner_bin)?;
+    let measurement_executable_sha256 = current_exe_sha256()?;
+    let owned_identity = OwnedIdentity::from_environment_fingerprint(
+        &environment_fingerprint,
+        Some(measurement_executable_sha256),
+        Some(planner_binary_sha256),
+    );
 
     // `process::id()` alone collides when this crate's own tests call
     // `run()` concurrently from multiple threads of the same test
@@ -380,7 +471,6 @@ pub fn run(warmup: usize, repetitions: usize) -> Result<M3Report, String> {
         &test_inputs,
     );
 
-    let planner_bin = resolve_or_build_planner_binary()?;
     let outcome = laminaria_plan::call_planner(&planner_bin, &input)
         .map_err(|e| format!("planner call failed: {e}"))?;
     let plan = match outcome {
@@ -557,8 +647,8 @@ pub fn run(warmup: usize, repetitions: usize) -> Result<M3Report, String> {
     std::fs::remove_dir_all(&dir).ok();
 
     Ok(M3Report {
-        schema_version: "0.3.0".to_string(),
-        case_id: "M3-owned-independent-chains".to_string(),
+        schema_version: EXPECTED_SCHEMA_VERSION.to_string(),
+        case_id: EXPECTED_CASE_ID.to_string(),
         plan_action_count: plan.actions.len(),
         runs_root,
         budgets,

@@ -27,22 +27,34 @@ pub struct OwnedIdentity {
     /// time -- `Some(true)` means this measurement cannot be trusted as
     /// identifying a specific, reproducible revision.
     pub repo_dirty: Option<bool>,
-    /// SHA-256 of a separately-built artifact file this measurement
-    /// exercised (e.g. the `laminaria-planner` binary for M8) --
-    /// `None` when the measurement is in-process code with no single
-    /// artifact file to hash (M3's `compiler_work_executor` dispatch).
-    pub artifact_content_sha256: Option<String>,
+    /// SHA-256 of `std::env::current_exe()` -- the actual compiled binary
+    /// that is executing this measurement (the `laminaria-m3-owned-baseline`/
+    /// `laminaria-m8-owned-baseline` bin, or the test binary under `cargo
+    /// test`). Binds identity to the exact artifact that ran, not merely
+    /// its source commit: the same commit rebuilt with different flags,
+    /// a stale `target/` directory, or a different toolchain would
+    /// silently name the same `repo_commit` while running different
+    /// code -- this field catches that a review round named directly as
+    /// a gap ("M3の実行体identityが実物を識別していない").
+    pub measurement_executable_sha256: Option<String>,
+    /// SHA-256 of the `laminaria-planner` binary this measurement's Nim
+    /// planner call actually spawned (M3 and M8 both invoke it). Distinct
+    /// from `measurement_executable_sha256`: the planner is a separate
+    /// build artifact from the Rust measurement binary.
+    pub planner_binary_sha256: Option<String>,
 }
 
 impl OwnedIdentity {
     pub fn from_environment_fingerprint(
         fingerprint: &laminaria_fingerprint::EnvironmentFingerprint,
-        artifact_content_sha256: Option<String>,
+        measurement_executable_sha256: Option<String>,
+        planner_binary_sha256: Option<String>,
     ) -> Self {
         OwnedIdentity {
             repo_commit: fingerprint.repository.commit.clone(),
             repo_dirty: fingerprint.repository.dirty,
-            artifact_content_sha256,
+            measurement_executable_sha256,
+            planner_binary_sha256,
         }
     }
 }
@@ -59,6 +71,14 @@ pub fn content_sha256(path: &Path) -> Result<String, String> {
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// SHA-256 of the currently-running executable itself -- see
+/// `OwnedIdentity::measurement_executable_sha256`.
+pub fn current_exe_sha256() -> Result<String, String> {
+    let exe = std::env::current_exe()
+        .map_err(|e| format!("failed to resolve the current executable's path: {e}"))?;
+    content_sha256(&exe)
 }
 
 /// `Ok(())` only if both identities name the same, non-dirty repo commit,
@@ -89,11 +109,24 @@ pub fn identities_comparable(a: &OwnedIdentity, b: &OwnedIdentity) -> Result<(),
             a.repo_dirty, b.repo_dirty
         ));
     }
-    match (&a.artifact_content_sha256, &b.artifact_content_sha256) {
-        (None, None) => Ok(()),
+    match (
+        &a.measurement_executable_sha256,
+        &b.measurement_executable_sha256,
+    ) {
+        (Some(x), Some(y)) if x == y => {}
+        (x, y) => {
+            return Err(format!(
+                "owned identity unresolved or differs: measurement_executable_sha256 (a={x:?}, \
+                 b={y:?}) -- an unresolved or mismatched measurement executable is never treated \
+                 as comparable"
+            ))
+        }
+    }
+    match (&a.planner_binary_sha256, &b.planner_binary_sha256) {
         (Some(x), Some(y)) if x == y => Ok(()),
         (x, y) => Err(format!(
-            "owned identity differs: artifact_content_sha256 (a={x:?}, b={y:?})"
+            "owned identity unresolved or differs: planner_binary_sha256 (a={x:?}, b={y:?}) -- an \
+             unresolved or mismatched planner binary is never treated as comparable"
         )),
     }
 }

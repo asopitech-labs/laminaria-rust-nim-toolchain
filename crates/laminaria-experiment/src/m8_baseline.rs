@@ -45,12 +45,22 @@ use laminaria_run::types::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::owned_identity::{content_sha256, identities_comparable, OwnedIdentity};
+use crate::owned_identity::{
+    content_sha256, current_exe_sha256, identities_comparable, OwnedIdentity,
+};
 use crate::planner_binary::resolve_or_build_planner_binary;
 
 pub const WORKLOAD_ID: &str = "M8-many-unrequested-nim-planner@issue35-d0-accepted-c812d70-v1";
 
 const TELEMETRY_KIND: &str = "m8-owned-baseline-v1";
+const EXPECTED_CASE_ID: &str = "M8-many-unrequested-nim-planner";
+const EXPECTED_SCHEMA_VERSION: &str = "0.3.0";
+/// The exact `unused_actions` scale set this case's `pass_criteria.d1`
+/// requires -- no missing, duplicate, or extra scale group is ever a
+/// valid baseline (a review round's own reproduction: renaming one
+/// scale's `unused_actions` from `4` to `30` must be rejected, not
+/// silently treated as a second `30` group).
+const REQUIRED_SCALES: [usize; 3] = [4, 10, 30];
 
 /// `ActionKind::Integrate` with no `compiler_work` descriptor: a
 /// structural placeholder action (this case tests demand-closure
@@ -244,10 +254,32 @@ impl ScaleOutcome {
             && self.scenario_report.is_some()
             && self.needed_set_matches_in_every_successful_rep()
             && self.kernel_nanos_present_in_every_successful_rep()
-            && self
-                .owned_identity_if_consistent()
-                .is_some_and(|id| id.repo_commit.is_some() && id.repo_dirty == Some(false))
+            && self.owned_identity_if_consistent().is_some_and(|id| {
+                id.repo_commit.is_some()
+                    && id.repo_dirty == Some(false)
+                    && id.measurement_executable_sha256.is_some()
+                    && id.planner_binary_sha256.is_some()
+            })
     }
+}
+
+/// `Ok(())` only if `scales` is exactly the required `{4, 10, 30}` set --
+/// no scale missing, none duplicated, none extra. Checked structurally,
+/// before any per-scale validity or identity comparison, so a tampered
+/// group label (e.g. `unused_actions` changed from `4` to `30`) is
+/// rejected for exactly that reason.
+fn scale_set_matches_required(scales: &[ScaleOutcome]) -> Result<(), String> {
+    let mut found: Vec<usize> = scales.iter().map(|s| s.unused_actions).collect();
+    found.sort_unstable();
+    let mut required = REQUIRED_SCALES.to_vec();
+    required.sort_unstable();
+    if found != required {
+        return Err(format!(
+            "scale set {found:?} does not exactly match the required {{4, 10, 30}} set -- \
+             missing, duplicate, or extra unused_actions groups are never a valid baseline"
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -264,6 +296,7 @@ impl M8Report {
     /// (same clean repo commit *and* the identical planner binary
     /// content) -- the gate a genuine cross-scale comparison must pass.
     pub fn owned_baseline_comparable_across_scales(&self) -> Result<(), String> {
+        scale_set_matches_required(&self.scales)?;
         for scale in &self.scales {
             if !scale.is_a_valid_baseline() {
                 return Err(format!(
@@ -302,13 +335,51 @@ impl M8Report {
 /// own claims, and `scenario_report`/`kernel_nanos_stats` are rebuilt
 /// from that freshly-read data.
 pub fn regenerate(report: M8Report) -> Result<M8Report, String> {
+    if report.case_id != EXPECTED_CASE_ID {
+        return Err(format!(
+            "case_id {:?} is not {EXPECTED_CASE_ID:?} -- refusing to regenerate a report for a \
+             different case",
+            report.case_id
+        ));
+    }
+    if report.schema_version != EXPECTED_SCHEMA_VERSION {
+        return Err(format!(
+            "schema_version {:?} is not {EXPECTED_SCHEMA_VERSION:?} -- refusing to regenerate an \
+             unsupported schema",
+            report.schema_version
+        ));
+    }
+
+    let mut seen_run_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut scales = Vec::new();
     for scale in &report.scales {
+        let expected_scenario_id = format!("unused-actions-{}", scale.unused_actions);
         let mut repetitions = Vec::new();
         for old in &scale.repetitions {
+            if !seen_run_ids.insert(old.run_id.clone()) {
+                return Err(format!(
+                    "run_id {} is referenced more than once across scales/repetitions -- a \
+                     genuine measurement never reuses a run_id",
+                    old.run_id
+                ));
+            }
             let run = read_run(&report.runs_root, &old.run_id)
                 .map_err(|e| format!("failed to read run {}: {e}", old.run_id))?;
-            let telemetry_value = run.compiler_telemetry.ok_or_else(|| {
+            if run.workload_id != WORKLOAD_ID {
+                return Err(format!(
+                    "run {}: workload_id {:?} is not {WORKLOAD_ID:?}",
+                    old.run_id, run.workload_id
+                ));
+            }
+            if run.scenario_id != expected_scenario_id {
+                return Err(format!(
+                    "run {}: scenario_id {:?} does not match its outer group unused_actions={} \
+                     (expected {expected_scenario_id:?}) -- a run belonging to one group must \
+                     never be attributed to another",
+                    old.run_id, run.scenario_id, scale.unused_actions
+                ));
+            }
+            let telemetry_value = run.compiler_telemetry.clone().ok_or_else(|| {
                 format!(
                     "run {} has no compiler_telemetry -- cannot regenerate its judgment from disk",
                     old.run_id
@@ -320,6 +391,21 @@ pub fn regenerate(report: M8Report) -> Result<M8Report, String> {
                 return Err(format!(
                     "run {}: compiler_telemetry.kind {:?} is not {TELEMETRY_KIND:?}",
                     old.run_id, telemetry.kind
+                ));
+            }
+            if telemetry.unused_actions != scale.unused_actions {
+                return Err(format!(
+                    "run {}: telemetry.unused_actions={} does not match its outer group \
+                     unused_actions={} -- a repetition must never be attributed to a different \
+                     group than the one it actually measured",
+                    old.run_id, telemetry.unused_actions, scale.unused_actions
+                ));
+            }
+            let run_result_success = run.result.as_ref().map(|r| r.success);
+            if run_result_success != Some(telemetry.success) {
+                return Err(format!(
+                    "run {}: telemetry.success={} does not match Run.result.success={:?}",
+                    old.run_id, telemetry.success, run_result_success
                 ));
             }
             repetitions.push(RepetitionRecord {
@@ -381,8 +467,10 @@ pub fn run(
         laminaria_fingerprint::env::detect(&repo_root, "laminaria-m8-owned-baseline", "0.1.0");
     let planner_bin = resolve_or_build_planner_binary()?;
     let planner_binary_sha256 = content_sha256(&planner_bin)?;
+    let measurement_executable_sha256 = current_exe_sha256()?;
     let owned_identity = OwnedIdentity::from_environment_fingerprint(
         &environment_fingerprint,
+        Some(measurement_executable_sha256),
         Some(planner_binary_sha256),
     );
 
@@ -578,8 +666,8 @@ pub fn run(
     }
 
     Ok(M8Report {
-        schema_version: "0.3.0".to_string(),
-        case_id: "M8-many-unrequested-nim-planner".to_string(),
+        schema_version: EXPECTED_SCHEMA_VERSION.to_string(),
+        case_id: EXPECTED_CASE_ID.to_string(),
         runs_root,
         scales,
     })

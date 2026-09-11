@@ -323,12 +323,30 @@ fn detect_repository_state(repo_root: &Path) -> RepositoryState {
         "git",
         &["-C", &repo_root.to_string_lossy(), "rev-parse", "HEAD"],
     );
-    let dirty = run(
-        "git",
-        &["-C", &repo_root.to_string_lossy(), "status", "--porcelain"],
-    )
-    .map(|s| !s.is_empty());
+    let dirty = git_status_porcelain_is_dirty(repo_root);
     RepositoryState { commit, dirty }
+}
+
+/// `git status --porcelain`'s own exit status and stdout are the whole
+/// signal: empty stdout on a zero exit means "clean" (a real, positive
+/// result), not "nothing to report." The shared `run()` helper (every
+/// other detector in this module) treats empty-and-successful output as
+/// "undetected" (`None`) -- correct for a command whose only meaningful
+/// output is non-empty, but wrong here, where it silently turned every
+/// genuinely clean tree into an *unresolved* dirty flag instead of
+/// `Some(false)`. Found via issue #28 D1-a's own clean-isolated-worktree
+/// verification: every prior run of this detector happened to be in a
+/// tree with some unrelated untracked file, so `status --porcelain`
+/// always had non-empty output and this gap stayed invisible.
+fn git_status_porcelain_is_dirty(repo_root: &Path) -> Option<bool> {
+    let output = std::process::Command::new("git")
+        .args(["-C", &repo_root.to_string_lossy(), "status", "--porcelain"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(!output.stdout.is_empty())
 }
 
 #[cfg(target_os = "macos")]
@@ -381,5 +399,57 @@ mod tests {
         assert!(!ENV_ALLOWLIST.contains(&"AWS_SECRET_ACCESS_KEY"));
         assert!(!ENV_ALLOWLIST.contains(&"GITHUB_TOKEN"));
         assert!(!ENV_ALLOWLIST.contains(&"NPM_TOKEN"));
+    }
+
+    #[test]
+    fn git_status_porcelain_is_dirty_reports_false_not_none_on_a_genuinely_clean_tree() {
+        // Direct regression test for a gap issue #28 D1-a's own
+        // clean-isolated-worktree verification exposed: every prior run of
+        // this detector happened to be in a tree with some unrelated
+        // untracked file, so `git status --porcelain`'s stdout was never
+        // actually empty -- masking that the old implementation (routed
+        // through the shared `run()` helper, which treats empty-and-
+        // successful output as "undetected") silently reported `None`
+        // instead of `Some(false)` for a genuinely clean tree, failing
+        // closed for the *wrong* reason.
+        let dir = std::env::temp_dir().join(format!(
+            "laminaria-fingerprint-clean-repo-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let run_git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(args)
+                .status()
+                .expect("git must be on PATH");
+            assert!(status.success(), "git {args:?} failed");
+        };
+        run_git(&["init", "-q"]);
+        run_git(&["config", "user.email", "test@example.com"]);
+        run_git(&["config", "user.name", "test"]);
+        std::fs::write(dir.join("f.txt"), "hello").expect("write fixture file");
+        run_git(&["add", "f.txt"]);
+        run_git(&["commit", "-q", "-m", "initial"]);
+
+        assert_eq!(
+            git_status_porcelain_is_dirty(&dir),
+            Some(false),
+            "a freshly-committed, untouched working tree must report Some(false), never None"
+        );
+
+        std::fs::write(dir.join("f.txt"), "changed").expect("modify fixture file");
+        assert_eq!(
+            git_status_porcelain_is_dirty(&dir),
+            Some(true),
+            "a modified tracked file must report Some(true)"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
