@@ -19,6 +19,10 @@ path = "src/bin/m3_owned_baseline.rs"
 name = "laminaria-m8-owned-baseline"
 path = "src/bin/m8_owned_baseline.rs"
 
+[[bin]]
+name = "laminaria-d1b1-reference-cases"
+path = "src/bin/d1b1_reference_cases_runner.rs"
+
 [dependencies]
 laminaria-fingerprint = { path = "../laminaria-fingerprint" }
 laminaria-plan = { path = "../laminaria-plan" }
