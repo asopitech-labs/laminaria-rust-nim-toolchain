@@ -607,6 +607,20 @@ jobs:
             exit 1
           fi
 
+      # Issue #28 D1-b1: actually runs the case-evidence runner CI never
+      # invoked before this step existed -- a review caught that "CI is
+      # green" and "the D1-b1 runner itself passes" are not the same
+      # claim. Runs after the fixture-preparation steps above so their
+      # target/nimcache state is already warm. The runner's own preflight
+      # exits 2 (not the usual case-failure 1) if the environment is
+      # internally inconsistent (a PATH-resolved rustc targeting a
+      # different architecture than the real hardware) -- this job's
+      # runners are single-toolchain, so that should never actually fire
+      # here; it exists for exactly the split-toolchain dev machine this
+      # review was run on.
+      - name: Run the D1-b1 reference-case evidence runner (M2/M3-topology/M4/M5)
+        run: cargo run -p laminaria-experiment --bin laminaria-d1b1-reference-cases
+
   # Issue #4's genuinely-open question, not #11's: every fixture above
   # uses `nim c`, which always produces native code via a generated-C
   # intermediate -- even with no header file, that route's ABI/symbol

@@ -184,6 +184,20 @@ mod tests {
                     .args([
                         "c",
                         "--path:src",
+                        // Workspace-local nimcache, not Nim's OS-default
+                        // (`~/.cache/nim/...` on Unix) -- an environment
+                        // where that default isn't writable (a sandboxed
+                        // CI-like environment, a read-only $HOME) would
+                        // otherwise fail this build with an error that
+                        // looks like a genuine planner-binary defect
+                        // rather than the actually-unrelated cache-path
+                        // permission problem it is. Shared with
+                        // `test_planning_kernel`'s own `nim c -r
+                        // --nimcache:nimcache` invocation and
+                        // `resolve_or_build_planner_binary`'s identical
+                        // fix -- same directory name, gitignored
+                        // (`nimcache/`).
+                        "--nimcache:nimcache",
                         "-o:bin/laminaria-planner",
                         "src/laminaria_planner.nim",
                     ])

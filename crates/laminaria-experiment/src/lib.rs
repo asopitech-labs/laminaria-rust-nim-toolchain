@@ -6,6 +6,7 @@
 //! D0 scope this crate implements against.
 
 pub mod d1b1_planner_cases;
+pub mod d1b1_preflight;
 pub mod d1b1_reference_cases;
 pub mod m3_baseline;
 pub mod m8_baseline;

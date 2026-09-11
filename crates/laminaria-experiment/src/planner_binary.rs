@@ -72,6 +72,15 @@ fn resolve_or_build_planner_binary_uncached() -> Result<PathBuf, String> {
         .args([
             "c",
             "--path:src",
+            // Workspace-local nimcache, not Nim's OS-default
+            // (`~/.cache/nim/...` on Unix) -- matches
+            // `nim_planner_client.rs`'s own `real_planner_binary()` fix
+            // for the identical issue: an environment where that default
+            // isn't writable would otherwise fail here with an error
+            // that looks like a genuine planner-binary defect rather
+            // than the actually-unrelated cache-path permission problem
+            // it is.
+            "--nimcache:nimcache",
             "-o:bin/laminaria-planner",
             "src/laminaria_planner.nim",
         ])
