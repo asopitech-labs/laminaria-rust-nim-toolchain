@@ -6,33 +6,57 @@ target route」を確定する設計タスクであり、実装（T1以降）で
 設定担当（Claude）が候補比較・推奨案・契約を提出し、指示者(Codex)が確定する。
 
 基準commit: `5f1832f2b6ff0a823c276ee4cb4f4340191b45ef`(#28 D1-a最終補正)。
-本書のすべての事実主張は、下記の各行番号のファイルを直接読んで確認したもの
-であり、issue #5自体の原文はこのリポジトリ内に存在しないため、想像で補って
-いない(§0参照)。
+本書のすべての事実主張は、下記の各行番号のファイルを直接読んで確認した
+ものか、`gh issue view 5`で取得したissue #5本文からの直接引用であり、
+想像で補っていない(issue #5本文の一次引用は§0参照)。
 
 ---
 
-## §0. issue #5のスコープについて — ローカルに存在する記録の限界
+## §0. issue #5のスコープ(GitHub上の本文を直接確認)
 
-このリポジトリには issue #5 の本文そのものは存在しない(`docs/issue-5*.md`等
-は存在しない)。ローカルで確認できるのは以下の間接的な言及のみ:
+初版はこのリポジトリ内にissue #5の本文の写しがない(`docs/issue-5*.md`等が
+存在しない)ことを理由に、間接的な言及のみから本書を組み立てていた。
+`gh issue view 5`で実際の本文を直接取得し、以下2点を確定する。
 
-- `docs/research-intent-audit-2026-09-10.md:109`: 「#5 | Select and exercise
-  LAMINARIA-owned target lowering/code generation. Existing compiler backend
-  families remain role-separated reference experiments, not alternate
-  production compilers.」
-- `docs/issue-plan.md:113`: 「#5 answers **which backend route is valid and
-  selected**. #13 answers how the selected backend expands into internal
-  computation...」
-- `docs/issue-plan.md:51`: 「4. Backend route selection and capability
-  constraints — #5」
-- `docs/compiler-ownership-contract.md:9-21`(必須パイプライン、後述§1で全文
-  引用)の最終段「LAMINARIA target lowering and code generation → target
-  artifacts with explicit runtime / assembly / link contracts」が#5の実体。
+**issue #5自身が定めるT0の定義(本文から一次引用)**:
+「最初の生成実装に先行する独立タスク。生成実装者にtarget選定や合格条件の
+設定を要求しない。設計担当は現在のIR・subsetと利用可能な実行環境を調査し、
+候補の比較根拠と、最初に採用する生成先1つの仕様案を提出する。仕様には
+execute-on/produces-for、ISA・生成形式・成果物、対応演算と呼出規約、
+runtime/link境界、独自に実装する生成処理、必要なIR変更、未対応入力の
+診断を具体的に記す。最初のsource fixture・期待する実行値と導出根拠・
+評価器との照合手順・既存compilerへ委譲していないことの確認方法を指定する。」
+本書§2-§9はこの一次定義の各項目に1対1で対応する(§2=候補比較根拠、
+§3=推奨する生成先1つ、§4=execute-on/produces-for・ISA・成果物、
+§5=呼出規約・runtime/link境界、§6=既存compilerへ委譲していないことの
+確認方法、§7=対応演算と未対応診断、§8=fixture・期待値・導出根拠・照合
+手順、§9=T1入出力・停止条件)。
 
-「T0」というラベル自体はリポジトリ内のどのファイルにも出現しない(全文grep
-で確認済み)。本書では、この会話で与えられた定義「最初のtarget生成方式を
-選ぶ設計タスク」をそのまま採用し、それ以上の解釈を加えていない。
+**issue #5全体が定める、より広い「backend route」グラフモデル**は、
+Rust側のLLVM/Cranelift/GCC系route、Nim側のC/C++/Objective-C/JavaScript系
+route、LAMINARIA-owned routeを対等な軸として扱い、target ISA/object model、
+最適化profile、LTO mode、debug info、ABI/calling-convention、downstream
+linker、post-link optimizer、composition model、artifact kind、
+backend切替時のcache invalidationまでを1つのgraph次元としてモデル化する、
+issue #5全体としての受け入れ基準(acceptance criteria)である。**T0は
+この全体像を解くタスクではない** — issue本文が明記する通り、T0は
+「最初の生成実装に先行する独立タスク」であり、T0の完了条件は「実装者が
+生成先や合格基準を選び直さず着手できる確定契約が存在すること」のみ
+(issue本文より引用)。本書はこの狭いT0スコープに厳密に留まり、
+「Backend engine is an explicit graph dimension」等、issue #5全体の
+受け入れ基準を本書がすべて満たしたとは主張しない。
+
+**明記された制約との整合性の確認**: issue #5本文は「WebAssembly remains a
+target-pipeline configuration rather than a peer backend value」および
+「WebAssembly is represented as target-pipeline configuration」(受け入れ
+基準の1項目)を明記する。本書§3-§9は一貫して「WASM」を**backend/route**
+としてではなく**target(produces-for)**として扱っており(§3の見出しも
+「推奨する最初のtarget」であって「推奨するbackend」ではない)、backend
+route自体は常に「LAMINARIA-owned」(現行`laminaria-ir`由来の自己生成経路、
+issue本文の「LAMINARIA-owned semantic/optimization/target-generation
+route from #25 as the main path」に対応)のまま固定している。この区別は
+本書の用語選択自体がissue #5の制約と矛盾しないことを示すための確認であり、
+新しい主張ではない。
 
 ---
 
@@ -105,6 +129,12 @@ LAMINARIA自身が持つこと」ではない。** 実行主体(CPU、OS、WASM 
 | AArch64 (AAPCS64) | 固定32bit命令幅でエンコーダが単純、開発機(Apple Silicon)とホストISAが一致 | x86-64と同様にレジスタ割付が必須、OS毎のobject形式分岐も同様に残る |
 | WebAssembly 1.0 (MVP, i32のみ) | スタックマシンでレジスタ割付が不要、単一のportable binary形式(OS分岐なし)、呼出規約が型付きexport/callのみで極めて単純、`i32`演算はWASM仕様上すでに2の補数ラップ(このIRの`WrappingAdd/Sub/Mul`と完全一致)、既存runtime(wasmtime等)で実行のみを検証でき自前runtime実装が不要 | 「実ハードウェア機械語」ではない(ただし§1の通りcontractはハードウェアターゲットを要求していない) |
 | 独自bytecode + 自作VM | 実装の自由度が最大 | runtime契約を含め全てゼロから自作する必要があり、既存の外部検証手段(標準仕様に基づくruntime)を使えない。`docs/design/issue-35-d0-spec.md`のM10が要求するWASM経路を一切前進させない |
+
+**必要なIR変更**: なし。§3で選ぶWASM MVPは、上記の現行`Expr`/`Stmt`/
+`IntWidth`(types.rs:70-73, 91-120, 148-163)の全バリアントをそのまま
+1対1でWASM命令にマップできる(§4-§7で確定)。`Program`/`FnFact`の型
+定義そのものへの変更は一切不要 — target生成は既存の`Program`を読み取る
+だけの新しいコード(§9)であり、IR自体の拡張ではない。
 
 ---
 
