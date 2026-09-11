@@ -278,21 +278,28 @@ impl ArtifactStore {
 
 /// Counts how many `laminaria_ir` computations -- never a `SharedStore`
 /// lock-wait -- are genuinely running at once, tracking the peak
-/// observed. Always live (not test-gated): every dispatch enters/exits
-/// one of these around its own real computation, at the cost of a
-/// handful of atomic ops per dispatch, negligible next to the
-/// computation itself. A review found that the previous concurrency
-/// proof -- comparing dispatch *call* start/end timestamps, taken from
-/// `worker_loop` around the whole `dispatch_action` call -- could not
-/// tell real computation apart from time spent merely waiting for a
-/// lock: a temporary, fully-serialized counter-implementation (every
-/// dispatch behind one global `Mutex`) still passed it, since the
-/// *call* intervals still overlapped even though the *work* inside never
-/// did. This probe is entered only around the actual `laminaria_ir`
-/// call(s) inside each `dispatch_*` function -- after any such
-/// serializing lock a regression might add would already have been
-/// acquired -- so a regression that serializes real work, wherever it
-/// adds the lock, shows up as a peak that never exceeds 1.
+/// observed. Constructed only when a caller opts in (see
+/// [`SharedStore::new`]'s own `trace_compute_concurrency` parameter);
+/// production dispatch (`run_compiler_work_plan`) always opts out, so
+/// [`SharedStore::enter_compute`] short-circuits on a plain `None` check
+/// with no atomic touched at all -- a review found the first version of
+/// this probe was unconditionally live, meaning every worker thread
+/// updated the *same* atomics on *every* dispatch regardless of whether
+/// anything ever read the result, a real, unmeasured contention point
+/// that gets worse as `cpu_budget` grows, for a benefit only tests use.
+///
+/// A review found that the previous concurrency proof -- comparing
+/// dispatch *call* start/end timestamps, taken from `worker_loop` around
+/// the whole `dispatch_action` call -- could not tell real computation
+/// apart from time spent merely waiting for a lock: a temporary,
+/// fully-serialized counter-implementation (every dispatch behind one
+/// global `Mutex`) still passed it, since the *call* intervals still
+/// overlapped even though the *work* inside never did. This probe is
+/// entered only around the actual `laminaria_ir` call(s) inside each
+/// `dispatch_*` function -- after any such serializing lock a regression
+/// might add would already have been acquired -- so a regression that
+/// serializes real work, wherever it adds the lock, shows up as a peak
+/// that never exceeds 1.
 #[derive(Default)]
 struct ComputeConcurrencyProbe {
     active: AtomicUsize,
@@ -334,15 +341,34 @@ impl Drop for ComputeConcurrencyGuard<'_> {
 /// runtime, defeating the point of a CPU budget greater than one.
 struct SharedStore {
     store: Mutex<ArtifactStore>,
-    compute_probe: ComputeConcurrencyProbe,
+    /// `None` in every production run -- see [`ComputeConcurrencyProbe`]'s
+    /// own doc comment for why this must cost nothing when unused rather
+    /// than merely being cheap.
+    compute_probe: Option<ComputeConcurrencyProbe>,
 }
 
 impl SharedStore {
-    fn new(store: ArtifactStore) -> Self {
+    fn new(store: ArtifactStore, trace_compute_concurrency: bool) -> Self {
         SharedStore {
             store: Mutex::new(store),
-            compute_probe: ComputeConcurrencyProbe::default(),
+            compute_probe: trace_compute_concurrency.then(ComputeConcurrencyProbe::default),
         }
+    }
+
+    /// Marks one real computation as starting, if this store was built
+    /// with tracing on -- a plain `None` check and nothing else
+    /// otherwise, never an atomic access, so production dispatch pays
+    /// nothing for a probe only tests ever read.
+    fn enter_compute(&self) -> Option<ComputeConcurrencyGuard<'_>> {
+        self.compute_probe
+            .as_ref()
+            .map(ComputeConcurrencyProbe::enter)
+    }
+
+    fn peak_compute_concurrency(&self) -> usize {
+        self.compute_probe
+            .as_ref()
+            .map_or(0, ComputeConcurrencyProbe::peak)
     }
 
     fn candidate(&self, artifact_id: &str) -> Option<Program> {
@@ -567,7 +593,7 @@ pub fn run_compiler_work_plan(
     store: &mut ArtifactStore,
     cpu_budget: NonZeroUsize,
 ) -> Result<(), CompilerWorkExecutionError> {
-    run_compiler_work_plan_inner(plan, store, cpu_budget).0
+    run_compiler_work_plan_inner(plan, store, cpu_budget, false).0
 }
 
 /// Test-only entry point that also returns the peak number of real
@@ -585,13 +611,14 @@ fn run_compiler_work_plan_traced(
     store: &mut ArtifactStore,
     cpu_budget: NonZeroUsize,
 ) -> (Result<(), CompilerWorkExecutionError>, usize) {
-    run_compiler_work_plan_inner(plan, store, cpu_budget)
+    run_compiler_work_plan_inner(plan, store, cpu_budget, true)
 }
 
 fn run_compiler_work_plan_inner(
     plan: &ExecutionPlan,
     store: &mut ArtifactStore,
     cpu_budget: NonZeroUsize,
+    trace_compute_concurrency: bool,
 ) -> (Result<(), CompilerWorkExecutionError>, usize) {
     let total = plan.actions.len();
     let (remaining_deps, dependents) = dependency_graph(plan);
@@ -609,7 +636,7 @@ fn run_compiler_work_plan_inner(
         errors: BTreeMap::new(),
     });
     let ready_or_done = Condvar::new();
-    let shared_store = SharedStore::new(std::mem::take(store));
+    let shared_store = SharedStore::new(std::mem::take(store), trace_compute_concurrency);
 
     std::thread::scope(|scope| {
         for _ in 0..cpu_budget.get() {
@@ -626,7 +653,7 @@ fn run_compiler_work_plan_inner(
         }
     });
 
-    let peak_compute_concurrency = shared_store.compute_probe.peak();
+    let peak_compute_concurrency = shared_store.peak_compute_concurrency();
     *store = shared_store.store.into_inner().unwrap();
 
     // Deterministic regardless of which worker happened to fail first or
@@ -717,7 +744,7 @@ fn dispatch_lower_source(
         .collect();
     let language = descriptor.language.as_deref().unwrap_or("");
     let lowered = {
-        let _compute = store.compute_probe.enter();
+        let _compute = store.enter_compute();
         match language {
             "rust" => lower_rust_source(source_path, &source_text, &requested),
             "nim" => lower_nim_source(source_path, &source_text, &requested),
@@ -755,7 +782,7 @@ fn dispatch_validate_ir(
         }
     })?;
     let validated = {
-        let _compute = store.compute_probe.enter();
+        let _compute = store.enter_compute();
         validate_program(&candidate)
     }
     .map_err(|e| CompilerWorkExecutionError::ValidationFailed {
@@ -792,7 +819,7 @@ fn dispatch_transform_function(
     })?;
     let program = validated.program();
     let transformed = {
-        let _compute = store.compute_probe.enter();
+        let _compute = store.enter_compute();
         match params.kind {
             TransformKind::Anf => anf_insert(program, &params.caller, &params.callee),
             TransformKind::Checked => checked_inline(program, &params.caller, &params.callee),
@@ -842,7 +869,7 @@ fn dispatch_evaluate_evidence(
     }
     let mut outcomes = Vec::with_capacity(descriptor.test_inputs.len());
     {
-        let _compute = store.compute_probe.enter();
+        let _compute = store.enter_compute();
         for args in &descriptor.test_inputs {
             let outcome = eval_function(validated.program(), function_name, args).map_err(|e| {
                 CompilerWorkExecutionError::EvaluationFailed {
@@ -1207,7 +1234,7 @@ mod tests {
         // Present only as an *unvalidated* candidate, deliberately never
         // promoted to `validated`.
         store.candidates.insert("prog-1".to_string(), program);
-        let store = SharedStore::new(store);
+        let store = SharedStore::new(store, false);
 
         let action = Action {
             id: "transform-1".to_string(),
@@ -1259,7 +1286,7 @@ mod tests {
             outputs: vec![],
             compiler_work: None,
         };
-        let store = SharedStore::new(ArtifactStore::new());
+        let store = SharedStore::new(ArtifactStore::new(), false);
         assert!(matches!(
             dispatch_action(&action, &store),
             Err(CompilerWorkExecutionError::UnsupportedActionKind { .. })
@@ -1278,7 +1305,7 @@ mod tests {
             outputs: vec![],
             compiler_work: None,
         };
-        let store = SharedStore::new(ArtifactStore::new());
+        let store = SharedStore::new(ArtifactStore::new(), false);
         assert!(matches!(
             dispatch_action(&action, &store),
             Err(CompilerWorkExecutionError::MissingDescriptor { .. })
@@ -1331,7 +1358,7 @@ mod tests {
             }),
         };
 
-        let store = SharedStore::new(ArtifactStore::new());
+        let store = SharedStore::new(ArtifactStore::new(), false);
         let result = dispatch_action(&action, &store);
         std::fs::remove_dir_all(&dir).ok();
         assert!(

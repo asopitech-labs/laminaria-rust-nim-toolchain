@@ -2013,3 +2013,44 @@ to separately test at the value level. `cargo test -p laminaria-run`:
 324 (unchanged). `cargo fmt --check`/`cargo clippy --workspace
 --all-targets -- -D warnings` clean; the full workspace suite run 3
 times back to back with no flakes.
+
+## Eighth pass: the seventh pass's own new probe was unconditionally live in production
+
+A review of the seventh pass found one more real P2: `ComputeConcurrencyProbe`
+was constructed unconditionally inside every `SharedStore`, meaning
+every worker thread performed a `fetch_add`/`fetch_max`/`fetch_sub` on
+the *same* atomics on *every single dispatch* in production, not just
+under test. This is a genuine, structural contention point that gets
+worse as `cpu_budget` grows -- exactly the kind of cost the scheduler
+itself should never introduce -- for a benefit (peak-concurrency
+measurement) only this crate's own tests ever read. The doc comment's
+own claim that this was "negligible" had never actually been measured,
+which the review named directly.
+
+Fixed by making the probe opt-in: `SharedStore::new` now takes a
+`trace_compute_concurrency: bool`, storing `compute_probe:
+Option<ComputeConcurrencyProbe>` (`None` in every real call from
+`run_compiler_work_plan`). Each `dispatch_*` function now calls a new
+`SharedStore::enter_compute()` (`self.compute_probe.as_ref().map(...)`)
+instead of touching the probe field directly -- a plain `None` check
+with no atomic access at all when tracing is off, not merely a *cheap*
+atomic access. `run_compiler_work_plan_inner` gained a
+`trace_compute_concurrency` parameter threading this through;
+`run_compiler_work_plan_traced` (test-only) passes `true`,
+`run_compiler_work_plan` (production) passes `false`.
+
+**Re-verified the regression-detection property survived this
+refactor**, the same way both prior rounds verified their own fixes:
+reapplied the "one global `Mutex` around all of `dispatch_action`"
+experiment against this round's code, confirmed
+`independent_rust_and_nim_chains_agree_across_cpu_budgets_and_run_concurrently_under_budget_two`
+still correctly fails (`peak_2 == 1`, expected `2`) under it, then
+reverted.
+
+No behavior change from any caller's perspective, no new tests (the
+existing suite already exercises every changed call site).
+`cargo test -p laminaria-run`: 130 passed (unchanged). Workspace total:
+324 (unchanged). `cargo clippy -p laminaria-run --all-targets -- -D
+warnings` (the review's own exact invocation) and the full workspace
+`cargo fmt --check`/`cargo clippy` both clean; the full workspace suite
+run 3 times back to back with no flakes.
