@@ -1,25 +1,36 @@
-# #35 D0 — 機械可読case定義
+# #35 D0 — 機械可読case定義（改訂版、R1〜R5対応）
 #
 # 対応する設計文書: docs/design/issue-35-d0-spec.md
 # 基準commit: b875e43303a7ec9a5215897ed9dd08c98b45c812
+# 審査記録: issue-35-d0-spec.md セクション6（審査commit 443b5f2、判定revision issue35-d0-review-443b5f2-v1）
 #
 # schema (docs/design/issue-35-d0-spec.md セクション4.1と同一):
-#   id, pattern, origin, source_layout, dependency_edges, requested_artifacts,
-#   demand_mode, edit, forbidden_work, required_work, expected, subset_scope,
-#   scale, measurement, pass_criteria
+#   id, pattern, execution_role, reached_stage, origin, refs, source_layout,
+#   dependency_edges, requested_artifacts, demand_mode, edit, forbidden_work,
+#   required_work, expected, subset_scope, scale, measurement, pass_criteria
 #
-# 本ファイルは提出時点で「案」であり、指示者の採否記録（issue-35-d0-spec.md
-# セクション6）をもって初めて確定する。全case共通で d1_only の値は
-# subset_scope.future_work が空でない限り "D1では暫定" として扱う。
+# execution_role:
+#   owned      — LAMINARIA自身のIR/scheduler(compiler_work_executor)が実際に計算・実行する経路の証拠
+#   reference  — 既存ツール(Cargo/Nimコンパイラ等)の実挙動を観測する証拠。独自経路の達成を意味しない
+#   bootstrap  — 自己ビルド等、外部ツールでLAMINARIA自身の実行体を組み立てる経路の証拠
+#
+# reached_stage: configuration-definition | source-ir-evaluation | target-generation-execution
+# origin: self | fixture-existing | fixture-new | self-planned
+#   self-planned — M9/M10のように自身が将来持つべき機能として計画されたnode構成（未実装）
+#
+# refs: 値・入力を共有する他caseへの明示参照。"同上"のような曖昧な再利用は使わない。
 
-schema_version: "0.1.0-draft"
+schema_version: "0.2.0-draft"
 
 cases:
 
   # ---------------------------------------------------------------- M1 ----
-  - id: M1-fingerprint-fanout
+  - id: M1-fingerprint-cold
     pattern: M1
+    execution_role: reference
+    reached_stage: target-generation-execution
     origin: self
+    refs: []
     source_layout: >
       crates/laminaria-run/src/bin/{rustc_wrapper.rs,cc_wrapper.rs} の2 [[bin]]、
       および crates/{laminaria-plan,laminaria-run,laminaria-cli} の3 crateが
@@ -30,86 +41,123 @@ cases:
       - "laminaria-plan -> laminaria-fingerprint"
       - "laminaria-run -> laminaria-fingerprint"
       - "laminaria-cli -> laminaria-fingerprint"
+      - "laminaria-cli -> laminaria-run"
+      - "laminaria-cli -> laminaria-plan"
     non_dependency: "laminaria-ir と laminaria-fingerprint の間に依存なし"
     requested_artifacts:
       - "target/debug/laminaria"
       - "target/debug/laminaria-rustc-wrapper"
       - "target/debug/laminaria-cc-wrapper"
     demand_mode: full
-    edit:
-      kind: none
-      target: null
-    forbidden_work:
-      - "fingerprint未変更時に laminaria-fingerprint 自体が再コンパイルされる"
+    edit: { kind: none, target: null }
+    forbidden_work: []
     required_work:
-      - "cargo build --workspace が3 binすべてを1回のfingerprintコンパイルで共有する"
+      - "cargo build --workspace (target/ 削除後の初回ビルド) が laminaria-fingerprint を1回だけコンパイルし、laminaria-rustc-wrapper/laminaria-cc-wrapper/laminariaの3 binすべてで共有する"
     expected:
       kind: diagnostic
       value_or_diagnostic: "cargo build -v の Compiling laminaria-fingerprint が1回のみ出現"
-      derivation: "cargo自体の実測ビルドログ（既存ツールの実挙動、LAMINARIA独自コンパイラの主張ではない — bootstrap/delegated-buildベースラインとして記録）"
+      derivation: "cargo自体の実測ビルドログ(reference role, LAMINARIA独自コンパイラの主張ではない)"
     subset_scope:
-      d1_verifies:
-        - "cargo実測ログとの宣言一致"
-      future_work:
-        - "LAMINARIA自身のplanner/schedulerによる同一グラフの再現（M9実装後）"
-    scale:
-      small: { description: "既存構成そのまま(5crate+2bin)" }
-      medium: null
-      large: null
-      seed: null
+      d1_verifies: ["cargo実測ログとの宣言一致"]
+      future_work: ["owned schedulerによる同一グラフの再現(M9実装後)"]
+    scale: { small: { description: "既存構成そのまま(5crate+2bin)" }, medium: null, large: null, seed: null }
     measurement:
-      comparison_modes: [1]
-      cpu_budget: [1]
+      comparison_modes: []
+      cpu_budget: []
       memory_state: [normal]
-      cache_state: [cold, warm]
-      warmup_runs: 1
-      repetitions: 5
-      noise_floor: "laminaria-run::scenario::NOISE_FLOOR_STDDEV_MULTIPLIER方式を流用"
+      cache_state: [cold]
+      warmup_runs: 0
+      repetitions: 3
+      noise_floor: "not-applicable (reference role, 正当性判定のみ)"
+      reproducibility: "3回の独立したtarget/削除→再ビルドで同一ログパターンを確認する"
     pass_criteria:
-      d1: "forbidden_workがゼロ回、required_workが実測で確認される"
+      d1: "Compiling laminaria-fingerprintが厳密に1回、3回とも再現"
+      d4: not-applicable-yet
+
+  - id: M1-fingerprint-noop
+    pattern: M1
+    execution_role: reference
+    reached_stage: target-generation-execution
+    origin: self
+    refs: [M1-fingerprint-cold]
+    source_layout: "M1-fingerprint-coldと同一ワークスペース。coldビルド完了後の状態から開始する別case(R4対応: coldとnoopを同一caseにしない)"
+    dependency_edges: "M1-fingerprint-coldのdependency_edgesを参照(refs)"
+    requested_artifacts: "M1-fingerprint-coldと同一"
+    demand_mode: full
+    edit: { kind: none, target: null }
+    forbidden_work:
+      - "laminaria-fingerprint, laminaria-plan, laminaria-run, laminaria-cli のいずれかが再コンパイルされる"
+    required_work:
+      - "M1-fingerprint-cold完了直後に同じ cargo build --workspace を再実行し、全crateがFreshとして扱われる"
+    expected:
+      kind: diagnostic
+      value_or_diagnostic: "cargo build -v に Compiling行が一切出現せず、Finished ... in 0.0Xs相当の即時終了になる"
+      derivation: "fixtures/unchanged-noop-workspaceが確立したno-op状態契約と同じ観測方法"
+    subset_scope:
+      d1_verifies: ["true no-op状態の実測確認"]
+      future_work: []
+    scale: { small: { description: "既存構成そのまま" }, medium: null, large: null, seed: null }
+    measurement:
+      comparison_modes: []
+      cpu_budget: []
+      memory_state: [normal]
+      cache_state: [true-noop]
+      warmup_runs: 0
+      repetitions: 3
+      noise_floor: "not-applicable"
+      reproducibility: "3回の独立した再実行でCompiling行ゼロを確認する"
+    pass_criteria:
+      d1: "forbidden_workがゼロ回、3回とも再現"
       d4: not-applicable-yet
 
   - id: M1-fingerprint-leaf-edit
     pattern: M1
+    execution_role: reference
+    reached_stage: target-generation-execution
     origin: self
-    source_layout: "M1-fingerprint-fanoutと同一"
-    dependency_edges: "M1-fingerprint-fanoutと同一"
-    requested_artifacts: "M1-fingerprint-fanoutと同一"
+    refs: [M1-fingerprint-cold]
+    source_layout: "M1-fingerprint-coldと同一ワークスペース"
+    dependency_edges: "refs: M1-fingerprint-cold"
+    requested_artifacts: "M1-fingerprint-coldと同一"
     demand_mode: full
     edit:
       kind: shared-lib-edit
-      target: "crates/laminaria-fingerprint/src/env.rs の1関数本体を1行変更"
+      target: "crates/laminaria-fingerprint/src/env.rs 内の既存関数の戻り値に使われるリテラル定数を1つ変更する(具体的な行・変更前後の値はD1実装時にファイル内容を確認して固定し、この差分自体をEDIT.md相当の記録として残す)"
     forbidden_work:
       - "laminaria-ir の再コンパイル（fingerprintと無関係）"
     required_work:
-      - "laminaria-fingerprint, laminaria-plan, laminaria-run, laminaria-cli の4者すべてが再コンパイルされる"
+      - "laminaria-fingerprint, laminaria-plan, laminaria-run, laminaria-cli の4者すべてが再コンパイルされ、laminaria-fingerprint自体は1回のみコンパイルされる"
     expected:
       kind: diagnostic
-      value_or_diagnostic: "cargo build -v の Compiling行が上記4crateについてのみ出現、laminaria-ir は Fresh"
+      value_or_diagnostic: "cargo build -v の Compiling行が上記4crateについてのみ、各1回ずつ出現、laminaria-ir は Fresh"
       derivation: "incremental-semantic-edit/EDIT.md + STATE-CONTRACTS.md が確立した宣言→実測照合方式の直接適用"
     subset_scope:
       d1_verifies: ["宣言済み再ビルド集合との一致"]
-      future_work: ["LAMINARIA独自plannerでの同一invalidation集合の再現"]
+      future_work: ["owned schedulerでの同一invalidation集合の再現"]
     scale: { small: { description: "既存構成そのまま" }, medium: null, large: null, seed: null }
     measurement:
-      comparison_modes: [1]
-      cpu_budget: [1]
+      comparison_modes: []
+      cpu_budget: []
       memory_state: [normal]
       cache_state: [warm]
-      warmup_runs: 1
-      repetitions: 3
-      noise_floor: "同上"
+      warmup_runs: 0
+      repetitions: 1
+      noise_floor: "not-applicable"
+      reproducibility: "編集→ビルド→revertの1サイクルで確認(incremental-semantic-editのscripts/apply-edit.sh方式)"
     pass_criteria:
-      d1: "再ビルド集合が期待通り、余分な再ビルドがゼロ"
+      d1: "再ビルド集合が期待通り、余分な再ビルドがゼロ、fingerprint自体の重複コンパイルなし"
       d4: not-applicable-yet
 
   # ---------------------------------------------------------------- M2 ----
   - id: M2-nim-planner-shared-module
     pattern: M2
+    execution_role: reference
+    reached_stage: target-generation-execution
     origin: self
+    refs: []
     source_layout: >
       nim-planner/src/laminaria_planner.nim（本番bin）と
-      nim-planner/tests/test_planning_kernel.nim（unittest bin）が
+      nim-planner/tests/test_planning_kernel.nim（unittest bin、指示者が第2consumerとして採用済み）が
       ともに nim-planner/src/{contract,planning_kernel}.nim を import する。
     dependency_edges:
       - "laminaria_planner.nim -> contract.nim"
@@ -123,55 +171,103 @@ cases:
     edit: { kind: none, target: null }
     forbidden_work: []
     required_work:
-      - "両binがplanning_kernel.plan/findCycleの同一実装を呼び出す（コピーではない）"
+      - "両binがplanning_kernel.plan/findCycleの同一実装を呼び出す(コピーではない、importの実ソース確認)"
     expected:
       kind: diagnostic
       value_or_diagnostic: "同一PlanningInputに対しplanning_kernel.plan(...)の戻り値が両bin経由で一致する"
-      derivation: "既存の real_planner_binary テスト（crates/laminaria-plan/src/nim_planner_client.rs）が同種の決定性を既に検証している方式の踏襲"
+      derivation: "既存の real_planner_binary テスト(crates/laminaria-plan/src/nim_planner_client.rs)が同種の決定性を既に検証している方式の踏襲"
     subset_scope:
       d1_verifies: ["2 nim binaryが実際に同一moduleをimportしていることのソース確認、決定性テスト"]
-      future_work: ["指示者が付録A代替案を選んだ場合、fixtures/nim-heavy-workspaceへの第2bin追加に差し替え"]
+      future_work: []
     scale: { small: { description: "既存構成そのまま" }, medium: null, large: null, seed: null }
     measurement:
-      comparison_modes: [1]
-      cpu_budget: [1]
+      comparison_modes: []
+      cpu_budget: []
       memory_state: [normal]
-      cache_state: [cold, warm]
-      warmup_runs: 1
+      cache_state: [cold]
+      warmup_runs: 0
       repetitions: 3
-      noise_floor: "同上"
+      noise_floor: "not-applicable"
+      reproducibility: "3回の独立した実行で同一戻り値を確認する"
     pass_criteria:
-      d1: "決定性テストが通過し、指示者が付録A分岐を確定していること"
+      d1: "決定性テストが通過"
       d4: not-applicable-yet
 
   # ---------------------------------------------------------------- M3 ----
-  - id: M3-self-build-independent-groups
+  - id: M3-topology
     pattern: M3
+    execution_role: bootstrap
+    reached_stage: configuration-definition
     origin: self
+    refs: []
     source_layout: >
       crates/laminaria-cli の SelfBuild コマンドが構成する PlanningInput
-      （crates/laminaria-plan/src/nim_planner_client.rs の sample_input() が実例）。
+      (crates/laminaria-plan/src/nim_planner_client.rs の sample_input() が実例)。
       compile-rust-host (ActionKind::CargoBuild) と compile-nim-planner
       (ActionKind::NimBuild) は互いのinputs/outputsを参照しない。
     dependency_edges:
-      - "integrate -> compile-rust-host (host-bin)"
-      - "integrate -> compile-nim-planner (planner-bin)"
-    non_dependency: "compile-rust-host と compile-nim-planner の間に依存なし（ビルド時点で完全独立）"
+      - "integrate -> compile-rust-host (host-bin, ActionKind::CargoBuild)"
+      - "integrate -> compile-nim-planner (planner-bin, ActionKind::NimBuild)"
+    non_dependency: "compile-rust-host と compile-nim-planner の間に依存なし(ビルド時点で完全独立)"
     requested_artifacts: ["generation-root"]
     demand_mode: full
     edit: { kind: none, target: null }
     forbidden_work:
-      - "compile-rust-host の完了を compile-nim-planner が待つ（またはその逆）"
+      - "compile-rust-host/compile-nim-planner(いずれもCargoBuild/NimBuild)をcompiler_work_executorへ渡す(同executorはUnsupportedActionKindとして拒否する委譲ビルド種別)"
     required_work:
-      - "両アクションが並行に実行可能であること（実測でoverlapがあること）"
+      - "real_planner_binary経由で実際にPlanningInputを計画し、ordered_actionsがintegrateをcompile-rust-host/compile-nim-planner双方より後段に置くことを確認する"
     expected:
       kind: value
-      value_or_diagnostic: "ordered_actions が [compile-nim-planner, compile-rust-host, integrate] のいずれの順でも受理される（依存が無いため順序は入力側のtie-break規則のみで決まる）"
-      derivation: "nim_planner_client.rs の call_planner_against_the_real_binary_produces_a_deterministic_plan テストが既に確認済みの実際の挙動"
+      value_or_diagnostic: "ordered_actions が [compile-nim-planner, compile-rust-host, integrate] または [compile-rust-host, compile-nim-planner, integrate] のいずれか(両アクション間に依存が無いため順序は入力側のtie-break規則のみで決まる)、実際の値はcall_planner_against_the_real_binary_produces_a_deterministic_planと同一"
+      derivation: "既存の call_planner_against_the_real_binary_produces_a_deterministic_plan テスト(crates/laminaria-plan/src/nim_planner_client.rs)が既に確認済みの実際の挙動"
     subset_scope:
-      d1_verifies: ["真の非依存性の実測確認（compiler_work_executorのCPU budget>=2での並行dispatch実測）"]
-      future_work: ["需要駆動実行への統合（D2）"]
+      d1_verifies: ["構成(非依存性)の正当性のみ。並行実行の実測はM3-ownedへ分離"]
+      future_work: []
     scale: { small: { description: "既存自己ビルドそのまま" }, medium: null, large: null, seed: null }
+    measurement:
+      comparison_modes: []
+      cpu_budget: []
+      memory_state: [normal]
+      cache_state: [cold]
+      warmup_runs: 0
+      repetitions: 1
+      noise_floor: "not-applicable"
+      reproducibility: "既存テストの再実行"
+    pass_criteria:
+      d1: "非依存性が計画結果として実測される。CargoBuild/NimBuildがcompiler_work_executorへ渡されていないことをコードレビューで確認"
+      d4: not-applicable-yet
+
+  - id: M3-owned-independent-chains
+    pattern: M3
+    execution_role: owned
+    reached_stage: source-ir-evaluation
+    origin: self
+    refs: []
+    source_layout: >
+      crates/laminaria-run/src/compiler_work_executor.rs の既存テスト
+      independent_rust_and_nim_chains_agree_across_cpu_budgets_and_run_concurrently_under_budget_two
+      が使う、実Rust source由来チェーンと実Nim source由来チェーン(いずれも
+      LowerSource->ValidateIr->TransformFunction->ValidateIr->EvaluateEvidence)。
+    dependency_edges:
+      - "rust-chain: 内部でLowerSource->ValidateIr->TransformFunction->ValidateIr->EvaluateEvidenceの直列依存"
+      - "nim-chain: 同上、rust-chainとは非依存"
+    non_dependency: "rust-chain と nim-chain の間に依存なし"
+    requested_artifacts: ["rust-chainの最終EvaluateEvidence結果", "nim-chainの最終EvaluateEvidence結果"]
+    demand_mode: full
+    edit: { kind: none, target: null }
+    forbidden_work:
+      - "rust-chainの完了をnim-chainが待つ(またはその逆)"
+    required_work:
+      - "budget=2でpeak並行度2が実測される(ComputeConcurrencyProbe、opt-in設定で使用)"
+      - "budget=1/2で最終結果が一致する"
+    expected:
+      kind: value
+      value_or_diagnostic: "budget1とbudget2で同一の最終EvaluateEvidence結果、budget2でpeak_concurrency==2"
+      derivation: "既存テストindependent_rust_and_nim_chains_agree_across_cpu_budgets_and_run_concurrently_under_budget_twoが既に確認済みの実測値(issue#27, commit 3815fb7/b875e43で確定)"
+    subset_scope:
+      d1_verifies: ["既存テストのcase登録、ScenarioReport形式での計測データ保存"]
+      future_work: ["需要駆動実行(D2)との比較"]
+    scale: { small: { description: "既存テストそのまま" }, medium: null, large: null, seed: null }
     measurement:
       comparison_modes: [1, 2]
       cpu_budget: [1, 2]
@@ -179,17 +275,21 @@ cases:
       cache_state: [cold]
       warmup_runs: 1
       repetitions: 5
-      noise_floor: "同上、加えて issue#27 の ComputeConcurrencyProbe 方式（実計算区間のみのpeak並行度計測）を流用"
+      noise_floor: "laminaria-run::scenario::NOISE_FLOOR_STDDEV_MULTIPLIER方式"
+      reproducibility: "5回の独立した実行間でStats::from_samplesのstddevベース判定を行う。同一reportの自己比較はしない"
     pass_criteria:
-      d1: "budget=2でpeak並行度2が実測される（issue#27と同一の検証済み方式）"
+      d1: "budget1/2の結果一致、budget2でpeak_concurrency==2が5回とも再現、ScenarioReportとして保存"
       d4: not-applicable-yet
 
   # ---------------------------------------------------------------- M4 ----
   - id: M4-rust-nim-c-abi-scalar
     pattern: M4
+    execution_role: reference
+    reached_stage: target-generation-execution
     origin: fixture-existing
+    refs: []
     source_layout: "fixtures/rust-nim-c-abi-baseline/{rust-bin,nim-lib}"
-    dependency_edges: ["rust-bin -> nim-lib (static link, C-ABI, scalar only)"]
+    dependency_edges: ["rust-bin -> nim-lib (static link, C-ABI, scalar only, 外部compiler nim c/rustcによる)"]
     requested_artifacts: ["rust-bin実行結果(stdout)"]
     demand_mode: full
     edit: { kind: none, target: null }
@@ -201,25 +301,29 @@ cases:
       derivation: "fixtures/rust-nim-c-abi-baseline/rust-bin/src/main.rs の既存アサーション"
     subset_scope:
       d1_verifies: ["既存fixtureの再実行と結果一致確認、case定義への正式登録"]
-      future_work: ["M9実装後、自己構成での同型edgeとの比較"]
+      future_work: ["M9実装後、自己構成でのowned版edgeとの比較"]
     scale: { small: { description: "既存規模そのまま" }, medium: null, large: null, seed: null }
     measurement:
-      comparison_modes: [1]
-      cpu_budget: [1]
+      comparison_modes: []
+      cpu_budget: []
       memory_state: [normal]
       cache_state: [cold]
-      warmup_runs: 1
-      repetitions: 3
-      noise_floor: "同上"
+      warmup_runs: 0
+      repetitions: 1
+      noise_floor: "not-applicable (reference role)"
+      reproducibility: "既存アサーションの再実行"
     pass_criteria:
       d1: "既存アサーションが通過"
       d4: not-applicable-yet
 
   - id: M4-rust-nim-c-abi-buffer
     pattern: M4
+    execution_role: reference
+    reached_stage: target-generation-execution
     origin: fixture-existing
+    refs: [M4-rust-nim-c-abi-scalar]
     source_layout: "fixtures/mixed-rust-nim-executable/{rust-bin,nim-lib}"
-    dependency_edges: ["rust-bin -> nim-lib (static link, C-ABI, pointer+length)"]
+    dependency_edges: ["rust-bin -> nim-lib (static link, C-ABI, pointer+length, 外部compilerによる)"]
     requested_artifacts: ["rust-bin実行結果(stdout)"]
     demand_mode: full
     edit: { kind: none, target: null }
@@ -234,20 +338,24 @@ cases:
       future_work: ["M9実装後の比較"]
     scale: { small: { description: "既存規模そのまま" }, medium: null, large: null, seed: null }
     measurement:
-      comparison_modes: [1]
-      cpu_budget: [1]
+      comparison_modes: []
+      cpu_budget: []
       memory_state: [normal]
       cache_state: [cold]
-      warmup_runs: 1
-      repetitions: 3
-      noise_floor: "同上"
+      warmup_runs: 0
+      repetitions: 1
+      noise_floor: "not-applicable"
+      reproducibility: "既存アサーションの再実行"
     pass_criteria: { d1: "既存アサーションが通過", d4: not-applicable-yet }
 
   - id: M4-rust-nim-c-abi-callcount
     pattern: M4
+    execution_role: reference
+    reached_stage: target-generation-execution
     origin: fixture-existing
+    refs: [M4-rust-nim-c-abi-scalar]
     source_layout: "fixtures/boundary-heavy-workload/{rust-bin,nim-lib}"
-    dependency_edges: ["rust-bin -> nim-lib (static link, C-ABI, 100万回呼び出し)"]
+    dependency_edges: ["rust-bin -> nim-lib (static link, C-ABI, 100万回呼び出し、外部compilerによる)"]
     requested_artifacts: ["rust-bin実行結果(stdout)"]
     demand_mode: full
     edit: { kind: none, target: null }
@@ -258,263 +366,502 @@ cases:
       value_or_diagnostic: "EXPECTED_FINAL=636658098"
       derivation: "fixtures/boundary-heavy-workload/rust-bin/src/main.rs:53-59 の既存定数"
     subset_scope:
-      d1_verifies: ["既存アサーションの再実行確認、境界コスト（呼出あたりオーバーヘッド）の計測基盤への統合"]
+      d1_verifies: ["既存アサーションの再実行確認、境界コスト(呼出あたりオーバーヘッド)の参照値としての記録"]
       future_work: ["M9実装後の比較"]
     scale: { small: { description: "既存規模そのまま(100万回)" }, medium: null, large: null, seed: null }
     measurement:
-      comparison_modes: [1]
-      cpu_budget: [1]
+      comparison_modes: []
+      cpu_budget: []
       memory_state: [normal]
       cache_state: [cold]
       warmup_runs: 1
       repetitions: 5
-      noise_floor: "同上"
-    pass_criteria: { d1: "既存アサーションが通過、呼出あたりコストが記録される", d4: not-applicable-yet }
+      noise_floor: "not-applicable (reference timingとして記録するのみ、owned baselineではない)"
+      reproducibility: "5回の独立した実行で参照timingを記録"
+    pass_criteria: { d1: "既存アサーションが通過、参照timingが記録される", d4: not-applicable-yet }
 
   # ---------------------------------------------------------------- M5 ----
   - id: M5-nim-entry-rust-lib
     pattern: M5
+    execution_role: reference
+    reached_stage: target-generation-execution
     origin: fixture-existing
+    refs: []
     source_layout: "fixtures/direct-native-link/{nim-bin,rust-lib}"
-    dependency_edges: ["nim-bin -> rust-lib (static link, C-ABI)"]
+    dependency_edges: ["nim-bin -> rust-lib (static link, C-ABI, 外部compilerによる)"]
     requested_artifacts: ["nim-bin実行結果(stdout)"]
     demand_mode: full
     edit: { kind: none, target: null }
     forbidden_work:
-      - "Rustのpanicがそのままプロセスをundefinedな状態にする（deterministic abortでなければならない）"
+      - "Rustのpanicがそのままプロセスをundefinedな状態にする(deterministic abortでなければならない)"
       - "seq/Vec値そのものがABI境界を越える"
     required_work:
       - "scalar往復, struct layout一致, pointer往復(growth/last-reference-drop両方), panic越境時の決定的abort, callback経由のNim例外の境界挙動確認"
     expected:
       kind: value
       value_or_diagnostic: "result=43; layout一致(size=8 align=4); panic時exit=134(SIGABRT); nim c route callback例外はexit=1、nlvm routeはSIGABRT"
-      derivation: "fixtures/direct-native-link/NOTES.md 全体（各項目にコマンド出力の引用あり）"
+      derivation: "fixtures/direct-native-link/NOTES.md 全体(各項目にコマンド出力の引用あり)"
     subset_scope:
       d1_verifies: ["既存NOTES.mdの各主張の再実行確認、case定義への正式登録"]
       future_work: ["M9実装後の比較、nlvm route側のby-value集約体ギャップの追跡"]
     scale: { small: { description: "既存規模そのまま" }, medium: null, large: null, seed: null }
     measurement:
-      comparison_modes: [1]
-      cpu_budget: [1]
+      comparison_modes: []
+      cpu_budget: []
       memory_state: [normal]
       cache_state: [cold]
-      warmup_runs: 1
-      repetitions: 3
-      noise_floor: "同上"
+      warmup_runs: 0
+      repetitions: 1
+      noise_floor: "not-applicable"
+      reproducibility: "既存NOTES.mdの再現実行"
     pass_criteria: { d1: "既存NOTES.mdの主張が再現する", d4: not-applicable-yet }
 
   # ---------------------------------------------------------------- M6 ----
   - id: M6-diamond-fingerprint-plan
     pattern: M6
+    execution_role: reference
+    reached_stage: target-generation-execution
     origin: self
+    refs: [M1-fingerprint-cold]
     source_layout: >
-      laminaria-fingerprint(producer) <- laminaria-plan, laminaria-run, laminaria-cli(3独立consumer);
-      さらに laminaria-plan(producer) <- laminaria-run, laminaria-cli(2独立consumer)という入れ子diamond。
+      単一の最上位要求 laminaria-cli が laminaria-plan へ2経路(直接依存、および
+      laminaria-run経由)、laminaria-fingerprint へ4経路(直接、laminaria-run経由、
+      laminaria-plan経由、laminaria-run->laminaria-plan経由)で収束する
+      (独立した複数要求者の重複要求合流ではない。訂正版、spec.md 2.1参照)。
     dependency_edges:
-      - "laminaria-plan -> laminaria-fingerprint"
-      - "laminaria-run -> laminaria-fingerprint"
-      - "laminaria-cli -> laminaria-fingerprint"
-      - "laminaria-run -> laminaria-plan"
-      - "laminaria-cli -> laminaria-plan"
+      - "laminaria-cli -> laminaria-plan (直接)"
+      - "laminaria-cli -> laminaria-run -> laminaria-plan (経路2)"
+      - "laminaria-cli -> laminaria-fingerprint (直接)"
+      - "laminaria-cli -> laminaria-run -> laminaria-fingerprint (経路2)"
+      - "laminaria-cli -> laminaria-plan -> laminaria-fingerprint (経路3)"
+      - "laminaria-cli -> laminaria-run -> laminaria-plan -> laminaria-fingerprint (経路4)"
     requested_artifacts: ["target/debug/laminaria"]
     demand_mode: full
     edit:
       kind: shared-lib-edit
-      target: "crates/laminaria-fingerprint/src/types.rs の1フィールド追加"
+      target: "crates/laminaria-fingerprint/src/types.rs に新規フィールドを1つ追加する(具体的なフィールド名・型はD1実装時に確定し記録する)"
     forbidden_work:
-      - "laminaria-fingerprintが複数回コンパイルされる（重複要求の非合流）"
+      - "laminaria-fingerprintが複数回コンパイルされる(4経路収束点での重複コンパイル)"
+      - "laminaria-planが複数回コンパイルされる(2経路収束点での重複コンパイル)"
     required_work:
-      - "laminaria-fingerprintの変更がlaminaria-plan経由とlaminaria-run経由の両方に正しく伝播する"
+      - "laminaria-fingerprintの変更が全収束経路を通じて一度だけ反映される"
     expected:
       kind: diagnostic
-      value_or_diagnostic: "cargo build -v で laminaria-fingerprint の Compiling が1回のみ、laminaria-plan/laminaria-run/laminaria-cliが全て再コンパイルされる"
-      derivation: "cargoの実測ビルドログ（bootstrap/delegated-buildベースライン）"
+      value_or_diagnostic: "cargo build -v で laminaria-fingerprint / laminaria-plan の Compiling がそれぞれ1回のみ、laminaria-plan/laminaria-run/laminaria-cliが全て再コンパイルされる"
+      derivation: "cargoの実測ビルドログ(reference role)"
     subset_scope:
-      d1_verifies: ["宣言済みcompile回数・伝播集合との実測一致"]
-      future_work: ["LAMINARIA独自plannerでの同一挙動の再現、重複semantic keyの合流保証テスト"]
+      d1_verifies: ["宣言済み収束点での重複コンパイル非発生の実測確認"]
+      future_work: ["owned schedulerでの同一挙動の再現、独立した複数要求者による重複semantic keyの合流保証テスト(将来的にM9/D2で実施)"]
     scale: { small: { description: "既存構成そのまま" }, medium: null, large: null, seed: null }
     measurement:
-      comparison_modes: [1]
-      cpu_budget: [1]
+      comparison_modes: []
+      cpu_budget: []
       memory_state: [normal]
       cache_state: [warm]
-      warmup_runs: 1
-      repetitions: 3
-      noise_floor: "同上"
+      warmup_runs: 0
+      repetitions: 1
+      noise_floor: "not-applicable"
+      reproducibility: "編集->ビルドの1サイクルで確認"
     pass_criteria: { d1: "重複コンパイルがゼロ、伝播集合が期待通り", d4: not-applicable-yet }
 
   # ---------------------------------------------------------------- M7 ----
   - id: M7-long-chain-wide-branches-small
     pattern: M7
+    execution_role: reference
+    reached_stage: target-generation-execution
     origin: fixture-new
-    source_layout: "fixtures/long-chain-wide-branches (新規, 鎖4段+wide leaf2本)"
+    refs: []
+    source_layout: "fixtures/long-chain-wide-branches (新規, 鎖4段+wide leaf2本、分岐点stage-02固定)"
     dependency_edges:
-      - "aggregator -> stage-04"
-      - "aggregator -> leaf-a, leaf-b"
-      - "leaf-a, leaf-b -> stage-02 (鎖の中間ノードから分岐)"
       - "stage-02 -> stage-01"
+      - "stage-02 -> (鎖継続) stage-03, stage-04"
+      - "stage-02 -> (wide分岐) leaf-a, leaf-b"
       - "stage-04 -> stage-03 -> stage-02"
+      - "aggregator -> stage-04, leaf-a, leaf-b"
     requested_artifacts: ["aggregator実行結果"]
     demand_mode: full
     edit: { kind: none, target: null }
-    forbidden_work: ["stage-01の重複コンパイル(leaf-a/leaf-b双方から参照される共有区間)"]
+    forbidden_work: ["stage-01/stage-02の重複コンパイル(leaf-a/leaf-b/stage-03双方から参照される共有区間)"]
     required_work: ["critical path(stage-01..04)の逐次実行、leaf-a/leaf-bの並行実行"]
     expected:
       kind: value
-      value_or_diagnostic: "固定seed(20260909)に対する決定的な集約値（D1実装時にfixture内テストとして確定・記録）"
-      derivation: "deep-critical-path-graph/wide-parallel-graphと同型の実アルゴリズム(avalanche mix, gcd等)の合成"
+      value_or_diagnostic: "SEED=20260909に対するaggregatorの最終集約値。数式・分岐点・edgeはspec.md 2.2で確定済み。実行結果の具体的な数値はD1が実装時に一度実行して得た値をpinする(deep-critical-path-graphのEXPECTED_RESULTと同じ確立済み方法論、期待値の未決定ではない)"
+      derivation: "stage-01..04はsplitmix64風avalanche mix/popcount fold/modulus正規化の周期的適用(deep-critical-path-graphと同型)、leaf-a/leaf-bはgcd/bubble-sort相当の実アルゴリズム"
     subset_scope:
-      d1_verifies: ["fixture実装、critical path長の実測、期待値との照合"]
-      future_work: ["head-of-line blocking回避の検証（重いleaf導入後）"]
+      d1_verifies: ["fixture実装、critical path長の実測、期待値との照合(実行後pin)"]
+      future_work: ["head-of-line blocking回避の検証(medium/largeでの重いleaf導入後)"]
     scale:
-      small: { chain_stages: 4, wide_leaves: 2, description: "全列挙" }
-      medium: { chain_stages: 8, wide_leaves: 4, description: "既定値、うち1 leafを10倍重くする" }
-      large: { chain_stages: 16, wide_leaves: 8, selection_rule: "重いleafを2本のみ導入、残り6本は既存同様軽量", description: "固定seed代表組合せ" }
+      small: { chain_stages: 4, wide_leaves: 2, branch_point: "stage-02", description: "全列挙" }
+      medium: null
+      large: null
       seed: 20260909
     measurement:
-      comparison_modes: [1, 2]
-      cpu_budget: [1, 2, 4]
+      comparison_modes: []
+      cpu_budget: []
       memory_state: [normal]
-      cache_state: [cold, warm]
-      warmup_runs: 1
-      repetitions: 5
-      noise_floor: "同上"
+      cache_state: [cold]
+      warmup_runs: 0
+      repetitions: 1
+      noise_floor: "not-applicable (構造正当性の検証段階、D1範囲)"
+      reproducibility: "1回の実行でgraph構造とpin値の整合を確認"
     pass_criteria:
       d1: "期待値と一致、宣言済み依存/非依存が実測と一致"
       d4: not-applicable-yet
 
   - id: M7-long-chain-wide-branches-medium
     pattern: M7
+    execution_role: reference
+    reached_stage: target-generation-execution
     origin: fixture-new
-    source_layout: "fixtures/long-chain-wide-branches (中規模設定)"
-    dependency_edges: "M7-long-chain-wide-branches-smallと同型、鎖8段+wide4本"
+    refs: [M7-long-chain-wide-branches-small]
+    source_layout: "fixtures/long-chain-wide-branches (中規模設定、鎖8段+wide4本、分岐点stage-04固定)"
+    dependency_edges:
+      - "stage-04 -> stage-03 -> stage-02 -> stage-01"
+      - "stage-04 -> (鎖継続) stage-05..08"
+      - "stage-04 -> (wide分岐) leaf-a, leaf-b, leaf-c, leaf-matrix-sum"
+      - "aggregator -> stage-08, leaf-a, leaf-b, leaf-c, leaf-matrix-sum"
     requested_artifacts: ["aggregator実行結果"]
     demand_mode: full
     edit:
       kind: shared-lib-edit
-      target: "stage-02（分岐点そのもの）を1行編集"
-    forbidden_work: ["stage-01の再コンパイル(分岐点より上流で無関係)"]
-    required_work: ["stage-02以降の鎖、leaf-a/b/c/d全て、aggregatorが再コンパイルされる"]
+      target: >
+        stage-04の変換式に使うwrapping_mul定数を0xff51afd7ed558ccdから
+        0xc4ceb9fe1a85ec53へ変更する(MurmurHash3 finalizerの定数対の一方から
+        他方への実在する入れ替え、恣意的な値ではない)。
+    forbidden_work: ["stage-01/stage-02/stage-03の再コンパイル(分岐点より上流で無関係)"]
+    required_work: ["stage-04以降の鎖(stage-05..08)、leaf-a/b/c/matrix-sum全4本、aggregatorが再コンパイルされる"]
     expected:
       kind: diagnostic
-      value_or_diagnostic: "宣言済み再ビルド集合との一致"
-      derivation: "incremental-semantic-edit方式の適用"
+      value_or_diagnostic: "宣言済み再ビルド集合(stage-04..08 + 4leaf + aggregator)との一致。編集前後の集約値差分はD1が実行して得た2値をpinする"
+      derivation: "incremental-semantic-edit方式の適用。分岐点・編集内容はspec.md 2.2で確定済み"
     subset_scope:
-      d1_verifies: ["編集シナリオの実装・照合"]
-      future_work: ["重いleafの実行時間支配が確認できるかのプロファイリング"]
-    scale: { small: null, medium: { chain_stages: 8, wide_leaves: 4 }, large: null, seed: 20260909 }
+      d1_verifies: ["編集シナリオの実装・再ビルド集合の照合"]
+      future_work: ["軸2(payload量)拡大時の実行時間支配プロファイリング"]
+    scale:
+      small: null
+      medium:
+        chain_stages: 8
+        wide_leaves: 4
+        branch_point: "stage-04"
+        source_volume_axis: "leaf-matrix-sumのみ4補助関数に分割(他leafは単一関数)"
+        payload_volume_axis: "leaf-matrix-sumの行列サイズN=8(既定)"
+        description: "既定値"
+      large: null
+      seed: 20260909
     measurement:
-      comparison_modes: [1, 2]
-      cpu_budget: [1, 2, 4]
+      comparison_modes: []
+      cpu_budget: []
       memory_state: [normal]
       cache_state: [warm]
-      warmup_runs: 1
-      repetitions: 5
-      noise_floor: "同上"
+      warmup_runs: 0
+      repetitions: 1
+      noise_floor: "not-applicable"
+      reproducibility: "編集->ビルド->revertの1サイクル"
     pass_criteria: { d1: "再ビルド集合が期待通り", d4: not-applicable-yet }
 
-  # ---------------------------------------------------------------- M8 ----
-  - id: M8-many-unrequested-small
-    pattern: M8
+  - id: M7-long-chain-wide-branches-large
+    pattern: M7
+    execution_role: reference
+    reached_stage: target-generation-execution
     origin: fixture-new
-    source_layout: "fixtures/many-unrequested-targets (新規, 非要求4package)"
+    refs: [M7-long-chain-wide-branches-medium]
+    source_layout: "fixtures/long-chain-wide-branches (大規模設定、鎖16段+wide8本、分岐点stage-08固定)"
+    dependency_edges: "M7-long-chain-wide-branches-mediumと同型構造をchain_stages=16, wide_leaves=8へ拡大"
+    requested_artifacts: ["aggregator実行結果"]
+    demand_mode: full
+    edit: { kind: none, target: null }
+    forbidden_work: []
+    required_work: ["軸2(payload量)をleaf-matrix-sumでN=80(既定の10倍)へ拡大した場合の実行時間計測が、軸1(source量、解析コスト)の計測と独立に記録される"]
+    expected:
+      kind: value
+      value_or_diagnostic: "critical path長=16、D1が実行して得た集約値をpinする"
+      derivation: "spec.md 2.2の選定規則(重いleafを2本のみ導入、残り6本は既存同様軽量)"
+    subset_scope:
+      d1_verifies: ["大規模構成でのgraph正当性"]
+      future_work: ["ablation・distributed配置評価(D2以降)"]
+    scale:
+      small: null
+      medium: null
+      large:
+        chain_stages: 16
+        wide_leaves: 8
+        branch_point: "stage-08"
+        selection_rule: "重いleaf(source量axis)を2本のみ導入、残り6本は既存同様軽量"
+        payload_volume_axis: "leaf-matrix-sumのうち1本のみN=80、他は既定N=8"
+        description: "固定seed代表組合せ"
+      seed: 20260909
+    measurement:
+      comparison_modes: []
+      cpu_budget: []
+      memory_state: [normal]
+      cache_state: [cold]
+      warmup_runs: 1
+      repetitions: 3
+      noise_floor: "not-applicable (reference timing)"
+      reproducibility: "3回の独立実行で軸1/軸2それぞれの参照timingを記録"
+    pass_criteria:
+      d1: "期待値と一致、軸1/軸2の計測が分離して記録される"
+      d4: not-applicable-yet
+
+  # ---------------------------------------------------------------- M8 ----
+  - id: M8-many-unrequested-cargo
+    pattern: M8
+    execution_role: reference
+    reached_stage: target-generation-execution
+    origin: fixture-new
+    refs: []
+    source_layout: "fixtures/many-unrequested-targets (新規, 非要求4/10/30package)"
     dependency_edges:
       - "fixture-bin -> used-core, used-util"
-    non_dependency: "fixture-bin と unused-pkg-01..04 の間に依存なし"
+    non_dependency: "fixture-bin と unused-pkg-01..NN の間に依存なし"
     requested_artifacts: ["fixture-bin(要求される[[bin]]の1つのみ)"]
     demand_mode: partial
     edit: { kind: none, target: null }
     forbidden_work:
-      - "unused-pkg-01..04のいずれかがビルドされる"
+      - "unused-pkg-*のいずれかがビルドされる(cargo build -vで確認)"
       - "非要求[[bin]]、非要求[profile]がビルドされる"
     required_work: ["used-core, used-util, fixture-binの3者のみがビルドされる"]
     expected:
       kind: diagnostic
       value_or_diagnostic: "cargo build -v に unused-pkg-* のCompiling行が一切出現しない"
-      derivation: "cargoの実測ビルドログ、demand closureの直接検証"
+      derivation: "cargoの実測ビルドログ(reference role、Cargo自身の依存解決の実挙動)"
     subset_scope:
-      d1_verifies: ["fixture実装、非要求集合の非ビルド確認"]
-      future_work: ["LAMINARIA独自plannerでの同一pruning再現（cargoの標準機能ではなくLAMINARIA自身が同じ性質を持つことの証明）"]
+      d1_verifies: ["fixture実装、Cargo非build集合の非ビルド確認"]
+      future_work: []
     scale:
       small: { unused_packages: 4, description: "全列挙" }
       medium: { unused_packages: 10, description: "既定値、うち3つは内部依存鎖を持つ" }
       large: { unused_packages: 30, selection_rule: "内部依存鎖を持つものを5つのみ導入", description: "固定seed代表組合せ" }
       seed: 20260909
     measurement:
-      comparison_modes: [1]
-      cpu_budget: [1]
+      comparison_modes: []
+      cpu_budget: []
       memory_state: [normal]
       cache_state: [cold]
-      warmup_runs: 1
-      repetitions: 3
-      noise_floor: "同上"
+      warmup_runs: 0
+      repetitions: 1
+      noise_floor: "not-applicable"
+      reproducibility: "1回のcold buildで確認"
     pass_criteria:
       d1: "forbidden_workがゼロ回"
       d4: not-applicable-yet
 
-  # ---------------------------------------------------------------- M9 ----
-  - id: M9-fingerprint-compat-chain
-    pattern: M9
+  - id: M8-many-unrequested-nim-planner
+    pattern: M8
+    execution_role: owned
+    reached_stage: source-ir-evaluation
     origin: fixture-new
+    refs: [M8-many-unrequested-cargo]
     source_layout: >
-      新規: nim-planner/src/fp_report_cli.nim (N1),
-      新規crate crates/laminaria-fingerprint-ffi (N2, 既存laminaria-fingerprintを再公開),
-      新規 nim-planner/src/schema_compat.nim (N3),
-      新規薄いFFI shim (N4, 既存laminaria-run/laminaria-plan由来のハッシュロジックを再公開)。
-    dependency_edges:
-      - "N1(Nim CLI) -> N2(Rust lib, native C-ABI)"
-      - "N2(Rust lib) -> N3(Nim lib, native C-ABI)"
-      - "N3(Nim lib) -> N4(Rust lib, native C-ABI)"
-    requested_artifacts: ["N1実行結果(stdout, 終了コード)"]
-    demand_mode: full
+      M8-many-unrequested-cargoと同型の依存形状(used-core/used-util + 未要求
+      unused-pkg-*)を、Cargo workspaceではなく PlanningInput として直接構成する
+      (実ファイルシステムのビルドを伴わない、軽量なNim planner向けcase)。
+    dependency_edges: "M8-many-unrequested-cargoと同型、PlanningInputのAction間inputs/outputsとして表現"
+    requested_artifacts: ["used-utilに対応するArtifactRefのみをdemandへ含める"]
+    demand_mode: partial
     edit: { kind: none, target: null }
     forbidden_work:
-      - "panicまたはNim例外がFFI境界を越えてN1プロセス全体を予期しない状態にする（決定的なエラー終了コード以外の挙動）"
-      - "by-value集約体・seq/Vec値がいずれかのFFI境界を越える"
+      - "unused-pkg-*に対応するActionがExecutionPlan.ordered_actionsに含まれる"
     required_work:
-      - "N1が--lockに存在するバージョンで終了コード0を返す"
-      - "N1が--lockに存在しないバージョンで終了コード1、Incompatible診断を返す"
-      - "同一入力の2回実行でN4のダイジェストが一致する(決定性)"
+      - "planning_kernel.planのdemand_closureがunused-pkg-*系列を一切辿らない"
     expected:
-      kind: value
-      value_or_diagnostic: "決定性: digest(run1) == digest(run2); 不適合時: exit=1, N3がIncompatibleを返す"
-      derivation: "D1で新規実装するschema_compat.nimの単体テスト、および既存laminaria-fingerprintロジックの再利用（値そのものは既存env.rs/rust_toolchain.rsの出力）"
+      kind: diagnostic
+      value_or_diagnostic: "ExecutionPlan.ordered_actionsがused-core/used-util(+demandそのもの)に対応するAction IDのみを含む"
+      derivation: "issue#27で実装済みのdemand_closureロジック(nim-planner/src/planning_kernel.nim)の実測確認。既存のnim_planner_clientテスト群を土台にできる"
     subset_scope:
-      d1_verifies: ["4ノードの実装、native C-ABIリンク成立、決定性テスト"]
-      future_work: ["compiler_work_executor統合による並行実行計測、M1/M4/M5の自己構成側証拠としての格上げ"]
-    scale: { small: { description: "単一lock, 単一toolchain" }, medium: null, large: null, seed: null }
+      d1_verifies: ["実PlanningInputでの非展開確認"]
+      future_work: []
+    scale:
+      small: { unused_actions: 4, description: "全列挙" }
+      medium: { unused_actions: 10, description: "既定値" }
+      large: { unused_actions: 30, description: "固定seed代表組合せ" }
+      seed: 20260909
     measurement:
       comparison_modes: [1]
       cpu_budget: [1]
       memory_state: [normal]
       cache_state: [cold]
-      warmup_runs: 1
+      warmup_runs: 0
+      repetitions: 3
+      noise_floor: "laminaria-run::scenario::NOISE_FLOOR_STDDEV_MULTIPLIER方式"
+      reproducibility: "3回の独立実行でordered_actionsの非展開を確認"
+    pass_criteria:
+      d1: "forbidden_workがゼロ、ordered_actionsが期待集合と一致"
+      d4: not-applicable-yet
+
+  # ---------------------------------------------------------------- M9 ----
+  - id: M9-fingerprint-compat-chain
+    pattern: M9
+    execution_role: self-planned
+    reached_stage: configuration-definition
+    origin: self-planned
+    refs: []
+    source_layout: >
+      新規: nim-planner/src/fp_report_cli.nim (N1),
+      新規crate crates/laminaria-fingerprint-ffi (N2, 既存laminaria-fingerprintを再公開+固定snapshotモード),
+      新規 nim-planner/src/schema_compat.nim (N3, capability完全一致判定),
+      新規薄いFFI shim (N4, 既存sha2依存を使った正準化digest計算)。
+      各edgeの抽象意味契約(所有・失敗)はspec.md 3.1の表を正とし、
+      native C-ABIは#5 T0確定までの参照実装候補として扱う。
+    dependency_edges:
+      - "N1(Nim CLI) -> N2(Rust lib, 参照実装: native C-ABI)"
+      - "N2(Rust lib) -> N3(Nim lib, 参照実装: native C-ABI)"
+      - "N3(Nim lib) -> N4(Rust lib, 参照実装: native C-ABI)"
+    requested_artifacts: ["N1実行結果(stdout, 終了コード)"]
+    demand_mode: full
+    edit: { kind: none, target: null }
+    forbidden_work:
+      - "panicまたはNim例外がFFI境界を越えてN1プロセス全体を予期しない状態にする(決定的なエラー終了コード以外の挙動)"
+      - "by-value集約体・seq/Vec値がいずれかのFFI境界を越える"
+      - "N3がSemVer範囲互換やDegraded分類を導入する(planFromJsonと同じ厳密一致のみ許可)"
+      - "N4を経由しない判定結果がN1へ到達する(装飾的edgeの禁止)"
+    required_work:
+      - "N1が固定snapshotモードで requested_capabilities ⊆ provided_capabilities のとき終了コード0を返す"
+      - "N1が requested_capabilities に provided_capabilities 外の要素を含む場合、終了コード1・Incompatible診断を返す"
+      - "同一固定snapshot入力の2回実行でN4のダイジェストが一致する(決定性)"
+    expected:
+      kind: value
+      value_or_diagnostic: >
+        固定snapshot: provided_capabilities=["env-fingerprint-v1","toolchain-fingerprint-v1"]
+        (contract.nimのPlanSchemaVersionが実際に宣言する値とD1実装時に一致させる)。
+        正準化書式: "REQ:{req}\nPROV:{prov}\nRESULT:{Compatible|Incompatible}"
+        (reqとprovは辞書順ソート後"|"区切り連結)。この書式に対するSHA-256ダイジェストは
+        D1が実装時に一度実行して得た値をpinする(既存fixtureと同じ方法論)。
+        決定性: digest(run1) == digest(run2)。不適合時: exit=1, N3がIncompatibleを返す。
+      derivation: "N3はplanning_kernel.nim::planFromJsonの既存厳密一致gateと同じ規則。N4は既存sha2依存の直接使用"
+    subset_scope:
+      d1_verifies: ["4ノードの実装、native C-ABIリンク成立(参照実装として)、決定性テスト、正準化書式どおりのdigest計算"]
+      future_work: ["#5 T0確定後の正式target境界選定、compiler_work_executor統合による並行実行計測"]
+    scale: { small: { description: "単一固定snapshot, 単一capability集合" }, medium: null, large: null, seed: null }
+    measurement:
+      comparison_modes: []
+      cpu_budget: []
+      memory_state: [normal]
+      cache_state: [cold]
+      warmup_runs: 0
       repetitions: 5
-      noise_floor: "同上"
+      noise_floor: "not-applicable (self-planned機能実装段階、owned比較はまだ対象外)"
+      reproducibility: "5回の独立実行でdigest決定性を確認"
     pass_criteria:
       d1: "決定性テスト・不適合診断テストの双方が通過、panic/例外の境界越え非発生"
       d4: not-applicable-yet
 
   # --------------------------------------------------------------- M10 ----
-  - id: M10-spike-nim-wasm-feasibility
+  - id: M10-lsp-native
     pattern: M10
+    execution_role: self-planned
+    reached_stage: configuration-definition
+    origin: self-planned
+    refs: []
+    source_layout: >
+      新規 laminaria-lsp (Rust bin, native), 新規 nim-planner/src/plan_ffi.nim
+      (既存planning_kernel.plan/findCycleを再公開、native C-ABIは参照実装候補)。
+    dependency_edges:
+      - "laminaria-lsp -> plan_ffi.nim (native C-ABI static link, 参照実装候補)"
+    requested_artifacts: ["laminaria-lsp診断出力(LSP Diagnostic)"]
+    demand_mode: full
+    edit:
+      kind: config-change
+      target: >
+        固定入力manifest(下記value_or_diagnostic参照)に対し、action-bのrequiresを
+        artifact-aへ変更する編集(循環を導入する具体的な1行変更)。
+    forbidden_work: ["循環が実際には存在しないのに診断を出す(偽陽性)"]
+    required_work: ["循環導入直後にDiagnostic.rangeが循環を構成するノードを指す"]
+    expected:
+      kind: diagnostic
+      value_or_diagnostic: >
+        固定入力manifest:
+        "demand: [artifact-a]\nactions:\n  action-a: produces artifact-a, requires artifact-b\n  action-b: produces artifact-b, requires artifact-a"
+        期待診断: RejectionReasonKind::Cycle, cycle_path=["action-a","action-b","action-a"]
+        (既存call_planner_reports_a_structured_cycle_rejection_from_the_real_binaryテストと同一形)。
+        Diagnostic.rangeはaction-a記述行からaction-b記述行まで(具体的行番号はD1がfixture manifestテキストを
+        書き下ろした時点で確定、正しさの根拠はcycle_pathとgraph定義そのもの)。
+      derivation: "既存テストcall_planner_reports_a_structured_cycle_rejection_from_the_real_binary(crates/laminaria-plan/src/nim_planner_client.rs)と同一ロジックの再利用"
+    subset_scope:
+      d1_verifies: ["native linkの成立(参照実装として)、循環診断の一致確認"]
+      future_work: ["実エディタ(LSPクライアント)経由の統合テスト、#5 T0確定後の正式target境界選定"]
+    scale: { small: { description: "単一manifest, 単一循環" }, medium: null, large: null, seed: null }
+    measurement:
+      comparison_modes: []
+      cpu_budget: []
+      memory_state: [normal]
+      cache_state: [cold]
+      warmup_runs: 0
+      repetitions: 3
+      noise_floor: "not-applicable"
+      reproducibility: "3回の独立実行で診断一致を確認"
+    pass_criteria:
+      d1: "診断一致、偽陽性ゼロ"
+      d4: not-applicable-yet
+
+  - id: M10-wasm-side
+    pattern: M10
+    execution_role: self-planned
+    reached_stage: configuration-definition
+    origin: self-planned
+    refs: [M10-lsp-native, M10-wasm-feasibility-reference-spike]
+    source_layout: >
+      M10-wasm-feasibility-reference-spikeの判定結果に依存する。肯定的な場合のみ
+      D1(または確定した後続実装ステージ)で本実装する。Rust再実装によるフォールバックは
+      削除済み(R2対応) — Nim実装への実依存を維持できない場合はM10-wasm-sideを
+      未達として保持する。
+    dependency_edges:
+      - "laminaria-plan-wasm -> plan_ffi (同一Nim実装のwasm32ビルド、フォールバックなし)"
+    requested_artifacts: [".wasmモジュール"]
+    demand_mode: full
+    edit: { kind: none, target: null }
+    forbidden_work:
+      - "WASM側の実装をRust再実装で代替する"
+      - "native側(M10-lsp-native)と異なる循環判定結果を返す"
+    required_work: ["M10-wasm-feasibility-reference-spikeが肯定的な場合にのみ、同一PlanningInputに対しM10-lsp-nativeと同一の診断/順序を返す実装を行う"]
+    expected:
+      kind: value
+      value_or_diagnostic: "M10-lsp-nativeの入力(M10-lsp-nativeのvalue_or_diagnostic参照)に対し、バイト同一の診断結果を返す(同一Nim実装のため)"
+      derivation: "M10-lsp-nativeと同一のNim plan_ffi実装を参照するため"
+    subset_scope:
+      d1_verifies: []
+      future_work:
+        - "M10-wasm-feasibility-reference-spikeが否定的な場合: 不足している独自target/runtime生成能力(Nim->wasm32コンパイルパス、または#5 T0のtarget契約)を具体的に記録し、未達(not-yet-satisfied)として保持する"
+        - "肯定的な場合: 実装・native側との一致確認"
+    scale: { small: null, medium: null, large: null, seed: null }
+    measurement:
+      comparison_modes: []
+      cpu_budget: []
+      memory_state: [normal]
+      cache_state: [cold]
+      warmup_runs: 0
+      repetitions: 0
+      noise_floor: "not-applicable"
+      reproducibility: "not-applicable (spike結果待ちのため未実行)"
+    pass_criteria:
+      d1: "spike結果が肯定的な場合のみ実装・一致確認まで完了。否定的な場合はfuture_workへの記録をもって本case自体は未達のまま保持(D1の完了条件には数えない)"
+      d4: not-applicable-yet
+
+  - id: M10-wasm-feasibility-reference-spike
+    pattern: M10
+    execution_role: reference
+    reached_stage: configuration-definition
     origin: fixture-new
-    source_layout: "新規スパイク専用ディレクトリ（fixtures/nim-wasm-spike等、D1着手時に確定）"
+    refs: []
+    source_layout: >
+      独立したreference調査タスク(M10本体の合格条件には数えない、R2対応)。
+      専用ディレクトリ(例: fixtures/nim-wasm-spike、D1着手時に確定)で実施する。
     dependency_edges: []
     requested_artifacts: ["単体.wasmまたはリンク失敗の診断ログ"]
     demand_mode: full
     edit: { kind: none, target: null }
-    forbidden_work: []
+    forbidden_work:
+      - "この調査結果をもってM10-wasm-sideを暗黙に完了扱いにする"
     required_work:
-      - "nim c --os:linux -d:emscripten (または--os:wasi) で最小のexportc関数をコンパイル"
-      - "wasm32向けRust cdylibとのリンク試行(最大3回)"
+      - "nim c --os:linux -d:emscripten (または--os:wasi) で最小のexportc関数(plan_ffiの1関数)をコンパイルする"
+      - "得られた成果物を対応するRust wasm32ターゲット(wasm32-unknown-emscriptenまたはwasm32-wasip1)cdylibとリンクし、1回の往復呼び出し(空のPlanningInput->空のPlanOutcome相当)を試みる"
     expected:
       kind: diagnostic
-      value_or_diagnostic: "A案(成立)またはB案(フォールバック採用)のいずれかの判定結果"
-      derivation: "docs/design/issue-35-d0-spec.md セクション3.3の判定規則"
+      value_or_diagnostic: "肯定(リンク成功・往復呼び出し成功)または否定(具体的な失敗理由・使用したrevision/target/commandの記録)のいずれか"
+      derivation: "調査タスク自体の実施記録。正確なrevision・target・command・成功/失敗判定条件はD1着手時に固定してから実行する"
     subset_scope:
       d1_verifies: ["判定結果の記録"]
-      future_work: ["判定結果に応じたM10本実装"]
+      future_work: ["判定結果に応じたM10-wasm-side本実装、または不足能力の記録"]
     scale: { small: { description: "最小往復1関数のみ" }, medium: null, large: null, seed: null }
     measurement:
       comparison_modes: []
@@ -523,73 +870,8 @@ cases:
       cache_state: [cold]
       warmup_runs: 0
       repetitions: 1
-      noise_floor: "not-applicable (feasibility spikeのため計測対象外)"
+      noise_floor: "not-applicable (feasibility調査のため計測対象外)"
+      reproducibility: "not-applicable"
     pass_criteria:
-      d1: "3回以内にA/Bいずれかの判定が記録される（未決着のまま放置しない）"
-      d4: not-applicable-yet
-
-  - id: M10-lsp-native
-    pattern: M10
-    origin: fixture-new
-    source_layout: >
-      新規 laminaria-lsp (Rust bin, native), 新規 nim-planner/src/plan_ffi.nim
-      (既存planning_kernel.plan/findCycleを再公開)。
-    dependency_edges:
-      - "laminaria-lsp -> plan_ffi.nim (native C-ABI static link)"
-    requested_artifacts: ["laminaria-lsp診断出力(LSP Diagnostic)"]
-    demand_mode: full
-    edit:
-      kind: config-change
-      target: "編集対象manifest内に循環依存を導入"
-    forbidden_work: ["循環が実際には存在しないのに診断を出す(偽陽性)"]
-    required_work: ["循環導入直後にDiagnostic.rangeが循環を構成するノードを指す"]
-    expected:
-      kind: diagnostic
-      value_or_diagnostic: "RejectionReasonKind::Cycleのcycle_pathと一致するLSP診断"
-      derivation: "既存のcall_planner_reports_a_structured_cycle_rejection_from_the_real_binaryテスト(crates/laminaria-plan/src/nim_planner_client.rs)と同一ロジックの再利用"
-    subset_scope:
-      d1_verifies: ["native linkの成立、循環診断の一致確認"]
-      future_work: ["実エディタ(LSPクライアント)経由の統合テスト"]
-    scale: { small: { description: "単一manifest, 単一循環" }, medium: null, large: null, seed: null }
-    measurement:
-      comparison_modes: [1]
-      cpu_budget: [1]
-      memory_state: [normal]
-      cache_state: [cold]
-      warmup_runs: 1
-      repetitions: 3
-      noise_floor: "同上"
-    pass_criteria:
-      d1: "診断一致、偽陽性ゼロ"
-      d4: not-applicable-yet
-
-  - id: M10-wasm-side
-    pattern: M10
-    origin: fixture-new
-    source_layout: "M10-spike-nim-wasm-feasibilityの判定結果に依存(A案またはB案)"
-    dependency_edges:
-      - "laminaria-plan-wasm -> plan_ffi (A案: 同一Nim実装のwasm32ビルド / B案: 同値性検証済みRust実装)"
-    requested_artifacts: [".wasmモジュール"]
-    demand_mode: full
-    edit: { kind: none, target: null }
-    forbidden_work: ["native側(M10-lsp-native)と異なる循環判定結果を返す"]
-    required_work: ["同一PlanningInputに対しM10-lsp-nativeと同一の診断/順序を返す"]
-    expected:
-      kind: value
-      value_or_diagnostic: "M10-lsp-nativeの出力とバイト同一(A案)または意味同値(B案、テストで保証)"
-      derivation: "A案:同一実装、B案:D1で新規実装する同値性テスト"
-    subset_scope:
-      d1_verifies: ["M10-spikeの判定結果を前提としたA/B分岐実装、同値性/同一性テスト"]
-      future_work: ["ブラウザ実行環境での統合、実際のWASMランタイム上での計測"]
-    scale: { small: { description: "M10-lsp-nativeと同一入力" }, medium: null, large: null, seed: null }
-    measurement:
-      comparison_modes: [1]
-      cpu_budget: [1]
-      memory_state: [normal]
-      cache_state: [cold]
-      warmup_runs: 1
-      repetitions: 3
-      noise_floor: "同上"
-    pass_criteria:
-      d1: "M10-spikeの判定結果に基づくA/B実装が同一/同値の結果を返す"
+      d1: "肯定/否定いずれかの判定が具体的な根拠とともに記録される(未決着のまま放置しない)"
       d4: not-applicable-yet
