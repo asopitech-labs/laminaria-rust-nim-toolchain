@@ -1,0 +1,9 @@
+[package]
+name = "leaf-a-medium"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+leaf-a-core = { path = "../leaf-a-core" }
+stage-04 = { path = "../stage-04" }

@@ -1,0 +1,48 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/used-core",
+    "crates/used-util",
+    "crates/fixture-bin",
+    "crates/unused-pkg-01",
+    "crates/unused-pkg-02",
+    "crates/unused-pkg-03",
+    "crates/unused-pkg-04",
+    "crates/unused-pkg-05",
+    "crates/unused-pkg-06",
+    "crates/unused-pkg-07",
+    "crates/unused-pkg-08",
+    "crates/unused-pkg-09",
+    "crates/unused-pkg-10",
+    "crates/unused-pkg-11",
+    "crates/unused-pkg-12",
+    "crates/unused-pkg-13",
+    "crates/unused-pkg-14",
+    "crates/unused-pkg-15",
+    "crates/unused-pkg-16",
+    "crates/unused-pkg-17",
+    "crates/unused-pkg-18",
+    "crates/unused-pkg-19",
+    "crates/unused-pkg-20",
+    "crates/unused-pkg-21",
+    "crates/unused-pkg-22",
+    "crates/unused-pkg-23",
+    "crates/unused-pkg-24",
+    "crates/unused-pkg-25",
+    "crates/unused-pkg-26",
+    "crates/unused-pkg-27",
+    "crates/unused-pkg-28",
+    "crates/unused-pkg-29",
+    "crates/unused-pkg-30",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[profile.dev]
+opt-level = 0
+
+[profile.release]
+opt-level = 3

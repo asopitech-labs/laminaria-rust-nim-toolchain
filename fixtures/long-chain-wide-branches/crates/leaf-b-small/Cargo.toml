@@ -1,0 +1,9 @@
+[package]
+name = "leaf-b-small"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+leaf-b-core = { path = "../leaf-b-core" }
+stage-02 = { path = "../stage-02" }

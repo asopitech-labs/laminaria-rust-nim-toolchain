@@ -1,0 +1,39 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/stage-01",
+    "crates/stage-02",
+    "crates/stage-03",
+    "crates/stage-04",
+    "crates/stage-05",
+    "crates/stage-06",
+    "crates/stage-07",
+    "crates/stage-08",
+    "crates/stage-09",
+    "crates/stage-10",
+    "crates/stage-11",
+    "crates/stage-12",
+    "crates/stage-13",
+    "crates/stage-14",
+    "crates/stage-15",
+    "crates/stage-16",
+    "crates/leaf-a-core",
+    "crates/leaf-b-core",
+    "crates/leaf-c-core",
+    "crates/leaf-matrix-sum-core",
+    "crates/leaf-a-small",
+    "crates/leaf-b-small",
+    "crates/leaf-a-medium",
+    "crates/leaf-b-medium",
+    "crates/leaf-c-medium",
+    "crates/leaf-matrix-sum-medium",
+    "crates/leaf-set-large",
+    "crates/aggregator-small",
+    "crates/aggregator-medium",
+    "crates/aggregator-large",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+publish = false

@@ -1,0 +1,13 @@
+[package]
+name = "aggregator-large"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "aggregator-large"
+path = "src/main.rs"
+
+[dependencies]
+stage-16 = { path = "../stage-16" }
+leaf-set-large = { path = "../leaf-set-large" }

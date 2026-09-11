@@ -621,6 +621,13 @@ jobs:
       - name: Run the D1-b1 reference-case evidence runner (M2/M3-topology/M4/M5)
         run: cargo run -p laminaria-experiment --bin laminaria-d1b1-reference-cases
 
+      # Issue #28 D1-b2: the two new fixtures (M7's long-chain-wide-branches,
+      # M8-many-unrequested-cargo's many-unrequested-targets), reproduced
+      # and checked against their D0-pinned expected values the same way
+      # D1-b1's own step above does for the existing fixtures.
+      - name: Run the D1-b2 new-fixture evidence runner (M7/M8-many-unrequested-cargo)
+        run: cargo run -p laminaria-experiment --bin laminaria-d1b2-new-fixtures
+
   # Issue #4's genuinely-open question, not #11's: every fixture above
   # uses `nim c`, which always produces native code via a generated-C
   # intermediate -- even with no header file, that route's ABI/symbol

@@ -1,0 +1,8 @@
+[package]
+name = "unused-pkg-29"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+unused-pkg-30 = { path = "../unused-pkg-30" }

@@ -1,0 +1,18 @@
+[package]
+name = "fixture-bin"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "fixture-bin"
+path = "src/main.rs"
+
+[[bin]]
+name = "fixture-bin-unrequested"
+path = "src/unrequested_main.rs"
+
+[dependencies]
+used-core = { path = "../used-core" }
+used-util = { path = "../used-util" }
+

@@ -1,0 +1,9 @@
+[package]
+name = "leaf-matrix-sum-medium"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+leaf-matrix-sum-core = { path = "../leaf-matrix-sum-core" }
+stage-04 = { path = "../stage-04" }

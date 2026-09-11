@@ -1,0 +1,28 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/used-core",
+    "crates/used-util",
+    "crates/fixture-bin",
+    "crates/unused-pkg-01",
+    "crates/unused-pkg-02",
+    "crates/unused-pkg-03",
+    "crates/unused-pkg-04",
+    "crates/unused-pkg-05",
+    "crates/unused-pkg-06",
+    "crates/unused-pkg-07",
+    "crates/unused-pkg-08",
+    "crates/unused-pkg-09",
+    "crates/unused-pkg-10",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[profile.dev]
+opt-level = 0
+
+[profile.release]
+opt-level = 3
