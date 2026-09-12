@@ -108,6 +108,22 @@ jobs:
       - name: cargo test
         run: cargo test --workspace
 
+      # nim-planner's own Nim-level unit tests (planning_kernel.plan,
+      # issue #36's incremental_kernel) were, until now, never actually
+      # invoked in CI at all -- only indirectly, through the Rust-side
+      # integration tests that spawn the compiled laminaria-planner
+      # binary (crates/laminaria-plan/src/nim_planner_client.rs). Adding
+      # this now rather than leaving it as a repeat of that same,
+      # pre-existing gap: incremental_kernel's own test suite has no
+      # Rust-side caller yet (the session client lands in a later step
+      # of this same task), so it would otherwise go completely
+      # unexercised in CI in the meantime.
+      - name: nim-planner unit tests (planning_kernel, incremental_kernel)
+        run: |
+          cd nim-planner
+          nim c -r --path:src --nimcache:nimcache tests/test_planning_kernel.nim
+          nim c -r --path:src --nimcache:nimcache tests/test_incremental_kernel.nim
+
       - name: doctor (environment fingerprint, informational)
         run: cargo run -p laminaria-cli -- doctor
         continue-on-error: true
