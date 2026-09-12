@@ -29,7 +29,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::num::NonZeroUsize;
 use std::path::Path;
-use std::sync::{mpsc, Barrier, Mutex};
+use std::sync::{mpsc, Mutex};
 use std::time::{Duration, Instant};
 
 use laminaria_ir::discover::discover_called_functions;
@@ -394,10 +394,23 @@ enum DispatchOutcome {
     Failed(String),
 }
 
+/// Test-only instrumentation seam (issue #36 T1 completion-review
+/// follow-up, 2026-09-12): called with an action's id the instant that
+/// action's CPU slot is acquired, before any real `laminaria_ir` work
+/// for it begins. Always `None` in production (the public
+/// `run_to_completion` never supplies one) -- only a controlled,
+/// explicitly-labeled test (see `mod tests`) supplies one, to force two
+/// specific actions to rendezvous at this exact point and prove the
+/// scheduler's genuine concurrent-dispatch capability deterministically,
+/// rather than depending on however the OS happens to schedule two
+/// independently spawned threads.
+type SlotAcquiredHook<'a> = dyn Fn(&str) + Sync + 'a;
+
 fn dispatch(
     action: &Action,
     store: &IncrementalArtifactStore,
     trace: &CpuSlotTrace,
+    on_slot_acquired: Option<&SlotAcquiredHook<'_>>,
 ) -> DispatchOutcome {
     let Some(descriptor) = action.compiler_work.as_ref() else {
         return DispatchOutcome::Failed(format!("action {:?} has no compiler_work", action.id));
@@ -426,6 +439,9 @@ fn dispatch(
                 .collect();
             let result = {
                 let _slot = trace.enter(&action.id);
+                if let Some(hook) = on_slot_acquired {
+                    hook(&action.id);
+                }
                 lower_rust_source(Path::new(&provenance.source_file), &source_text, &requested)
             };
             match result {
@@ -451,6 +467,9 @@ fn dispatch(
                 .collect();
             let result = {
                 let _slot = trace.enter(&action.id);
+                if let Some(hook) = on_slot_acquired {
+                    hook(&action.id);
+                }
                 discover_called_functions(Path::new(&provenance.source_file), &source_text, &known)
             };
             match result {
@@ -475,6 +494,9 @@ fn dispatch(
             };
             let result = {
                 let _slot = trace.enter(&action.id);
+                if let Some(hook) = on_slot_acquired {
+                    hook(&action.id);
+                }
                 validate_program(&candidate)
             };
             match result {
@@ -507,6 +529,9 @@ fn dispatch(
             let mut outcomes = Vec::new();
             {
                 let _slot = trace.enter(&action.id);
+                if let Some(hook) = on_slot_acquired {
+                    hook(&action.id);
+                }
                 for test_input in &descriptor.test_inputs {
                     match eval_function(program, function_name, test_input) {
                         Ok(outcome) => outcomes.push(outcome),
@@ -578,11 +603,57 @@ struct WorkerPoolState {
     done: bool,
 }
 
+/// Ordinary (production) entry point: no slot-acquisition
+/// instrumentation, so nothing about dispatch timing here is anything
+/// other than however the OS actually schedules this run's worker
+/// threads -- exactly production behavior, with no synchronization
+/// overhead added purely to make a test's timing more convenient (see
+/// [`run_to_completion_impl`]'s own doc comment for why an earlier
+/// version of this function added, and this version removed, a
+/// worker-start `Barrier`).
 pub fn run_to_completion(
     client: &mut IncrementalSessionClient,
     initial_ready: Vec<Action>,
     cpu_budget: NonZeroUsize,
+    on_discovered: impl FnMut(&str, &[String]) -> DiscoveryResolution,
+) -> Result<(EvidenceReader, ExecutionReport), ExecutorError> {
+    run_to_completion_impl(client, initial_ready, cpu_budget, on_discovered, None)
+}
+
+/// The shared implementation behind [`run_to_completion`]. Dispatches
+/// every `ready` action onto a pool of at most `cpu_budget` worker
+/// threads, translates each completion/failure into the matching
+/// `PlanningEvent`, feeds it back to `client`, and dispatches whatever
+/// becomes newly ready -- until nothing is ready and nothing is in
+/// flight.
+///
+/// `on_slot_acquired` is `None` for every real caller (via
+/// `run_to_completion`'s own public wrapper). Issue #36 T1
+/// completion-review follow-up (2026-09-12): an earlier version of
+/// this function added a worker-start `Barrier` here, in production
+/// code, to make T0 case1's own concurrency proof deterministic. A
+/// second review correctly found that fix insufficient and actively
+/// counter-productive: a `Barrier` only synchronizes *when workers may
+/// first attempt to claim work* -- it does not, and cannot, force the
+/// OS to actually run two specific threads' real computation
+/// concurrently afterward (the OS could still schedule worker A to run
+/// to completion before worker B is ever given a timeslice, reproducing
+/// the exact same `peak_concurrent() == 1` outcome), so it was not a
+/// real logical guarantee; and it unconditionally adds a rendezvous
+/// delay to every real run, worse the larger `cpu_budget` is -- the
+/// wrong direction for issue #28 D3's own goal of minimizing
+/// time-to-first-useful-work. The `Barrier` is removed entirely; a
+/// genuinely deterministic proof of concurrent dispatch instead lives
+/// in a controlled, explicitly-labeled test (`mod tests`) that supplies
+/// `on_slot_acquired` to force exactly the two actions it cares about to
+/// rendezvous at CPU-slot acquisition -- this production path stays
+/// unsynchronized and pays no overhead for it.
+fn run_to_completion_impl(
+    client: &mut IncrementalSessionClient,
+    initial_ready: Vec<Action>,
+    cpu_budget: NonZeroUsize,
     mut on_discovered: impl FnMut(&str, &[String]) -> DiscoveryResolution,
+    on_slot_acquired: Option<&SlotAcquiredHook<'_>>,
 ) -> Result<(EvidenceReader, ExecutionReport), ExecutorError> {
     let store = IncrementalArtifactStore::default();
     let trace = CpuSlotTrace::new();
@@ -616,25 +687,6 @@ pub fn run_to_completion(
         ready: initial_ready.into_iter().collect(),
         done: false,
     });
-    // Every worker thread rendezvous here before any of them may pop a
-    // single action -- issue #36 T1 completion-review follow-up
-    // (2026-09-12): without this, two actions dispatched to two
-    // separate freshly-`scope.spawn`ed threads could start racing at
-    // whatever moment each thread happened to actually get scheduled by
-    // the OS, which -- under real CI-runner contention -- proved wide
-    // enough that a fast, near-instantaneous dispatch could finish and
-    // release its CPU slot before a slower thread's dispatch had even
-    // begun, making T0 case1's own "an independent ready branch
-    // genuinely overlaps a slower one" property depend on OS scheduling
-    // luck rather than this executor's own design. A `Barrier` makes
-    // every worker's *first* attempt to claim work start from the same
-    // synchronized instant instead -- a real, deterministic scheduling
-    // guarantee, not a test-only hook (every real run pays this same
-    // one-time rendezvous, not merely this module's own tests): once
-    // released, whichever ready actions the queue already holds are
-    // raced for genuinely concurrently, no longer skewed by independent
-    // thread-spawn latency.
-    let start_barrier = Barrier::new(cpu_budget.get());
 
     std::thread::scope(|scope| -> Result<(), ExecutorError> {
         for _ in 0..cpu_budget.get() {
@@ -642,37 +694,31 @@ pub fn run_to_completion(
             let pool = &pool;
             let store = &store;
             let trace = &trace;
-            let start_barrier = &start_barrier;
             let report_tx = report_tx.clone();
-            scope.spawn(move || {
-                start_barrier.wait();
-                loop {
-                    let action = {
-                        let mut s = state.lock().unwrap();
-                        loop {
-                            if let Some(a) = s.ready.pop_front() {
-                                break a;
-                            }
-                            if s.done {
-                                return;
-                            }
-                            s = pool.wait(s).unwrap();
+            scope.spawn(move || loop {
+                let action = {
+                    let mut s = state.lock().unwrap();
+                    loop {
+                        if let Some(a) = s.ready.pop_front() {
+                            break a;
                         }
-                    };
-                    let action_id = action.id.clone();
-                    let outcome = dispatch(&action, store, trace);
-                    let report = match outcome {
-                        DispatchOutcome::Completed => WorkerReport::Completed { action_id },
-                        DispatchOutcome::Discovered(names) => {
-                            WorkerReport::Discovered { action_id, names }
+                        if s.done {
+                            return;
                         }
-                        DispatchOutcome::Failed(detail) => {
-                            WorkerReport::Failed { action_id, detail }
-                        }
-                    };
-                    if report_tx.send(report).is_err() {
-                        return;
+                        s = pool.wait(s).unwrap();
                     }
+                };
+                let action_id = action.id.clone();
+                let outcome = dispatch(&action, store, trace, on_slot_acquired);
+                let report = match outcome {
+                    DispatchOutcome::Completed => WorkerReport::Completed { action_id },
+                    DispatchOutcome::Discovered(names) => {
+                        WorkerReport::Discovered { action_id, names }
+                    }
+                    DispatchOutcome::Failed(detail) => WorkerReport::Failed { action_id, detail },
+                };
+                if report_tx.send(report).is_err() {
+                    return;
                 }
             });
         }
@@ -1139,37 +1185,42 @@ mod tests {
         }
     }
 
-    /// The end-to-end proof of every outcome this round of issue #36 T1
-    /// was asked for, in one real session against the real compiled
-    /// Nim binary:
-    ///
-    /// - an independent ready branch (`f`'s `LowerSource`) genuinely
-    ///   overlaps in execution with a slower branch
-    ///   (`add_or_double.rs`'s `DiscoverSourceDependencies`) -- T0 case1
-    ///   (`peak_concurrent() >= 2`, the same probe technique
-    ///   `compiler_work_executor.rs`'s own review-vetted
-    ///   `ComputeConcurrencyProbe` uses, entered only around real
-    ///   computation).
-    /// - discovery resolves the real closed function set (`["add_or_double",
-    ///   "double"]`) from the real fixture file, and the resulting
-    ///   LowerSource -> ValidateIr -> EvaluateEvidence chain, dispatched
-    ///   entirely through real `laminaria_ir` calls, produces the
-    ///   D0-confirmed value `add_or_double(3,4,1) == 6`
-    ///   (`crates/laminaria-ir/src/rust_frontend.rs:830-835`).
-    /// - the whole session runs over the real session-scoped Nim IPC
-    ///   boundary (`IncrementalSessionClient`), never a Rust-computed
-    ///   substitute.
-    #[test]
+    /// T0 case1's fixed scenario, shared by both tests below: an
+    /// independent `f`'s `LowerSource` and `add_or_double.rs`'s
+    /// `DiscoverSourceDependencies` both start `ready`. `label` must be
+    /// distinct per caller -- `cargo test` runs tests in parallel
+    /// threads within one process by default, and this fixture writes
+    /// a real temp file to a fixed-looking path, so two tests sharing
+    /// one literal path would race on it. `#[cfg(unix)]`, matching the
+    /// two real-binary tests that are its only callers -- unused (and
+    /// therefore a `-D warnings` build failure) on a non-unix build.
     #[cfg(unix)]
-    fn add_or_double_discovery_runs_concurrently_with_an_independent_branch_and_produces_the_confirmed_value(
-    ) {
+    struct Case1Fixture {
+        f_path: PathBuf,
+        lower_f_id: String,
+        lower_f: Action,
+        add_or_double_path: PathBuf,
+        add_or_double_snapshot: String,
+        discover_id: String,
+        discover: Action,
+    }
+
+    #[cfg(unix)]
+    impl Drop for Case1Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.f_path);
+        }
+    }
+
+    #[cfg(unix)]
+    fn build_case1_fixture(label: &str) -> Case1Fixture {
         let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .canonicalize()
             .unwrap();
         let f_source = "fn f(x: i32) -> i32 { x }";
         let f_snapshot = compute_source_snapshot_id(f_source);
-        let f_path = repo_root.join("target/tmp-incremental-executor-f.rs");
+        let f_path = repo_root.join(format!("target/tmp-incremental-executor-f-{label}.rs"));
         std::fs::write(&f_path, f_source).unwrap();
 
         let add_or_double_path = repo_root
@@ -1200,9 +1251,158 @@ mod tests {
             &["add_or_double"],
         );
 
+        Case1Fixture {
+            f_path,
+            lower_f_id,
+            lower_f,
+            add_or_double_path,
+            add_or_double_snapshot,
+            discover_id,
+            discover,
+        }
+    }
+
+    /// The `on_discovered` handler both case1 tests share: resolves the
+    /// real `["add_or_double", "double"]` closed set into
+    /// `LowerSource -> ValidateIr -> EvaluateEvidence`, recording the
+    /// intermediate `ValidateIr`/`EvaluateEvidence` ids into the two
+    /// `_out` holders so a caller can assert their `action_waits`
+    /// entries afterward. `#[cfg(unix)]`, same reasoning as
+    /// `Case1Fixture`.
+    #[cfg(unix)]
+    fn case1_discovery_resolver<'a>(
+        add_or_double_path: &'a Path,
+        add_or_double_snapshot: &'a str,
+        validate_id_out: &'a mut Option<String>,
+        evidence_id_out: &'a mut Option<String>,
+    ) -> impl FnMut(&str, &[String]) -> DiscoveryResolution + 'a {
+        move |_discovering_action_id, names| {
+            assert_eq!(
+                names,
+                ["double".to_string()],
+                "must discover exactly `double`"
+            );
+            let closed_set = ["add_or_double", "double"];
+            let lower_id = lower_source_artifact_id(
+                "0.1.0",
+                "rust",
+                add_or_double_snapshot,
+                &closed_set,
+                "0.1.0",
+            );
+            let lower = lower_source_action(
+                &lower_id,
+                "rust",
+                add_or_double_snapshot,
+                add_or_double_path.to_str().unwrap(),
+                &closed_set,
+            );
+            let validate_id = validate_ir_artifact_id("0.1.0", &lower_id, "0.1.0");
+            let validate = validate_ir_action(&validate_id, &lower_id);
+            let evidence_id = evaluate_evidence_artifact_id(
+                "0.1.0",
+                &validate_id,
+                "add_or_double",
+                &[vec![3, 4, 1]],
+                "0.1.0",
+            );
+            let evidence = evaluate_evidence_action(
+                &evidence_id,
+                &validate_id,
+                "add_or_double",
+                vec![vec![3, 4, 1]],
+            );
+            *validate_id_out = Some(validate_id.clone());
+            *evidence_id_out = Some(evidence_id.clone());
+            DiscoveryResolution {
+                new_actions: vec![lower, validate, evidence],
+                new_demands: vec![DemandReference {
+                    artifact_id: evidence_id,
+                    requested_by: "consumer-b".to_string(),
+                }],
+            }
+        }
+    }
+
+    /// Test-only rendezvous for exactly the named target action ids
+    /// (issue #36 T1 completion-review follow-up, 2026-09-12): every
+    /// target must call `arrive_and_wait` (wired in as
+    /// `run_to_completion_impl`'s `on_slot_acquired` seam) before any of
+    /// them is released to proceed with its real computation -- this is
+    /// what makes "these two actions genuinely dispatch concurrently"
+    /// deterministic, rather than a matter of OS scheduling luck.
+    /// Bounded by `timeout` so a scheduler that genuinely fails to
+    /// dispatch both concurrently fails the test with a clear message
+    /// instead of hanging forever. `#[cfg(unix)]`, same reasoning as
+    /// `Case1Fixture`.
+    #[cfg(unix)]
+    struct SlotRendezvous {
+        targets: HashSet<String>,
+        arrived: Mutex<HashSet<String>>,
+        condvar: std::sync::Condvar,
+    }
+
+    #[cfg(unix)]
+    impl SlotRendezvous {
+        fn new(targets: impl IntoIterator<Item = String>) -> Self {
+            SlotRendezvous {
+                targets: targets.into_iter().collect(),
+                arrived: Mutex::new(HashSet::new()),
+                condvar: std::sync::Condvar::new(),
+            }
+        }
+
+        fn arrive_and_wait(&self, action_id: &str, timeout: Duration) {
+            if !self.targets.contains(action_id) {
+                return;
+            }
+            let mut arrived = self.arrived.lock().unwrap();
+            arrived.insert(action_id.to_string());
+            self.condvar.notify_all();
+            let (_arrived, wait_result) = self
+                .condvar
+                .wait_timeout_while(arrived, timeout, |a| {
+                    !self.targets.iter().all(|t| a.contains(t))
+                })
+                .unwrap();
+            assert!(
+                !wait_result.timed_out(),
+                "timed out waiting for every target action {:?} to reach CPU-slot acquisition -- \
+                 the scheduler failed to dispatch them concurrently",
+                self.targets
+            );
+        }
+    }
+
+    /// The end-to-end proof of every T0 case1 outcome that does *not*
+    /// depend on OS thread scheduling, in one real session against the
+    /// real compiled Nim binary: discovery resolves the real closed
+    /// function set (`["add_or_double", "double"]`) from the real
+    /// fixture file, and the resulting
+    /// `LowerSource -> ValidateIr -> EvaluateEvidence` chain, dispatched
+    /// entirely through real `laminaria_ir` calls over the real
+    /// session-scoped Nim IPC boundary, produces the D0-confirmed value
+    /// `add_or_double(3,4,1) == 6`
+    /// (`crates/laminaria-ir/src/rust_frontend.rs:830-835`); the
+    /// execution report's own measurement fields (T0 §9's evidence
+    /// requirements) are populated and internally consistent.
+    ///
+    /// Deliberately makes **no claim about whether `lower_f` and
+    /// `discover` genuinely overlapped in real time** -- that would
+    /// depend on however the OS happened to schedule this run's worker
+    /// threads (issue #36 T1 completion-review follow-up, 2026-09-12:
+    /// exactly this kind of OS-dependent pass/fail condition must not
+    /// gate this test). The deterministic overlap proof lives in
+    /// [`tests::scheduler_genuinely_overlaps_two_independent_actions_under_a_forced_rendezvous`]
+    /// below, which forces it via instrumentation instead.
+    #[test]
+    #[cfg(unix)]
+    fn add_or_double_discovery_runs_concurrently_with_an_independent_branch_and_produces_the_confirmed_value(
+    ) {
+        let fixture = build_case1_fixture("ordinary");
         let initial_graph = PlanningInput::new(
-            vec![lower_f_id.clone(), discover_id.clone()],
-            vec![lower_f.clone(), discover.clone()],
+            vec![fixture.lower_f_id.clone(), fixture.discover_id.clone()],
+            vec![fixture.lower_f.clone(), fixture.discover.clone()],
         );
 
         let bin = real_incremental_planner_binary();
@@ -1219,116 +1419,23 @@ mod tests {
             2,
             "both actions must start ready (Source-only inputs)"
         );
-        let initial_ready = vec![lower_f, discover];
+        let initial_ready = vec![fixture.lower_f.clone(), fixture.discover.clone()];
 
-        let add_or_double_path_for_closure = add_or_double_path.clone();
-        let add_or_double_snapshot_for_closure = add_or_double_snapshot.clone();
         let mut validate_action_id_holder: Option<String> = None;
         let mut evidence_action_id_holder: Option<String> = None;
-
         let cpu_budget = NonZeroUsize::new(2).unwrap();
         let (evidence_reader, report) = run_to_completion(
             &mut client,
             initial_ready,
             cpu_budget,
-            |_discovering_action_id, names| {
-                assert_eq!(
-                    names,
-                    ["double".to_string()],
-                    "must discover exactly `double`"
-                );
-                let closed_set = ["add_or_double", "double"];
-                let lower_id = lower_source_artifact_id(
-                    "0.1.0",
-                    "rust",
-                    &add_or_double_snapshot_for_closure,
-                    &closed_set,
-                    "0.1.0",
-                );
-                let lower = lower_source_action(
-                    &lower_id,
-                    "rust",
-                    &add_or_double_snapshot_for_closure,
-                    add_or_double_path_for_closure.to_str().unwrap(),
-                    &closed_set,
-                );
-                let validate_id = validate_ir_artifact_id("0.1.0", &lower_id, "0.1.0");
-                let validate = validate_ir_action(&validate_id, &lower_id);
-                let evidence_id = evaluate_evidence_artifact_id(
-                    "0.1.0",
-                    &validate_id,
-                    "add_or_double",
-                    &[vec![3, 4, 1]],
-                    "0.1.0",
-                );
-                let evidence = evaluate_evidence_action(
-                    &evidence_id,
-                    &validate_id,
-                    "add_or_double",
-                    vec![vec![3, 4, 1]],
-                );
-                validate_action_id_holder = Some(validate_id.clone());
-                evidence_action_id_holder = Some(evidence_id.clone());
-                DiscoveryResolution {
-                    new_actions: vec![lower, validate, evidence],
-                    new_demands: vec![DemandReference {
-                        artifact_id: evidence_id,
-                        requested_by: "consumer-b".to_string(),
-                    }],
-                }
-            },
+            case1_discovery_resolver(
+                &fixture.add_or_double_path,
+                &fixture.add_or_double_snapshot,
+                &mut validate_action_id_holder,
+                &mut evidence_action_id_holder,
+            ),
         )
         .unwrap();
-
-        // `run_to_completion`'s own worker-start barrier (issue #36 T1
-        // completion-review follow-up, 2026-09-12) is what makes this
-        // overlap deterministic rather than a matter of OS scheduling
-        // luck: both `lower_f` and `discover` are already queued
-        // `ready` before any worker is released to race for them, so
-        // both dispatches begin from the same synchronized instant --
-        // a prior version of this same assertion, without that
-        // barrier, failed once on CI (`observed peak_concurrent=1`,
-        // 2026-09-12) purely from independent thread-spawn latency
-        // staggering the two dispatches far enough apart that the
-        // faster one (`lower_f`) finished before the slower one
-        // (`discover`) had even begun.
-        assert!(
-            report.peak_concurrent() >= 2,
-            "AID_LOWER_F must genuinely overlap with the add_or_double discovery, not merely be \
-             dispatched sequentially behind it (T0 case1); observed peak_concurrent={}",
-            report.peak_concurrent()
-        );
-
-        // The same T0 case1 property (an independent ready branch
-        // genuinely overlaps a slower one), now proven by real,
-        // action-tagged timestamps rather than only an aggregate
-        // concurrency counter (issue #36 T1 completion review, point
-        // 5): `lower_f`'s CPU slot and `discover`'s CPU slot must have
-        // been held *simultaneously* at some real instant -- i.e. each
-        // one's own acquisition happened before the other's release.
-        // Deterministic under the worker-start barrier above, not a
-        // race against however the OS happened to schedule two
-        // independently-spawned threads.
-        let lower_f_acquired = report
-            .slot_acquired_at(&lower_f_id)
-            .expect("lower_f must have acquired a CPU slot");
-        let lower_f_released = report
-            .slot_released_at(&lower_f_id)
-            .expect("lower_f must have released its CPU slot");
-        let discover_acquired = report
-            .slot_acquired_at(&discover_id)
-            .expect("the discover action must have acquired a CPU slot");
-        let discover_released = report
-            .slot_released_at(&discover_id)
-            .expect("the discover action must have released its CPU slot");
-        assert!(
-            lower_f_acquired < discover_released && discover_acquired < lower_f_released,
-            "the independent branch's useful work (LowerSource on `f`) must have started, by \
-             timestamp, before the other branch's dependency discovery finished, and vice versa \
-             -- their CPU-slot intervals must genuinely overlap in real time, not merely count \
-             as concurrent in aggregate; lower_f=[{lower_f_acquired:?}, {lower_f_released:?}], \
-             discover=[{discover_acquired:?}, {discover_released:?}]"
-        );
 
         report
             .verify_slot_invariants(cpu_budget)
@@ -1379,7 +1486,116 @@ mod tests {
         );
 
         client.close().unwrap();
-        let _ = std::fs::remove_file(&f_path);
+    }
+
+    /// A **controlled test that uses instrumentation to verify the
+    /// scheduler's genuine concurrent-dispatch capability** (issue #36
+    /// T1 completion-review follow-up, 2026-09-12) -- explicitly not a
+    /// claim about how the OS happens to schedule threads on its own.
+    /// Forces `lower_f` and `discover` to rendezvous, via
+    /// [`SlotRendezvous`], at the exact instant each acquires its CPU
+    /// slot (`run_to_completion_impl`'s own `on_slot_acquired` seam), so
+    /// both begin their real `laminaria_ir` computation from the same
+    /// synchronized instant -- proving the scheduler is *capable* of
+    /// running two independent real dispatches concurrently and still
+    /// producing the correct final result, deterministically. A prior
+    /// version of this same proof, with no such instrumentation and
+    /// relying purely on however two independently `scope.spawn`ed
+    /// threads happened to be scheduled, failed once on real CI (`rust
+    /// (ubuntu-latest)`, run `34678695347`, `observed peak_concurrent=1`)
+    /// before a same-commit rerun passed cleanly -- exactly the
+    /// "logical guarantee vs. observed luck" gap this test closes.
+    #[test]
+    #[cfg(unix)]
+    fn scheduler_genuinely_overlaps_two_independent_actions_under_a_forced_rendezvous() {
+        let fixture = build_case1_fixture("controlled");
+        let initial_graph = PlanningInput::new(
+            vec![fixture.lower_f_id.clone(), fixture.discover_id.clone()],
+            vec![fixture.lower_f.clone(), fixture.discover.clone()],
+        );
+
+        let bin = real_incremental_planner_binary();
+        let (mut client, start_response) =
+            IncrementalSessionClient::start(&bin, "s-case1-controlled", initial_graph, vec![])
+                .unwrap();
+        let IncrementalPlannerResponse::PlanDelta {
+            changed_actions, ..
+        } = start_response
+        else {
+            panic!("expected PlanDelta from StartSession")
+        };
+        assert_eq!(
+            changed_actions.len(),
+            2,
+            "both actions must start ready (Source-only inputs)"
+        );
+        let initial_ready = vec![fixture.lower_f.clone(), fixture.discover.clone()];
+
+        let rendezvous =
+            SlotRendezvous::new([fixture.lower_f_id.clone(), fixture.discover_id.clone()]);
+        let on_slot_acquired =
+            |action_id: &str| rendezvous.arrive_and_wait(action_id, Duration::from_secs(10));
+
+        let mut validate_action_id_holder: Option<String> = None;
+        let mut evidence_action_id_holder: Option<String> = None;
+        let cpu_budget = NonZeroUsize::new(2).unwrap();
+        let (evidence_reader, report) = run_to_completion_impl(
+            &mut client,
+            initial_ready,
+            cpu_budget,
+            case1_discovery_resolver(
+                &fixture.add_or_double_path,
+                &fixture.add_or_double_snapshot,
+                &mut validate_action_id_holder,
+                &mut evidence_action_id_holder,
+            ),
+            Some(&on_slot_acquired),
+        )
+        .unwrap();
+
+        assert!(
+            report.peak_concurrent() >= 2,
+            "the forced rendezvous must make lower_f and discover genuinely overlap; observed \
+             peak_concurrent={}",
+            report.peak_concurrent()
+        );
+
+        let lower_f_acquired = report
+            .slot_acquired_at(&fixture.lower_f_id)
+            .expect("lower_f must have acquired a CPU slot");
+        let lower_f_released = report
+            .slot_released_at(&fixture.lower_f_id)
+            .expect("lower_f must have released its CPU slot");
+        let discover_acquired = report
+            .slot_acquired_at(&fixture.discover_id)
+            .expect("the discover action must have acquired a CPU slot");
+        let discover_released = report
+            .slot_released_at(&fixture.discover_id)
+            .expect("the discover action must have released its CPU slot");
+        assert!(
+            lower_f_acquired < discover_released && discover_acquired < lower_f_released,
+            "the forced rendezvous must make each action's own acquisition happen before the \
+             other's release -- their CPU-slot intervals must genuinely overlap in real time; \
+             lower_f=[{lower_f_acquired:?}, {lower_f_released:?}], \
+             discover=[{discover_acquired:?}, {discover_released:?}]"
+        );
+
+        report
+            .verify_slot_invariants(cpu_budget)
+            .expect("the recorded CPU-slot event timeline must satisfy T0 §9's own invariants");
+
+        let evidence_id = evidence_action_id_holder.expect("discovery closure must have run");
+        let evidence = evidence_reader
+            .evidence_of(&evidence_id)
+            .expect("add_or_double's EvaluateEvidence must have produced evidence");
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(
+            evidence[0].value, 6,
+            "add_or_double(3,4,1) must equal the D0-confirmed value 6 even under a forced \
+             rendezvous -- the instrumentation must not have perturbed the real computation"
+        );
+
+        client.close().unwrap();
     }
 
     /// Regression guard for the "single linearized order" fix (issue
