@@ -737,7 +737,8 @@ pub fn run_project_generation(
             ActionKind::LowerSource
             | ActionKind::ValidateIr
             | ActionKind::TransformFunction
-            | ActionKind::EvaluateEvidence => {
+            | ActionKind::EvaluateEvidence
+            | ActionKind::DiscoverSourceDependencies => {
                 unreachable!(
                     "project_planning_input never emits a compiler-work action -- issue #27 \
                      owns their own in-process executor, a separate role from this one"

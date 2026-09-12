@@ -17,15 +17,20 @@ use serde::{Deserialize, Serialize};
 use crate::compiler_work::CompilerWorkDescriptor;
 
 /// Bumped 0.1.0 -> 0.2.0 for issue #27's B: four new `ActionKind`
-/// variants and `Action`'s new optional `compiler_work` field. Backward
-/// compatible on the wire (every existing field/variant is unchanged, the
+/// variants and `Action`'s new optional `compiler_work` field. Bumped
+/// again 0.2.0 -> 0.3.0 for issue #36 T0's fifth compiler-work kind,
+/// `DiscoverSourceDependencies` -- `StartSession`'s `initial_graph`
+/// (`crates/laminaria-run/src/incremental_session_client.rs`) reuses this
+/// same `PlanningInput`/`Action` shape unchanged, so an `Action` carrying
+/// the new kind must decode on both sides of the wire. Backward
+/// compatible in *shape* (every existing field/variant is unchanged, the
 /// new field is omitted entirely when absent -- see
 /// `compiler_work::tests::an_action_with_no_compiler_work_omits_the_field_entirely`),
 /// but bumped anyway so a producer/consumer pair that has not been
 /// updated together is still caught by the existing schema-version gate
 /// (`nim-planner/src/contract.nim`'s `planFromJson`) rather than silently
 /// running with a partially-understood contract.
-pub const PLAN_SCHEMA_VERSION: &str = "0.2.0";
+pub const PLAN_SCHEMA_VERSION: &str = "0.3.0";
 pub const PRODUCED_BY: &str = "laminaria-nim-planning-kernel";
 
 /// An external, pre-existing input (`Source`, a leaf with no producing
@@ -72,6 +77,16 @@ pub enum ActionKind {
     ValidateIr,
     TransformFunction,
     EvaluateEvidence,
+    /// Issue #36 T0 §1.8: a shallow, `lower_rust_source`/`lower_nim_source`-
+    /// independent call-graph scan (`laminaria_ir::rust_frontend::
+    /// discover_called_functions`) that determines which functions a
+    /// requested set transitively calls but does not yet declare --
+    /// never itself calls `lower_rust_source`/`lower_nim_source`, so it
+    /// never hits their "call to a name outside this lowering request"
+    /// precondition. Its own artifact id
+    /// ([`crate::compiler_work::discover_source_dependencies_artifact_id`])
+    /// mirrors `lower_source_artifact_id`'s shape exactly.
+    DiscoverSourceDependencies,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

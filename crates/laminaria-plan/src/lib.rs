@@ -8,9 +8,10 @@ pub mod types;
 pub mod validate;
 
 pub use compiler_work::{
-    evaluate_evidence_artifact_id, lower_source_artifact_id, transform_function_artifact_id,
-    validate_ir_artifact_id, CompilerWorkDescriptor, ResourceRequest, SourceProvenanceRef,
-    TransformKind, TransformParameters, COMPILER_WORK_SCHEMA_VERSION,
+    discover_source_dependencies_artifact_id, evaluate_evidence_artifact_id,
+    lower_source_artifact_id, transform_function_artifact_id, validate_ir_artifact_id,
+    CompilerWorkDescriptor, ResourceRequest, SourceProvenanceRef, TransformKind,
+    TransformParameters, COMPILER_WORK_SCHEMA_VERSION,
 };
 pub use nim_planner_client::{
     call_default_planner, call_planner, find_planner_binary, PlannerCallError,

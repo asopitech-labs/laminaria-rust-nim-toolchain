@@ -292,7 +292,8 @@ pub fn run_generation(
             ActionKind::LowerSource
             | ActionKind::ValidateIr
             | ActionKind::TransformFunction
-            | ActionKind::EvaluateEvidence => Err(SelfBuildError::ActionFailed {
+            | ActionKind::EvaluateEvidence
+            | ActionKind::DiscoverSourceDependencies => Err(SelfBuildError::ActionFailed {
                 action_id: action.id.clone(),
                 detail: "compiler-work action kinds are not executable via this legacy \
                          delegated-build self-build executor -- issue #27 owns their own \

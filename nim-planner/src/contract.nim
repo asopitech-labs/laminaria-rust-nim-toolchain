@@ -24,8 +24,10 @@ import std/[json, tables, sequtils, options]
 ## `ActionKind` values plus `Action`'s new optional `compilerWork` field
 ## mirror `crates/laminaria-plan/src/{types,compiler_work}.rs` exactly --
 ## see that crate's own `PLAN_SCHEMA_VERSION` doc comment for why this is
-## bumped even though every existing field/variant is unchanged.
-const PlanSchemaVersion* = "0.2.0"
+## bumped even though every existing field/variant is unchanged. Bumped
+## again 0.2.0 -> 0.3.0 for issue #36 T0's fifth compiler-work kind,
+## `akDiscoverSourceDependencies` -- see that same doc comment.
+const PlanSchemaVersion* = "0.3.0"
 const ProducedBy* = "laminaria-nim-planning-kernel"
 const CompilerWorkSchemaVersion* = "0.1.0"
 
@@ -65,6 +67,11 @@ type
     akValidateIr = "validate_ir"
     akTransformFunction = "transform_function"
     akEvaluateEvidence = "evaluate_evidence"
+    ## Issue #36 T0 §1.8: a shallow call-graph scan, never
+    ## `lower_rust_source`/`lower_nim_source` itself -- see
+    ## `crates/laminaria-plan/src/types.rs`'s own doc comment on this
+    ## variant.
+    akDiscoverSourceDependencies = "discover_source_dependencies"
 
   TransformKind* = enum
     tkAnf = "anf"
@@ -411,6 +418,7 @@ proc actionFromJson*(node: JsonNode): Action =
     of "validate_ir": akValidateIr
     of "transform_function": akTransformFunction
     of "evaluate_evidence": akEvaluateEvidence
+    of "discover_source_dependencies": akDiscoverSourceDependencies
     else: raise newException(ContractError, "unknown Action kind '" & kindStr & "'")
   let inputsNode = node.expectField("inputs")
   let outputsNode = node.expectField("outputs")

@@ -283,6 +283,34 @@ pub fn lower_source_artifact_id(
     )
 }
 
+/// Artifact id for a `DiscoverSourceDependencies` work item -- the exact
+/// same argument shape as [`lower_source_artifact_id`] (issue #36 T0
+/// §1.8: this operation reads the same `source_snapshot_id`/`language`/
+/// `subset_version`, over whichever function names are *already* known
+/// to be requested so far, not the eventual closed set `LowerSource`
+/// will use). A different `requested_functions_known_so_far` set is a
+/// different discovery request and must get a different id, the same
+/// way a different `LowerSource.requested_functions` does.
+pub fn discover_source_dependencies_artifact_id(
+    operation_version: &str,
+    language: &str,
+    source_snapshot_id: &str,
+    requested_functions_known_so_far: &[&str],
+    subset_version: &str,
+) -> String {
+    let joined_functions = requested_functions_known_so_far.join(",");
+    compute_artifact_id(
+        "discover_source_dependencies",
+        operation_version,
+        &[
+            language,
+            source_snapshot_id,
+            &joined_functions,
+            subset_version,
+        ],
+    )
+}
+
 /// Artifact id for a `ValidateIr` work item.
 pub fn validate_ir_artifact_id(
     operation_version: &str,
@@ -582,10 +610,36 @@ fn recompute_work_id(
                 observation_contract_version,
             ))
         }
+        ActionKind::DiscoverSourceDependencies => {
+            let language = descriptor
+                .language
+                .as_deref()
+                .ok_or_else(|| missing("language"))?;
+            let subset_version = descriptor
+                .contract_version
+                .as_deref()
+                .ok_or_else(|| missing("contract_version"))?;
+            let source = descriptor
+                .source_provenance
+                .as_ref()
+                .ok_or_else(|| missing("source_provenance"))?;
+            let requested: Vec<&str> = descriptor
+                .requested_functions
+                .iter()
+                .map(String::as_str)
+                .collect();
+            Ok(discover_source_dependencies_artifact_id(
+                &descriptor.operation_version,
+                language,
+                &source.source_snapshot_id,
+                &requested,
+                subset_version,
+            ))
+        }
         ActionKind::NimBuild | ActionKind::CargoBuild | ActionKind::Integrate => {
             unreachable!(
                 "recompute_work_id is only ever called after validate_compiler_work_action has \
-                 already confirmed action.kind is one of the four compiler-work kinds"
+                 already confirmed action.kind is one of the five compiler-work kinds"
             )
         }
     }
@@ -634,6 +688,7 @@ pub fn validate_compiler_work_action(action: &Action) -> Result<(), CompilerWork
             | ActionKind::ValidateIr
             | ActionKind::TransformFunction
             | ActionKind::EvaluateEvidence
+            | ActionKind::DiscoverSourceDependencies
     );
     let descriptor = match (&action.compiler_work, is_compiler_work_kind) {
         (None, true) => {
