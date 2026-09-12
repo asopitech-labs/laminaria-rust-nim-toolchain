@@ -2,6 +2,8 @@
 
 This file maps the GitHub issue set to the research program. The GitHub issues are the execution tracker; this document preserves the intended research decomposition and dependency order.
 
+The [research issue prioritization and minimal-hypothesis policy](research-prioritization-policy.md) governs how work is selected and when an issue may stop. Existing acceptance lists are research backlogs and evidence menus, not requests for finished products or mandatory all-at-once completion. Project-wide priority follows non-substitutability and falsification power, not issue number or unchecked-box count.
+
 ## Compiler ownership and execution order — corrected 2026-09-10
 
 The [compiler ownership contract](compiler-ownership-contract.md) governs this plan. The goal is an independent Rust/Nim compiler, IR and scheduler that ultimately compile LAMINARIA itself. External-compiler orchestration/self-build is reference/bootstrap evidence, not the primary delivery milestone.
