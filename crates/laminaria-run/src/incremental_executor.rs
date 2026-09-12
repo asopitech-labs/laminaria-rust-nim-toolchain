@@ -582,7 +582,14 @@ mod tests {
     #[test]
     fn source_never_spawns_a_subprocess() {
         let source = include_str!("incremental_executor.rs");
-        let test_module_marker = "#[cfg(test)]\nmod tests {";
+        // A marker with no embedded newline -- found and fixed during
+        // this task's own CI run: splitting on a marker that embeds a
+        // literal "\n" silently matched nothing at all on Windows, where
+        // this file's checked-out line endings are "\r\n", leaving the
+        // test module (which legitimately spawns `nim`) inside
+        // `production_source` and reintroducing the exact self-matching
+        // failure this split exists to avoid.
+        let test_module_marker = "#[cfg(test)]";
         let production_source = source
             .split(test_module_marker)
             .next()
