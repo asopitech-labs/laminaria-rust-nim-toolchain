@@ -3,6 +3,7 @@
 //! `nim-planner/`. See `docs/self-build.md` for the full protocol.
 
 pub mod compiler_work;
+pub mod incremental;
 pub mod nim_planner_client;
 pub mod types;
 pub mod validate;

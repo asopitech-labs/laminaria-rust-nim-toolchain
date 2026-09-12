@@ -494,9 +494,20 @@ PlanningEvent:
   planning_generation: u64 # 発行側(Rust)がこのeventを組み立てた時点で
                             # 最新と認識していたgeneration。Nim側の
                             # staleness判定入力(§4.2)
-  emitted_at_unix_ns: u128
+  emitted_at_unix_ns: u64  # T1実装時の訂正(理由は下記)
   kind: PlanningEventKind
 ```
+
+**T1実装時の訂正(実装が既存コードの不変条件と矛盾したための修正、
+指示「実コードの既存不変条件と矛盾するfixtureはT1内で修正し、その理由を
+記録する」に基づく)**: `emitted_at_unix_ns`は当初`u128`としていたが、
+`PlanningEvent`は`#[serde(flatten)] kind: PlanningEventKind`
+(内部タグ付きenum)と組み合わせるため、`serde_json`のflatten実装が内部で
+使う`Content`バッファ型が`u128`/`i128`を一切サポートしないという、
+実際に`cargo test`で再現した具体的な制約に直面した。エポック起点の
+ナノ秒を`u64`で表現しても西暦2554年まで有効であり、この用途には十分
+なため、`u64`に変更した。アーキテクチャ契約(§2〜§10の設計)自体には
+一切影響しない、wire型の実装詳細の訂正である。
 
 ```yaml
 PlanningEventKind:
