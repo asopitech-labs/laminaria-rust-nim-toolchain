@@ -46,6 +46,7 @@
 //! `laminaria-run`, or `laminaria-cli`; that is Task 2's own scope.
 
 pub mod diagnostics;
+pub mod discover;
 pub mod interpreter;
 pub mod nim_frontend;
 pub mod rust_frontend;

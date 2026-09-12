@@ -34,7 +34,7 @@ use crate::types::{
     SourceSpan, Stmt,
 };
 
-fn to_source_position(lc: LineColumn) -> SourcePosition {
+pub(crate) fn to_source_position(lc: LineColumn) -> SourcePosition {
     // `LineColumn::column` is 0-indexed (per proc_macro2's own docs); this
     // crate reports 1-indexed positions to humans everywhere, matching
     // `line` (already 1-indexed).
