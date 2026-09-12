@@ -43,6 +43,15 @@ pub enum IncrementalSessionError {
     ChildExited,
     ReadResponse(std::io::Error),
     MalformedResponse(serde_json::Error),
+    /// The response's own `schema_version`/`session_id`/
+    /// `in_reply_to_command_index` didn't match what this client sent --
+    /// a review caught that this client accepted *any* well-formed
+    /// response without ever checking these against the command it was
+    /// actually a reply to, the Rust-side half of the same wire-identity
+    /// gap `incremental_kernel.checkEnvelope` closes on the Nim side.
+    UnexpectedResponseIdentity {
+        detail: String,
+    },
 }
 
 impl std::fmt::Display for IncrementalSessionError {
@@ -72,11 +81,39 @@ impl std::fmt::Display for IncrementalSessionError {
                 "the incremental planner's stdout line was not a well-formed \
                  IncrementalPlannerResponse: {e}"
             ),
+            IncrementalSessionError::UnexpectedResponseIdentity { detail } => {
+                write!(f, "response identity mismatch: {detail}")
+            }
         }
     }
 }
 
 impl std::error::Error for IncrementalSessionError {}
+
+/// Extracts `(schema_version, session_id, in_reply_to_command_index)`
+/// from any response variant -- all three are present on every variant
+/// (T0 §3.2), just not through one shared field a `match` can avoid.
+fn response_identity(response: &IncrementalPlannerResponse) -> (&str, &str, u64) {
+    match response {
+        IncrementalPlannerResponse::PlanDelta {
+            schema_version,
+            session_id,
+            in_reply_to_command_index,
+            ..
+        }
+        | IncrementalPlannerResponse::Rejected {
+            schema_version,
+            session_id,
+            in_reply_to_command_index,
+            ..
+        }
+        | IncrementalPlannerResponse::SessionClosed {
+            schema_version,
+            session_id,
+            in_reply_to_command_index,
+        } => (schema_version, session_id, *in_reply_to_command_index),
+    }
+}
 
 /// A live `laminaria-incremental-planner` session: one child process,
 /// kept alive from `start` through `close`. `command_index` is owned and
@@ -134,6 +171,7 @@ impl IncrementalSessionClient {
         &mut self,
         command: IncrementalPlannerCommand,
     ) -> Result<IncrementalPlannerResponse, IncrementalSessionError> {
+        let command_index = command.command_index();
         let mut line =
             serde_json::to_vec(&command).expect("IncrementalPlannerCommand always serializes");
         line.push(b'\n');
@@ -156,6 +194,36 @@ impl IncrementalSessionClient {
         let response: IncrementalPlannerResponse =
             serde_json::from_str(response_line.trim_end())
                 .map_err(IncrementalSessionError::MalformedResponse)?;
+
+        // Review-caught gap: verify the response is actually a reply to
+        // *this* command, on *this* session, speaking the protocol
+        // version this client itself sent -- never trust a well-formed
+        // response's own claimed identity without checking it against
+        // what was actually sent.
+        let (resp_schema_version, resp_session_id, resp_in_reply_to) = response_identity(&response);
+        if resp_schema_version != INCREMENTAL_PROTOCOL_SCHEMA_VERSION {
+            return Err(IncrementalSessionError::UnexpectedResponseIdentity {
+                detail: format!(
+                    "expected schema_version {INCREMENTAL_PROTOCOL_SCHEMA_VERSION:?}, got {resp_schema_version:?}"
+                ),
+            });
+        }
+        if resp_session_id != self.session_id {
+            return Err(IncrementalSessionError::UnexpectedResponseIdentity {
+                detail: format!(
+                    "expected session_id {:?}, got {resp_session_id:?}",
+                    self.session_id
+                ),
+            });
+        }
+        if resp_in_reply_to != command_index {
+            return Err(IncrementalSessionError::UnexpectedResponseIdentity {
+                detail: format!(
+                    "expected in_reply_to_command_index {command_index}, got {resp_in_reply_to}"
+                ),
+            });
+        }
+
         Ok(response)
     }
 
@@ -242,6 +310,62 @@ mod tests {
             inputs,
             outputs: vec![ArtifactRef::declared(id)],
             compiler_work: None,
+        }
+    }
+
+    /// A raw JSON-lines session, deliberately bypassing
+    /// `IncrementalSessionClient`'s own automatic envelope construction
+    /// and response-identity checking -- `IncrementalSessionClient`
+    /// itself always builds a well-formed envelope, so it cannot be used
+    /// to send the deliberately identity-violating commands these tests
+    /// need to confirm the *binary* rejects. Sends exactly the raw JSON
+    /// text given and returns exactly the raw JSON text received, one
+    /// line each -- the same shape as this session's own manual
+    /// stdin-piping verification, just automated.
+    #[cfg(unix)]
+    struct RawSession {
+        child: Child,
+        stdin: ChildStdin,
+        stdout: BufReader<ChildStdout>,
+    }
+
+    #[cfg(unix)]
+    impl RawSession {
+        fn spawn(bin: &Path) -> Self {
+            let mut child = Command::new(bin)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let stdin = child.stdin.take().unwrap();
+            let stdout = BufReader::new(child.stdout.take().unwrap());
+            RawSession {
+                child,
+                stdin,
+                stdout,
+            }
+        }
+
+        fn send_raw(&mut self, json_line: &str) -> serde_json::Value {
+            self.stdin.write_all(json_line.as_bytes()).unwrap();
+            self.stdin.write_all(b"\n").unwrap();
+            self.stdin.flush().unwrap();
+            let mut line = String::new();
+            let n = self.stdout.read_line(&mut line).unwrap();
+            assert!(
+                n > 0,
+                "the binary exited without responding to: {json_line}"
+            );
+            serde_json::from_str(line.trim_end()).unwrap()
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for RawSession {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
         }
     }
 
@@ -333,5 +457,147 @@ mod tests {
             vec![],
         );
         assert!(matches!(result, Err(IncrementalSessionError::Spawn(_))));
+    }
+
+    // --- Wire-identity tests (issue #36 review: schema_version/session_id/
+    // command_index were never actually validated by the real binary --
+    // reproduced here against the real binary itself, not just Nim unit
+    // tests of the pure checkEnvelope logic, exactly as requested). ---
+
+    #[cfg(unix)]
+    const EMPTY_GRAPH: &str = r#"{"schema_version":"0.3.0","demanded_artifacts":[],"actions":[]}"#;
+
+    #[test]
+    #[cfg(unix)]
+    fn a_wrong_schema_version_is_rejected_as_invalid_contract_version() {
+        let bin = real_incremental_planner_binary();
+        let mut raw = RawSession::spawn(&bin);
+        let response = raw.send_raw(&format!(
+            r#"{{"schema_version":"wrong-version","session_id":"s1","command_index":0,"kind":"start_session","initial_graph":{EMPTY_GRAPH},"initial_demands":[]}}"#
+        ));
+        assert_eq!(response["kind"], "rejected");
+        assert_eq!(response["reason_kind"], "invalid_contract_version");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_start_session_at_a_nonzero_command_index_is_rejected() {
+        let bin = real_incremental_planner_binary();
+        let mut raw = RawSession::spawn(&bin);
+        let response = raw.send_raw(&format!(
+            r#"{{"schema_version":"0.1.0","session_id":"s1","command_index":7,"kind":"start_session","initial_graph":{EMPTY_GRAPH},"initial_demands":[]}}"#
+        ));
+        assert_eq!(response["kind"], "rejected");
+        assert_eq!(response["reason_kind"], "unsupported_input");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_close_session_with_a_different_session_id_is_rejected() {
+        let bin = real_incremental_planner_binary();
+        let mut raw = RawSession::spawn(&bin);
+        let start = raw.send_raw(&format!(
+            r#"{{"schema_version":"0.1.0","session_id":"s1","command_index":0,"kind":"start_session","initial_graph":{EMPTY_GRAPH},"initial_demands":[]}}"#
+        ));
+        assert_eq!(start["kind"], "plan_delta");
+        let response = raw.send_raw(
+            r#"{"schema_version":"0.1.0","session_id":"s2","command_index":1,"kind":"close_session"}"#,
+        );
+        assert_eq!(response["kind"], "rejected");
+        assert_eq!(response["reason_kind"], "unsupported_input");
+        assert!(response["reason_detail"]
+            .as_str()
+            .unwrap()
+            .contains("session_id mismatch"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_non_sequential_command_index_is_rejected() {
+        let bin = real_incremental_planner_binary();
+        let mut raw = RawSession::spawn(&bin);
+        let start = raw.send_raw(&format!(
+            r#"{{"schema_version":"0.1.0","session_id":"s1","command_index":0,"kind":"start_session","initial_graph":{EMPTY_GRAPH},"initial_demands":[]}}"#
+        ));
+        assert_eq!(start["kind"], "plan_delta");
+        let response = raw.send_raw(
+            r#"{"schema_version":"0.1.0","session_id":"s1","command_index":99,"kind":"close_session"}"#,
+        );
+        assert_eq!(response["kind"], "rejected");
+        assert_eq!(response["reason_kind"], "unsupported_input");
+        assert!(response["reason_detail"]
+            .as_str()
+            .unwrap()
+            .contains("command_index must be sequential"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_second_start_session_for_the_same_session_is_rejected() {
+        let bin = real_incremental_planner_binary();
+        let mut raw = RawSession::spawn(&bin);
+        let start = raw.send_raw(&format!(
+            r#"{{"schema_version":"0.1.0","session_id":"s1","command_index":0,"kind":"start_session","initial_graph":{EMPTY_GRAPH},"initial_demands":[]}}"#
+        ));
+        assert_eq!(start["kind"], "plan_delta");
+        let response = raw.send_raw(&format!(
+            r#"{{"schema_version":"0.1.0","session_id":"s1","command_index":1,"kind":"start_session","initial_graph":{EMPTY_GRAPH},"initial_demands":[]}}"#
+        ));
+        assert_eq!(response["kind"], "rejected");
+        assert_eq!(response["reason_kind"], "unsupported_input");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_rejected_envelope_command_does_not_advance_the_expected_command_index() {
+        // After a rejected (skipped-ahead) command_index, the *correct*
+        // next index is still accepted -- confirms checkEnvelope's own
+        // "never mutate on rejection" contract holds through the real
+        // binary, not just in the pure-function Nim unit test.
+        let bin = real_incremental_planner_binary();
+        let mut raw = RawSession::spawn(&bin);
+        let start = raw.send_raw(&format!(
+            r#"{{"schema_version":"0.1.0","session_id":"s1","command_index":0,"kind":"start_session","initial_graph":{EMPTY_GRAPH},"initial_demands":[]}}"#
+        ));
+        assert_eq!(start["kind"], "plan_delta");
+        let skipped = raw.send_raw(
+            r#"{"schema_version":"0.1.0","session_id":"s1","command_index":99,"kind":"close_session"}"#,
+        );
+        assert_eq!(skipped["kind"], "rejected");
+        let correct = raw.send_raw(
+            r#"{"schema_version":"0.1.0","session_id":"s1","command_index":1,"kind":"close_session"}"#,
+        );
+        assert_eq!(correct["kind"], "session_closed");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_client_itself_rejects_a_response_whose_identity_does_not_match_what_it_sent() {
+        // IncrementalSessionClient::send always builds a well-formed
+        // command, so this exercises the client's own response-identity
+        // check (not the binary's) via a deliberately mismatched
+        // self.session_id set up by hand, bypassing `start`'s own
+        // (correct) construction.
+        let bin = real_incremental_planner_binary();
+        let (mut client, _start_response) =
+            IncrementalSessionClient::start(&bin, "s1", PlanningInput::new(vec![], vec![]), vec![])
+                .unwrap();
+        // Simulate a client that (incorrectly) believes it owns a
+        // different session than the one it actually started.
+        client.session_id = "not-actually-s1".to_string();
+        let result = client.apply_delta(PlanningEvent {
+            event_id: "e1".to_string(),
+            sequence_number: 1,
+            planning_generation: 0,
+            emitted_at_unix_ns: 1,
+            kind: laminaria_plan::incremental::PlanningEventKind::DemandRequested {
+                artifact_id: "x".to_string(),
+                requested_by: "consumer-a".to_string(),
+            },
+        });
+        assert!(matches!(
+            result,
+            Err(IncrementalSessionError::UnexpectedResponseIdentity { .. })
+        ));
     }
 }

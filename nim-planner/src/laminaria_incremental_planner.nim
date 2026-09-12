@@ -27,7 +27,7 @@
 ## command line cannot even be parsed -- a well-formed but *rejected*
 ## delta is a normal, zero-exit response, never a process failure.
 
-import std/[json]
+import std/[json, options]
 import ./contract
 import ./incremental_contract
 import ./incremental_kernel
@@ -62,13 +62,25 @@ proc main() =
         stderr.writeLine("laminaria-incremental-planner: malformed command: " & e.msg)
         quit(1)
 
+    # Wire-identity check (issue #36 review: schema_version/session_id/
+    # command_index were never actually validated anywhere -- a
+    # well-formed-JSON command violating any of them was silently
+    # accepted as normal). A violation is a well-formed `Rejected`
+    # response (zero-exit, matching the one-shot planner's own "genuine
+    # rejection is not a process failure" convention) -- the session
+    # itself is left completely untouched (`lastCommandIndex` is not
+    # advanced), and the loop keeps running so a caller can resend a
+    # corrected command.
+    let violation = session.checkEnvelope(cmd)
+    if violation.isSome:
+      let v = violation.get
+      let sessionIdForResponse = if session.isNil: cmd.sessionId else: session.sessionId
+      let response = rejectedResponse(sessionIdForResponse, cmd.commandIndex, v.reasonKind, v.detail)
+      stdout.writeLine($response.toJson)
+      stdout.flushFile()
+      continue
+
     if session.isNil:
-      if cmd.kind != ipckStartSession:
-        stderr.writeLine(
-          "laminaria-incremental-planner: the first command of a session must be StartSession, got '" &
-            $cmd.kind & "'"
-        )
-        quit(1)
       session = newIncrementalSession(cmd.sessionId)
 
     let response =
@@ -79,6 +91,7 @@ proc main() =
         session.applyDelta(cmd.commandIndex, cmd.event)
       of ipckCloseSession:
         session.closeSession(cmd.commandIndex)
+    session.lastCommandIndex = cmd.commandIndex.int64
 
     stdout.writeLine($response.toJson)
     stdout.flushFile()

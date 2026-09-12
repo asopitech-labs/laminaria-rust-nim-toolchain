@@ -36,6 +36,14 @@ type
     producerOf: Table[string, string] ## artifact_id -> action_id, active producers only.
     knownEventIds: HashSet[string]
     closed*: bool
+    lastCommandIndex: int64
+      ## The most recently *accepted* (envelope-valid) `command_index`
+      ## -- `StartSession` itself is always 0 (`checkEnvelope*` enforces
+      ## this before a session is even created). Used to enforce strict
+      ## `command_index` monotonic contiguity (`checkEnvelope*` again),
+      ## a review-caught gap: the wire contract's own identity fields
+      ## (schema/session/command-index) were never actually checked by
+      ## this kernel or the binary wrapping it.
 
 proc newIncrementalSession*(sessionId: string): IncrementalSession =
   IncrementalSession(
@@ -45,7 +53,83 @@ proc newIncrementalSession*(sessionId: string): IncrementalSession =
     producerOf: initTable[string, string](),
     knownEventIds: initHashSet[string](),
     closed: false,
+    lastCommandIndex: 0,
   )
+
+proc lastCommandIndex*(session: IncrementalSession): int64 = session.lastCommandIndex
+
+proc `lastCommandIndex=`*(session: IncrementalSession, value: int64) =
+  session.lastCommandIndex = value
+
+type EnvelopeViolation* = object
+  reasonKind*: RejectionReasonKind
+  detail*: string
+
+## Checks the wire contract's own fixed identity invariants (T0 §3.1)
+## *before* a command is ever dispatched to `startSession`/`applyDelta`/
+## `closeSession` -- none of these were previously checked anywhere,
+## which a review caught directly by sending real, well-formed-JSON but
+## identity-violating commands to the real binary and observing they
+## were silently accepted as normal:
+##
+## 1. `schema_version` must equal `IncrementalProtocolSchemaVersion`
+##    exactly (`rrkInvalidContractVersion`, matching the existing
+##    one-shot planner's own schema-gate precedent, `planning_kernel.
+##    decodePlanningInputOrReject`).
+## 2. The *first* command of a session must be `StartSession` at
+##    `command_index == 0` -- `session` is `nil` exactly when no
+##    `StartSession` has yet been accepted.
+## 3. Once a session exists, every subsequent command's `session_id`
+##    must equal the one `StartSession` established
+##    (`session.sessionId`) exactly.
+## 4. `StartSession` is never accepted twice for the same session.
+## 5. `command_index` must be strictly sequential: exactly
+##    `session.lastCommandIndex + 1`, never skipped or repeated.
+##
+## Returns `none` when `cmd` may proceed; never mutates `session` itself
+## (the caller updates `lastCommandIndex` only after successfully
+## dispatching `cmd`, so a rejected-at-the-envelope command never
+## advances it -- the caller is expected to resend the correct index).
+proc checkEnvelope*(session: IncrementalSession, cmd: IncrementalPlannerCommand): Option[EnvelopeViolation] =
+  if cmd.schemaVersion != IncrementalProtocolSchemaVersion:
+    return some(EnvelopeViolation(
+      reasonKind: rrkInvalidContractVersion,
+      detail: "expected schema_version '" & IncrementalProtocolSchemaVersion & "', got '" &
+        cmd.schemaVersion & "'",
+    ))
+
+  if session.isNil:
+    if cmd.kind != ipckStartSession:
+      return some(EnvelopeViolation(
+        reasonKind: rrkUnsupportedInput,
+        detail: "the first command of a session must be StartSession, got '" & $cmd.kind & "'",
+      ))
+    if cmd.commandIndex != 0'u64:
+      return some(EnvelopeViolation(
+        reasonKind: rrkUnsupportedInput,
+        detail: "StartSession must be command_index 0, got " & $cmd.commandIndex,
+      ))
+    return none(EnvelopeViolation)
+
+  if cmd.sessionId != session.sessionId:
+    return some(EnvelopeViolation(
+      reasonKind: rrkUnsupportedInput,
+      detail: "session_id mismatch: this session is '" & session.sessionId & "', got '" &
+        cmd.sessionId & "'",
+    ))
+  if cmd.kind == ipckStartSession:
+    return some(EnvelopeViolation(
+      reasonKind: rrkUnsupportedInput,
+      detail: "StartSession received twice for the same session",
+    ))
+  let expected = session.lastCommandIndex + 1
+  if cmd.commandIndex.int64 != expected:
+    return some(EnvelopeViolation(
+      reasonKind: rrkUnsupportedInput,
+      detail: "command_index must be sequential: expected " & $expected & ", got " &
+        $cmd.commandIndex,
+    ))
+  none(EnvelopeViolation)
 
 proc declaredInputIds(action: Action): seq[string] =
   for inp in action.inputs:

@@ -303,3 +303,63 @@ suite "incremental_kernel.applyDelta -- demand merge/cancel":
     discard session.applyDelta(1, demandCancelledEvent(1, "lower", "consumer-a"))
     check session.referenceCountOf("lower") == 1
     check session.stateOf("lower") == asReady
+
+suite "incremental_kernel.checkEnvelope -- wire identity (review-caught gap)":
+  proc startCmd(schemaVersion: string, sessionId: string, commandIndex: uint64): IncrementalPlannerCommand =
+    IncrementalPlannerCommand(
+      schemaVersion: schemaVersion, sessionId: sessionId, commandIndex: commandIndex,
+      kind: ipckStartSession, initialGraph: planningInput(@[], @[]), initialDemands: @[],
+    )
+
+  proc closeCmd(schemaVersion: string, sessionId: string, commandIndex: uint64): IncrementalPlannerCommand =
+    IncrementalPlannerCommand(
+      schemaVersion: schemaVersion, sessionId: sessionId, commandIndex: commandIndex,
+      kind: ipckCloseSession,
+    )
+
+  test "a wrong schema_version is rejected as invalid_contract_version, even before any session exists":
+    let violation = checkEnvelope(nil, startCmd("wrong-version", "s1", 0))
+    check violation.isSome
+    check violation.get.reasonKind == rrkInvalidContractVersion
+
+  test "the first command of a session must be StartSession":
+    let violation = checkEnvelope(nil, closeCmd(IncrementalProtocolSchemaVersion, "s1", 0))
+    check violation.isSome
+    check violation.get.reasonKind == rrkUnsupportedInput
+
+  test "StartSession must be command_index 0":
+    let violation = checkEnvelope(nil, startCmd(IncrementalProtocolSchemaVersion, "s1", 7))
+    check violation.isSome
+    check violation.get.reasonKind == rrkUnsupportedInput
+
+  test "a well-formed StartSession at index 0 is accepted":
+    let violation = checkEnvelope(nil, startCmd(IncrementalProtocolSchemaVersion, "s1", 0))
+    check violation.isNone
+
+  test "a different session_id on a later command is rejected":
+    let session = newIncrementalSession("s1")
+    let violation = checkEnvelope(session, closeCmd(IncrementalProtocolSchemaVersion, "s2", 1))
+    check violation.isSome
+    check violation.get.reasonKind == rrkUnsupportedInput
+
+  test "a second StartSession for the same session is rejected":
+    let session = newIncrementalSession("s1")
+    let violation = checkEnvelope(session, startCmd(IncrementalProtocolSchemaVersion, "s1", 1))
+    check violation.isSome
+    check violation.get.reasonKind == rrkUnsupportedInput
+
+  test "a non-sequential command_index (skipping ahead) is rejected":
+    let session = newIncrementalSession("s1") # lastCommandIndex starts at 0
+    let violation = checkEnvelope(session, closeCmd(IncrementalProtocolSchemaVersion, "s1", 99))
+    check violation.isSome
+    check violation.get.reasonKind == rrkUnsupportedInput
+
+  test "the correct next sequential command_index is accepted":
+    let session = newIncrementalSession("s1")
+    let violation = checkEnvelope(session, closeCmd(IncrementalProtocolSchemaVersion, "s1", 1))
+    check violation.isNone
+
+  test "checkEnvelope never mutates lastCommandIndex itself":
+    let session = newIncrementalSession("s1")
+    discard checkEnvelope(session, closeCmd(IncrementalProtocolSchemaVersion, "s1", 1))
+    check session.lastCommandIndex() == 0
