@@ -25,7 +25,7 @@
 import std/[tables, algorithm, strutils, hashes, json, options]
 import ./contract
 
-proc findCycle(actionIds: seq[string], deps: Table[string, seq[string]]): seq[string] =
+proc findCycle*(actionIds: seq[string], deps: Table[string, seq[string]]): seq[string] =
   ## Explicit path-tracking DFS (Bazel `SimpleCycleDetector` / Nx
   ## `findCycle` shape): the moment a node already on the *current* DFS
   ## path is revisited, the cycle is the suffix of `path` starting at

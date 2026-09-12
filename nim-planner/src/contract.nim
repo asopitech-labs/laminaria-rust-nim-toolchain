@@ -305,18 +305,18 @@ type ContractError* = object of ValueError
   ## by `main.nim`, never by `plan()` itself (`plan()` receives an
   ## already-decoded `PlanningInput`).
 
-proc expectField(node: JsonNode, key: string): JsonNode =
+proc expectField*(node: JsonNode, key: string): JsonNode =
   if node.kind != JObject or not node.hasKey(key):
     raise newException(ContractError, "missing required field '" & key & "'")
   node[key]
 
-proc getStrField(node: JsonNode, key: string): string =
+proc getStrField*(node: JsonNode, key: string): string =
   let field = node.expectField(key)
   if field.kind != JString:
     raise newException(ContractError, "field '" & key & "' must be a string")
   field.getStr()
 
-proc getStrSeqField(node: JsonNode, key: string): seq[string] =
+proc getStrSeqField*(node: JsonNode, key: string): seq[string] =
   let field = node.expectField(key)
   if field.kind != JArray:
     raise newException(ContractError, "field '" & key & "' must be an array")
@@ -326,7 +326,7 @@ proc getStrSeqField(node: JsonNode, key: string): seq[string] =
       raise newException(ContractError, "field '" & key & "' must be an array of strings")
     result.add(item.getStr())
 
-proc getIntField(node: JsonNode, key: string): BiggestInt =
+proc getIntField*(node: JsonNode, key: string): BiggestInt =
   let field = node.expectField(key)
   if field.kind != JInt:
     raise newException(ContractError, "field '" & key & "' must be an integer")
