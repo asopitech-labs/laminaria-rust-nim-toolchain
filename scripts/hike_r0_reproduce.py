@@ -18,6 +18,7 @@ import tempfile
 HIKE_REVISION = "6402155652fa61692818fe7985193f0fd97513f5"
 GENERATED_FILES = (
     "HIKE-LICENSE",
+    "bridge-contract.txt",
     "execution.stderr.txt",
     "execution.stdout.txt",
     "index.html",
@@ -137,6 +138,11 @@ def extract_llvm_definition(ir: str, symbol: str) -> str:
     raise RuntimeError(f"unterminated LLVM definition: {symbol}")
 
 
+def ensure_separate_paths(source: Path, output: Path) -> None:
+    if source == output or source in output.parents or output in source.parents:
+        raise RuntimeError("Hike source and evidence output must not contain one another")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--hike-source", type=Path, required=True)
@@ -145,6 +151,7 @@ def main() -> int:
 
     source = args.hike_source.resolve()
     output = args.output.resolve()
+    ensure_separate_paths(source, output)
     actual_revision = run(
         ["git", "-c", f"safe.directory={source}", "-C", str(source), "rev-parse", "HEAD"]
     ).stdout.strip()
@@ -152,6 +159,16 @@ def main() -> int:
         raise RuntimeError(
             f"Hike revision mismatch: expected {HIKE_REVISION}, got {actual_revision}"
         )
+    origin = run(
+        ["git", "-c", f"safe.directory={source}", "-C", str(source), "remote", "get-url", "origin"]
+    ).stdout.strip()
+    if origin != "https://github.com/kanryu/hike-lang.git":
+        raise RuntimeError(f"Hike origin mismatch: {origin}")
+    dirty = run(
+        ["git", "-c", f"safe.directory={source}", "-C", str(source), "status", "--porcelain"]
+    ).stdout
+    if dirty:
+        raise RuntimeError("Hike checkout must be clean")
 
     output.mkdir(parents=True, exist_ok=True)
     for name in GENERATED_FILES + LEGACY_FILES:
@@ -231,6 +248,22 @@ def main() -> int:
             env=stable_env,
         )
 
+    index_html = (output / "index.html").read_text(encoding="utf-8")
+    runtime_js = (output / "runtime.js").read_text(encoding="utf-8")
+    if (
+        "new HikeRuntime()" not in index_html
+        or "window.HikeConcurrentRuntime" not in runtime_js
+        or "window.HikeRuntime" in runtime_js
+    ):
+        raise RuntimeError("pinned generated bridge mismatch signature changed")
+    (output / "bridge-contract.txt").write_text(
+        "index constructor: HikeRuntime\n"
+        "generated runtime export: HikeConcurrentRuntime\n"
+        "compatible: false\n"
+        "Node evidence path: direct WebAssembly API harness (generated bridge bypassed)\n",
+        encoding="utf-8",
+    )
+
     generated_ir = (output / "main.generated.ll").read_text(encoding="utf-8")
     if "@strlen32(" not in generated_ir or "define internal i32 @strlen32(" in generated_ir:
         raise RuntimeError("pinned upstream strlen32 failure signature changed")
@@ -304,7 +337,7 @@ def main() -> int:
         "toolchain": {
             "container_base": "golang:1.22.12-bookworm@sha256:3d699e4d15d0f8f13c9195c0632a16702b8cbdece2955af1c23b37ae5d55a253",
             "debian": first_line(["sh", "-c", ". /etc/os-release && printf '%s\\n' \"$PRETTY_NAME\""]),
-            "packages": run(
+            "packages": sorted(run(
                 [
                     "dpkg-query",
                     "-W",
@@ -316,7 +349,7 @@ def main() -> int:
                     "wabt",
                     "zstd",
                 ]
-            ).stdout.splitlines(),
+            ).stdout.splitlines()),
             "git": first_line(["git", "--version"]),
             "go": first_line(["go", "version"]),
             "clang": first_line(["clang", "--version"]),
@@ -339,6 +372,12 @@ def main() -> int:
                 "the compatibility artifact restores only strlen32 from the same revision's runtime.ll",
                 "the fixed revision emits a newer unified runtime.js than the bridge shown in the article",
             ],
+        },
+        "bridge_contract": {
+            "index_constructor": "HikeRuntime",
+            "generated_runtime_export": "HikeConcurrentRuntime",
+            "compatible": False,
+            "node_execution_path": "direct WebAssembly API harness; generated runtime.js bypassed",
         },
         "wasm": {
             "imports": extract_block(details.stdout, "Import"),

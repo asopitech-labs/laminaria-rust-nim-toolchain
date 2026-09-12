@@ -15,14 +15,21 @@ the definition. [`upstream-build.stderr.txt`](upstream-build.stderr.txt)
 preserves the normalized Clang failure, and
 [`main.generated.ll`](main.generated.ll) is the unmodified compiler output.
 
-To finish the reference path without changing the pinned Hike checkout,
+The generated browser artifacts also disagree with each other: `index.html`
+constructs `HikeRuntime`, while generated `runtime.js` exports only
+`HikeConcurrentRuntime`. [`bridge-contract.txt`](bridge-contract.txt) records
+that incompatibility. The generated bridge therefore cannot drive this fixed
+workload as published.
+
+To finish the Wasm reference path without changing the pinned Hike checkout,
 [`main.compat.ll`](main.compat.ll) appends only the missing `strlen32`
 definition from that same revision's native `runtime.ll`. The normal Hike
 Wasm linker options then produce a valid module. This compatibility artifact
 instantiates under Node, calls `InitApp`, returns `6912` for
 `AddNumbers(1234, 5678)` and `55` for `Fib(10)`, performs the expected host
-callbacks, and keeps linear memory at two pages. See
-[`execution.stdout.txt`](execution.stdout.txt).
+callbacks, and keeps linear memory at two pages. This functional check uses a
+direct WebAssembly API harness and explicitly bypasses the incompatible
+generated bridge. See [`execution.stdout.txt`](execution.stdout.txt).
 
 | Artifact | Bytes |
 | --- | ---: |
@@ -52,7 +59,9 @@ producers rather than treating the values as directly comparable:
 - the fixed revision has the `strlen32` wasm32 runtime regression described
   above, requiring the explicitly separated compatibility IR;
 - the fixed revision generates an 11,159-byte unified worker/browser bridge,
-  whereas the article shows an earlier, smaller `HikeRuntime` bridge.
+  whereas the article shows an earlier, smaller `HikeRuntime` bridge; the
+  generated bridge and checked-in `index.html` also name different runtime
+  classes.
 
 Consequently, `2.56 KB` remains the article's workload/toolchain result; this
 R0 result establishes the auditable state of the issue-pinned revision and

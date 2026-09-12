@@ -1,0 +1,4 @@
+index constructor: HikeRuntime
+generated runtime export: HikeConcurrentRuntime
+compatible: false
+Node evidence path: direct WebAssembly API harness (generated bridge bypassed)

@@ -42,6 +42,17 @@ define void @other() {
             "<temp>.ll:9: error",
         )
 
+    def test_source_and_output_cannot_contain_one_another(self):
+        source = Path("/work/source").resolve()
+        for output in (source, source / "evidence", source.parent):
+            with self.assertRaisesRegex(RuntimeError, "must not contain"):
+                reproduce.ensure_separate_paths(source, output)
+
+    def test_sibling_source_and_output_are_allowed(self):
+        reproduce.ensure_separate_paths(
+            Path("/work/source").resolve(), Path("/work/evidence").resolve()
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -4,6 +4,10 @@
       "bytes": 1068,
       "sha256": "6b3497e1e711780741457cdcb345be01421b8a7ef6c35d4f084cac7993a0b4ef"
     },
+    "bridge-contract.txt": {
+      "bytes": 176,
+      "sha256": "0f8d4b780222dfc379a3afef83bebb8a9597d814e9107548bd500b59dc05fab0"
+    },
     "execution.stderr.txt": {
       "bytes": 0,
       "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
@@ -68,6 +72,12 @@
       "bytes": 7755,
       "sha256": "10f831e00f95b062ef1b0a5bedf620f0c340b23aae8422170b4deccb616e463a"
     }
+  },
+  "bridge_contract": {
+    "compatible": false,
+    "generated_runtime_export": "HikeConcurrentRuntime",
+    "index_constructor": "HikeRuntime",
+    "node_execution_path": "direct WebAssembly API harness; generated runtime.js bypassed"
   },
   "commands": {
     "compatibility_transform": "append pinned runtime.ll's strlen32 definition to main.generated.ll",
