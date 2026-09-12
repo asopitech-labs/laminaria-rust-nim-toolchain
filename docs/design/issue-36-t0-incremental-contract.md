@@ -5,17 +5,44 @@ discovered dependencies」、parent #28、related #6/#8/#10/#19/#37）。本書�
 #36をT0（契約確定、本書）とT1（実装、後続）に分割したうちのT0であり、
 コード実装は一切含まない。
 
-**本書は改訂版である。** 初版（基準commit `e3b528c`）は指示者レビューで
-不採択となり、5件のP1欠陥（増分協調がRust内部へ実質的に退行している、
-固定fixtureが現行frontendの前提を満たさない、`DependencyDiscovered`から
-producerを生成できない、`semantic_key`が既存identity契約を弱めている、
-機械可読caseが宣言schemaに適合していない）が指摘された。本書はこの
-指示に基づき**一度だけ**改訂したものであり、指摘された5件すべてに対応
-する形で§1〜§10を全面的に書き直している。旧版からの主な変更点は各節末尾
-に「**改訂**:」として明示する。
+**本書は第2版改訂である。** 初版（基準commit `e3b528c`）は5件のP1で不採択
+となり、`1a2e9af`で改訂したが、その改訂版も以下7件の欠陥で再度不採択と
+なった:
 
-基準commit: `36ee8a0`。本書のすべての事実主張は、下記の各行番号のファイル
-を直接読んで確認したものであり、想像で補っていない。
+1. `DependencyDiscovered`契約は`new_actions`を1件以上と定めるが、旧
+   改訂版のcase2/6/10はこれを空で送っていた(契約とcaseの矛盾)。
+2. stale-generation試験(旧case6)は、現在世代・event世代がともに`0`で、
+   staleを一度も再現していなかった。
+3. `extends_inputs`(既存Actionの`inputs`だけを書き換え、`id`を維持する)
+   は、既存実装の`Action.id`が`CompilerWorkDescriptor`(semantic inputs
+   を含む)から再計算される、という既存契約(§1.3)に反していた。
+4. 旧case5は`demanded_artifacts`が1件しかないのに、初期状態として
+   参照カウント2を要求しており、その参照元(consumer-a/b)を表現する
+   手段が契約になかった。
+5. 旧case7/8/11は、診断対象となる不正状態(取消後の実行完了、
+   missing producer)を`StartSession`自体の初期状態として持ち込んで
+   いた——診断対象はすべて`ApplyDelta`で初めて導入されなければならない。
+6. 旧case4の「重複」2 eventは実際には異なる`event_id`を持っており、
+   `event_id`による重複判定(§7.1)では検出できないものだった。
+   「完全重複」(同一id・同一payloadの再送)と「別idを持つ意味的重複」
+   (状態遷移そのものの内容的冪等性、§7.3)は別の現象であり、別caseに
+   分離する必要がある。
+7. `cases.yaml`のActionは`id`/`kind`/`inputs`/`outputs`のみで、契約が
+   要求する`command_identity`/`compiler_work`を欠いており、artifact id
+   も具体的な値を示していなかった。
+
+**本書はこれら7件すべてに対応する形で§3・§6・§8・§10を再改訂した。**
+指示された範囲(Actionのimmutable化+replacement方式、`StartSession.
+initial_demands`+需要移送・取消規則、完全なAction/CompilerWorkDescriptor
+catalog+具体的artifact ID、対象caseの修正、YAML検証スクリプトのCI組込)
+に限定し、他issueの作業は混在させていない。旧版からの変更点は各節末尾に
+「**改訂**:」として明示する。
+
+基準commit: `1a2e9af`。本書のすべての事実主張は、下記の各行番号のファイル
+を直接読んで確認したものであり、想像で補っていない。artifact idは
+実際の`compute_artifact_id`(FNV-1a、`compiler_work.rs:251-263`)を
+Pythonで再実装し、実引数から計算した具体的な値である
+(`docs/design/issue-36-t0-cases.yaml`の`artifact_id_definitions`参照)。
 
 ---
 
@@ -101,6 +128,30 @@ artifact idを追加しても、そのaction自身の`id`は変化しない(`inp
 は必然的に変化する——「既存actionをin-placeで書き換える」ことと
 「新しいidを持つ別actionが生まれる」ことは、変わるfieldの種類によって
 結果が異なる。本書はこの区別を曖昧にしない(§1.8)。
+
+**改訂(第2版): 「`inputs`だけを書き換える」という逃げ道は、この
+domainには実在しない。** `crates/laminaria-run/src/compiler_work_executor.rs:276-338`
+の実際のAction構築を直接確認すると、
+```rust
+let validate_action = Action {
+    id: validate_id.clone(),
+    inputs: vec![ArtifactRef::declared(&lower_id)],
+    outputs: vec![ArtifactRef::declared(&validate_id)],
+    compiler_work: Some(CompilerWorkDescriptor {
+        semantic_input_artifact_ids: vec![lower_id.clone()],
+        ...
+```
+`inputs`は常に`semantic_input_artifact_ids`(+`LowerSource`の場合の
+`ArtifactRef::Source`)の**宣言形そのもの**であり、両者が独立に動く
+「意味的ではない、順序だけのedge」はこのcompiler-workの4kindには
+存在しない。また`outputs`は常に`[Declared(self.id)]`——つまり
+**あるactionの出力artifact idは、そのaction自身のidと同一の文字列**
+である。したがって「`inputs`だけ書き換えてidは維持する」という操作は、
+この4 kindのどれについても意味を持たない: 意味的入力が変わる箇所は
+必ず`semantic_input_artifact_ids`(または`LowerSource`の
+`requested_functions`)を通じて`id`自体を変化させる。初版・第1改訂の
+`extends_inputs`は、この事実を確認せずに導入された、存在しない逃げ道
+だった(第2版改訂の核心的な自己訂正、§3.4)。
 
 ### 1.4 CPU budget dispatchは「待機＝slot占有」が現行の構造そのもの——変更なし
 
@@ -313,6 +364,26 @@ IncrementalPlannerCommandKind:
                                      # IncrementalPlanningInput/known_satisfied_artifacts
                                      # は撤回——session自体が累積状態を持つため
                                      # 不要になった)。session中ちょうど1回のみ送る。
+      initial_demands: [DemandReference]   # NEW(第2版改訂)。§3.4のDemandReference
+                                            # と同型。`initial_graph.demanded_artifacts`
+                                            # (既存field、文字列のみ)を補足し、
+                                            # どの`requested_by`が最初から要求して
+                                            # いるかを明示する(§4.4改訂・§8改訂)。
+                                            # 省略時、Nimは`demanded_artifacts`の
+                                            # 各entryに対して匿名の要求者1件
+                                            # (参照カウント1)を暗黙に仮定する
+                                            # (既存PlanningInputとの後方互換)。
+                                            # 同一artifact_idが複数の
+                                            # DemandReferenceで指定される場合、
+                                            # 参照カウントはその個数になる
+                                            # (§8 case5)。**重要(fix#5)**:
+                                            # `initial_graph`+`initial_demands`
+                                            # が表す開始状態そのものは、常に
+                                            # 単独で有効(閉包・cycleなし、
+                                            # 未解決のproducer参照なし)でなければ
+                                            # ならない——診断対象となる不正状態は
+                                            # 必ず後続の`ApplyDelta`が導入する
+                                            # (§10各case)。
   - ApplyDelta:
       event: PlanningEvent          # §3.2。ちょうど1個のeventを運ぶ。
   - CloseSession: {}
@@ -360,11 +431,19 @@ ActionStateChange:
   action_id: string
   from_state: ActionState?     # null は「このactionがこのdeltaで初めて
                                 # graphに現れた」ことを意味する
-  to_state: ActionState        # Nimが追跡する6種のみ、discovered|
+  to_state: ActionState?       # Nimが追跡する6種、discovered|
                                 # blocked_dependency|ready|completed|
                                 # failed|cancelled。`running`はRust側の
                                 # 実行status overlayでありNimはこれを
-                                # 報告しない(§6.1)
+                                # 報告しない(§6.1)。**null は、この
+                                # actionがsupersede(§3.4・§1.3改訂)により
+                                # 退役したことを意味する(その場合
+                                # `retired_because_superseded_by`が
+                                # 必ず埋まる、第2版改訂・fix#3)。**
+  retired_because_superseded_by: string?  # NEW(第2版改訂)。non-null は
+                                # `to_state == null`のときのみで、この
+                                # actionを置き換えた新しいAction idを
+                                # 指す。
   new_action: Action?          # non-null は「graphにまだ存在しなかった
                                 # Actionが挿入された」ことを意味し、その
                                 # 場合は必ずfull Action(id/kind/
@@ -395,6 +474,15 @@ P1「増分協調が実質的にRust内部へ閉じている」の直接の原�
 本書はこれを撤回し、`PlanningEvent`は`ApplyDelta`のペイロードとして
 Nim plannerへ直接送られる、と改める。**
 
+**改訂(第2版): `extends_inputs`/`InputsExtension`を完全に撤回し、
+`supersessions`/`Supersession`に置き換える。** §1.3改訂が示す通り、
+この4 compiler-work kindでは`inputs`と`semantic_input_artifact_ids`が
+常に連動しており、「`inputs`だけ書き換えてidは維持する」という操作は
+存在しない。あるactionが意味的に新しい入力を必要とするようになった
+場合、既存actionは一切変更せず、新しい(再計算された)idを持つ
+replacement actionを`new_actions`へ追加し、`supersessions`でどの既存
+actionを置き換えるかを明示する。
+
 schema version: `"incremental-planning-event/0.1.0"`。
 
 ```yaml
@@ -415,22 +503,33 @@ PlanningEventKind:
   - DependencyDiscovered:
       discovering_action_id: string   # 実際にこの発見を行ったaction
                                        # (例: DiscoverSourceDependencies)
-      new_actions: [Action]           # 1個以上。このdeltaで初めてgraphへ
-                                       # 挿入される、full Action(id/kind/
+      new_actions: [Action]           # **常に1個以上**(第2版改訂・fix#1:
+                                       # 契約違反していた旧case2/6/10を
+                                       # すべて修正)。このdeltaが
+                                       # 主張する、full Action(id/kind/
                                        # command_identity/inputs/outputs/
                                        # compiler_work、§1.3・§1.8)。
-                                       # 空配列は不正(「発見したが何も
-                                       # 追加しない」は矛盾)。
+                                       # 既にgraphへ同一idのActionが
+                                       # 存在する場合、Nimはこのentryを
+                                       # 無害な再主張として扱い、無視する
+                                       # (§7.1改訂: 「同一新規Action idの
+                                       # 再送」を duplicate discoveryの
+                                       # 正規表現とする、§10 case2)。
+      supersessions: [Supersession]   # NEW(第2版改訂、extends_inputsを
+                                       # 置き換える、fix#3)。既存の
+                                       # activeなAction(このdeltaより
+                                       # 前からgraphに存在し、まだ
+                                       # supersedeされていないもの)を
+                                       # `new_actions`中の1つで置き換える
+                                       # 場合のpairを列挙する。空配列は
+                                       # 「new_actionsは全て新規の葉で
+                                       # あり、既存Actionを置き換えない」
+                                       # ことを意味する。
       new_demands: [DemandReference]  # new_actionsが存在することで初めて
                                        # 表現可能になった外部からの需要。
                                        # (§1.8のadd_or_double例: consumer-b
                                        # の本来の要求はここで初めて
                                        # 具体的なartifact_idを得る)
-      extends_inputs: [InputsExtension] # 既存actionの`inputs`へ新規に
-                                        # 追加されるDeclared artifact id
-                                        # (§1.3: これらのactionのidは
-                                        # 変化しない)。new_actionsが完全に
-                                        # 新規の葉である場合は空。
   - ProducerCompleted:
       artifact_id: string
       produced_by_action_id: string
@@ -454,15 +553,45 @@ DemandReference:
   artifact_id: string
   requested_by: string
 
-InputsExtension:
-  action_id: string        # 既存action(このdeltaより前からgraphに存在)
-  added_inputs: [string]   # このactionの inputs (ArtifactRef::Declared)
-                            # へ新規追加される artifact id
+Supersession:
+  old_action_id: string   # 既にgraphに存在し、まだsupersedeされていない
+                           # activeなAction。存在しない/既にsuperseded
+                           # 済みのidを指す場合、このdelta全体を
+                           # `Rejected{reason_kind: unsupported_input}`
+                           # とする(既存5variantのうち、「入力そのものが
+                           # このplanning_kernelの前提を満たさない」を
+                           # 表す既存の分類に素直に収まるため、新規
+                           # variantは追加しない)。
+  new_action_id: string   # 同じevent中の new_actions[*].id のいずれか
 ```
 
 必須field(全variant共通): `event_id`, `sequence_number`,
 `planning_generation`, `emitted_at_unix_ns`, `kind`。省略可能なfieldは
 存在しない(#35 D0の教訓を踏襲)。
+
+**supersession適用時の副作用(第2版改訂、fix#3・fix#4)**:
+1. `old_action_id`は`retired_because_superseded_by: new_action_id`と
+   して`PlanDelta.changed_actions`へ報告され、以後のいかなるevent
+   (`ProducerCompleted`/`ProducerFailed`/`DemandRequested`/
+   `DemandCancelled`)からも`superseded`として扱われる——Rust runtimeは
+   supersessionをPlanDeltaから知った時点で、以後`old_action_id`を
+   一切実行・参照しない(実行対象を`new_action_id`へ切り替える)ことを
+   前提とする契約であり、Nimはそれでも古いidを参照するeventが届いた
+   場合、`stale_generation`診断(§6.4)として扱う(そのidはもはや
+   このgenerationの有効な対象ではないため、新しい診断enumを追加しない)。
+2. `old_action_id`に対する既存の参照カウント(§8)は、そのまま
+   `new_action_id`へ**全数移送**される——supersessionは要求元
+   (`requested_by`)から見て「同じものを指す名前が変わった」だけであり、
+   需要そのものが消長するわけではない。
+3. `old_action_id`を`inputs`で参照していた**他の既存action**がある
+   場合、そのactionもまた意味的入力(=`old_action_id`という文字列)が
+   変わることになり、fix#3の同じ規則により**それ自身もreplacement
+   actionとして再導入されなければならない**(cascadeする)。本書の
+   固定caseは、この cascade を要求する構成を意図的に避けている
+   (§10 case12の注記)——T1が実装する際にcascade自体を検出・拒否する
+   か、連鎖的に解決するかは、この後の反復で決定する未解決事項として
+   明記する(D2以降で拡張する余地として残す、T0が今すぐ決め切る
+   必要はない事項)。
 
 ---
 
@@ -541,7 +670,7 @@ InputsExtension:
 | `planning_generation`カウンタの発行・増分・staleness判定 | Nim planner | §4.2(初版から反転) |
 | `event_id`重複集合の保持 | Nim planner | §4.3(初版から反転) |
 | compiler work(`LowerSource`/`ValidateIr`/`TransformFunction`/`EvaluateEvidence`/`DiscoverSourceDependencies`)の実行 | Rust runtime | §1.8、変更なし |
-| `DiscoverSourceDependencies`の実行結果から`new_actions`/`new_demands`/`extends_inputs`を構成し、`DependencyDiscovered`として送出する | Rust runtime | §1.8・§3.4(P1「producerを生成できない」への修正) |
+| `DiscoverSourceDependencies`の実行結果から`new_actions`/`supersessions`/`new_demands`を構成し、`DependencyDiscovered`として送出する | Rust runtime | §1.8・§3.4(P1「producerを生成できない」への修正) |
 | CPU budget・実行枠の割当・`cpu_slot_acquired`/`cpu_slot_released`の発行 | Rust runtime | §1.4・§9 |
 | `ArtifactStore`(実行結果の実体) | Rust runtime | 変更なし |
 | 合流キー(`*_artifact_id`)の計算 | Rust runtime(計算)、Nim(合流判定の実行) | §4.4——計算はRustの既存関数、合流(参照カウント判定)はNimのgraph操作 |
@@ -587,12 +716,13 @@ statusの変化として起こる——Nimへ伝わるのはその**結果**
 | (初期) | `discovered` | `StartSession.initial_graph`または`DependencyDiscovered.new_actions`により、Nimのgraphへ初めて挿入される | — |
 | `discovered` | `ready` | 宣言済み`inputs`の全Declared artifactが既に`completed`(またはSourceで解決済み) | — |
 | `discovered` | `blocked_dependency` | 宣言済み`inputs`のうち少なくとも1つが未完成 | — |
-| `blocked_dependency` | `blocked_dependency` | `extends_inputs`により、blocking集合が**増加**する(既存の待機理由に追加、リセットしない) | 冪等(§7.3) |
 | `blocked_dependency` | `ready` | blocking集合が空になる(最後の1つが`ProducerCompleted`) | **一度だけ**(#36 case2)。複数producerが同時に完了しても、blocking集合が空になった瞬間の1回のみ遷移する |
+| (discovered\|blocked_dependency\|ready) | (状態は変えず) | 同一idの`new_actions`エントリが重複して主張される(§7.1・§10 case2) | 冪等(無視) |
+| いずれか(active) | `superseded`(=`to_state: null`、§3.2) | `supersessions`で`old_action_id`として名指しされる(§3.4・§10 case12) | 一度だけ。参照カウントは`new_action_id`へ全数移送(§8) |
 | `ready` | `running` | Rust runtimeがCPU budgetの空き枠をこのactionに割り当て、`cpu_slot_acquired`を発行する(§9) | — |
 | `running` | `completed` | 実行成功。Rust runtimeが`ProducerCompleted`を送出し、同時に`cpu_slot_released`を発行する | — |
 | `running` | `failed` | 実行失敗。`ProducerFailed`送出+`cpu_slot_released` | — |
-| `running` | `completed`だが公開しない(`cancelled_result`診断、§6.4) | 実行完了時点で、このactionへの参照カウント(§8)が既に0 | §6.3参照 |
+| `running` | `completed`だが公開しない(`cancelled_result`診断、§6.4) | 実行完了時点で、このactionへの参照カウント(§8)が既に0(§10 case7: 参照カウント0への到達自体は、readyの間に届いた`DemandCancelled`で先に`cancelled`へ遷移させ、その後に届く遅延`ProducerCompleted`をこの行で扱う) | §6.3参照 |
 | (discovered\|blocked_dependency\|ready) | `cancelled` | 参照カウントが0に達する(§8) | — |
 | いずれか | `cancelled`(直接) | 全ての`DemandRequested`が対応する`DemandCancelled`で相殺され、かつ`running`未満の状態 | — |
 
@@ -628,11 +758,29 @@ IncrementalDiagnosticReason:
 
 ## §7. 冪等規則（重複・遅延・順序入替event、判定主体はすべてNim）
 
-### 7.1 重複(duplicate)
+### 7.1 重複(duplicate)——**2つの異なる形を区別する(第2版改訂、fix#6)**
 
-同一`event_id`を持つeventの2回目以降の到着は、Nimが保持する既知
-`event_id`集合と照合し、無視する(`PlanDelta`、`changed_actions: []`、
-`diagnostic: null`——診断なしの無害な無視。§4.3)。
+初版・第1改訂は「重複」を1種類として扱っていたが、実際には性質の
+異なる2つの現象であり、本改訂は明示的に分離する:
+
+1. **完全重複(同一`event_id`の再送)**: 同一`event_id`を持つeventの
+   2回目以降の到着は、Nimが保持する既知`event_id`集合と照合し、無視
+   する(`PlanDelta`、`changed_actions: []`、`diagnostic: null`——診断
+   なしの無害な無視。§4.3)。at-least-once配送で同じevent(payloadも
+   同一)が物理的に2回届くケース(§10 case4)。
+2. **内容的な重複(別`event_id`・同一の意味内容)**: `event_id`は
+   異なる(例: 独立した2回のretryがそれぞれ新しい`event_id`を発行した)
+   が、結果として同じ状態遷移を主張するevent。この場合`event_id`集合
+   での重複検出には引っかからないため、**状態遷移そのものが内容ベース
+   で冪等でなければならない**(§7.3、§10 case13)——例えば既に
+   `completed`のactionへ2回目の`ProducerCompleted`が(別`event_id`で)
+   届いても、状態は`completed`のまま変化せず、エラーにもならない。
+   `DependencyDiscovered`についても、既にgraphに存在するidと同じ
+   `new_actions`エントリの再主張は無害に無視する(§6.2改訂の新しい行、
+   §10 case2)。
+
+この2つを同じ「重複」として扱い、`event_id`ベースの検出だけで
+両方カバーできると誤って想定したことが、第1改訂のcase4の欠陥だった。
 
 ### 7.2 遅延(delayed)
 
@@ -663,6 +811,16 @@ actionに対する2つの`ProducerCompleted`/`DependencyDiscovered`eventが
 - `blocked_dependency`中のactionが取消された場合、そのactionが依存
   していたproducerへの参照カウントも連動して-1する(推移的取消)。
   他のconsumerから要求されていれば(参照カウント>0)生存する。
+- **NEW(第2版改訂、fix#4)**: session開始時点の初期需要は
+  `StartSession.initial_demands`(§3.1)から構成する——`demanded_artifacts`
+  (既存field、文字列のみ)だけでは「誰が」要求しているかを表現でき
+  ず、複数consumerによる初期参照カウントを正当化できなかった
+  (第1改訂case5の欠陥)。
+- **NEW(第2版改訂、fix#3)**: `supersessions`(§3.4)により
+  `old_action_id`が退役するとき、`old_action_id`に対して保持されて
+  いた参照カウントは**全数**`new_action_id`へ移送される——
+  supersessionは要求元から見て「指す名前が変わっただけ」であり、
+  需要そのものの消長ではない。
 
 ---
 
@@ -685,7 +843,7 @@ actionに対する2つの`ProducerCompleted`/`DependencyDiscovered`eventが
 
 ---
 
-## §10. 固定する最低限6種類→11 case（fixture修正・schema完全準拠・否定caseを追加）
+## §10. 固定する最低限6種類→13 case（fixture修正・schema完全準拠・否定case+supersession+内容的冪等caseを追加）
 
 ### 10.1 共有fixture(修正版)
 
@@ -713,41 +871,98 @@ fixtures:
 `add_or_double`/`double`両方を含む1回の`LowerSource`が作られる、という
 §1.8の設計に合わせて書き直した。**
 
-### 10.2 case一覧
+**新設(第2版改訂、case12用)**: `branch_ready`の`f`を編集し、
+`f_helper`という新規関数を呼ぶようになった版
+(`fixtures.branch_ready_edited_for_case12`、`docs/design/issue-36-t0-
+cases.yaml`)を、source-edit-triggered supersessionの実演(§3.4)専用に
+追加した。
+
+### 10.2 case一覧(第2版改訂: 全13case、`StartSession`単独有効性を全case
+で満たし、診断対象の不正状態は必ず`ApplyDelta`で導入する、fix#5)
 
 1. `T0-incremental-ready-branch-proceeds-during-discovery` — 別枝の依存
    発見が継続中に、依存が閉じたready枝が実compiler workを開始する。
-2. `T0-incremental-late-dependency-single-resume` — 同一blocking関係の
-   重複した発見通知が二重の待機/再開を起こさない。
+   `StartSession`は`AID_LOWER_F`(ready)と`AID_DISCOVER_ADD`(ready)の
+   みを持つ、単独で有効な graph。
+2. `T0-incremental-duplicate-discovery-single-resume`(第2版改訂で改称。
+   旧`late-dependency-single-resume`) — 既に`new_actions`として存在
+   するActionと同一idの再主張(=duplicate discovery、fix#1・fix#6)が
+   状態を変化させず、その後の本物の`ProducerCompleted`が
+   blocked→readyを一度だけ起こす。
 3. `T0-incremental-semantic-key-merge` — 同一artifact_id(既存
    `lower_source_artifact_id`の戻り値)への同時要求が一計算へ合流する。
    (caseの識別名は据え置くが、内容は`semantic_key`ではなく既存
    `*_artifact_id`を使う、§4.4改訂)
 4. `T0-incremental-event-reorder-duplicate-delay-stable-result` —
-   eventの重複・遅延・順序入替で最終graphと公開結果が変化しない。
+   **完全重複(同一event_id・同一payloadの再送)**と順序入替が最終
+   graphと公開結果を変化させない(第2版改訂: 真の重複に修正、fix#6。
+   別event_idを持つ内容的重複はcase13へ分離)。
 5. `T0-incremental-cancel-survives-shared-producer` — 一consumerの
-   取消後も共有producerが生存する。
+   取消後も共有producerが生存する。`StartSession.initial_demands`で
+   consumer-a/consumer-bの2件を明示し、そこから参照カウント2を
+   導出する(第2版改訂、fix#4)。
 6. `T0-incremental-diagnostic-stale-generation` — 古いgenerationの
-   eventをNimが拒否する。
+   eventをNimが拒否する。`StartSession`は空に近い有効な graph、
+   `ApplyDelta`でまず本物の発見によりgeneration 0→1へ正当に進め、
+   その後にgeneration 0を名乗る(既に反映済みの内容の)eventを送って
+   初めてstaleを再現する(第2版改訂: 実際にstaleにした、fix#2)。
 7. `T0-incremental-diagnostic-cancelled-result` — 取消後に完了した
-   結果の診断。
+   結果の診断。`StartSession`は有効なdemand付きready状態から開始し、
+   `DemandCancelled`(→Nim視点でready→cancelled)の**後**に遅れて届く
+   `ProducerCompleted`が診断対象を発生させる(第2版改訂: 診断対象を
+   `ApplyDelta`側へ移した、fix#5)。
 8. `T0-incremental-diagnostic-missing-producer` — 増分session内での
-   missing producer(既存`RejectionReasonKind::MissingProducer`)。
+   missing producer。`StartSession`は`AID_DISCOVER_ADD`のみの有効な
+   graphから開始し、`ApplyDelta`のdiscoveryが自己矛盾した
+   (存在しないproducerに依存する)actionを持ち込む(第2版改訂、fix#5)。
 9. `T0-incremental-diagnostic-dependency-failed` — blocking producer
-   の失敗によるblocked_dependency actionの終端診断。
-10. `T0-incremental-diagnostic-cycle` — 新規発見された依存が既存graph
-    とcycleを構成する場合の診断。
-11. **`T0-incremental-no-fallback-on-rejection`(新設)** — `Rejected`
-    (missing_producer/cycle)を受けた後、Rust runtimeが外部compiler
+   の失敗によるblocked_dependency actionの終端診断。`branch_ready`
+   (`AID_LOWER_F`/`AID_VALIDATE_F`)を使い、discovery未解決の閉包に
+   依存しない、単独で有効な初期状態に統一(第2版改訂の整合性強化)。
+10. `T0-incremental-diagnostic-cycle` — discoveryが導入する**2つの
+    新規action同士が互いに依存し合う**ことで、既存graphに触れずに
+    自己完結したcycleを構成する場合の診断(第2版改訂: 既存action自体
+    を書き換えてcycleを作る、というextends_inputs時代の設計をやめ、
+    supersessionの複雑なcascadeを要求しない構成にした)。abstract
+    action(実compiler-work kindに紐付かない、Nim自身のcycle検出
+    アルゴリズムを単体で検証するための構造的case)であることを明示
+    する。
+11. `T0-incremental-no-fallback-on-rejection` — `Rejected`
+    (missing_producer)を受けた後、Rust runtimeが外部compiler
     (`rustc`/`nim`)を一切起動せず、Rust側の代替planningロジックにも
     フォールバックせず、graphは直前の有効なgeneration状態のまま
-    変化しないことを固定する(§11・指示の否定case要求への対応)。
+    変化しないことを固定する(§11)。`StartSession`はcase8と同型の
+    単独有効なgraphから開始する(第2版改訂、fix#5)。
+12. **`T0-incremental-supersession-replaces-superseded-action`(新設、
+    fix#3の直接の実例)** — `branch_ready`の`AID_LOWER_F`がまだ
+    `ready`(何もconsumeしていない)段階で、discoveryにより`f`が実は
+    別関数`f_helper`も呼ぶと判明し、閉じた集合`["f","f_helper"]`を
+    持つ`AID_LOWER_F_V2`が`supersedes_action_id: AID_LOWER_F`として
+    導入される。`AID_LOWER_F`は`retired_because_superseded_by:
+    AID_LOWER_F_V2`として退役し、`AID_LOWER_F`に対する参照カウント
+    (もしあれば)は全数`AID_LOWER_F_V2`へ移送される。既存consumerに
+    よるcascade(§3.4 supersession適用時の副作用3)は本caseの対象外
+    ——意図的に、まだ何もconsumeしていない段階で置換することで
+    cascadeを要求しない最小構成にしている(§3.4に明記した未解決事項)。
+13. **`T0-incremental-content-idempotent-different-event-id`(新設、
+    fix#6で「別サブcaseに分離」と指示された内容的重複)** — 独立した
+    2回のretryがそれぞれ**別の`event_id`**を発行して同じ
+    `ProducerCompleted`を主張しても(`event_id`ベースの重複検出には
+    引っかからない)、既に`completed`のactionへの2回目の適用は状態を
+    変化させない——冪等性は`event_id`の一致にではなく、状態遷移
+    そのものの内容(§7.3)に宿ることを示す。
 
 全caseは`crates/laminaria-ir`由来の実IR評価(`LowerSource`→
 `ValidateIr`→`EvaluateEvidence`、および新設`DiscoverSourceDependencies`)
 を使う固定caseとして`docs/design/issue-36-t0-cases.yaml`に完全記述する
 (event_id・sequence_number・planning_generation・emitted_at_unix_ns
-を含む宣言schema完全準拠、`pass_criteria.t1`表記)。
+を含む宣言schema完全準拠、`pass_criteria.t1`表記、`command_identity`/
+`compiler_work`を含む完全なActionと、実際の`compute_artifact_id`
+(FNV-1a)から計算した具体的なartifact idを持つcatalog、fix#7)。
+case10のみ、Nim自身のcycle検出アルゴリズムを単体で検証する目的から
+abstract actionを使う——それ以外の全caseは実際のcompiler-work kind
+(`LowerSource`/`ValidateIr`/`EvaluateEvidence`/`DiscoverSourceDependencies`)
+を使う。
 
 ---
 

@@ -868,3 +868,26 @@ jobs:
 
       - name: doctor inside the container
         run: docker run --rm laminaria-bootstrap doctor
+
+  # issue #36 T0's own review requirement: a YAML validation script must
+  # actually run in CI, not just exist locally (docs/design/issue-36-t0-
+  # incremental-contract.md's "第2版改訂" header, fix requirement 5).
+  # A separate, lean job rather than folding into `rust` above: this is
+  # pure Python and needs neither the Rust nor the Nim toolchain, and
+  # PyYAML is an explicit, verified `pip install` here rather than an
+  # assumed-preinstalled package (the same "never silently assume an
+  # external dependency is just there" discipline scripts/resolve_nlvm_asset.py
+  # already follows for its own GitHub API dependency).
+  docs-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PyYAML
+        run: python3 -m pip install --quiet pyyaml
+
+      - name: Run validate_issue36_t0_cases.py's own test suite
+        run: python3 -m unittest scripts.tests.test_validate_issue36_t0_cases -v
+
+      - name: Validate docs/design/issue-36-t0-cases.yaml
+        run: python3 scripts/validate_issue36_t0_cases.py

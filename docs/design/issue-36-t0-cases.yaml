@@ -1,43 +1,62 @@
-# #36 T0 — 機械可読case定義（改訂版）
+# #36 T0 — 機械可読case定義（第2版改訂）
 #
 # 対応する設計文書: docs/design/issue-36-t0-incremental-contract.md
-# 基準commit: 36ee8a0
+# 基準commit: 1a2e9af
 #
-# 改訂の理由: 初版(基準commit e3b528c)はレビューで5件のP1欠陥を指摘され
-# 不採択となった。本改訂は設計文書の全面書き直しに合わせて、本fileも
-# 全caseを書き直したものである。主な変更:
-#   - branch_discoveringの前提を修正(add_or_doubleだけを先にlowerする
-#     という、実際のlower_rust_sourceの前提と矛盾する想定を廃した)。
-#   - 全eventにevent_id/sequence_number/planning_generation/
-#     emitted_at_unix_nsを完全記述した(宣言schema準拠)。
-#   - semantic_keyを廃し、既存の*_artifact_id関数の戻り値をartifact_idと
-#     して使う。
-#   - DependencyDiscoveredにnew_actions(full Action)/new_demands/
-#     extends_inputsを持たせ、「producerを生成できない」欠陥を修正した。
-#   - pass_criteria.d1 を pass_criteria.t1 に修正した。
-#   - cpu_slot_acquired/cpu_slot_releasedをtraceへ追加した。
-#   - 否定case(no-fallback)を追加し、合計11 caseとした。
-#   - 各caseは独立したsession(StartSession〜CloseSession)として自己完結
-#     させた(前caseの状態を暗黙に引き継がない)。
-#
-# artifact idの記法: 以下のAID_*は、すべて
-# crates/laminaria-plan/src/compiler_work.rs:265-359の実関数を実引数で
-# 呼んだ戻り値を指す固定ラベルである(本fileが独自に定義する識別子では
-# ない)。関数と実引数の対応は下の `artifact_id_definitions` に明記する。
+# この改訂で修正した7件(レビュー指摘、docs/design/issue-36-t0-incremental-
+# contract.md冒頭の「本書は第2版改訂である」参照):
+#   1. DependencyDiscovered.new_actions は常に1件以上(旧case2/6/10の
+#      矛盾を修正)。
+#   2. stale-generation(case6)を実際にstaleにした(先に本物の発見で
+#      generationを0->1へ進めてから、generation 0のeventを送る)。
+#   3. extends_inputsを撤回し、既存Actionはimmutableのまま、新IDの
+#      replacement Action + supersessions で置換する方式にした(fix#3の
+#      実例をcase12として新設)。
+#   4. StartSession.initial_demandsを追加し、case5の参照カウント2を
+#      consumer-a/consumer-bの2件のDemandReferenceから導出できるように
+#      した。
+#   5. case7/8/11の診断対象(取消後の完了、missing producer)を、
+#      StartSessionの初期状態からApplyDeltaでの導入に移した——
+#      StartSessionは全caseで単独有効。
+#   6. case4を真の完全重複(同一event_id・同一payloadの再送)に修正し、
+#      別event_idを持つ内容的重複はcase13へ分離した。
+#   7. 全ActionにVcommand_identity/compiler_workを含む完全な記述を与え、
+#      artifact idは実際のcompute_artifact_id(FNV-1a、
+#      crates/laminaria-plan/src/compiler_work.rs:251-263)をPythonで
+#      再実装し、実引数から計算した具体的な値にした(action_catalog参照)。
 #
 # schema_version: "incremental-planner-protocol/0.1.0" (Command/Response)
 #                  "incremental-planning-event/0.1.0" (PlanningEvent)
 
-schema_version: "0.1.0-draft"
+schema_version: "0.2.0-draft"
+
+# ---------------------------------------------------------------------------
+# artifact id の再計算方法(検証はscripts/validate_issue36_t0_cases.pyで
+# 自動化する、CI組込)。定数はcompiler_work_executor.rsの実際の呼び出し
+# (crates/laminaria-run/src/compiler_work_executor.rs:263-266)と同じ値。
+# ---------------------------------------------------------------------------
+constants:
+  operation_version: "0.1.0"
+  subset_version: "0.1.0"
+  semantic_contract_version: "0.1.0"
+  observation_contract_version: "0.1.0"
+  descriptor_schema_version: "0.1.0"   # COMPILER_WORK_SCHEMA_VERSION, compiler_work.rs:29
+  budget_token: "budget-1"
 
 fixtures:
   branch_ready:
     rust_source: "fn f(x: i32) -> i32 { x }"
     nim_source: "proc g(x: int32): int32 =\n  x\n"
-    expected_rust_result: 5
-    expected_nim_result: 5
     test_input: 5
+    expected_result: 5
     # fはどの関数も呼ばない -- 閉包は最初から既知、discoveryを経ない。
+    # nim_source("g")は本改訂の13caseのいずれからも直接は参照されない
+    # (将来のNim側caseのために宣言のみ保持)。
+  branch_ready_edited_for_case12:
+    # case12専用: branch_readyの"f"が、ソース編集により新たにf_helperを
+    # 呼ぶようになった後の版(source-edit-triggered supersessionの実演、
+    # docs/design/issue-36-t0-incremental-contract.md §3.4)。
+    rust_source: "fn f(x: i32) -> i32 { f_helper(x) }\nfn f_helper(x: i32) -> i32 { x }"
   branch_discovering:
     rust_source_file: "fixtures/laminaria-semantic-substrate-prototype/rust-src/add_or_double.rs"
     initially_requested_functions: ["add_or_double"]
@@ -46,19 +65,225 @@ fixtures:
     expected_result: 6
     derivation: "D0確定済み(issue #35)、crates/laminaria-ir/src/rust_frontend.rs:830-835"
 
+# ---------------------------------------------------------------------------
+# artifact id 定義(検証スクリプトが実際に再計算し、下のaction_catalogの
+# 値と一致することを確認する——このコメントは人間向けの説明であり、
+# 真に唯一の正本はaction_catalog自身の`id`フィールドである)。
+# ---------------------------------------------------------------------------
 artifact_id_definitions:
-  AID_LOWER_F: 'lower_source_artifact_id("lower_source/0.1.0", "rust", SNAPSHOT_F, ["f"], "declared-subset/0.1.0")'
-  AID_VALIDATE_F: 'validate_ir_artifact_id("validate_ir/0.1.0", AID_LOWER_F, "semantic-contract/0.1.0")'
-  AID_EVIDENCE_F: 'evaluate_evidence_artifact_id("evaluate_evidence/0.1.0", AID_VALIDATE_F, "f", [[5]], "observation-contract/0.1.0")'
-  AID_LOWER_G: 'lower_source_artifact_id("lower_source/0.1.0", "nim", SNAPSHOT_G, ["g"], "declared-subset/0.1.0")'
-  AID_VALIDATE_G: 'validate_ir_artifact_id("validate_ir/0.1.0", AID_LOWER_G, "semantic-contract/0.1.0")'
-  AID_EVIDENCE_G: 'evaluate_evidence_artifact_id("evaluate_evidence/0.1.0", AID_VALIDATE_G, "g", [[5]], "observation-contract/0.1.0")'
-  AID_DISCOVER_ADD: 'discover_source_dependencies_artifact_id("discover_source_dependencies/0.1.0", "rust", SNAPSHOT_ADD, ["add_or_double"], "declared-subset/0.1.0")'
-  AID_LOWER_ADD: 'lower_source_artifact_id("lower_source/0.1.0", "rust", SNAPSHOT_ADD, ["add_or_double", "double"], "declared-subset/0.1.0")'
-  AID_VALIDATE_ADD: 'validate_ir_artifact_id("validate_ir/0.1.0", AID_LOWER_ADD, "semantic-contract/0.1.0")'
-  AID_EVIDENCE_ADD: 'evaluate_evidence_artifact_id("evaluate_evidence/0.1.0", AID_VALIDATE_ADD, "add_or_double", [[3,4,1]], "observation-contract/0.1.0")'
-  # SNAPSHOT_F/SNAPSHOT_G/SNAPSHOT_ADD はそれぞれの source_snapshot_id
-  # (compute_source_snapshot_id、compiler_work.rs:64-70 のSHA-256)。
+  SNAPSHOT_F: 'sha256("fn f(x: i32) -> i32 { x }") = 47ccfa71d2b9d5f65b0991fab8e9bd39e78f4e6fd3d8242e8423f1648939558f'
+  SNAPSHOT_F_V2: 'sha256(fixtures.branch_ready_edited_for_case12.rust_source) = 1cd791159ef83c2b14e1e2d749082f867754323ed21bfe6b32a4a6087631face'
+  SNAPSHOT_ADD: 'sha256(<contents of fixtures/laminaria-semantic-substrate-prototype/rust-src/add_or_double.rs>) = 48d7eb8a80859d1ee9aae5c455a1505cce82ca3f3b62919a985623e7ef3a2499'
+  AID_LOWER_F: 'lower_source_artifact_id("0.1.0", "rust", SNAPSHOT_F, ["f"], "0.1.0") = fb9a5e4882ac44d3'
+  AID_VALIDATE_F: 'validate_ir_artifact_id("0.1.0", AID_LOWER_F, "0.1.0") = 3291ecb211f5165c'
+  AID_EVIDENCE_F: 'evaluate_evidence_artifact_id("0.1.0", AID_VALIDATE_F, "f", [[5]], "0.1.0") = 346daf22171a2722'
+  AID_LOWER_F_V2: 'lower_source_artifact_id("0.1.0", "rust", SNAPSHOT_F_V2, ["f","f_helper"], "0.1.0") = e632c3722565763b'
+  AID_DISCOVER_ADD: 'discover_source_dependencies_artifact_id("0.1.0", "rust", SNAPSHOT_ADD, ["add_or_double"], "0.1.0") = 0e788157045cb74a'
+  AID_LOWER_ADD: 'lower_source_artifact_id("0.1.0", "rust", SNAPSHOT_ADD, ["add_or_double","double"], "0.1.0") = 95d7231ab054085b'
+  AID_VALIDATE_ADD: 'validate_ir_artifact_id("0.1.0", AID_LOWER_ADD, "0.1.0") = eac04bc4907983a3'
+  AID_EVIDENCE_ADD: 'evaluate_evidence_artifact_id("0.1.0", AID_VALIDATE_ADD, "add_or_double", [[3,4,1]], "0.1.0") = 4539bb6e4724df6b'
+  AID_TRIPLE_VALIDATE: 'validate_ir_artifact_id("0.1.0", "nonexistent-triple-lower-output", "0.1.0") = fb6225c8e90f34e1 -- "nonexistent-triple-lower-output" is a deliberately unresolvable producer id, not a computed value'
+
+# ---------------------------------------------------------------------------
+# Action catalog: every Action any case references, fully specified
+# (id/kind/command_identity/inputs/outputs/compiler_work) matching the real
+# shape crates/laminaria-run/src/compiler_work_executor.rs:276-298 builds
+# (fix#7). Cases reference these by catalog key, never redeclare them.
+# ---------------------------------------------------------------------------
+common: &common_resource_request
+  cpu_slots: 1
+  transient_memory_bytes_estimate: 0
+
+action_catalog:
+  AID_LOWER_F: &AID_LOWER_F
+    id: "fb9a5e4882ac44d3"
+    kind: LowerSource
+    command_identity: "lower_source"
+    inputs: [{ kind: source, path: "fixtures/branch_ready/f.rs" }]
+    outputs: [{ kind: declared, artifact_id: "fb9a5e4882ac44d3" }]
+    compiler_work:
+      descriptor_schema_version: "0.1.0"
+      operation_version: "0.1.0"
+      semantic_input_artifact_ids: []
+      requested_functions: ["f"]
+      language: "rust"
+      contract_version: "0.1.0"
+      transform: null
+      source_provenance: { source_file: "fixtures/branch_ready/f.rs", source_snapshot_id: "47ccfa71d2b9d5f65b0991fab8e9bd39e78f4e6fd3d8242e8423f1648939558f" }
+      test_inputs: []
+      resource_request: *common_resource_request
+      budget_token: "budget-1"
+
+  AID_VALIDATE_F: &AID_VALIDATE_F
+    id: "3291ecb211f5165c"
+    kind: ValidateIr
+    command_identity: "validate_ir"
+    inputs: [{ kind: declared, artifact_id: "fb9a5e4882ac44d3" }]
+    outputs: [{ kind: declared, artifact_id: "3291ecb211f5165c" }]
+    compiler_work:
+      descriptor_schema_version: "0.1.0"
+      operation_version: "0.1.0"
+      semantic_input_artifact_ids: ["fb9a5e4882ac44d3"]
+      requested_functions: []
+      language: null
+      contract_version: "0.1.0"
+      transform: null
+      source_provenance: null
+      test_inputs: []
+      resource_request: *common_resource_request
+      budget_token: "budget-1"
+
+  AID_EVIDENCE_F: &AID_EVIDENCE_F
+    id: "346daf22171a2722"
+    kind: EvaluateEvidence
+    command_identity: "evaluate_evidence"
+    inputs: [{ kind: declared, artifact_id: "3291ecb211f5165c" }]
+    outputs: [{ kind: declared, artifact_id: "346daf22171a2722" }]
+    compiler_work:
+      descriptor_schema_version: "0.1.0"
+      operation_version: "0.1.0"
+      semantic_input_artifact_ids: ["3291ecb211f5165c"]
+      requested_functions: ["f"]
+      language: null
+      contract_version: "0.1.0"
+      transform: null
+      source_provenance: null
+      test_inputs: [[5]]
+      resource_request: *common_resource_request
+      budget_token: "budget-1"
+
+  AID_LOWER_F_V2: &AID_LOWER_F_V2
+    id: "e632c3722565763b"
+    kind: LowerSource
+    command_identity: "lower_source"
+    inputs: [{ kind: source, path: "fixtures/branch_ready/f.rs" }]
+    outputs: [{ kind: declared, artifact_id: "e632c3722565763b" }]
+    compiler_work:
+      descriptor_schema_version: "0.1.0"
+      operation_version: "0.1.0"
+      semantic_input_artifact_ids: []
+      requested_functions: ["f", "f_helper"]
+      language: "rust"
+      contract_version: "0.1.0"
+      transform: null
+      source_provenance: { source_file: "fixtures/branch_ready/f.rs", source_snapshot_id: "1cd791159ef83c2b14e1e2d749082f867754323ed21bfe6b32a4a6087631face" }
+      test_inputs: []
+      resource_request: *common_resource_request
+      budget_token: "budget-1"
+
+  AID_DISCOVER_ADD: &AID_DISCOVER_ADD
+    id: "0e788157045cb74a"
+    kind: DiscoverSourceDependencies
+    command_identity: "discover_source_dependencies"
+    inputs: [{ kind: source, path: "fixtures/laminaria-semantic-substrate-prototype/rust-src/add_or_double.rs" }]
+    outputs: [{ kind: declared, artifact_id: "0e788157045cb74a" }]
+    compiler_work:
+      descriptor_schema_version: "0.1.0"
+      operation_version: "0.1.0"
+      semantic_input_artifact_ids: []
+      requested_functions: ["add_or_double"]
+      language: "rust"
+      contract_version: "0.1.0"
+      transform: null
+      source_provenance: { source_file: "fixtures/laminaria-semantic-substrate-prototype/rust-src/add_or_double.rs", source_snapshot_id: "48d7eb8a80859d1ee9aae5c455a1505cce82ca3f3b62919a985623e7ef3a2499" }
+      test_inputs: []
+      resource_request: *common_resource_request
+      budget_token: "budget-1"
+
+  AID_LOWER_ADD: &AID_LOWER_ADD
+    id: "95d7231ab054085b"
+    kind: LowerSource
+    command_identity: "lower_source"
+    inputs: [{ kind: source, path: "fixtures/laminaria-semantic-substrate-prototype/rust-src/add_or_double.rs" }]
+    outputs: [{ kind: declared, artifact_id: "95d7231ab054085b" }]
+    compiler_work:
+      descriptor_schema_version: "0.1.0"
+      operation_version: "0.1.0"
+      semantic_input_artifact_ids: []
+      requested_functions: ["add_or_double", "double"]
+      language: "rust"
+      contract_version: "0.1.0"
+      transform: null
+      source_provenance: { source_file: "fixtures/laminaria-semantic-substrate-prototype/rust-src/add_or_double.rs", source_snapshot_id: "48d7eb8a80859d1ee9aae5c455a1505cce82ca3f3b62919a985623e7ef3a2499" }
+      test_inputs: []
+      resource_request: *common_resource_request
+      budget_token: "budget-1"
+
+  AID_VALIDATE_ADD: &AID_VALIDATE_ADD
+    id: "eac04bc4907983a3"
+    kind: ValidateIr
+    command_identity: "validate_ir"
+    inputs: [{ kind: declared, artifact_id: "95d7231ab054085b" }]
+    outputs: [{ kind: declared, artifact_id: "eac04bc4907983a3" }]
+    compiler_work:
+      descriptor_schema_version: "0.1.0"
+      operation_version: "0.1.0"
+      semantic_input_artifact_ids: ["95d7231ab054085b"]
+      requested_functions: []
+      language: null
+      contract_version: "0.1.0"
+      transform: null
+      source_provenance: null
+      test_inputs: []
+      resource_request: *common_resource_request
+      budget_token: "budget-1"
+
+  AID_EVIDENCE_ADD: &AID_EVIDENCE_ADD
+    id: "4539bb6e4724df6b"
+    kind: EvaluateEvidence
+    command_identity: "evaluate_evidence"
+    inputs: [{ kind: declared, artifact_id: "eac04bc4907983a3" }]
+    outputs: [{ kind: declared, artifact_id: "4539bb6e4724df6b" }]
+    compiler_work:
+      descriptor_schema_version: "0.1.0"
+      operation_version: "0.1.0"
+      semantic_input_artifact_ids: ["eac04bc4907983a3"]
+      requested_functions: ["add_or_double"]
+      language: null
+      contract_version: "0.1.0"
+      transform: null
+      source_provenance: null
+      test_inputs: [[3, 4, 1]]
+      resource_request: *common_resource_request
+      budget_token: "budget-1"
+
+  AID_TRIPLE_VALIDATE: &AID_TRIPLE_VALIDATE
+    id: "fb6225c8e90f34e1"
+    kind: ValidateIr
+    command_identity: "validate_ir"
+    # 意図的に欠落させたproducer: "nonexistent-triple-lower-output"は
+    # このgraphのどのactionのoutputsにも一致しない(case8/11)。
+    inputs: [{ kind: declared, artifact_id: "nonexistent-triple-lower-output" }]
+    outputs: [{ kind: declared, artifact_id: "fb6225c8e90f34e1" }]
+    compiler_work:
+      descriptor_schema_version: "0.1.0"
+      operation_version: "0.1.0"
+      semantic_input_artifact_ids: ["nonexistent-triple-lower-output"]
+      requested_functions: []
+      language: null
+      contract_version: "0.1.0"
+      transform: null
+      source_provenance: null
+      test_inputs: []
+      resource_request: *common_resource_request
+      budget_token: "budget-1"
+
+  # case10専用: Nim自身のcycle検出アルゴリズムを単体で検証するための
+  # abstract action(実compiler-work kindに紐付けない、構造的case)。
+  action-x: &action_x
+    id: "action-x"
+    kind: LowerSource
+    command_identity: "abstract-structural-test"
+    inputs: [{ kind: declared, artifact_id: "action-y-out" }]
+    outputs: [{ kind: declared, artifact_id: "action-x-out" }]
+    compiler_work: null
+  action-y: &action_y
+    id: "action-y"
+    kind: LowerSource
+    command_identity: "abstract-structural-test"
+    inputs: [{ kind: declared, artifact_id: "action-x-out" }]
+    outputs: [{ kind: declared, artifact_id: "action-y-out" }]
+    compiler_work: null
 
 cases:
   # ------------------------------------------------------------ case 1 ----
@@ -66,19 +291,13 @@ cases:
     purpose: "別枝の依存発見中にready枝が実compiler workを開始する"
     start_session:
       initial_graph:
-        demanded_artifacts: ["AID_EVIDENCE_F", "AID_DISCOVER_ADD"]
-        actions:
-          - { id: "AID_LOWER_F", kind: LowerSource, inputs: [], outputs: ["AID_LOWER_F"] }
-          - { id: "AID_VALIDATE_F", kind: ValidateIr, inputs: ["AID_LOWER_F"], outputs: ["AID_VALIDATE_F"] }
-          - { id: "AID_EVIDENCE_F", kind: EvaluateEvidence, inputs: ["AID_VALIDATE_F"], outputs: ["AID_EVIDENCE_F"] }
-          - { id: "AID_DISCOVER_ADD", kind: DiscoverSourceDependencies, inputs: [], outputs: ["AID_DISCOVER_ADD"] }
-      initial_nim_state:
-        planning_generation: 0
-        graph_states:
-          AID_LOWER_F: ready            # inputsなし
-          AID_VALIDATE_F: blocked_dependency
-          AID_EVIDENCE_F: blocked_dependency
-          AID_DISCOVER_ADD: ready       # inputsなし(sourceを直接読む)
+        demanded_artifacts: ["346daf22171a2722", "0e788157045cb74a"]
+        actions: [*AID_LOWER_F, *AID_DISCOVER_ADD]   # catalogキー参照。単独有効
+                                                     # (AID_LOWER_Fはready、
+                                                     # AID_DISCOVER_ADDもready
+                                                     # -- どちらもSource入力の
+                                                     # みで未解決producerなし)
+      initial_demands: []   # demanded_artifactsのみ、匿名要求者(参照カウント1)
     apply_deltas:
       - command_index: 1
         event:
@@ -87,16 +306,13 @@ cases:
           planning_generation: 0
           emitted_at_unix_ns: 1700000000000000001
           kind: ProducerCompleted
-          artifact_id: "AID_DISCOVER_ADD"
-          produced_by_action_id: "AID_DISCOVER_ADD"
-        # Rust runtimeが実際にDiscoverSourceDependencies(構文走査、
-        # sleepではない)を実行し終えた結果。出力artifactの中身は
-        # 発見された関数名リスト["double"]。
+          artifact_id: "0e788157045cb74a"
+          produced_by_action_id: "0e788157045cb74a"
         expected_response:
           kind: PlanDelta
-          planning_generation: 0        # ProducerCompletedは増分しない
+          planning_generation: 0
           changed_actions:
-            - { action_id: "AID_DISCOVER_ADD", from_state: ready, to_state: completed }
+            - { action_id: "0e788157045cb74a", from_state: ready, to_state: completed }
           diagnostic: null
       - command_index: 2
         event:
@@ -105,38 +321,31 @@ cases:
           planning_generation: 0
           emitted_at_unix_ns: 1700000000000000002
           kind: DependencyDiscovered
-          discovering_action_id: "AID_DISCOVER_ADD"
-          new_actions:
-            - { id: "AID_LOWER_ADD", kind: LowerSource, inputs: [], outputs: ["AID_LOWER_ADD"] }
-            - { id: "AID_VALIDATE_ADD", kind: ValidateIr, inputs: ["AID_LOWER_ADD"], outputs: ["AID_VALIDATE_ADD"] }
-            - { id: "AID_EVIDENCE_ADD", kind: EvaluateEvidence, inputs: ["AID_VALIDATE_ADD"], outputs: ["AID_EVIDENCE_ADD"] }
+          discovering_action_id: "0e788157045cb74a"
+          new_actions: [*AID_LOWER_ADD, *AID_VALIDATE_ADD, *AID_EVIDENCE_ADD]
+          supersessions: []
           new_demands:
-            - { artifact_id: "AID_EVIDENCE_ADD", requested_by: "consumer-b" }
-          extends_inputs: []
-        # add_or_doubleとdoubleを閉じた集合["add_or_double","double"]と
-        # して1回のLowerSourceへ渡す(docs/design/issue-36-t0-incremental-
-        # contract.md §1.8) -- add-or-double-lowerを別々に2回lowerして
-        # 後から結合する、という初版の(誤った)想定はここでは行わない。
+            - { artifact_id: "4539bb6e4724df6b", requested_by: "consumer-b" }
         expected_response:
           kind: PlanDelta
-          planning_generation: 1        # DependencyDiscoveredで1増分
+          planning_generation: 1
           changed_actions:
-            - { action_id: "AID_LOWER_ADD", from_state: null, to_state: ready }
-            - { action_id: "AID_VALIDATE_ADD", from_state: null, to_state: blocked_dependency }
-            - { action_id: "AID_EVIDENCE_ADD", from_state: null, to_state: blocked_dependency }
+            - { action_id: "95d7231ab054085b", from_state: null, to_state: ready }
+            - { action_id: "eac04bc4907983a3", from_state: null, to_state: blocked_dependency }
+            - { action_id: "4539bb6e4724df6b", from_state: null, to_state: blocked_dependency }
           diagnostic: null
     expected_trace:
       assertion: >-
-        AID_LOWER_Fについてcpu_slot_acquiredが記録された時刻は、
-        AID_DISCOVER_ADDの完了(evt1)より前であり、かつAID_LOWER_ADDが
-        readyになった時刻(evt2の応答時点)より前である -- doubleの発見と
-        無関係にf枝が先に実行を開始したことを直接のslot事象で示す。
+        AID_LOWER_F(fb9a5e4882ac44d3)についてcpu_slot_acquiredが記録された
+        時刻は、AID_DISCOVER_ADDの完了(evt1)より前であり、かつ
+        AID_LOWER_ADDがreadyになった時刻(evt2の応答時点)より前である --
+        doubleの発見と無関係にf枝が先に実行を開始したことを直接のslot
+        事象で示す。
       time_to_first_useful_work: "AID_LOWER_Fのcpu_slot_acquired時刻(session開始からの経過)"
       cpu_slot_invariant: >-
-        任意の時刻において held_slots == running状態のaction数 と一致する
-        (docs/design/issue-36-t0-incremental-contract.md §9の不変条件)。
-        AID_VALIDATE_F/AID_EVIDENCE_F/AID_VALIDATE_ADD/AID_EVIDENCE_ADDは
-        blocked_dependency状態の間、一度もcpu_slot_acquiredを記録しない。
+        任意の時刻において held_slots == running状態のaction数 と一致する。
+        AID_VALIDATE_ADD/AID_EVIDENCE_ADDはblocked_dependency状態の間、
+        一度もcpu_slot_acquiredを記録しない。
     measurement:
       dynamic_expansion_count_after_evt2: 1
       cpu_budget: 2
@@ -144,74 +353,73 @@ cases:
       t1: >-
         AID_LOWER_F枝がAID_DISCOVER_ADDの発見処理と独立にready→running
         へ進む。blocked_dependency状態のactionはcpu_slot_acquiredを
-        一度も記録しない(trace上のheld_slots不変条件で示す)。
+        一度も記録しない。
 
   # ------------------------------------------------------------ case 2 ----
-  - id: T0-incremental-late-dependency-single-resume
-    purpose: "同一blocking関係の重複した発見通知が二重の待機/再開を起こさない"
+  - id: T0-incremental-duplicate-discovery-single-resume
+    purpose: "既存Actionと同一idの再主張(duplicate discovery)が状態を変化させず、本物の完了で一度だけ再開する"
     start_session:
       initial_graph:
-        demanded_artifacts: ["AID_EVIDENCE_ADD"]
-        actions:
-          - { id: "AID_LOWER_ADD", kind: LowerSource, inputs: [], outputs: ["AID_LOWER_ADD"] }
-          - { id: "AID_VALIDATE_ADD", kind: ValidateIr, inputs: ["AID_LOWER_ADD"], outputs: ["AID_VALIDATE_ADD"] }
-          - { id: "AID_EVIDENCE_ADD", kind: EvaluateEvidence, inputs: ["AID_VALIDATE_ADD"], outputs: ["AID_EVIDENCE_ADD"] }
-      initial_nim_state:
-        planning_generation: 1   # case1相当の発見が既にこのsession開始前に確定済みという設定
-        graph_states:
-          AID_LOWER_ADD: ready
-          AID_VALIDATE_ADD: blocked_dependency   # blocked_on: [AID_LOWER_ADD]
-          AID_EVIDENCE_ADD: blocked_dependency
+        demanded_artifacts: ["4539bb6e4724df6b"]
+        actions: [*AID_LOWER_ADD, *AID_VALIDATE_ADD]   # 単独有効:
+                                                        # AID_LOWER_ADDはready、
+                                                        # AID_VALIDATE_ADDは
+                                                        # blocked_dependency
+                                                        # (AID_LOWER_ADDの
+                                                        # 完了待ち、既に
+                                                        # graph内に存在する
+                                                        # producerを待つ、
+                                                        # 不正な初期状態では
+                                                        # ない)
+      initial_demands: []
     apply_deltas:
       - command_index: 1
         event:
           event_id: "T0-case2-evt1"
           sequence_number: 1
-          planning_generation: 1
+          planning_generation: 0
           emitted_at_unix_ns: 1700000000000000101
           kind: DependencyDiscovered
-          discovering_action_id: "AID_DISCOVER_ADD"
-          new_actions: []
+          discovering_action_id: "0e788157045cb74a"
+          new_actions: [*AID_LOWER_ADD]   # 既にgraphに存在する同一idの
+                                           # 再主張(duplicate discovery、
+                                           # 例えば再試行によりRustが同じ
+                                           # 発見をもう一度送った)
+          supersessions: []
           new_demands: []
-          extends_inputs:
-            - { action_id: "AID_VALIDATE_ADD", added_inputs: ["AID_LOWER_ADD"] }
-        # 既にAID_VALIDATE_ADD.inputsに含まれているAID_LOWER_ADDを重複して
-        # 追加通知するevent(同じblocking関係の再送、実システムでは
-        # スレッドレースや再試行により起こり得る)。blocking集合は
-        # 変化しない。
         expected_response:
           kind: PlanDelta
-          planning_generation: 1   # 新しい情報を含まないため増分しない
-          changed_actions: []
+          planning_generation: 0   # 新しい情報を含まないため増分しない
+          changed_actions: []       # 既存idの再主張は無害に無視される(§7.1)
           diagnostic: null
       - command_index: 2
         event:
           event_id: "T0-case2-evt2"
           sequence_number: 2
-          planning_generation: 1
+          planning_generation: 0
           emitted_at_unix_ns: 1700000000000000102
           kind: ProducerCompleted
-          artifact_id: "AID_LOWER_ADD"
-          produced_by_action_id: "AID_LOWER_ADD"
+          artifact_id: "95d7231ab054085b"
+          produced_by_action_id: "95d7231ab054085b"
         expected_response:
           kind: PlanDelta
-          planning_generation: 1
+          planning_generation: 0
           changed_actions:
-            - { action_id: "AID_LOWER_ADD", from_state: ready, to_state: completed }
-            - { action_id: "AID_VALIDATE_ADD", from_state: blocked_dependency, to_state: ready }
+            - { action_id: "95d7231ab054085b", from_state: ready, to_state: completed }
+            - { action_id: "eac04bc4907983a3", from_state: blocked_dependency, to_state: ready }
           diagnostic: null
     expected_trace:
       assertion: >-
-        AID_VALIDATE_ADDについて blocked_dependency -> ready の遷移が
-        正確に1回だけ記録される(evt1はblocking集合を変化させず、状態
-        遷移を発生させない)。
+        AID_VALIDATE_ADD(eac04bc4907983a3)について blocked_dependency ->
+        ready の遷移が正確に1回だけ記録される(evt1はgraphを変化させず、
+        状態遷移を発生させない)。
       transition_count_blocked_to_ready: 1
     measurement:
       dynamic_expansion_count_after_evt1: 0
     pass_criteria:
       t1: >-
-        blocking producer完了時に一度だけready化する。重複した依存発見
-        通知が二重の待機/再開を起こさない。
+        既存Actionと同一idの発見の再主張は無害に無視され、blocking
+        producer完了時に一度だけready化する。
 
   # ------------------------------------------------------------ case 3 ----
   - id: T0-incremental-semantic-key-merge
@@ -219,12 +427,8 @@ cases:
     start_session:
       initial_graph:
         demanded_artifacts: []
-        actions:
-          - { id: "AID_LOWER_F", kind: LowerSource, inputs: [], outputs: ["AID_LOWER_F"] }
-      initial_nim_state:
-        planning_generation: 0
-        graph_states:
-          AID_LOWER_F: ready
+        actions: [*AID_LOWER_F]
+      initial_demands: []
     apply_deltas:
       - command_index: 1
         event:
@@ -233,7 +437,7 @@ cases:
           planning_generation: 0
           emitted_at_unix_ns: 1700000000000000201
           kind: DemandRequested
-          artifact_id: "AID_LOWER_F"
+          artifact_id: "fb9a5e4882ac44d3"
           requested_by: "consumer-a"
         expected_response:
           kind: PlanDelta
@@ -247,11 +451,11 @@ cases:
           planning_generation: 0
           emitted_at_unix_ns: 1700000000000000202
           kind: DemandRequested
-          artifact_id: "AID_LOWER_F"     # consumer-a/consumer-cは異なる
-                                          # requested_byだが、artifact_idは
-                                          # 同一(同一source_snapshot_id・
-                                          # 同一requested_functions・
-                                          # 同一language -- §4.4)
+          artifact_id: "fb9a5e4882ac44d3"   # consumer-a/consumer-cは異なる
+                                             # requested_byだが、artifact_id
+                                             # は同一(同一source_snapshot_id・
+                                             # 同一requested_functions・
+                                             # 同一language -- §4.4)
           requested_by: "consumer-c"
         expected_response:
           kind: PlanDelta
@@ -275,57 +479,50 @@ cases:
 
   # ------------------------------------------------------------ case 4 ----
   - id: T0-incremental-event-reorder-duplicate-delay-stable-result
-    purpose: "eventの重複・遅延・順序入替で最終graphと公開結果が変化しない"
+    purpose: "完全重複(同一event_id・同一payload)の再送と順序入替で最終graphと公開結果が変化しない"
     start_session:
       initial_graph:
-        demanded_artifacts: ["AID_LOWER_F"]
-        actions:
-          - { id: "AID_LOWER_F", kind: LowerSource, inputs: [], outputs: ["AID_LOWER_F"] }
-      initial_nim_state:
-        planning_generation: 0
-        graph_states:
-          AID_LOWER_F: ready
+        demanded_artifacts: ["fb9a5e4882ac44d3"]
+        actions: [*AID_LOWER_F]
+      initial_demands: []
     apply_delta_orderings:
-      # 同じ3イベントを3つの異なる到着順で、それぞれ独立したsessionへ与え、
-      # いずれも最終状態が一致することを確認する。
+      # 同じ3つの論理event(重複evt1/evt1dup は同一event_id・同一payload、
+      # 真の完全重複)を3つの異なる到着順で、それぞれ独立したsessionへ
+      # 与え、いずれも最終状態が一致することを確認する(fix#6)。
       - name: canonical_order
         events:
-          - { command_index: 1, event_id: "T0-case4-canonical-evt1", sequence_number: 1, planning_generation: 0, emitted_at_unix_ns: 1700000000000000301, kind: ProducerCompleted, artifact_id: "AID_LOWER_F", produced_by_action_id: "AID_LOWER_F" }
-          - { command_index: 2, event_id: "T0-case4-canonical-evt2", sequence_number: 1, planning_generation: 0, emitted_at_unix_ns: 1700000000000000302, kind: ProducerCompleted, artifact_id: "AID_LOWER_F", produced_by_action_id: "AID_LOWER_F" }   # 重複(同一sequence_number)
-          - { command_index: 3, event_id: "T0-case4-canonical-evt3", sequence_number: 1, planning_generation: 0, emitted_at_unix_ns: 1700000000000000303, kind: DemandRequested, artifact_id: "AID_LOWER_F", requested_by: "consumer-a" }
+          - { command_index: 1, event_id: "T0-case4-evt1", sequence_number: 1, planning_generation: 0, emitted_at_unix_ns: 1700000000000000301, kind: ProducerCompleted, artifact_id: "fb9a5e4882ac44d3", produced_by_action_id: "fb9a5e4882ac44d3" }
+          - { command_index: 2, event_id: "T0-case4-evt1", sequence_number: 1, planning_generation: 0, emitted_at_unix_ns: 1700000000000000301, kind: ProducerCompleted, artifact_id: "fb9a5e4882ac44d3", produced_by_action_id: "fb9a5e4882ac44d3" }   # evt1の物理的再送(同一event_id・同一payload)
+          - { command_index: 3, event_id: "T0-case4-evt2", sequence_number: 2, planning_generation: 0, emitted_at_unix_ns: 1700000000000000302, kind: DemandRequested, artifact_id: "fb9a5e4882ac44d3", requested_by: "consumer-a" }
       - name: duplicate_first
         events:
-          - { command_index: 1, event_id: "T0-case4-canonical-evt1", sequence_number: 1, planning_generation: 0, emitted_at_unix_ns: 1700000000000000311, kind: ProducerCompleted, artifact_id: "AID_LOWER_F", produced_by_action_id: "AID_LOWER_F" }
-          - { command_index: 2, event_id: "T0-case4-canonical-evt3", sequence_number: 1, planning_generation: 0, emitted_at_unix_ns: 1700000000000000312, kind: DemandRequested, artifact_id: "AID_LOWER_F", requested_by: "consumer-a" }
-          - { command_index: 3, event_id: "T0-case4-canonical-evt2", sequence_number: 1, planning_generation: 0, emitted_at_unix_ns: 1700000000000000313, kind: ProducerCompleted, artifact_id: "AID_LOWER_F", produced_by_action_id: "AID_LOWER_F" }
+          - { command_index: 1, event_id: "T0-case4-evt1", sequence_number: 1, planning_generation: 0, emitted_at_unix_ns: 1700000000000000301, kind: ProducerCompleted, artifact_id: "fb9a5e4882ac44d3", produced_by_action_id: "fb9a5e4882ac44d3" }
+          - { command_index: 2, event_id: "T0-case4-evt2", sequence_number: 2, planning_generation: 0, emitted_at_unix_ns: 1700000000000000302, kind: DemandRequested, artifact_id: "fb9a5e4882ac44d3", requested_by: "consumer-a" }
+          - { command_index: 3, event_id: "T0-case4-evt1", sequence_number: 1, planning_generation: 0, emitted_at_unix_ns: 1700000000000000301, kind: ProducerCompleted, artifact_id: "fb9a5e4882ac44d3", produced_by_action_id: "fb9a5e4882ac44d3" }   # evt1の遅延再送
       - name: delayed_duplicate_last
         events:
-          - { command_index: 1, event_id: "T0-case4-canonical-evt3", sequence_number: 1, planning_generation: 0, emitted_at_unix_ns: 1700000000000000321, kind: DemandRequested, artifact_id: "AID_LOWER_F", requested_by: "consumer-a" }
-          - { command_index: 2, event_id: "T0-case4-canonical-evt1", sequence_number: 1, planning_generation: 0, emitted_at_unix_ns: 1700000000000000322, kind: ProducerCompleted, artifact_id: "AID_LOWER_F", produced_by_action_id: "AID_LOWER_F" }
-          - { command_index: 3, event_id: "T0-case4-canonical-evt2", sequence_number: 1, planning_generation: 0, emitted_at_unix_ns: 1700000000000000323, kind: ProducerCompleted, artifact_id: "AID_LOWER_F", produced_by_action_id: "AID_LOWER_F" }
-    # 3つのorderingとも、evt1とevt2は同一event_id("T0-case4-canonical-evt1"/
-    # "...evt2")を持つ -- evt2はevt1の重複到着(event_id基準の冪等性、
-    # docs/design/issue-36-t0-incremental-contract.md §7.1)として無視される。
+          - { command_index: 1, event_id: "T0-case4-evt2", sequence_number: 2, planning_generation: 0, emitted_at_unix_ns: 1700000000000000302, kind: DemandRequested, artifact_id: "fb9a5e4882ac44d3", requested_by: "consumer-a" }
+          - { command_index: 2, event_id: "T0-case4-evt1", sequence_number: 1, planning_generation: 0, emitted_at_unix_ns: 1700000000000000301, kind: ProducerCompleted, artifact_id: "fb9a5e4882ac44d3", produced_by_action_id: "fb9a5e4882ac44d3" }
+          - { command_index: 3, event_id: "T0-case4-evt1", sequence_number: 1, planning_generation: 0, emitted_at_unix_ns: 1700000000000000301, kind: ProducerCompleted, artifact_id: "fb9a5e4882ac44d3", produced_by_action_id: "fb9a5e4882ac44d3" }
     expected_graph:
-      final: [{ id: "AID_LOWER_F", state: completed }]
+      final: [{ id: "fb9a5e4882ac44d3", state: completed }]
     expected_trace:
       assertion: "3つのordering全てで、最終graphのbyte-for-byte一致(JSON表現の完全一致)を確認する。"
     measurement: {}
     pass_criteria:
-      t1: "3通りの到着順(正順・重複先行・遅延重複)すべてで最終公開結果が同一である。"
+      t1: "3通りの到着順(正順・重複先行・遅延重複)すべてで最終公開結果が同一である。evt1の2回目の到着はevent_idの一致により無視される(§7.1)。"
 
   # ------------------------------------------------------------ case 5 ----
   - id: T0-incremental-cancel-survives-shared-producer
     purpose: "一consumerの取消後も共有producerが生存する"
     start_session:
       initial_graph:
-        demanded_artifacts: ["AID_LOWER_ADD"]
-        actions:
-          - { id: "AID_LOWER_ADD", kind: LowerSource, inputs: [], outputs: ["AID_LOWER_ADD"] }
-      initial_nim_state:
-        planning_generation: 0
-        graph_states:
-          AID_LOWER_ADD: { state: discovered, reference_count: 2 }
+        demanded_artifacts: ["95d7231ab054085b"]
+        actions: [*AID_LOWER_ADD]
+      initial_demands:   # NEW(fix#4): 参照カウント2をconsumer-a/bの
+                          # 2件のDemandReferenceから導出する
+        - { artifact_id: "95d7231ab054085b", requested_by: "consumer-a" }
+        - { artifact_id: "95d7231ab054085b", requested_by: "consumer-b" }
     apply_deltas:
       - command_index: 1
         event:
@@ -334,7 +531,7 @@ cases:
           planning_generation: 0
           emitted_at_unix_ns: 1700000000000000401
           kind: DemandCancelled
-          artifact_id: "AID_LOWER_ADD"
+          artifact_id: "95d7231ab054085b"
           requested_by: "consumer-a"
         expected_response:
           kind: PlanDelta
@@ -347,22 +544,16 @@ cases:
       assertion: "AID_LOWER_ADDがcancelledへ遷移しない(参照カウントが1のまま残る)。"
     measurement: {}
     pass_criteria:
-      t1: "参照カウントが0に達しない限りproducerは生存する。"
+      t1: "参照カウントが0に達しない限りproducerは生存する。初期参照カウントはinitial_demandsの2件から導出される(demanded_artifactsの1件ではない)。"
 
   # ------------------------------------------------------- case 6 (診断1/5) ----
   - id: T0-incremental-diagnostic-stale-generation
-    purpose: "古いgenerationのeventをNimが拒否する"
+    purpose: "古いgenerationのeventをNimが拒否する(実際にstaleな状態を作ってから確認する)"
     start_session:
       initial_graph:
-        demanded_artifacts: ["AID_LOWER_ADD", "AID_VALIDATE_ADD"]
-        actions:
-          - { id: "AID_LOWER_ADD", kind: LowerSource, inputs: [], outputs: ["AID_LOWER_ADD"] }
-          - { id: "AID_VALIDATE_ADD", kind: ValidateIr, inputs: ["AID_LOWER_ADD"], outputs: ["AID_VALIDATE_ADD"] }
-      initial_nim_state:
-        planning_generation: 0
-        graph_states:
-          AID_LOWER_ADD: ready
-          AID_VALIDATE_ADD: blocked_dependency
+        demanded_artifacts: ["0e788157045cb74a"]
+        actions: [*AID_DISCOVER_ADD]   # 単独有効。generation 0で開始
+      initial_demands: []
     apply_deltas:
       - command_index: 1
         event:
@@ -371,39 +562,60 @@ cases:
           planning_generation: 0
           emitted_at_unix_ns: 1700000000000000501
           kind: ProducerCompleted
-          artifact_id: "AID_LOWER_ADD"
-          produced_by_action_id: "AID_LOWER_ADD"
+          artifact_id: "0e788157045cb74a"
+          produced_by_action_id: "0e788157045cb74a"
         expected_response:
           kind: PlanDelta
           planning_generation: 0
           changed_actions:
-            - { action_id: "AID_LOWER_ADD", from_state: ready, to_state: completed }
-            - { action_id: "AID_VALIDATE_ADD", from_state: blocked_dependency, to_state: ready }
+            - { action_id: "0e788157045cb74a", from_state: ready, to_state: completed }
           diagnostic: null
       - command_index: 2
         event:
           event_id: "T0-case6-evt2"
           sequence_number: 2
-          planning_generation: 0    # 送信側が"generation 0"時点で組み立てた、
-                                     # 既に反映済みの情報を運ぶ遅延event
-                                     # (AID_VALIDATE_ADDは既にreadyであり、
-                                     # このeventはそれ以上の新情報を運ばない)
+          planning_generation: 0
           emitted_at_unix_ns: 1700000000000000502
           kind: DependencyDiscovered
-          discovering_action_id: "AID_DISCOVER_ADD"
-          new_actions: []
+          discovering_action_id: "0e788157045cb74a"
+          new_actions: [*AID_LOWER_ADD]   # 本物の新規発見。generationが0->1へ進む
+          supersessions: []
           new_demands: []
-          extends_inputs:
-            - { action_id: "AID_VALIDATE_ADD", added_inputs: ["AID_LOWER_ADD"] }
         expected_response:
           kind: PlanDelta
-          planning_generation: 0   # 変化なし
+          planning_generation: 1   # ここで現在世代が1になる
+          changed_actions:
+            - { action_id: "95d7231ab054085b", from_state: null, to_state: ready }
+          diagnostic: null
+      - command_index: 3
+        event:
+          event_id: "T0-case6-evt3"
+          sequence_number: 3
+          planning_generation: 0   # 送信側が"generation 0"時点で組み立てた、
+                                    # 既に反映済みの情報(AID_LOWER_ADDは
+                                    # 既にevt2でgraphに存在する)を運ぶ、
+                                    # 現在世代(1)より古い遅延event
+          emitted_at_unix_ns: 1700000000000000503
+          kind: DependencyDiscovered
+          discovering_action_id: "0e788157045cb74a"
+          new_actions: [*AID_LOWER_ADD]   # evt2と全く同じ主張の再送
+          supersessions: []
+          new_demands: []
+        expected_response:
+          kind: PlanDelta
+          planning_generation: 1   # 変化なし(現在世代のまま)
           changed_actions: []
           diagnostic: stale_generation
     expected_graph:
-      after_evt2: [{ id: "AID_VALIDATE_ADD", state: ready }]   # 変化なし
+      after_evt3: [{ id: "95d7231ab054085b", state: ready }]   # 変化なし
     expected_trace:
-      assertion: "evt2の処理結果としてstale_generationが記録され、状態遷移は発生しない。"
+      assertion: >-
+        evt3は自身のplanning_generation(0)が現在世代(1)より古く、かつ
+        内容が既に反映済みであるためstale_generationとして拒否され、
+        状態遷移は発生しない。evt2自体(本物の発見)は正常に適用され
+        generationを進めている——このcaseは「現在世代もevent世代も0の
+        まま」という第1改訂の欠陥を修正し、真にstaleな状況を作ってから
+        検証する。
     measurement: {}
     pass_criteria:
       t1: >-
@@ -412,16 +624,16 @@ cases:
 
   # ------------------------------------------------------- case 7 (診断2/5) ----
   - id: T0-incremental-diagnostic-cancelled-result
-    purpose: "取消後に完了した結果を診断する"
+    purpose: "取消後に完了した結果を診断する(診断対象はApplyDeltaで初めて発生させる)"
     start_session:
       initial_graph:
-        demanded_artifacts: []   # 唯一のconsumerが既に要求を撤回済み、という開始状態
-        actions:
-          - { id: "AID_EVIDENCE_F", kind: EvaluateEvidence, inputs: ["AID_VALIDATE_F"], outputs: ["AID_EVIDENCE_F"] }
-      initial_nim_state:
-        planning_generation: 0
-        graph_states:
-          AID_EVIDENCE_F: { state: ready, reference_count: 0 }   # Rustはこのactionを既に実行開始している(ready->running)
+        demanded_artifacts: ["346daf22171a2722"]
+        actions: [*AID_LOWER_F, *AID_VALIDATE_F, *AID_EVIDENCE_F]   # 単独有効:
+                                                                    # 通常のready/
+                                                                    # blocked_dependency
+                                                                    # 連鎖、参照カウント1
+      initial_demands:
+        - { artifact_id: "346daf22171a2722", requested_by: "consumer-a" }
     apply_deltas:
       - command_index: 1
         event:
@@ -429,114 +641,133 @@ cases:
           sequence_number: 1
           planning_generation: 0
           emitted_at_unix_ns: 1700000000000000601
-          kind: ProducerCompleted
-          artifact_id: "AID_EVIDENCE_F"
-          produced_by_action_id: "AID_EVIDENCE_F"
+          kind: DemandCancelled
+          artifact_id: "346daf22171a2722"
+          requested_by: "consumer-a"
+        # Nimの視点では、AID_EVIDENCE_Fはこの時点でまだblocked_dependency
+        # (AID_VALIDATE_Fが未完了)であり、参照カウントが0に達したため
+        # §6.2の通常規則でblocked_dependency -> cancelledへ直ちに遷移する。
+        # ところがRust runtimeは(Nimからは見えないRust側の実行overlayで)
+        # 既にAID_LOWER_F/AID_VALIDATE_F/AID_EVIDENCE_Fの実行に着手して
+        # おり、この取消はその実行を中断させない(§6.3、非プリエンプション)。
         expected_response:
           kind: PlanDelta
           planning_generation: 0
           changed_actions:
-            - { action_id: "AID_EVIDENCE_F", from_state: ready, to_state: completed }
+            - { action_id: "346daf22171a2722", from_state: blocked_dependency, to_state: cancelled }
+          diagnostic: null
+      - command_index: 2
+        event:
+          event_id: "T0-case7-evt2"
+          sequence_number: 2
+          planning_generation: 0
+          emitted_at_unix_ns: 1700000000000000602
+          kind: ProducerCompleted
+          artifact_id: "346daf22171a2722"
+          produced_by_action_id: "346daf22171a2722"
+        # Rustが既に開始していた実行が、取消の到着後に完了して届く
+        # -- AID_EVIDENCE_Fは既にcancelled(終端)なので、この完了は
+        # 「結果を記録するが公開しない」cancelled_result診断として扱う。
+        expected_response:
+          kind: PlanDelta
+          planning_generation: 0
+          changed_actions:
+            - { action_id: "346daf22171a2722", from_state: cancelled, to_state: completed }
           diagnostic: cancelled_result
     expected_graph:
-      after_evt1:
-        - { id: "AID_EVIDENCE_F", state: completed, published: false }
+      after_evt2:
+        - { id: "346daf22171a2722", state: completed, published: false }
           # ArtifactStoreへは記録するが、公開(demand解決)はしない(§6.3)
     expected_trace:
       assertion: "AID_EVIDENCE_Fの結果はArtifactStoreに保存されるが、どのconsumerへも公開されない。"
     measurement: {}
     pass_criteria:
       t1: >-
-        runningへ遷移した後に参照カウントが0になったactionの結果は、
-        完了時にcancelled_resultとして記録され、証拠は保持されつつ
-        公開されない(黙って破棄しない、黙って公開しない)。
+        既にcancelledなactionへ遅れて届くProducerCompletedは、完了時に
+        cancelled_resultとして記録され、証拠は保持されつつ公開されない
+        (黙って破棄しない、黙って公開しない)。診断対象の不正状態は
+        StartSessionではなくApplyDelta(evt1のDemandCancelled)によって
+        初めて発生する。
 
   # ------------------------------------------------------- case 8 (診断3/5) ----
   - id: T0-incremental-diagnostic-missing-producer
-    purpose: "増分session内でのmissing producerを診断する"
+    purpose: "増分session内でのmissing producerを診断する(診断対象はApplyDeltaで初めて発生させる)"
     start_session:
       initial_graph:
-        demanded_artifacts: ["AID_VALIDATE_ADD"]
-        actions:
-          - { id: "AID_VALIDATE_ADD", kind: ValidateIr, inputs: ["AID_LOWER_ADD"], outputs: ["AID_VALIDATE_ADD"] }
-      initial_nim_state:
-        planning_generation: 1
-        graph_states:
-          AID_VALIDATE_ADD: blocked_dependency   # AID_LOWER_ADDを待っているが、
-                                                   # このsessionにはまだ存在しない
+        demanded_artifacts: ["0e788157045cb74a"]
+        actions: [*AID_DISCOVER_ADD]   # 単独有効
+      initial_demands: []
     apply_deltas:
       - command_index: 1
         event:
           event_id: "T0-case8-evt1"
           sequence_number: 1
-          planning_generation: 1
+          planning_generation: 0
           emitted_at_unix_ns: 1700000000000000701
           kind: DependencyDiscovered
-          discovering_action_id: "AID_DISCOVER_ADD"
-          new_actions:
-            - { id: "AID_TRIPLE_LOWER", kind: LowerSource, inputs: ["AID_MISSING_PRODUCER"], outputs: ["AID_TRIPLE_LOWER"] }
-            # AID_TRIPLE_LOWER自身がAID_MISSING_PRODUCERという、graphの
-            # どのactionのoutputsにも一致しないartifactを要求する
-            # (意図的な欠落 -- 新規発見されたaction自身の依存が閉じて
-            # いないケース)
+          discovering_action_id: "0e788157045cb74a"
+          new_actions: [*AID_TRIPLE_VALIDATE]   # このaction自身が
+                                                  # "nonexistent-triple-lower-output"
+                                                  # という、graphのどのaction
+                                                  # のoutputsにも一致しない
+                                                  # producerへ依存する
+                                                  # (意図的な欠落)
+          supersessions: []
           new_demands: []
-          extends_inputs:
-            - { action_id: "AID_VALIDATE_ADD", added_inputs: ["AID_TRIPLE_LOWER"] }
         expected_response:
           kind: Rejected
           reason_kind: missing_producer
-          reason_detail: "AID_MISSING_PRODUCER has no declared producer in this graph"
+          reason_detail: "nonexistent-triple-lower-output has no declared producer in this graph"
     expected_graph:
-      after_evt1: "graphは直前の有効なgeneration(1)の状態のまま変化しない"
+      after_evt1: "graphは直前の有効なgeneration(0)の状態のまま変化しない"
     expected_trace:
       assertion: >-
         Nim plannerの既存需要閉包アルゴリズムがRejected/MissingProducerを
-        返し、このevtはgraphへ一切反映されない(§5表、§1.2)。
+        返し、このeventはgraphへ一切反映されない(§5表、§1.2)。
     measurement: {}
     pass_criteria:
       t1: >-
         新規発見されたaction自身の依存にproducerが存在しない場合、既存
         RejectionReasonKind::MissingProducerが増分session内でも正しく
-        報告され、graphは変化しない。
+        報告され、graphは変化しない。診断対象はStartSessionではなく
+        ApplyDeltaによって初めて発生する。
 
   # ------------------------------------------------------- case 9 (診断4/5) ----
   - id: T0-incremental-diagnostic-dependency-failed
     purpose: "blocking producerの失敗を診断する"
     start_session:
       initial_graph:
-        demanded_artifacts: ["AID_VALIDATE_ADD"]
-        actions:
-          - { id: "AID_LOWER_ADD", kind: LowerSource, inputs: [], outputs: ["AID_LOWER_ADD"] }
-          - { id: "AID_VALIDATE_ADD", kind: ValidateIr, inputs: ["AID_LOWER_ADD"], outputs: ["AID_VALIDATE_ADD"] }
-      initial_nim_state:
-        planning_generation: 1
-        graph_states:
-          AID_LOWER_ADD: ready   # Rustが既に実行中(running overlay)
-          AID_VALIDATE_ADD: blocked_dependency
+        demanded_artifacts: ["3291ecb211f5165c"]
+        actions: [*AID_LOWER_F, *AID_VALIDATE_F]   # branch_readyを使用
+                                                    # (discovery未解決の
+                                                    # 閉包に依存しない、
+                                                    # 単独で有効な初期状態、
+                                                    # 第2版改訂の整合性強化)
+      initial_demands: []
     apply_deltas:
       - command_index: 1
         event:
           event_id: "T0-case9-evt1"
           sequence_number: 1
-          planning_generation: 1
+          planning_generation: 0
           emitted_at_unix_ns: 1700000000000000801
           kind: ProducerFailed
-          artifact_id: "AID_LOWER_ADD"
-          produced_by_action_id: "AID_LOWER_ADD"
+          artifact_id: "fb9a5e4882ac44d3"
+          produced_by_action_id: "fb9a5e4882ac44d3"
           failure_reason: "SourceSnapshotMismatch"
         expected_response:
           kind: PlanDelta
-          planning_generation: 1
+          planning_generation: 0
           changed_actions:
-            - { action_id: "AID_LOWER_ADD", from_state: ready, to_state: failed }
-            - { action_id: "AID_VALIDATE_ADD", from_state: blocked_dependency, to_state: failed }
+            - { action_id: "fb9a5e4882ac44d3", from_state: ready, to_state: failed }
+            - { action_id: "3291ecb211f5165c", from_state: blocked_dependency, to_state: failed }
           diagnostic: dependency_failed
     expected_trace:
       assertion: >-
-        AID_VALIDATE_ADDはproducer失敗を検知した時点で即座にfailedへ
+        AID_VALIDATE_Fはproducer失敗を検知した時点で即座にfailedへ
         遷移し、readyを経由しない(既存compiler_work_executor.rs:679-696
         の「producer失敗時にはconsumerを開始しない」原則を増分文脈でも
-        維持する)。cpu_slot_acquiredはAID_VALIDATE_ADDについて一度も
+        維持する)。cpu_slot_acquiredはAID_VALIDATE_Fについて一度も
         記録されない。
     measurement: {}
     pass_criteria:
@@ -546,86 +777,82 @@ cases:
 
   # ------------------------------------------------------ case 10 (診断5/5) ----
   - id: T0-incremental-diagnostic-cycle
-    purpose: "新規発見された依存が既存graphとcycleを構成する場合を診断する"
+    purpose: "discoveryが導入する2つの新規action同士のcycleを診断する(abstract/構造的case)"
     start_session:
       initial_graph:
-        demanded_artifacts: ["action-a-out", "action-b-out"]
-        actions:
-          - { id: "action-a", kind: LowerSource, inputs: [], outputs: ["action-a-out"] }
-          - { id: "action-b", kind: ValidateIr, inputs: ["action-a-out"], outputs: ["action-b-out"] }
-      initial_nim_state:
-        planning_generation: 1
-        graph_states:
-          action-a: ready
-          action-b: blocked_dependency
+        demanded_artifacts: ["0e788157045cb74a"]
+        actions: [*AID_DISCOVER_ADD]   # 単独有効。cycleはこの後のdeltaが
+                                        # 導入する2つの新規actionだけで
+                                        # 自己完結する(既存actionを書き
+                                        # 換えない、supersessionのcascade
+                                        # を要求しない構成)
+      initial_demands: []
     apply_deltas:
       - command_index: 1
         event:
           event_id: "T0-case10-evt1"
           sequence_number: 1
-          planning_generation: 1
+          planning_generation: 0
           emitted_at_unix_ns: 1700000000000000901
           kind: DependencyDiscovered
-          discovering_action_id: "action-a"
-          new_actions: []
+          discovering_action_id: "0e788157045cb74a"
+          new_actions: [*action_x, *action_y]   # action-xはaction-y-outに、
+                                                # action-yはaction-x-outに
+                                                # 依存する -- この2件だけで
+                                                # 閉じたcycle
+          supersessions: []
           new_demands: []
-          extends_inputs:
-            - { action_id: "action-a", added_inputs: ["action-b-out"] }
-        # action-aが(新たに)action-bの出力に依存すると判明 -> a->b->aのcycle
         expected_response:
           kind: Rejected
           reason_kind: cycle
-          reason_detail: "adding action-b-out to action-a's inputs creates a cycle"
-          cycle_path: ["action-a", "action-b", "action-a"]
+          reason_detail: "action-x and action-y form a cycle introduced by the same discovery"
+          cycle_path: ["action-x", "action-y", "action-x"]
     expected_graph:
-      after_evt1: "graphは直前の有効なgeneration(1)の状態のまま変化しない"
+      after_evt1: "graphは直前の有効なgeneration(0)の状態のまま変化しない(action-x/action-yは一切挿入されない)"
     expected_trace:
       assertion: >-
         Nim plannerの既存cycle検出アルゴリズムがRejected/Cycleを
         cycle_path付きで返し、Rust runtimeはこの世代への更新を採用
-        しない(直前の有効なgeneration状態を保持する)。
+        しない(直前の有効なgeneration状態を保持する)。action-x/
+        action-yは実compiler-work kindに紐付かないabstract actionで
+        あり、Nim自身のcycle検出アルゴリズムを単体で検証する目的の
+        構造的caseである(既存actionを書き換えてcycleを作る旧設計は
+        撤回した、fix#3)。
     measurement: {}
     pass_criteria:
       t1: >-
-        新規発見依存が既存グラフとcycleを構成する場合、既存
+        discoveryが導入する新規action同士がcycleを構成する場合、既存
         RejectionReasonKind::Cycle+cycle_pathが増分session内でも正しく
         報告され、グラフは更新前の状態に留まる。
 
   # ---------------------------------------------------- case 11 (否定case) ----
   - id: T0-incremental-no-fallback-on-rejection
     purpose: >-
-      Rejected(missing_producer/cycle)を受けた後、Rust runtimeが外部
+      Rejected(missing_producer)を受けた後、Rust runtimeが外部
       compiler(rustc/nim)を一切起動せず、Rust側の代替planningロジックにも
       フォールバックせず、graphが直前の有効なgeneration状態のまま変化
-      しないことを固定する(否定試験、docs/design/issue-36-t0-incremental-
-      contract.md §11)。
+      しないことを固定する(否定試験)。
     start_session:
       initial_graph:
-        demanded_artifacts: ["AID_VALIDATE_ADD"]
-        actions:
-          - { id: "AID_VALIDATE_ADD", kind: ValidateIr, inputs: ["AID_LOWER_ADD"], outputs: ["AID_VALIDATE_ADD"] }
-      initial_nim_state:
-        planning_generation: 1
-        graph_states:
-          AID_VALIDATE_ADD: blocked_dependency
+        demanded_artifacts: ["0e788157045cb74a"]
+        actions: [*AID_DISCOVER_ADD]   # case8と同型の単独有効なgraph
+      initial_demands: []
     apply_deltas:
       - command_index: 1
         event:
           event_id: "T0-case11-evt1"
           sequence_number: 1
-          planning_generation: 1
+          planning_generation: 0
           emitted_at_unix_ns: 1700000000000001001
           kind: DependencyDiscovered
-          discovering_action_id: "AID_DISCOVER_ADD"
-          new_actions:
-            - { id: "AID_TRIPLE_LOWER", kind: LowerSource, inputs: ["AID_MISSING_PRODUCER"], outputs: ["AID_TRIPLE_LOWER"] }
+          discovering_action_id: "0e788157045cb74a"
+          new_actions: [*AID_TRIPLE_VALIDATE]
+          supersessions: []
           new_demands: []
-          extends_inputs:
-            - { action_id: "AID_VALIDATE_ADD", added_inputs: ["AID_TRIPLE_LOWER"] }
         expected_response:
           kind: Rejected
           reason_kind: missing_producer
-          reason_detail: "AID_MISSING_PRODUCER has no declared producer in this graph"
+          reason_detail: "nonexistent-triple-lower-output has no declared producer in this graph"
     negative_assertions:
       - "このevent処理の間、Rust runtimeプロセスは rustc/nim のいずれの外部プロセスも起動しない(#5 T1のsource_never_spawns_a_subprocessと同じ回帰ガード手法をRust runtime側にも適用する)。"
       - "このevent処理の間、Rust runtime内にNim plannerを経由しない代替のplanning/scheduling経路(cycle検出やready frontier判定を独自に再実装したコードパス)は一切呼ばれない。"
@@ -635,3 +862,119 @@ cases:
       t1: >-
         Rejectedを受けた場合、Rust runtimeは外部compilerにもRust側の
         代替plannerにも一切フォールバックせず、graphを変化させない。
+
+  # --------------------------------------------------- case 12 (supersession) ----
+  - id: T0-incremental-supersession-replaces-superseded-action
+    purpose: >-
+      ソース編集によりAID_LOWER_Fの意味的入力(requested_functions)が
+      変わる場合、既存Actionを書き換えず、新IDのreplacement Actionを
+      supersessionsで導入し、旧Actionは退役・参照カウント移送される
+      ことを実演する(fix#3の直接の実例)。
+    start_session:
+      initial_graph:
+        demanded_artifacts: ["fb9a5e4882ac44d3"]
+        actions: [*AID_LOWER_F]   # まだ何もconsumeしていない、ready状態
+                                   # (cascade不要な最小構成、§3.4の注記)
+      initial_demands:
+        - { artifact_id: "fb9a5e4882ac44d3", requested_by: "consumer-a" }
+    apply_deltas:
+      - command_index: 1
+        event:
+          event_id: "T0-case12-evt1"
+          sequence_number: 1
+          planning_generation: 0
+          emitted_at_unix_ns: 1700000000000001101
+          kind: DependencyDiscovered
+          discovering_action_id: "0e788157045cb74a"   # source-edit検知後に
+                                                         # 再実行された
+                                                         # DiscoverSourceDependencies
+                                                         # (fixtures.
+                                                         # branch_ready_edited_for_case12
+                                                         # に対して)
+          new_actions: [*AID_LOWER_F_V2]
+          supersessions:
+            - { old_action_id: "fb9a5e4882ac44d3", new_action_id: "e632c3722565763b" }
+          new_demands: []
+        expected_response:
+          kind: PlanDelta
+          planning_generation: 1
+          changed_actions:
+            - { action_id: "fb9a5e4882ac44d3", from_state: ready, to_state: null, retired_because_superseded_by: "e632c3722565763b" }
+            - { action_id: "e632c3722565763b", from_state: null, to_state: ready }
+          diagnostic: null
+    expected_state:
+      reference_count_for_AID_LOWER_F_fb9a5e4882ac44d3: 0   # 退役、参照カウントは全数移送済み
+      reference_count_for_AID_LOWER_F_V2_e632c3722565763b: 1   # consumer-aの分がそのまま移送された
+    expected_trace:
+      assertion: >-
+        fb9a5e4882ac44d3は二度と`ProducerCompleted`/`DemandRequested`等の
+        対象にならない(Rust runtimeは以後e632c3722565763bを実行対象と
+        する)。fb9a5e4882ac44d3を参照する既存consumerは本caseには存在
+        しない(cascade不要な最小構成であることの確認)。
+    measurement:
+      dynamic_expansion_count_after_evt1: 1
+    pass_criteria:
+      t1: >-
+        意味的入力の変化は既存Actionのin-place書き換えではなく、新IDの
+        replacement Action + supersessionsとして導入される。旧Actionは
+        退役し、参照カウントは全数新Actionへ移送される。
+
+  # -------------------------------------------- case 13 (内容的冪等性) ----
+  - id: T0-incremental-content-idempotent-different-event-id
+    purpose: >-
+      別々のevent_idを持つ、内容的に同じProducerCompletedが2回届いても
+      (event_idベースの重複検出には引っかからない)、状態遷移そのものが
+      内容ベースで冪等であるため最終状態は変化しない(fix#6、case4から
+      分離した内容的重複)。
+    start_session:
+      initial_graph:
+        demanded_artifacts: ["fb9a5e4882ac44d3"]
+        actions: [*AID_LOWER_F]
+      initial_demands: []
+    apply_deltas:
+      - command_index: 1
+        event:
+          event_id: "T0-case13-evt-retry-a"
+          sequence_number: 1
+          planning_generation: 0
+          emitted_at_unix_ns: 1700000000000001201
+          kind: ProducerCompleted
+          artifact_id: "fb9a5e4882ac44d3"
+          produced_by_action_id: "fb9a5e4882ac44d3"
+        expected_response:
+          kind: PlanDelta
+          planning_generation: 0
+          changed_actions:
+            - { action_id: "fb9a5e4882ac44d3", from_state: ready, to_state: completed }
+          diagnostic: null
+      - command_index: 2
+        event:
+          event_id: "T0-case13-evt-retry-b"   # 独立したretryが発行した、
+                                                 # evt-retry-aとは別の
+                                                 # event_id -- しかし主張
+                                                 # する内容(このartifactは
+                                                 # completed)は同一
+          sequence_number: 2
+          planning_generation: 0
+          emitted_at_unix_ns: 1700000000000001202
+          kind: ProducerCompleted
+          artifact_id: "fb9a5e4882ac44d3"
+          produced_by_action_id: "fb9a5e4882ac44d3"
+        expected_response:
+          kind: PlanDelta
+          planning_generation: 0
+          changed_actions: []   # 既にcompletedのため、状態遷移そのものが
+                                  # 内容ベースで冪等(§7.3) -- event_idの
+                                  # 重複検出には頼っていない
+          diagnostic: null
+    expected_trace:
+      assertion: >-
+        fb9a5e4882ac44d3の状態はevt-retry-aの適用でcompletedになり、
+        event_idの異なるevt-retry-bの適用後も引き続きcompletedのまま
+        (二重に「完了」した扱いにはならない、エラーにもならない)。
+    measurement: {}
+    pass_criteria:
+      t1: >-
+        別のevent_idを持つ、内容的に同一の主張を繰り返し適用しても
+        最終状態は変化しない。冪等性はevent_idの一致ではなく状態遷移
+        自体の内容に宿る。
