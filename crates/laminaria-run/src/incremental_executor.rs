@@ -25,12 +25,13 @@
 //! `wasm_target.rs` already uses, applied here to the Rust runtime side
 //! of issue #36's own no-fallback requirement (T0 §10 case11).
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Mutex};
+use std::time::{Duration, Instant};
 
 use laminaria_ir::discover::discover_called_functions;
 use laminaria_ir::interpreter::{eval_function, EvalOutcome};
@@ -38,7 +39,8 @@ use laminaria_ir::rust_frontend::lower_rust_source;
 use laminaria_ir::types::Program;
 use laminaria_ir::validate::{validate_program, ValidatedProgram};
 use laminaria_plan::incremental::{
-    ActionState, DemandReference, IncrementalPlannerResponse, PlanningEvent, PlanningEventKind,
+    ActionState, ActionStateChange, DemandReference, IncrementalDiagnosticReason,
+    IncrementalPlannerResponse, PlanningEvent, PlanningEventKind,
 };
 use laminaria_plan::{Action, ActionKind};
 
@@ -97,6 +99,24 @@ impl IncrementalArtifactStore {
     }
 }
 
+/// One `cpu_slot_acquired`/`cpu_slot_released` event (T0 §9), tagged
+/// with the action that held the slot and a timestamp relative to this
+/// run's own start -- the concrete, action-id-tagged event series the
+/// issue #36 T1 completion review asked for, in place of the aggregate
+/// active/peak counters this trace used to expose on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotEventKind {
+    Acquired,
+    Released,
+}
+
+#[derive(Debug, Clone)]
+pub struct SlotEvent {
+    pub action_id: String,
+    pub kind: SlotEventKind,
+    pub at: Duration,
+}
+
 /// The same "peak concurrent real computation" probe
 /// `compiler_work_executor.rs::ComputeConcurrencyProbe` uses, applied
 /// here to the incremental executor's own worker pool -- this *is* the
@@ -104,31 +124,229 @@ impl IncrementalArtifactStore {
 /// duration of one dispatch's real `laminaria_ir` call, never while an
 /// action merely sits in `blocked_dependency` (which this executor never
 /// dispatches at all, so it structurally cannot enter this probe).
-#[derive(Default)]
-pub struct CpuSlotTrace {
+/// Module-private: only [`run_to_completion`] uses it directly (during
+/// the run, from worker threads); a caller only ever sees the finished,
+/// plain-data [`ExecutionReport`] this trace is folded into once the
+/// run completes.
+struct CpuSlotTrace {
     active: AtomicUsize,
     peak: AtomicUsize,
+    start: Instant,
+    events: Mutex<Vec<SlotEvent>>,
 }
 
 impl CpuSlotTrace {
-    fn enter(&self) -> CpuSlotGuard<'_> {
+    fn new() -> Self {
+        CpuSlotTrace {
+            active: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
+            start: Instant::now(),
+            events: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn enter(&self, action_id: &str) -> CpuSlotGuard<'_> {
         let now = self.active.fetch_add(1, Ordering::SeqCst) + 1;
         self.peak.fetch_max(now, Ordering::SeqCst);
-        CpuSlotGuard(self)
+        self.push_event(action_id, SlotEventKind::Acquired);
+        CpuSlotGuard {
+            trace: self,
+            action_id: action_id.to_string(),
+        }
+    }
+
+    fn push_event(&self, action_id: &str, kind: SlotEventKind) {
+        let at = self.start.elapsed();
+        self.events.lock().unwrap().push(SlotEvent {
+            action_id: action_id.to_string(),
+            kind,
+            at,
+        });
     }
 
     /// The highest number of actions ever observed genuinely executing
     /// (not merely dispatched/waiting) at the same instant.
-    pub fn peak_concurrent(&self) -> usize {
+    fn peak_concurrent(&self) -> usize {
         self.peak.load(Ordering::SeqCst)
+    }
+
+    /// A time-ordered snapshot of every slot event recorded so far.
+    fn slot_events(&self) -> Vec<SlotEvent> {
+        let mut events = self.events.lock().unwrap().clone();
+        events.sort_by_key(|e| e.at);
+        events
     }
 }
 
-struct CpuSlotGuard<'a>(&'a CpuSlotTrace);
+struct CpuSlotGuard<'a> {
+    trace: &'a CpuSlotTrace,
+    action_id: String,
+}
 
 impl Drop for CpuSlotGuard<'_> {
     fn drop(&mut self) {
-        self.0.active.fetch_sub(1, Ordering::SeqCst);
+        self.trace.active.fetch_sub(1, Ordering::SeqCst);
+        self.trace
+            .push_event(&self.action_id, SlotEventKind::Released);
+    }
+}
+
+/// Wall-clock duration of one [`IncrementalSessionClient::apply_delta`]
+/// round trip for a single `PlanningEvent` -- "event単位のplanner/IPC
+/// 時間" (issue #36 T1 completion review, 2026-09-12): a real,
+/// per-event measurement of the actual Nim IPC boundary, not merely a
+/// process-wide aggregate.
+#[derive(Debug, Clone)]
+pub struct EventTiming {
+    pub event_id: String,
+    pub event_kind: &'static str,
+    pub ipc_duration: Duration,
+}
+
+/// How long one action sat `blocked_dependency` before becoming `ready`
+/// -- "action単位のdependency wait" (same review). Only actions that
+/// actually passed through `blocked_dependency` appear here; an action
+/// that started (or was discovered) already `ready` never waited on a
+/// dependency, so it has nothing to report.
+#[derive(Debug, Clone)]
+pub struct ActionWait {
+    pub action_id: String,
+    pub wait: Duration,
+}
+
+/// The execution report [`run_to_completion`] returns alongside its
+/// evidence reader, closing the issue #36 T1 completion review's one
+/// remaining gap: T0 fixed `dynamic_expansion_count`, event-level
+/// planner/IPC time, action-level dependency wait, time-to-first-
+/// useful-work, and an action-id-tagged `cpu_slot_acquired`/
+/// `cpu_slot_released` event series as acceptance evidence this
+/// implementation must actually *produce*, not merely satisfy in spirit
+/// via an aggregate peak-concurrency counter.
+pub struct ExecutionReport {
+    /// How many `DependencyDiscovered` events genuinely introduced at
+    /// least one new action into the graph. A duplicate or
+    /// stale-generation rediscovery of an already-known closed set
+    /// (Nim's own `applyDependencyDiscovered`: the `allAlreadyKnown`
+    /// early return, which always reports `changed_actions: []`) is
+    /// deliberately *not* counted here, since nothing was actually
+    /// expanded.
+    pub dynamic_expansion_count: usize,
+    pub event_timings: Vec<EventTiming>,
+    pub action_waits: Vec<ActionWait>,
+    /// Every `cpu_slot_acquired`/`cpu_slot_released` event this run
+    /// recorded, in time order, each tagged with the action that held
+    /// the slot.
+    pub slot_events: Vec<SlotEvent>,
+    peak_concurrent: usize,
+    /// When each action currently in flight first entered
+    /// `blocked_dependency`, so its eventual transition to `ready` can
+    /// be turned into an `ActionWait`. Removed once that wait is
+    /// recorded.
+    blocked_since: HashMap<String, Instant>,
+    /// This run's own start -- the fallback "blocked since" instant for
+    /// an action that was already `blocked_dependency` before this
+    /// executor ever observed it.
+    session_start: Instant,
+}
+
+impl ExecutionReport {
+    fn new() -> Self {
+        ExecutionReport {
+            dynamic_expansion_count: 0,
+            event_timings: Vec::new(),
+            action_waits: Vec::new(),
+            slot_events: Vec::new(),
+            peak_concurrent: 0,
+            blocked_since: HashMap::new(),
+            session_start: Instant::now(),
+        }
+    }
+
+    /// The highest number of actions ever observed genuinely executing
+    /// (not merely dispatched/waiting) at the same instant -- the same
+    /// concurrency figure T0 case1's own acceptance criterion checks.
+    pub fn peak_concurrent(&self) -> usize {
+        self.peak_concurrent
+    }
+
+    /// Elapsed time from this run's own start until the first real
+    /// dispatched computation actually began -- "time-to-first-useful-
+    /// work" (same review).
+    pub fn time_to_first_useful_work(&self) -> Option<Duration> {
+        self.slot_events
+            .iter()
+            .filter(|e| e.kind == SlotEventKind::Acquired)
+            .map(|e| e.at)
+            .min()
+    }
+
+    /// When `action_id` first acquired a CPU slot, if it ever did.
+    pub fn slot_acquired_at(&self, action_id: &str) -> Option<Duration> {
+        self.slot_events
+            .iter()
+            .find(|e| e.kind == SlotEventKind::Acquired && e.action_id == action_id)
+            .map(|e| e.at)
+    }
+
+    /// When `action_id` last released a CPU slot, if it ever did.
+    pub fn slot_released_at(&self, action_id: &str) -> Option<Duration> {
+        self.slot_events
+            .iter()
+            .rev()
+            .find(|e| e.kind == SlotEventKind::Released && e.action_id == action_id)
+            .map(|e| e.at)
+    }
+
+    /// Replays this report's own recorded slot-event timeline and checks
+    /// the fixed invariants T0 §9 requires of any CPU-slot accounting:
+    /// `held_slots` (the number of actions currently holding a slot)
+    /// never exceeds `cpu_budget`, no action ever holds two slots at
+    /// once or releases one it never held, and every acquired slot is
+    /// eventually released -- i.e. `held_slots` always equals the real
+    /// number of currently-running actions. (A `blocked_dependency`
+    /// action never appears in this event series at all, since only
+    /// [`run_to_completion`]'s dispatch of an already-`ready` action
+    /// ever calls into the code that records one -- a structural
+    /// guarantee, not something this replay needs to separately check.)
+    pub fn verify_slot_invariants(&self, cpu_budget: NonZeroUsize) -> Result<(), String> {
+        let mut held: HashSet<&str> = HashSet::new();
+        for event in &self.slot_events {
+            match event.kind {
+                SlotEventKind::Acquired => {
+                    if !held.insert(event.action_id.as_str()) {
+                        return Err(format!(
+                            "action {:?} acquired a CPU slot twice without an intervening release",
+                            event.action_id
+                        ));
+                    }
+                    if held.len() > cpu_budget.get() {
+                        return Err(format!(
+                            "held_slots ({}) exceeded cpu_budget ({}) when action {:?} acquired \
+                             its slot",
+                            held.len(),
+                            cpu_budget.get(),
+                            event.action_id
+                        ));
+                    }
+                }
+                SlotEventKind::Released => {
+                    if !held.remove(event.action_id.as_str()) {
+                        return Err(format!(
+                            "action {:?} released a CPU slot it never held",
+                            event.action_id
+                        ));
+                    }
+                }
+            }
+        }
+        if !held.is_empty() {
+            return Err(format!(
+                "{} action(s) still hold a CPU slot after the run completed: {:?}",
+                held.len(),
+                held
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -169,7 +387,7 @@ fn dispatch(
                 .map(String::as_str)
                 .collect();
             let result = {
-                let _slot = trace.enter();
+                let _slot = trace.enter(&action.id);
                 lower_rust_source(Path::new(&provenance.source_file), &source_text, &requested)
             };
             match result {
@@ -194,7 +412,7 @@ fn dispatch(
                 .map(String::as_str)
                 .collect();
             let result = {
-                let _slot = trace.enter();
+                let _slot = trace.enter(&action.id);
                 discover_called_functions(Path::new(&provenance.source_file), &source_text, &known)
             };
             match result {
@@ -218,7 +436,7 @@ fn dispatch(
                 }
             };
             let result = {
-                let _slot = trace.enter();
+                let _slot = trace.enter(&action.id);
                 validate_program(&candidate)
             };
             match result {
@@ -250,7 +468,7 @@ fn dispatch(
             let program = validated.program();
             let mut outcomes = Vec::new();
             {
-                let _slot = trace.enter();
+                let _slot = trace.enter(&action.id);
                 for test_input in &descriptor.test_inputs {
                     match eval_function(program, function_name, test_input) {
                         Ok(outcome) => outcomes.push(outcome),
@@ -299,11 +517,12 @@ pub struct DiscoveryResolution {
 /// completion is handed to `on_discovered` (the only fixture-specific
 /// seam) to build the real `DependencyDiscovered` event.
 ///
-/// Returns the CPU-slot trace and the artifact store's own evidence
-/// accessor, so a caller can assert both genuine concurrency (T0 case1:
-/// an independent ready branch proceeds while a slower branch is still
-/// in flight) and the actual computed result of the work this session
-/// ran.
+/// Returns the artifact store's own evidence accessor and a full
+/// [`ExecutionReport`], so a caller can assert both genuine concurrency
+/// (T0 case1: an independent ready branch proceeds while a slower
+/// branch is still in flight, provable either by `peak_concurrent()` or,
+/// more precisely, by the report's own action-tagged slot timestamps)
+/// and the actual computed result of the work this session ran.
 /// Shared worker-pool state, following the exact `Mutex` + `Condvar` +
 /// shared queue shape `compiler_work_executor.rs::worker_loop`/
 /// `SchedulerState` already use (and this crate's review history already
@@ -326,9 +545,10 @@ pub fn run_to_completion(
     initial_ready: Vec<Action>,
     cpu_budget: NonZeroUsize,
     mut on_discovered: impl FnMut(&str, &[String]) -> DiscoveryResolution,
-) -> Result<(CpuSlotTrace, EvidenceReader), ExecutorError> {
+) -> Result<(EvidenceReader, ExecutionReport), ExecutorError> {
     let store = IncrementalArtifactStore::default();
-    let trace = CpuSlotTrace::default();
+    let trace = CpuSlotTrace::new();
+    let mut exec_report = ExecutionReport::new();
 
     let (report_tx, report_rx) = mpsc::channel::<WorkerReport>();
     // Every action this session has ever told us about, by id -- needed
@@ -399,7 +619,9 @@ pub fn run_to_completion(
         // synchronously (fast/local, never itself a bottleneck for the
         // worker threads' real compute-bound work).
         while outstanding > 0 {
-            let Ok(report) = report_rx.recv() else { break };
+            let Ok(worker_report) = report_rx.recv() else {
+                break;
+            };
             outstanding -= 1;
 
             let mut push_ready = |actions: Vec<Action>| {
@@ -413,9 +635,9 @@ pub fn run_to_completion(
                 pool.notify_all();
             };
 
-            match report {
+            match worker_report {
                 WorkerReport::Completed { action_id } => {
-                    let newly_ready = apply_and_dispatch(
+                    let outcome = apply_and_dispatch(
                         client,
                         PlanningEvent {
                             event_id: format!("evt-completed-{action_id}"),
@@ -428,11 +650,13 @@ pub fn run_to_completion(
                             },
                         },
                         &mut known_actions,
+                        "producer_completed",
+                        &mut exec_report,
                     )?;
-                    push_ready(newly_ready);
+                    push_ready(outcome.newly_ready);
                 }
                 WorkerReport::Failed { action_id, detail } => {
-                    let newly_ready = apply_and_dispatch(
+                    let outcome = apply_and_dispatch(
                         client,
                         PlanningEvent {
                             event_id: format!("evt-failed-{action_id}"),
@@ -446,11 +670,13 @@ pub fn run_to_completion(
                             },
                         },
                         &mut known_actions,
+                        "producer_failed",
+                        &mut exec_report,
                     )?;
-                    push_ready(newly_ready);
+                    push_ready(outcome.newly_ready);
                 }
                 WorkerReport::Discovered { action_id, names } => {
-                    let newly_ready = apply_and_dispatch(
+                    let outcome = apply_and_dispatch(
                         client,
                         PlanningEvent {
                             event_id: format!("evt-completed-{action_id}"),
@@ -463,11 +689,13 @@ pub fn run_to_completion(
                             },
                         },
                         &mut known_actions,
+                        "producer_completed",
+                        &mut exec_report,
                     )?;
-                    push_ready(newly_ready);
+                    push_ready(outcome.newly_ready);
                     if !names.is_empty() {
                         let resolution = on_discovered(&action_id, &names);
-                        let newly_ready = apply_and_dispatch(
+                        let discovery_outcome = apply_and_dispatch(
                             client,
                             PlanningEvent {
                                 event_id: format!("evt-discovered-{action_id}"),
@@ -482,8 +710,23 @@ pub fn run_to_completion(
                                 },
                             },
                             &mut known_actions,
+                            "dependency_discovered",
+                            &mut exec_report,
                         )?;
-                        push_ready(newly_ready);
+                        // A duplicate/stale rediscovery of an
+                        // already-known closed set reports no changed
+                        // actions at all (Nim's own `allAlreadyKnown`
+                        // early return) -- deliberately excluded from
+                        // the count, since nothing was actually
+                        // expanded (issue #36 T1 completion review:
+                        // "重複・staleな発見イベントを
+                        // dynamic_expansion_count に含めない").
+                        if discovery_outcome.diagnostic.is_none()
+                            && !discovery_outcome.changed_actions.is_empty()
+                        {
+                            exec_report.dynamic_expansion_count += 1;
+                        }
+                        push_ready(discovery_outcome.newly_ready);
                     }
                 }
             }
@@ -496,7 +739,9 @@ pub fn run_to_completion(
         Ok(())
     })?;
 
-    Ok((trace, EvidenceReader(store)))
+    exec_report.peak_concurrent = trace.peak_concurrent();
+    exec_report.slot_events = trace.slot_events();
+    Ok((EvidenceReader(store), exec_report))
 }
 
 /// A thin, read-only handle so a caller can retrieve one action's
@@ -510,30 +755,87 @@ impl EvidenceReader {
     }
 }
 
-/// Applies one event to the session and returns every action the
-/// resulting `PlanDelta` reports as newly `ready` (its full definition,
-/// resolved via `known_actions` when this particular response didn't
-/// carry it itself) -- pushing them onto the shared work queue is the
-/// caller's job, so it can also update its own `outstanding` bookkeeping
-/// atomically with the push.
+/// What one [`apply_and_dispatch`] call actually observed: every action
+/// newly `ready` (for the caller to dispatch), the raw state-change list
+/// (for `dynamic_expansion_count` accounting at the `DependencyDiscovered`
+/// call site), and the response's own diagnostic, if any.
+struct ApplyOutcome {
+    newly_ready: Vec<Action>,
+    changed_actions: Vec<ActionStateChange>,
+    diagnostic: Option<IncrementalDiagnosticReason>,
+}
+
+/// Applies one event to the session, records this call's own IPC timing
+/// and any `blocked_dependency` -> `ready` wait it observes into
+/// `report`, and returns every action the resulting `PlanDelta` reports
+/// as newly `ready` (its full definition, resolved via `known_actions`
+/// when this particular response didn't carry it itself) -- pushing them
+/// onto the shared work queue is the caller's job, so it can also update
+/// its own `outstanding` bookkeeping atomically with the push.
 fn apply_and_dispatch(
     client: &mut IncrementalSessionClient,
     event: PlanningEvent,
     known_actions: &mut HashMap<String, Action>,
-) -> Result<Vec<Action>, ExecutorError> {
+    event_kind_label: &'static str,
+    report: &mut ExecutionReport,
+) -> Result<ApplyOutcome, ExecutorError> {
+    let event_id = event.event_id.clone();
+    let started = Instant::now();
     let response = client.apply_delta(event)?;
+    report.event_timings.push(EventTiming {
+        event_id,
+        event_kind: event_kind_label,
+        ipc_duration: started.elapsed(),
+    });
+
     match response {
         IncrementalPlannerResponse::PlanDelta {
-            changed_actions, ..
+            changed_actions,
+            diagnostic,
+            ..
         } => {
             let mut newly_ready = Vec::new();
-            for change in changed_actions {
+            for change in &changed_actions {
                 if let Some(action) = &change.new_action {
                     known_actions.insert(change.action_id.clone(), action.clone());
+                }
+                // T0 §6.1's own state machine only ever reaches `ready`
+                // from `blocked_dependency` (or starts `ready`
+                // directly) -- so a transition *into*
+                // `blocked_dependency` marks the start of a genuine
+                // dependency wait, and a `blocked_dependency` -> `ready`
+                // transition marks its end (issue #36 T1 completion
+                // review: "action単位のdependency wait").
+                if change.to_state == Some(ActionState::BlockedDependency) {
+                    report
+                        .blocked_since
+                        .entry(change.action_id.clone())
+                        .or_insert_with(Instant::now);
+                }
+                if change.from_state == Some(ActionState::BlockedDependency)
+                    && change.to_state == Some(ActionState::Ready)
+                {
+                    // Falls back to this run's own start if the action
+                    // was already `blocked_dependency` before this
+                    // executor ever observed it (e.g. from the initial
+                    // graph, applied by the caller's own `StartSession`
+                    // before `run_to_completion` began) -- an
+                    // approximation, not a fabricated measurement: it
+                    // is the earliest instant this component could
+                    // possibly have known the action was waiting.
+                    let since = report
+                        .blocked_since
+                        .remove(&change.action_id)
+                        .unwrap_or(report.session_start);
+                    report.action_waits.push(ActionWait {
+                        action_id: change.action_id.clone(),
+                        wait: since.elapsed(),
+                    });
                 }
                 if change.to_state == Some(ActionState::Ready) {
                     let action = change
                         .new_action
+                        .clone()
                         .or_else(|| known_actions.get(&change.action_id).cloned())
                         .expect(
                             "an action reported ready must have been introduced via new_action \
@@ -542,33 +844,42 @@ fn apply_and_dispatch(
                     newly_ready.push(action);
                 }
             }
-            Ok(newly_ready)
+            Ok(ApplyOutcome {
+                newly_ready,
+                changed_actions,
+                diagnostic,
+            })
         }
         IncrementalPlannerResponse::Rejected { reason_detail, .. } => {
             Err(ExecutorError::UnexpectedRejected {
                 detail: reason_detail,
             })
         }
-        IncrementalPlannerResponse::SessionClosed { .. } => Ok(Vec::new()),
+        IncrementalPlannerResponse::SessionClosed { .. } => Ok(ApplyOutcome {
+            newly_ready: Vec::new(),
+            changed_actions: Vec::new(),
+            diagnostic: None,
+        }),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    // `source_never_spawns_a_subprocess` below (the only test that runs
-    // on every platform) needs nothing from the outer module -- only
-    // `include_str!` and plain string operations -- so `super::*` itself
-    // is unused on a non-unix build, same reasoning as every import
-    // below.
-    #[cfg(unix)]
+    // `source_never_spawns_a_subprocess` and
+    // `verify_slot_invariants_catches_every_kind_of_violation_and_accepts_a_valid_timeline`
+    // below run on every platform; the latter needs the outer module's
+    // report types (`ExecutionReport`/`SlotEvent`/`SlotEventKind`) and
+    // `NonZeroUsize`, so both imports are unconditional. Everything else
+    // below is used only by this module's real-binary test (`#[cfg(unix)]`,
+    // matching the platform gating `nim_planner_client.rs`'s own
+    // real-binary tests already use -- this repo's `windows` CI job
+    // deliberately never installs Nim) -- gated the same way, or a
+    // non-unix build sees every one of these as genuinely unused
+    // (`-D warnings` caught this directly on windows-latest CI, not
+    // assumed).
     use super::*;
-    // Everything below is used only by this module's real-binary test
-    // (`#[cfg(unix)]`, matching the platform gating
-    // `nim_planner_client.rs`'s own real-binary tests already use --
-    // this repo's `windows` CI job deliberately never installs Nim) --
-    // gated the same way, or a non-unix build sees every one of these as
-    // genuinely unused (`-D warnings` caught this directly on
-    // windows-latest CI, not assumed).
+    use std::num::NonZeroUsize;
+
     #[cfg(unix)]
     use laminaria_plan::compiler_work::{
         discover_source_dependencies_artifact_id, evaluate_evidence_artifact_id,
@@ -577,8 +888,6 @@ mod tests {
     };
     #[cfg(unix)]
     use laminaria_plan::{ArtifactRef, PlanningInput};
-    #[cfg(unix)]
-    use std::num::NonZeroUsize;
     #[cfg(unix)]
     use std::path::PathBuf;
     #[cfg(unix)]
@@ -851,12 +1160,14 @@ mod tests {
 
         let add_or_double_path_for_closure = add_or_double_path.clone();
         let add_or_double_snapshot_for_closure = add_or_double_snapshot.clone();
+        let mut validate_action_id_holder: Option<String> = None;
         let mut evidence_action_id_holder: Option<String> = None;
 
-        let (trace, evidence_reader) = run_to_completion(
+        let cpu_budget = NonZeroUsize::new(2).unwrap();
+        let (evidence_reader, report) = run_to_completion(
             &mut client,
             initial_ready,
-            NonZeroUsize::new(2).unwrap(),
+            cpu_budget,
             |_discovering_action_id, names| {
                 assert_eq!(
                     names,
@@ -893,6 +1204,7 @@ mod tests {
                     "add_or_double",
                     vec![vec![3, 4, 1]],
                 );
+                validate_action_id_holder = Some(validate_id.clone());
                 evidence_action_id_holder = Some(evidence_id.clone());
                 DiscoveryResolution {
                     new_actions: vec![lower, validate, evidence],
@@ -906,13 +1218,79 @@ mod tests {
         .unwrap();
 
         assert!(
-            trace.peak_concurrent() >= 2,
+            report.peak_concurrent() >= 2,
             "AID_LOWER_F must genuinely overlap with the add_or_double discovery, not merely be \
              dispatched sequentially behind it (T0 case1); observed peak_concurrent={}",
-            trace.peak_concurrent()
+            report.peak_concurrent()
+        );
+
+        // The same T0 case1 property (an independent ready branch
+        // genuinely overlaps a slower one), now proven by real,
+        // action-tagged timestamps rather than only an aggregate
+        // concurrency counter (issue #36 T1 completion review, point
+        // 5): `lower_f`'s CPU slot and `discover`'s CPU slot must have
+        // been held *simultaneously* at some real instant -- i.e. each
+        // one's own acquisition happened before the other's release.
+        let lower_f_acquired = report
+            .slot_acquired_at(&lower_f_id)
+            .expect("lower_f must have acquired a CPU slot");
+        let lower_f_released = report
+            .slot_released_at(&lower_f_id)
+            .expect("lower_f must have released its CPU slot");
+        let discover_acquired = report
+            .slot_acquired_at(&discover_id)
+            .expect("the discover action must have acquired a CPU slot");
+        let discover_released = report
+            .slot_released_at(&discover_id)
+            .expect("the discover action must have released its CPU slot");
+        assert!(
+            lower_f_acquired < discover_released && discover_acquired < lower_f_released,
+            "the independent branch's useful work (LowerSource on `f`) must have started, by \
+             timestamp, before the other branch's dependency discovery finished, and vice versa \
+             -- their CPU-slot intervals must genuinely overlap in real time, not merely count \
+             as concurrent in aggregate; lower_f=[{lower_f_acquired:?}, {lower_f_released:?}], \
+             discover=[{discover_acquired:?}, {discover_released:?}]"
+        );
+
+        report
+            .verify_slot_invariants(cpu_budget)
+            .expect("the recorded CPU-slot event timeline must satisfy T0 §9's own invariants");
+
+        assert_eq!(
+            report.dynamic_expansion_count, 1,
+            "exactly one genuine DependencyDiscovered expansion happened in this session"
+        );
+        assert!(
+            report
+                .event_timings
+                .iter()
+                .any(|e| e.event_kind == "dependency_discovered"),
+            "must have recorded event-level IPC timing for the DependencyDiscovered event"
+        );
+        assert!(
+            report.time_to_first_useful_work().is_some(),
+            "must have recorded a time-to-first-useful-work"
+        );
+
+        let validate_id = validate_action_id_holder.expect("discovery closure must have run");
+        assert!(
+            report
+                .action_waits
+                .iter()
+                .any(|w| w.action_id == validate_id),
+            "the ValidateIr action must have waited on its LowerSource producer before becoming \
+             ready"
         );
 
         let evidence_id = evidence_action_id_holder.expect("discovery closure must have run");
+        assert!(
+            report
+                .action_waits
+                .iter()
+                .any(|w| w.action_id == evidence_id),
+            "the EvaluateEvidence action must have waited on its ValidateIr producer before \
+             becoming ready"
+        );
         let evidence = evidence_reader
             .evidence_of(&evidence_id)
             .expect("add_or_double's EvaluateEvidence must have produced evidence");
@@ -924,5 +1302,71 @@ mod tests {
 
         client.close().unwrap();
         let _ = std::fs::remove_file(&f_path);
+    }
+
+    /// Pure-logic coverage for [`ExecutionReport::verify_slot_invariants`]
+    /// itself (issue #36 T1 completion review, point 4): runs on every
+    /// platform (no real Nim binary needed), and -- following this
+    /// project's own established practice of proving a validator is not
+    /// a rubber stamp (`scripts/validate_issue36_t0_cases.py`'s own test
+    /// suite deliberately breaks copies of a known-good input) --
+    /// exercises both a genuinely valid timeline and three distinct ways
+    /// a timeline could violate T0 §9's invariants.
+    #[test]
+    fn verify_slot_invariants_catches_every_kind_of_violation_and_accepts_a_valid_timeline() {
+        fn report_from(events: Vec<(&str, SlotEventKind)>) -> ExecutionReport {
+            let mut report = ExecutionReport::new();
+            for (i, (action_id, kind)) in events.into_iter().enumerate() {
+                report.slot_events.push(SlotEvent {
+                    action_id: action_id.to_string(),
+                    kind,
+                    at: Duration::from_nanos(i as u64),
+                });
+            }
+            report
+        }
+
+        let budget = NonZeroUsize::new(2).unwrap();
+
+        let valid = report_from(vec![
+            ("a", SlotEventKind::Acquired),
+            ("b", SlotEventKind::Acquired),
+            ("a", SlotEventKind::Released),
+            ("b", SlotEventKind::Released),
+        ]);
+        assert!(valid.verify_slot_invariants(budget).is_ok());
+
+        let double_acquire = report_from(vec![
+            ("a", SlotEventKind::Acquired),
+            ("a", SlotEventKind::Acquired),
+        ]);
+        assert!(
+            double_acquire.verify_slot_invariants(budget).is_err(),
+            "must reject an action acquiring a slot it already holds"
+        );
+
+        let over_budget = report_from(vec![
+            ("a", SlotEventKind::Acquired),
+            ("b", SlotEventKind::Acquired),
+            ("c", SlotEventKind::Acquired),
+        ]);
+        assert!(
+            over_budget.verify_slot_invariants(budget).is_err(),
+            "must reject held_slots exceeding cpu_budget"
+        );
+
+        let unreleased = report_from(vec![("a", SlotEventKind::Acquired)]);
+        assert!(
+            unreleased.verify_slot_invariants(budget).is_err(),
+            "must reject an action that never releases its slot"
+        );
+
+        let released_without_acquire = report_from(vec![("a", SlotEventKind::Released)]);
+        assert!(
+            released_without_acquire
+                .verify_slot_invariants(budget)
+                .is_err(),
+            "must reject a release with no matching acquire"
+        );
     }
 }
