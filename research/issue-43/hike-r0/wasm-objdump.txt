@@ -1,0 +1,100 @@
+
+main.wasm:	file format wasm 0x1
+
+Section Details:
+
+Type[6]:
+ - type[0] (i32, i32) -> nil
+ - type[1] (i32, i32, i32, i32) -> nil
+ - type[2] () -> nil
+ - type[3] (i32) -> nil
+ - type[4] (i32) -> i32
+ - type[5] (i32, i32) -> i32
+Import[4]:
+ - func[0] sig=0 <env.js_log> <- env.js_log
+ - func[1] sig=1 <env.js_set_text> <- env.js_set_text
+ - func[2] sig=1 <env.js_append_text> <- env.js_append_text
+ - func[3] sig=1 <env.js_set_badge_color> <- env.js_set_badge_color
+Function[10]:
+ - func[4] sig=2 <__wasm_call_ctors>
+ - func[5] sig=3 <Log>
+ - func[6] sig=0 <SetText>
+ - func[7] sig=0 <AppendText>
+ - func[8] sig=0 <SetBadgeColor>
+ - func[9] sig=4 <Fib>
+ - func[10] sig=2 <InitApp>
+ - func[11] sig=5 <AddNumbers>
+ - func[12] sig=4 <RunComputation>
+ - func[13] sig=3 <AppendLogMessage>
+Memory[1]:
+ - memory[0] pages: initial=2
+Global[6]:
+ - global[0] i32 mutable=0 <__dso_handle> - init i32=1024
+ - global[1] i32 mutable=0 <__data_end> - init i32=1468
+ - global[2] i32 mutable=0 <__global_base> - init i32=1024
+ - global[3] i32 mutable=0 <__heap_base> - init i32=67008
+ - global[4] i32 mutable=0 <__memory_base> - init i32=0
+ - global[5] i32 mutable=0 <__table_base> - init i32=1
+Export[21]:
+ - memory[0] -> "memory"
+ - func[4] <__wasm_call_ctors> -> "__wasm_call_ctors"
+ - func[5] <Log> -> "Log"
+ - func[6] <SetText> -> "SetText"
+ - func[7] <AppendText> -> "AppendText"
+ - func[8] <SetBadgeColor> -> "SetBadgeColor"
+ - func[9] <Fib> -> "Fib"
+ - func[10] <InitApp> -> "__hike_impl_InitApp"
+ - func[10] <InitApp> -> "InitApp"
+ - func[11] <AddNumbers> -> "__hike_impl_AddNumbers"
+ - func[11] <AddNumbers> -> "AddNumbers"
+ - func[12] <RunComputation> -> "__hike_impl_RunComputation"
+ - func[12] <RunComputation> -> "RunComputation"
+ - func[13] <AppendLogMessage> -> "__hike_impl_AppendLogMessage"
+ - func[13] <AppendLogMessage> -> "AppendLogMessage"
+ - global[0] -> "__dso_handle"
+ - global[1] -> "__data_end"
+ - global[2] -> "__global_base"
+ - global[3] -> "__heap_base"
+ - global[4] -> "__memory_base"
+ - global[5] -> "__table_base"
+Code[10]:
+ - func[4] size=3 <__wasm_call_ctors>
+ - func[5] size=50 <Log>
+ - func[6] size=88 <SetText>
+ - func[7] size=88 <AppendText>
+ - func[8] size=88 <SetBadgeColor>
+ - func[9] size=51 <Fib>
+ - func[10] size=46 <InitApp>
+ - func[11] size=7 <AddNumbers>
+ - func[12] size=13 <RunComputation>
+ - func[13] size=60 <AppendLogMessage>
+Data[1]:
+ - segment[0] memory=0 size=443 - init i32=1024
+  - 0000400: 7761 736d 2d6c 6f67 2d62 6f78 0077 6173  wasm-log-box.was
+  - 0000410: 6d2d 6f75 7470 7574 0073 7461 7475 732d  m-output.status-
+  - 0000420: 6261 6467 6500 2331 3062 3938 3100 4869  badge.#10b981.Hi
+  - 0000430: 6b65 2057 6562 4173 7365 6d62 6c79 2063  ke WebAssembly c
+  - 0000440: 6f72 6520 696e 6974 6961 6c69 7a65 6420  ore initialized 
+  - 0000450: 7375 6363 6573 7366 756c 6c79 2e00 4869  successfully..Hi
+  - 0000460: 6b65 204c 616e 6775 6167 6520 5761 736d  ke Language Wasm
+  - 0000470: 2052 756e 7469 6d65 2069 7320 6f6e 6c69   Runtime is onli
+  - 0000480: 6e65 2e0a 436c 6963 6b20 7468 6520 6275  ne..Click the bu
+  - 0000490: 7474 6f6e 7320 6265 6c6f 7720 746f 2074  ttons below to t
+  - 00004a0: 7269 6767 6572 206e 6174 6976 6520 636f  rigger native co
+  - 00004b0: 6d70 7574 6174 696f 6e73 2e00 0a5b 5761  mputations...[Wa
+  - 00004c0: 736d 2045 7665 6e74 5d20 4865 6172 7462  sm Event] Heartb
+  - 00004d0: 6561 7420 7469 636b 2072 6563 6569 7665  eat tick receive
+  - 00004e0: 6420 6672 6f6d 2062 726f 7773 6572 2e00  d from browser..
+  - 00004f0: 0a5b 5761 736d 2045 7665 6e74 5d20 5573  .[Wasm Event] Us
+  - 0000500: 6572 2063 6c69 636b 6564 2041 6374 696f  er clicked Actio
+  - 0000510: 6e20 423a 2053 6c69 6365 2062 7566 6665  n B: Slice buffe
+  - 0000520: 7220 6d61 6e69 7075 6c61 7469 6f6e 2063  r manipulation c
+  - 0000530: 6f6d 706c 6574 652e 000a 5b57 6173 6d20  omplete...[Wasm 
+  - 0000540: 4576 656e 745d 2055 7365 7220 636c 6963  Event] User clic
+  - 0000550: 6b65 6420 4163 7469 6f6e 2041 3a20 4d65  ked Action A: Me
+  - 0000560: 6d6f 7279 206c 6179 6f75 7420 7661 6c69  mory layout vali
+  - 0000570: 6461 7465 642e 0045 7865 6375 7469 6e67  dated..Executing
+  - 0000580: 2052 756e 436f 6d70 7574 6174 696f 6e20   RunComputation 
+  - 0000590: 696e 7369 6465 2057 6562 4173 7365 6d62  inside WebAssemb
+  - 00005a0: 6c79 2e2e 2e00 5275 6e6e 696e 6720 2857  ly....Running (W
+  - 00005b0: 6173 6d20 4163 7469 7665 29              asm Active)

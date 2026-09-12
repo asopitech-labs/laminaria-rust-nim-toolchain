@@ -151,9 +151,9 @@ class ReferenceSetupTests(unittest.TestCase):
         self.lock.write_text("[]")
         self.assertEqual(self.run_cli("setup"), 1)
 
-    def test_checked_in_lock_contains_twelve_pinned_projects(self):
+    def test_checked_in_lock_contains_thirteen_pinned_projects(self):
         projects = refs.load_lock(refs.DEFAULT_LOCK)
-        self.assertEqual(len(projects), 12)
+        self.assertEqual(len(projects), 13)
         self.assertEqual([p["name"] for p in projects if p.get("requires_case_sensitive_fs")], ["linux"])
 
 

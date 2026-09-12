@@ -1,0 +1,13 @@
+
+main.wasm:	file format wasm 0x1
+
+Sections:
+
+     Type start=0x0000000a end=0x00000029 (size=0x0000001f) count: 6
+   Import start=0x0000002b end=0x00000079 (size=0x0000004e) count: 4
+ Function start=0x0000007b end=0x00000086 (size=0x0000000b) count: 10
+   Memory start=0x00000088 end=0x0000008b (size=0x00000003) count: 1
+   Global start=0x0000008d end=0x000000b1 (size=0x00000024) count: 6
+   Export start=0x000000b4 end=0x00000204 (size=0x00000150) count: 21
+     Code start=0x00000207 end=0x00000400 (size=0x000001f9) count: 10
+     Data start=0x00000403 end=0x000005c6 (size=0x000001c3) count: 1

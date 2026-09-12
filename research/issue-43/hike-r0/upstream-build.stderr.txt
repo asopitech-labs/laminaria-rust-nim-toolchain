@@ -1,0 +1,5 @@
+<temp>.ll:143:18: error: use of undefined value '@strlen32'
+  %v5 = call i32 @strlen32(i8* %v4)
+                 ^
+1 error generated.
+Clang build failed: exit status 1

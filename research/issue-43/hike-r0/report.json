@@ -1,0 +1,198 @@
+{
+  "artifacts": {
+    "HIKE-LICENSE": {
+      "bytes": 1068,
+      "sha256": "6b3497e1e711780741457cdcb345be01421b8a7ef6c35d4f084cac7993a0b4ef"
+    },
+    "execution.stderr.txt": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "execution.stdout.txt": {
+      "bytes": 568,
+      "sha256": "aee5bcecc9197669a76c11fec79d3325ca57d09d306da86fe9c9bd6f6e6c5bf7"
+    },
+    "index.html": {
+      "bytes": 4781,
+      "sha256": "ac0dd7b7e643954fea1ed1eb465307981cfa0787524a565735d5c2206735895f"
+    },
+    "main.compat.ll": {
+      "bytes": 11442,
+      "sha256": "aed2bc54408c0ac134084a87b7da0ff7b1445681b451e49b48150da84075dcae"
+    },
+    "main.generated.ll": {
+      "bytes": 11055,
+      "sha256": "c4cbb78cf797d132861c2ea2783e939da161a15f8d0e7ab76e7ad9688ee73754"
+    },
+    "main.hike": {
+      "bytes": 2168,
+      "sha256": "b0a9768b90836c70baa1e89c114d63499dc06b1eed017ddad83be24a0b4d955d"
+    },
+    "main.wasm": {
+      "bytes": 1478,
+      "sha256": "e69cb2ccdf70dc4f74f6f7885ccd05f4856f81b0635eac97c14d30bea76b1e7f"
+    },
+    "main.wasm.gz": {
+      "bytes": 829,
+      "sha256": "ac6d352af48429ea3038e9627322ef2355519e5504a481137819c9b395350999"
+    },
+    "main.wasm.zst": {
+      "bytes": 839,
+      "sha256": "69428923036df961fe95cb43afaa9a8d7440af6b9b1ba74f0c45bef84bb0fc12"
+    },
+    "node_harness.js": {
+      "bytes": 1565,
+      "sha256": "ca03843ed71e10642f3a29dcf30f0a5497494fa58b09693f0a5bd4d7b0d53615"
+    },
+    "runtime.js": {
+      "bytes": 11159,
+      "sha256": "a5aa8a04ced23f8cef313b4bf58c00311a7a038a3499aaa1ad768df0f4593956"
+    },
+    "upstream-build.stderr.txt": {
+      "bytes": 168,
+      "sha256": "b34743aaf37bf632c61dfe2467d20978d27da77d6325d4597f36a6181b028cf3"
+    },
+    "upstream-build.stdout.txt": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "wasm-objdump.headers.txt": {
+      "bytes": 600,
+      "sha256": "ee73be21343496ff1018add66a5f9a9a2434fb76cc9df810df5984fa8f2666d2"
+    },
+    "wasm-objdump.txt": {
+      "bytes": 4400,
+      "sha256": "e057e7756c3f6a19cc6e5d18a95d88bad7a1505c8bec19536c06551fa6e40047"
+    },
+    "wasm.wat": {
+      "bytes": 7755,
+      "sha256": "10f831e00f95b062ef1b0a5bedf620f0c340b23aae8422170b4deccb616e463a"
+    }
+  },
+  "commands": {
+    "compatibility_transform": "append pinned runtime.ll's strlen32 definition to main.generated.ll",
+    "compiler": "go build -buildvcs=false -trimpath -o <temp>/hikec ./cmd/hikec",
+    "emit_ir": "<temp>/hikec -target wasm32 -o <output>/main.generated.ll <output>/main.hike",
+    "execute": "node node_harness.js",
+    "link_compatible": "clang --target=wasm32-unknown-unknown -O2 -nostdlib -Wl,--no-entry -Wl,--export-all -Wl,--allow-undefined main.compat.ll -o main.wasm",
+    "upstream_build": "<temp>/hikec build -target wasm32 main.hike -o upstream.wasm"
+  },
+  "execution": {
+    "exit_code": 0,
+    "stderr": [],
+    "stdout": [
+      "{\"instantiated\":true,\"initial_memory_pages\":2,\"final_memory_pages\":2,\"add_1234_5678\":6912,\"fib_10\":55,\"host_calls\":[[\"js_log\",\"Hike WebAssembly core initialized successfully.\"],[\"js_set_text\",\"status-badge\",\"Running (Wasm Active)\"],[\"js_set_badge_color\",\"status-badge\",\"#10b981\"],[\"js_set_text\",\"wasm-output\",\"Hike Language Wasm Runtime is online.\\nClick the buttons below to trigger native computations.\"],[\"js_log\",\"Executing RunComputation inside WebAssembly...\"],[\"js_append_text\",\"wasm-log-box\",\"\\n[Wasm Event] User clicked Action A: Memory layout validated.\"]]}"
+    ]
+  },
+  "reference": {
+    "repository": "https://github.com/kanryu/hike-lang.git",
+    "revision": "6402155652fa61692818fe7985193f0fd97513f5",
+    "workload": "examples/browser"
+  },
+  "schema_version": 1,
+  "size_comparison": {
+    "article_claim": "2.56 KB (unit convention unspecified)",
+    "difference_producers": [
+      "the fixed revision's examples/browser source is not byte-identical to the article excerpt",
+      "the article does not publish its exact Go/Clang/LLD versions or linker artifact",
+      "the fixed revision's wasm32 runtime omits strlen32, so its one-command build fails",
+      "the compatibility artifact restores only strlen32 from the same revision's runtime.ll",
+      "the fixed revision emits a newer unified runtime.js than the bridge shown in the article"
+    ],
+    "reproduced_runtime_js_bytes": 11159,
+    "reproduced_wasm_bytes": 1478,
+    "reproduced_wasm_plus_runtime_js_bytes": 12637
+  },
+  "toolchain": {
+    "binaryen": "wasm-opt version 108",
+    "clang": "Debian clang version 14.0.6",
+    "container_base": "golang:1.22.12-bookworm@sha256:3d699e4d15d0f8f13c9195c0632a16702b8cbdece2955af1c23b37ae5d55a253",
+    "debian": "Debian GNU/Linux 12 (bookworm)",
+    "git": "git version 2.39.5",
+    "go": "go version go1.22.12 linux/amd64",
+    "lld": "Debian LLD 14.0.6",
+    "node": "v18.20.4",
+    "packages": [
+      "binaryen=108-1",
+      "clang=1:14.0-55.7~deb12u1",
+      "lld=1:14.0-55.7~deb12u1",
+      "nodejs=18.20.4+dfsg-1~deb12u2",
+      "wabt=1.0.32-1",
+      "zstd=1.5.4+dfsg2-5"
+    ],
+    "wabt": "1.0.32",
+    "zstd": "*** Zstandard CLI (64-bit) v1.5.4, by Yann Collet ***"
+  },
+  "upstream_build": {
+    "exit_code": 1,
+    "stderr": [
+      "<temp>.ll:143:18: error: use of undefined value '@strlen32'",
+      "  %v5 = call i32 @strlen32(i8* %v4)",
+      "                 ^",
+      "1 error generated.",
+      "Clang build failed: exit status 1"
+    ],
+    "stdout": []
+  },
+  "wasm": {
+    "code_symbols": [
+      "Code[10]:",
+      " - func[4] size=3 <__wasm_call_ctors>",
+      " - func[5] size=50 <Log>",
+      " - func[6] size=88 <SetText>",
+      " - func[7] size=88 <AppendText>",
+      " - func[8] size=88 <SetBadgeColor>",
+      " - func[9] size=51 <Fib>",
+      " - func[10] size=46 <InitApp>",
+      " - func[11] size=7 <AddNumbers>",
+      " - func[12] size=13 <RunComputation>",
+      " - func[13] size=60 <AppendLogMessage>"
+    ],
+    "exports": [
+      "Export[21]:",
+      " - memory[0] -> \"memory\"",
+      " - func[4] <__wasm_call_ctors> -> \"__wasm_call_ctors\"",
+      " - func[5] <Log> -> \"Log\"",
+      " - func[6] <SetText> -> \"SetText\"",
+      " - func[7] <AppendText> -> \"AppendText\"",
+      " - func[8] <SetBadgeColor> -> \"SetBadgeColor\"",
+      " - func[9] <Fib> -> \"Fib\"",
+      " - func[10] <InitApp> -> \"__hike_impl_InitApp\"",
+      " - func[10] <InitApp> -> \"InitApp\"",
+      " - func[11] <AddNumbers> -> \"__hike_impl_AddNumbers\"",
+      " - func[11] <AddNumbers> -> \"AddNumbers\"",
+      " - func[12] <RunComputation> -> \"__hike_impl_RunComputation\"",
+      " - func[12] <RunComputation> -> \"RunComputation\"",
+      " - func[13] <AppendLogMessage> -> \"__hike_impl_AppendLogMessage\"",
+      " - func[13] <AppendLogMessage> -> \"AppendLogMessage\"",
+      " - global[0] -> \"__dso_handle\"",
+      " - global[1] -> \"__data_end\"",
+      " - global[2] -> \"__global_base\"",
+      " - global[3] -> \"__heap_base\"",
+      " - global[4] -> \"__memory_base\"",
+      " - global[5] -> \"__table_base\""
+    ],
+    "imports": [
+      "Import[4]:",
+      " - func[0] sig=0 <env.js_log> <- env.js_log",
+      " - func[1] sig=1 <env.js_set_text> <- env.js_set_text",
+      " - func[2] sig=1 <env.js_append_text> <- env.js_append_text",
+      " - func[3] sig=1 <env.js_set_badge_color> <- env.js_set_badge_color"
+    ],
+    "sections": [
+      "",
+      "main.wasm:\tfile format wasm 0x1",
+      "",
+      "Sections:",
+      "",
+      "     Type start=0x0000000a end=0x00000029 (size=0x0000001f) count: 6",
+      "   Import start=0x0000002b end=0x00000079 (size=0x0000004e) count: 4",
+      " Function start=0x0000007b end=0x00000086 (size=0x0000000b) count: 10",
+      "   Memory start=0x00000088 end=0x0000008b (size=0x00000003) count: 1",
+      "   Global start=0x0000008d end=0x000000b1 (size=0x00000024) count: 6",
+      "   Export start=0x000000b4 end=0x00000204 (size=0x00000150) count: 21",
+      "     Code start=0x00000207 end=0x00000400 (size=0x000001f9) count: 10",
+      "     Data start=0x00000403 end=0x000005c6 (size=0x000001c3) count: 1"
+    ]
+  }
+}

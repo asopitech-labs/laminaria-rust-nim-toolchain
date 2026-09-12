@@ -3,8 +3,8 @@
 参照コードの取得手順とrevisionは、版管理された
 [`reference-projects.lock.json`](../reference-projects.lock.json) と
 [`scripts/reference_projects.py`](../scripts/reference_projects.py) に固定する。
-既存の `.reference/` にあった12プロジェクトのoriginとHEADを採取したもので、
-default branchの最新コードへ追従する仕組みではない。
+既存の `.reference/` にあった12プロジェクトのoriginとHEAD、およびIssue #43の
+Hike固定revisionを収録したもので、default branchの最新コードへ追従する仕組みではない。
 
 ## セットアップ
 
@@ -27,7 +27,7 @@ python3 scripts/reference_projects.py status buck2 bazel pants nx
 python3 scripts/reference_projects.py setup --root /path/to/reference-sources
 ```
 
-`setup` は指定がなければ12件を順次処理する。1件失敗しても他の選択済みprojectは
+`setup` は指定がなければ13件を順次処理する。1件失敗しても他の選択済みprojectは
 処理し、1件でも失敗すると終了コード1を返す。`list` と `status` はclone/fetchせず、
 保存先ディレクトリも作らない。認証プロンプトは無効で、HTTPS通信できる環境が必要。
 初回は大きなソースツリー（特にLLVMとLinux）の取得容量・時間を見込むこと。
@@ -41,7 +41,7 @@ python3 scripts/reference_projects.py setup --root /path/to/reference-sources
 OS名だけで判定しない。小文字化やファイル除外によって成功扱いにもしない。
 
 ```sh
-# 通常のcase-insensitive volumeではまず残り11件を取得
+# 通常のcase-insensitive volumeではまず残り12件を取得
 python3 scripts/reference_projects.py setup --exclude linux
 python3 scripts/reference_projects.py status --exclude linux
 

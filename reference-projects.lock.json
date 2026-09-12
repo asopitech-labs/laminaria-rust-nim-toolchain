@@ -6,6 +6,7 @@
     {"name": "bazel", "url": "https://github.com/bazelbuild/bazel.git", "revision": "d4c275b89348663ec7b84e58f75ec8ab46f62101"},
     {"name": "buck2", "url": "https://github.com/facebook/buck2.git", "revision": "967164d58a6eac6716eea4c60e81fe85516efbd0"},
     {"name": "cargo", "url": "https://github.com/rust-lang/cargo.git", "revision": "e7506208ff1b7f01062e410c419f95628dfdb31b"},
+    {"name": "hike-lang", "url": "https://github.com/kanryu/hike-lang.git", "revision": "6402155652fa61692818fe7985193f0fd97513f5"},
     {"name": "linux", "url": "https://github.com/torvalds/linux.git", "revision": "893e11787f78e43b534e252249ac3fff4d1333f8", "requires_case_sensitive_fs": true},
     {"name": "llvm-project", "url": "https://github.com/llvm/llvm-project.git", "revision": "4f1d2ab0a9e57909a30b9fdce73afb00d7e7d686"},
     {"name": "nimony", "url": "https://github.com/nim-lang/nimony.git", "revision": "1b592f15c934aedad87e11df0cc6047c88b353d1"},
