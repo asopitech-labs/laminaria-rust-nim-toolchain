@@ -192,7 +192,9 @@ impl IncrementalSessionClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use laminaria_plan::{Action, ActionKind, ArtifactRef};
+    #[cfg(unix)]
     use std::sync::OnceLock;
 
     /// Builds (once per test binary process, `OnceLock`-guarded the same
@@ -231,6 +233,7 @@ mod tests {
             .clone()
     }
 
+    #[cfg(unix)]
     fn lower_action(id: &str, inputs: Vec<ArtifactRef>) -> Action {
         Action {
             id: id.to_string(),

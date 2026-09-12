@@ -555,15 +555,33 @@ fn apply_and_dispatch(
 
 #[cfg(test)]
 mod tests {
+    // `source_never_spawns_a_subprocess` below (the only test that runs
+    // on every platform) needs nothing from the outer module -- only
+    // `include_str!` and plain string operations -- so `super::*` itself
+    // is unused on a non-unix build, same reasoning as every import
+    // below.
+    #[cfg(unix)]
     use super::*;
+    // Everything below is used only by this module's real-binary test
+    // (`#[cfg(unix)]`, matching the platform gating
+    // `nim_planner_client.rs`'s own real-binary tests already use --
+    // this repo's `windows` CI job deliberately never installs Nim) --
+    // gated the same way, or a non-unix build sees every one of these as
+    // genuinely unused (`-D warnings` caught this directly on
+    // windows-latest CI, not assumed).
+    #[cfg(unix)]
     use laminaria_plan::compiler_work::{
         discover_source_dependencies_artifact_id, evaluate_evidence_artifact_id,
         lower_source_artifact_id, validate_ir_artifact_id, CompilerWorkDescriptor, ResourceRequest,
         SourceProvenanceRef,
     };
+    #[cfg(unix)]
     use laminaria_plan::{ArtifactRef, PlanningInput};
+    #[cfg(unix)]
     use std::num::NonZeroUsize;
+    #[cfg(unix)]
     use std::path::PathBuf;
+    #[cfg(unix)]
     use std::sync::OnceLock;
 
     /// Regression guard (issue #5 T1's `wasm_target.rs::
@@ -634,6 +652,7 @@ mod tests {
             .clone()
     }
 
+    #[cfg(unix)]
     fn lower_source_action(
         id: &str,
         language: &str,
@@ -667,6 +686,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn discover_action(id: &str, snapshot: &str, file: &str, known: &[&str]) -> Action {
         let requested: Vec<String> = known.iter().map(|s| s.to_string()).collect();
         Action {
@@ -694,6 +714,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn validate_ir_action(id: &str, input_id: &str) -> Action {
         Action {
             id: id.to_string(),
@@ -717,6 +738,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn evaluate_evidence_action(
         id: &str,
         input_id: &str,
