@@ -299,7 +299,11 @@ def main(argv=None):
     )
     args = parser.parse_args(argv)
 
-    with open(args.path) as f:
+    # Explicit utf-8, not the platform default: this file's own comments
+    # are in Japanese, and Windows' default codepage (cp1252) cannot
+    # decode them at all -- reproduced directly via the "Reference
+    # project setup" workflow's windows-latest job, not assumed.
+    with open(args.path, encoding="utf-8") as f:
         doc = yaml.safe_load(f)
 
     errors = validate(doc)

@@ -196,7 +196,7 @@ class RealFileEndToEndTest(unittest.TestCase):
         import yaml
 
         real_path = Path(__file__).resolve().parents[2] / "docs" / "design" / "issue-36-t0-cases.yaml"
-        with open(real_path) as f:
+        with open(real_path, encoding="utf-8") as f:
             doc = yaml.safe_load(f)
         errors = validator.validate(doc)
         self.assertEqual(errors, [], "\n".join(errors))
