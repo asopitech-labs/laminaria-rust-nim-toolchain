@@ -29,8 +29,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::num::NonZeroUsize;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{mpsc, Mutex};
+use std::sync::{mpsc, Barrier, Mutex};
 use std::time::{Duration, Instant};
 
 use laminaria_ir::discover::discover_called_functions;
@@ -128,36 +127,78 @@ pub struct SlotEvent {
 /// the run, from worker threads); a caller only ever sees the finished,
 /// plain-data [`ExecutionReport`] this trace is folded into once the
 /// run completes.
+///
+/// A single `Mutex`-guarded critical section ([`CpuSlotTrace::record`])
+/// linearizes every occupancy change: `active`/`peak` and the recorded
+/// `events` series are updated together, as one step, under one lock --
+/// issue #36 T1 completion-review follow-up (2026-09-12): the earlier
+/// design used a separate `AtomicUsize` pair for `active`/`peak` plus an
+/// *independently*-locked event log, so another thread's own event push
+/// could interleave between one thread's atomic active-increment and
+/// that same thread's own event push, leaving no guarantee the recorded
+/// `events` order matched the true order the atomics observed --
+/// `verify_slot_invariants`'s replay could then reject a genuinely valid
+/// run, or miss a real one, purely from event-log reordering unrelated
+/// to any actual scheduling violation. One lock removes the seam
+/// entirely: the order in which threads successfully acquire it *is*
+/// the true total order, and `events`' own insertion order (with each
+/// event's timestamp taken inside that same critical section, and
+/// `Instant` guaranteed monotonic) already *is* that order -- no
+/// separate re-sort required.
+struct CpuSlotTraceState {
+    active: usize,
+    peak: usize,
+    events: Vec<SlotEvent>,
+}
+
 struct CpuSlotTrace {
-    active: AtomicUsize,
-    peak: AtomicUsize,
     start: Instant,
-    events: Mutex<Vec<SlotEvent>>,
+    state: Mutex<CpuSlotTraceState>,
 }
 
 impl CpuSlotTrace {
     fn new() -> Self {
         CpuSlotTrace {
-            active: AtomicUsize::new(0),
-            peak: AtomicUsize::new(0),
             start: Instant::now(),
-            events: Mutex::new(Vec::new()),
+            state: Mutex::new(CpuSlotTraceState {
+                active: 0,
+                peak: 0,
+                events: Vec::new(),
+            }),
         }
     }
 
     fn enter(&self, action_id: &str) -> CpuSlotGuard<'_> {
-        let now = self.active.fetch_add(1, Ordering::SeqCst) + 1;
-        self.peak.fetch_max(now, Ordering::SeqCst);
-        self.push_event(action_id, SlotEventKind::Acquired);
+        self.record(action_id, SlotEventKind::Acquired);
         CpuSlotGuard {
             trace: self,
             action_id: action_id.to_string(),
         }
     }
 
-    fn push_event(&self, action_id: &str, kind: SlotEventKind) {
+    fn release(&self, action_id: &str) {
+        self.record(action_id, SlotEventKind::Released);
+    }
+
+    /// The one point every occupancy change passes through: while
+    /// holding this trace's single lock, updates `active`, updates
+    /// `peak` if this is a new high, and appends the event -- all three
+    /// as one indivisible step relative to every other thread.
+    fn record(&self, action_id: &str, kind: SlotEventKind) {
+        let mut state = self.state.lock().unwrap();
+        match kind {
+            SlotEventKind::Acquired => {
+                state.active += 1;
+                if state.active > state.peak {
+                    state.peak = state.active;
+                }
+            }
+            SlotEventKind::Released => {
+                state.active -= 1;
+            }
+        }
         let at = self.start.elapsed();
-        self.events.lock().unwrap().push(SlotEvent {
+        state.events.push(SlotEvent {
             action_id: action_id.to_string(),
             kind,
             at,
@@ -167,14 +208,13 @@ impl CpuSlotTrace {
     /// The highest number of actions ever observed genuinely executing
     /// (not merely dispatched/waiting) at the same instant.
     fn peak_concurrent(&self) -> usize {
-        self.peak.load(Ordering::SeqCst)
+        self.state.lock().unwrap().peak
     }
 
-    /// A time-ordered snapshot of every slot event recorded so far.
+    /// Every slot event recorded so far, in the true total order this
+    /// trace's own single lock established.
     fn slot_events(&self) -> Vec<SlotEvent> {
-        let mut events = self.events.lock().unwrap().clone();
-        events.sort_by_key(|e| e.at);
-        events
+        self.state.lock().unwrap().events.clone()
     }
 }
 
@@ -185,9 +225,7 @@ struct CpuSlotGuard<'a> {
 
 impl Drop for CpuSlotGuard<'_> {
     fn drop(&mut self) {
-        self.trace.active.fetch_sub(1, Ordering::SeqCst);
-        self.trace
-            .push_event(&self.action_id, SlotEventKind::Released);
+        self.trace.release(&self.action_id);
     }
 }
 
@@ -578,6 +616,25 @@ pub fn run_to_completion(
         ready: initial_ready.into_iter().collect(),
         done: false,
     });
+    // Every worker thread rendezvous here before any of them may pop a
+    // single action -- issue #36 T1 completion-review follow-up
+    // (2026-09-12): without this, two actions dispatched to two
+    // separate freshly-`scope.spawn`ed threads could start racing at
+    // whatever moment each thread happened to actually get scheduled by
+    // the OS, which -- under real CI-runner contention -- proved wide
+    // enough that a fast, near-instantaneous dispatch could finish and
+    // release its CPU slot before a slower thread's dispatch had even
+    // begun, making T0 case1's own "an independent ready branch
+    // genuinely overlaps a slower one" property depend on OS scheduling
+    // luck rather than this executor's own design. A `Barrier` makes
+    // every worker's *first* attempt to claim work start from the same
+    // synchronized instant instead -- a real, deterministic scheduling
+    // guarantee, not a test-only hook (every real run pays this same
+    // one-time rendezvous, not merely this module's own tests): once
+    // released, whichever ready actions the queue already holds are
+    // raced for genuinely concurrently, no longer skewed by independent
+    // thread-spawn latency.
+    let start_barrier = Barrier::new(cpu_budget.get());
 
     std::thread::scope(|scope| -> Result<(), ExecutorError> {
         for _ in 0..cpu_budget.get() {
@@ -585,31 +642,37 @@ pub fn run_to_completion(
             let pool = &pool;
             let store = &store;
             let trace = &trace;
+            let start_barrier = &start_barrier;
             let report_tx = report_tx.clone();
-            scope.spawn(move || loop {
-                let action = {
-                    let mut s = state.lock().unwrap();
-                    loop {
-                        if let Some(a) = s.ready.pop_front() {
-                            break a;
+            scope.spawn(move || {
+                start_barrier.wait();
+                loop {
+                    let action = {
+                        let mut s = state.lock().unwrap();
+                        loop {
+                            if let Some(a) = s.ready.pop_front() {
+                                break a;
+                            }
+                            if s.done {
+                                return;
+                            }
+                            s = pool.wait(s).unwrap();
                         }
-                        if s.done {
-                            return;
+                    };
+                    let action_id = action.id.clone();
+                    let outcome = dispatch(&action, store, trace);
+                    let report = match outcome {
+                        DispatchOutcome::Completed => WorkerReport::Completed { action_id },
+                        DispatchOutcome::Discovered(names) => {
+                            WorkerReport::Discovered { action_id, names }
                         }
-                        s = pool.wait(s).unwrap();
+                        DispatchOutcome::Failed(detail) => {
+                            WorkerReport::Failed { action_id, detail }
+                        }
+                    };
+                    if report_tx.send(report).is_err() {
+                        return;
                     }
-                };
-                let action_id = action.id.clone();
-                let outcome = dispatch(&action, store, trace);
-                let report = match outcome {
-                    DispatchOutcome::Completed => WorkerReport::Completed { action_id },
-                    DispatchOutcome::Discovered(names) => {
-                        WorkerReport::Discovered { action_id, names }
-                    }
-                    DispatchOutcome::Failed(detail) => WorkerReport::Failed { action_id, detail },
-                };
-                if report_tx.send(report).is_err() {
-                    return;
                 }
             });
         }
@@ -1217,6 +1280,18 @@ mod tests {
         )
         .unwrap();
 
+        // `run_to_completion`'s own worker-start barrier (issue #36 T1
+        // completion-review follow-up, 2026-09-12) is what makes this
+        // overlap deterministic rather than a matter of OS scheduling
+        // luck: both `lower_f` and `discover` are already queued
+        // `ready` before any worker is released to race for them, so
+        // both dispatches begin from the same synchronized instant --
+        // a prior version of this same assertion, without that
+        // barrier, failed once on CI (`observed peak_concurrent=1`,
+        // 2026-09-12) purely from independent thread-spawn latency
+        // staggering the two dispatches far enough apart that the
+        // faster one (`lower_f`) finished before the slower one
+        // (`discover`) had even begun.
         assert!(
             report.peak_concurrent() >= 2,
             "AID_LOWER_F must genuinely overlap with the add_or_double discovery, not merely be \
@@ -1231,6 +1306,9 @@ mod tests {
         // 5): `lower_f`'s CPU slot and `discover`'s CPU slot must have
         // been held *simultaneously* at some real instant -- i.e. each
         // one's own acquisition happened before the other's release.
+        // Deterministic under the worker-start barrier above, not a
+        // race against however the OS happened to schedule two
+        // independently-spawned threads.
         let lower_f_acquired = report
             .slot_acquired_at(&lower_f_id)
             .expect("lower_f must have acquired a CPU slot");
@@ -1302,6 +1380,95 @@ mod tests {
 
         client.close().unwrap();
         let _ = std::fs::remove_file(&f_path);
+    }
+
+    /// Regression guard for the "single linearized order" fix (issue
+    /// #36 T1 completion-review follow-up, 2026-09-12: a review found
+    /// that the previous design -- a separate `AtomicUsize` pair for
+    /// `active`/`peak` plus an *independently*-locked event log -- gave
+    /// no guarantee the recorded `events` order matched the true order
+    /// the atomics observed, since another thread's own event push
+    /// could interleave between one thread's atomic active-increment
+    /// and that same thread's own event push). Hammers `CpuSlotTrace`
+    /// with many threads racing `enter()`/drop() concurrently under
+    /// real contention, then independently recomputes peak concurrency
+    /// purely by replaying the recorded `slot_events()` in their own
+    /// recorded order -- under the fixed single-lock design this must
+    /// always exactly equal the trace's own `peak_concurrent()`, since
+    /// both now come from the very same critical section; under the
+    /// previous split design these two figures were not even the same
+    /// quantity by construction and could disagree under contention.
+    /// Also runs the real `verify_slot_invariants` check (not a
+    /// duplicate of its logic) against the same real, concurrently-
+    /// produced event series, at real thread-count scale.
+    #[test]
+    fn cpu_slot_trace_linearizes_occupancy_and_events_under_real_thread_contention() {
+        let trace = CpuSlotTrace::new();
+        let thread_count = 8usize;
+        let iterations_per_thread = 200usize;
+
+        std::thread::scope(|scope| {
+            for t in 0..thread_count {
+                let trace = &trace;
+                scope.spawn(move || {
+                    for i in 0..iterations_per_thread {
+                        let _slot = trace.enter(&format!("t{t}-{i}"));
+                    }
+                });
+            }
+        });
+
+        let events = trace.slot_events();
+        assert_eq!(events.len(), thread_count * iterations_per_thread * 2);
+
+        // Replay the recorded series, in its own recorded order, and
+        // recompute peak concurrency purely from that replay --
+        // independent of the trace's own atomic/peak bookkeeping.
+        let mut held: HashSet<&str> = HashSet::new();
+        let mut replayed_peak = 0usize;
+        for event in &events {
+            match event.kind {
+                SlotEventKind::Acquired => {
+                    assert!(
+                        held.insert(event.action_id.as_str()),
+                        "action {:?} was recorded acquiring a slot it was already holding -- \
+                         the recorded event order is not a valid linearization of what actually \
+                         happened",
+                        event.action_id
+                    );
+                    replayed_peak = replayed_peak.max(held.len());
+                }
+                SlotEventKind::Released => {
+                    assert!(
+                        held.remove(event.action_id.as_str()),
+                        "action {:?} was recorded releasing a slot the replay never saw it \
+                         acquire -- the recorded event order is not a valid linearization",
+                        event.action_id
+                    );
+                }
+            }
+        }
+        assert!(
+            held.is_empty(),
+            "every acquired slot must eventually be released"
+        );
+
+        assert_eq!(
+            replayed_peak,
+            trace.peak_concurrent(),
+            "peak concurrency recomputed purely by replaying the recorded event series must \
+             exactly match the trace's own tracked peak -- any mismatch means the event log and \
+             the occupancy counters were not updated as a single linearized step"
+        );
+
+        let mut report = ExecutionReport::new();
+        report.slot_events = events;
+        report
+            .verify_slot_invariants(NonZeroUsize::new(thread_count).unwrap())
+            .expect(
+                "a real, concurrently-produced event series from a correctly-linearized trace \
+                 must satisfy T0 §9's own invariants",
+            );
     }
 
     /// Pure-logic coverage for [`ExecutionReport::verify_slot_invariants`]
