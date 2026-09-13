@@ -22,7 +22,15 @@ validator test exists or should be added for this fixture
 - **`nimble/doubler/`** -- one real Nimble package, consumed by `app`'s
   `use_nim_double` feature. `doubler.nim`'s own `{.exportc: "nim_double".}`
   pragma is read directly (`laminaria_ir::nim_export_discover`), never
-  inferred from a compiled archive.
+  inferred from a compiled archive. `nimble.lock` pins the package's
+  own `requires "nim >= 2.0.0"` to the exact nim `2.2.10` this repo
+  already pins elsewhere (`toolchains.lock.toml`'s `nim2_pinned`) -- a
+  real nimble artifact (`nimble lock`'s own output), not a G1 code
+  workaround, and required so `nimble dump --json` can resolve its own
+  `nimDir`-reporting toolchain lookup from this lock file's exact
+  pinned revision instead of scanning/downloading candidate versions
+  (see `crates/laminaria-run/src/command_runner.rs`'s own doc comment
+  for the real CI failure this fixes).
 - **`c/cadd/v1/`** -- one C library exporting `c_add`: `cadd.c` includes
   `cadd.h`, and `cadd.h`'s own prototype (`int c_add(int a, int b);`) is
   the correct provider for `app`'s `extern "C" { fn c_add(...) }`
