@@ -112,6 +112,7 @@ semantic IR、target pipeline、measurement、identity、diagnostic、toolchain 
 ## 現在の判断に必要な文書
 
 - 制約: [独自コンパイラ責務契約](01-foundations/compiler-ownership-contract_ja.md)と[研究優先順位ポリシー](01-foundations/research-prioritization-policy_ja.md)
+- 3レーンの基礎研究: [Lane A — Semantic and Artifact Closure](02-research-areas/toolchains/lane-a-semantic-artifact-closure-foundations_ja.md)、[Lane B — Efficient Compiler Computation](02-research-areas/execution/lane-b-efficient-compiler-computation-foundations_ja.md)、[Lane C — Executable Verification and Testability](02-research-areas/toolchains/lane-c-executable-verification-foundations_ja.md)
 - 中心研究: [Cross-ecosystem dependency graph research](02-research-areas/toolchains/cross-ecosystem-dependency-graph.md)
 - 先行研究と差分: [複数ecosystem依存とcompiler IRを結合して解く先行研究調査](02-research-areas/toolchains/cross-ecosystem-dependency-and-ir-resolution-landscape_ja.md)
 - 枝刈りのcorrectnessと計測: [Native executableをrootとするcross-layer枝刈り](02-research-areas/toolchains/cross-layer-reachability-pruning_ja.md)

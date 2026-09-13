@@ -8,6 +8,8 @@ The [project progression and near-term research goal](../near-term-research-prog
 
 The portfolio has three coupled research lanes: **Lane A — Semantic and Artifact Closure**, **Lane B — Efficient Compiler Computation**, and **Lane C — Executable Verification and Testability**. Source semantics, IR, identity, and provenance form their shared substrate rather than duplicated lane-local models. Current GitHub tracking surfaces are #45 as shared gate M1, #48 for Lane A A1/G1, #46 for Lane A A2/G2, #47 for Lane B B1/G3, and #49 for Lane C C0/C1. Existing broad issues retain their subsystem responsibilities. Work without a suitable issue remains explicitly listed in the portfolio rather than being forced into the nearest existing issue.
 
+Issue decisions must cite the canonical lane research rather than reproduce an independent checklist: [Lane A](../02-research-areas/toolchains/lane-a-semantic-artifact-closure-foundations_ja.md), [Lane B](../02-research-areas/execution/lane-b-efficient-compiler-computation-foundations_ja.md), and [Lane C](../02-research-areas/toolchains/lane-c-executable-verification-foundations_ja.md).
+
 ## Compiler ownership and execution order — corrected 2026-09-10
 
 The [compiler ownership contract](../01-foundations/compiler-ownership-contract.md) governs this plan. The current artifact goal is a native executable backed by a resolved Cargo/Nimble/C/C++ graph. The independent Rust/Nim compiler, IR, and scheduler must ultimately compile LAMINARIA itself and its transitive dependencies. External-compiler orchestration/self-build is reference/bootstrap evidence, not the primary delivery milestone; WebAssembly is an optional target track.

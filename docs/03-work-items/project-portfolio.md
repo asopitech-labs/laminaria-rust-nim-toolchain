@@ -63,6 +63,8 @@ Lane C — Executable Verification and Testability
 
 Lane A owns artifact meaning and completeness. Lane B owns computation strategy and resource behavior. Lane C owns executable verification and testability. Source semantics and language/intermediate IR are not assigned exclusively to one lane: Lane A uses them to decide what is required and whether an obligation is satisfied; Lane B uses them to decide what computation exists and how it should execute; Lane C uses them to derive test obligations, controls, observations, oracles, and retest impact. Duplicating separate graphs, IR summaries, or expectation manifests per lane is prohibited.
 
+The research baselines and falsifiable hypotheses are maintained in the [Lane A foundation report](../02-research-areas/toolchains/lane-a-semantic-artifact-closure-foundations_ja.md), [Lane B foundation report](../02-research-areas/execution/lane-b-efficient-compiler-computation-foundations_ja.md), and [Lane C foundation report](../02-research-areas/toolchains/lane-c-executable-verification-foundations_ja.md). This portfolio selects work from those findings; it does not duplicate their literature survey.
+
 ### Lane A — Semantic and Artifact Closure
 
 | Milestone | Decision and evidence | Current tracking |
