@@ -133,8 +133,26 @@ pub fn ingest_cargo_metadata(manifest_path: &Path) -> Result<CargoFacts, IngestE
 /// direct analog of `cargo metadata`.
 pub fn ingest_nimble_package(nimble_dir: &Path) -> Result<NimbleFacts, IngestError> {
     let stdout = run("nimble", &["dump", "--json"], Some(nimble_dir))?;
-    let json: serde_json::Value =
-        serde_json::from_str(&stdout).map_err(|e| IngestError::Parse(e.to_string()))?;
+    // A real, observed CI difference from this machine's own local
+    // `nimble`: a fresh install can print an informational banner (e.g.
+    // "Tip: N messages have been suppressed, use --verbose to show
+    // them.") to stdout *before* the actual JSON object, depending on
+    // nimble's own cached package-list/verbosity state -- never on
+    // stderr, so it cannot be separated by stream alone. `nimble dump
+    // --json`'s own output is always exactly one top-level JSON object,
+    // so parsing from the first `{` is a real robustness fix for a real
+    // observed tool quirk, not a cover for a resolver bug.
+    let json_start = stdout.find('{').ok_or_else(|| {
+        IngestError::Parse(format!(
+            "nimble dump --json produced no JSON object at all; raw output: {stdout:?}"
+        ))
+    })?;
+    let json: serde_json::Value = serde_json::from_str(&stdout[json_start..]).map_err(|e| {
+        IngestError::Parse(format!(
+            "{e} (raw output: {:?})",
+            &stdout[..json_start.min(stdout.len())]
+        ))
+    })?;
     let package_name = json["name"]
         .as_str()
         .ok_or_else(|| IngestError::Parse("nimble dump produced no name".to_string()))?

@@ -262,43 +262,23 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use laminaria_plan::{Action, ActionKind, ArtifactRef};
-    #[cfg(unix)]
-    use std::sync::OnceLock;
 
-    /// Builds (once per test binary process, `OnceLock`-guarded the same
-    /// way `nim_planner_client::tests::real_planner_binary` is to avoid
-    /// a concurrent-build race a prior review already caught for that
-    /// sibling binary) the real `laminaria-incremental-planner` binary.
+    /// Delegates to `crate::test_support::real_incremental_planner_binary`,
+    /// shared across this crate's own test modules that need this exact
+    /// binary -- a previously per-module `OnceLock` here raced against
+    /// `incremental_executor.rs`'s own separate one (both target the
+    /// same output path, both compile into this crate's one shared test
+    /// binary), caught directly on CI
+    /// (`ExecutableFileBusy`/"Text file busy") once concurrent test load
+    /// made the race actually manifest -- see `test_support.rs`'s own
+    /// doc comment for the full history.
     #[cfg(unix)]
     fn real_incremental_planner_binary() -> PathBuf {
-        static BUILT: OnceLock<PathBuf> = OnceLock::new();
-        BUILT
-            .get_or_init(|| {
-                let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../..")
-                    .canonicalize()
-                    .unwrap();
-                let nim_planner_dir = repo_root.join("nim-planner");
-                let bin = nim_planner_dir.join("bin/laminaria-incremental-planner");
-                let status = Command::new("nim")
-                    .args([
-                        "c",
-                        "--path:src",
-                        "--nimcache:nimcache",
-                        "-o:bin/laminaria-incremental-planner",
-                        "src/laminaria_incremental_planner.nim",
-                    ])
-                    .current_dir(&nim_planner_dir)
-                    .status()
-                    .expect("failed to invoke nim -- is Nim installed?");
-                assert!(
-                    status.success(),
-                    "nim c failed to build laminaria-incremental-planner"
-                );
-                assert!(bin.is_file(), "expected {} to exist", bin.display());
-                bin
-            })
-            .clone()
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap();
+        crate::test_support::real_incremental_planner_binary(&repo_root)
     }
 
     #[cfg(unix)]
