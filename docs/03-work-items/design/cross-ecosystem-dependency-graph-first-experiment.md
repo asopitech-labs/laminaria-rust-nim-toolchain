@@ -22,6 +22,8 @@ Also include one deliberately unreachable package/provider candidate, one unused
 
 The graph must preserve package/version/feature identity, host-versus-target role, source/header inputs, generated adapter provenance, toolchain/ABI constraints, artifact producers, symbols, link order, and the final executable demand.
 
+The graph must also contain a first-class `TestContract` for the exact production executable, plus any separately identified test executable, harness executable, test data, controls, observations, and target-execution requirements. Test-only dependencies must be distinguishable from production dependencies.
+
 ## Required executable evidence
 
 Production resolver/planner/executor tests must directly establish that:
@@ -35,6 +37,10 @@ Production resolver/planner/executor tests must directly establish that:
 - no parse/lowering/compile action runs for items proven unreachable early;
 - final symbol/section evidence excludes dead code while retaining FFI, constructor, dynamic, and runtime roots; and
 - every retained or pruned node has a root path or a conservative-retention/pruning reason from the production graph.
+- the exact production executable digest, not only an instrumented/test-profile variant, is executed by the harness;
+- the harness exercises the Rust/Nim/C/C++ observable path and checks exit/output plus required ABI/symbol/runtime behavior;
+- one missing or incompatible dependency is not recovered accidentally from the host environment; and
+- test-only package, symbol, hook, and runtime dependencies do not enter the release artifact.
 
 The resulting artifact must also be exercised in a clean runtime environment without Cargo, Nimble, Rust/Nim/C/C++ compilers, project sources, or build-only dependencies. This test is evidence that the original ecosystem obligations were discharged, not merely copied into a package-manager or store closure. A self-contained or relocatable-bundle profile must run using only its declared runtime artifacts. A system-integrated profile must enumerate and preflight its external ABI/symbol/runtime contracts.
 
@@ -48,4 +54,4 @@ For the same graph, compare no pruning, linker GC only, compiler DCE plus linker
 
 ## Stop condition
 
-Stop after obtaining a correct positive closure, evidence that all obligations were discharged or externalized, a pre-compilation rejection, a runnable native binary, and enough measurements to adopt, reject, or reformulate one graph representation or resolution algorithm. Do not extend the experiment to complete ecosystem coverage, WASM, distributed execution, or self-hosting.
+Stop after obtaining a correct positive closure, evidence that all obligations were discharged or externalized, a pre-compilation rejection, a harness-tested exact production native binary, and enough measurements to adopt, reject, or reformulate one graph representation or resolution algorithm. Do not extend the experiment to complete ecosystem coverage, WASM, distributed execution, or self-hosting.

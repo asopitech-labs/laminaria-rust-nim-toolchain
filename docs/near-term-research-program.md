@@ -20,6 +20,8 @@ LAMINARIA does not merely solve Cargo, Nimble, C, and C++ package choices and di
 
 The original dependency graph remains as derivation, reproducibility, and audit provenance, not as a runtime topology the user must resolve again. This does not claim physical independence from the OS, kernel, drivers, or every dynamic library; unavoidable requirements are externalized as explicit, verifiable runtime contracts. Pruning is an important optimization that proves some obligations irrelevant and avoids their work, but it is not the source of this artifact property.
 
+An untestable binary is not a completed artifact. The exact production artifact identity must be bound to a test contract, harness, target environment, controls, observations, and raw evidence. Success of only an instrumented or test-profile binary cannot qualify the production binary, and test-only dependencies must not leak into the release artifact.
+
 ## Current evidence and central uncertainty
 
 The repository has bounded evidence for source-derived IR, owned validation/interpretation/transformation, Nim planning with Rust execution, incremental discovery, demand-driven execution, identity, measurement, and native/LLVM/WASM routes.
@@ -34,9 +36,9 @@ Cross-ecosystem package resolution now has direct formal prior art in *Package M
 
 This does not mean completing all Cargo/Nimble semantics, all C/C++ build systems, every platform, the fastest compiler, a production package manager, WASM support, distributed builds, or self-hosting. The milestone requires a correct closure, a runnable native binary, a negative case, resource measurements, and one architectural decision for a fixed realistic mixed-dependency workload.
 
-## Two-lane research program
+## Three-lane research program
 
-Research is divided into **Lane A — Semantic and Artifact Closure**, which owns artifact meaning and completeness, and **Lane B — Efficient Compiler Computation**, which owns compiler-computation strategy and physical resource behavior. They do not maintain separate graphs: both consume the same package/source/semantic/IR/artifact/ABI/symbol/link nodes, identities, and provenance. Source semantics and IR are their shared substrate.
+Research is divided into **Lane A — Semantic and Artifact Closure**, which owns artifact meaning and completeness; **Lane B — Efficient Compiler Computation**, which owns compiler-computation strategy and physical resource behavior; and **Lane C — Executable Verification and Testability**, which owns control, observation, falsification, and qualification of exact artifacts. They do not maintain separate graphs: all three consume the same package/source/semantic/IR/artifact/ABI/symbol/link/test nodes, identities, and provenance. Source semantics and IR are their shared substrate.
 
 ### Lane A — Semantic and Artifact Closure
 
@@ -47,15 +49,19 @@ Research is divided into **Lane A — Semantic and Artifact Closure**, which own
 
 1. **B1 / G3 — resolution efficiency, pruning, and incrementality (#47; related #8/#7/#11/#12/#6/#19–#24).** Compare eager candidate/code expansion with demand-driven constraint propagation, cross-layer reachability pruning, canonicalization, memoization, equivalent-state merging, dominance pruning, and SCC condensation. Measure cold resolution, no-op, leaf-change, root-set change, and feature/target-condition changes by wall time, peak RSS, output size, package/source/IR/artifact/symbol pruning, recomputation, and avoided external-tool executions.
 
+### Lane C — Executable Verification and Testability
+
+1. **C1 — exact production artifact harness.** Execute the exact production binary as the test subject in a clean target environment under one `TestContract` defining inputs/controls, exit/signal/stdout/stderr/ABI/symbol/runtime observations, negative dependencies, and raw evidence. Instrumented/test-profile artifacts retain separate identities, test-only dependencies do not enter the release artifact, and later C3 work derives retest sets from source/IR/artifact changes.
+
 ### Shared milestone gates
 
-- **M0 — contract lock:** Fix Lane A's obligation/artifact contract and Lane B's event/identity/measurement contract for the same graph.
-- **M1 — first dependency-discharged native artifact (current):** A1/G1 and A2/G2 produce the native artifact; B1/G3 provides a correctness-equivalent efficiency comparison and one algorithm decision on that graph.
+- **M0 — contract lock:** Fix Lane A's obligation/artifact contract, Lane B's event/identity/measurement contract, and Lane C's test-subject/control/observation/oracle contract for the same graph.
+- **M1 — first dependency-discharged native artifact (current):** A1/G1 and A2/G2 produce the exact production native artifact; B1/G3 provides a correctness-equivalent efficiency comparison and one algorithm decision; C1/C2 directly test the exact binary, cross-language path, ABI/runtime contracts, negative dependency, and pruning equivalence on the same graph.
 - **M2 — representative native projects:** Expand ecosystem coverage together with bounded invalidation, memory, and publication correctness.
 - **M3 — self-hosted native toolchain:** Establish stage0→stage1→stage2 obligation and producer lineage as explainable, resource-bounded owned computation.
 - **M4 — qualified resilient release:** Satisfy packaging/update/rollback contracts and the local or distributed recovery contract required by the selected profile.
 
-Semantic fusion/splitting and the WASM target pipeline remain useful separate research, but neither substitutes for M1 native evidence. The [project work portfolio](03-work-items/project-portfolio.md) defines the full two-lane progression.
+Semantic fusion/splitting and the WASM target pipeline remain useful separate research, but neither substitutes for M1 native evidence. The [project work portfolio](03-work-items/project-portfolio.md) defines the full three-lane progression.
 
 ## Progression after the current milestone
 
@@ -82,6 +88,7 @@ The current next task is therefore G1's cross-ecosystem dependency-graph experim
 - Prior art and research gap: [cross-ecosystem dependency and compiler-IR resolution survey](02-research-areas/toolchains/cross-ecosystem-dependency-and-ir-resolution-landscape_ja.md)
 - Pruning contract: [cross-layer reachability pruning](02-research-areas/toolchains/cross-layer-reachability-pruning_ja.md)
 - Artifact obligation discharge: [dependency-discharge artifact contract](02-research-areas/toolchains/dependency-resolved-artifact-closure_ja.md)
+- Artifact testability: [testable native artifact and first-class harness](02-research-areas/toolchains/testable-native-artifact-harness_ja.md)
 - Whole-project outcomes, capabilities, and unissued gaps: [project work portfolio](03-work-items/project-portfolio.md)
 - Execution map: [research issue plan](03-work-items/issue-plan.md)
 - Current experiment: [first cross-ecosystem dependency-graph experiment](03-work-items/design/cross-ecosystem-dependency-graph-first-experiment.md)

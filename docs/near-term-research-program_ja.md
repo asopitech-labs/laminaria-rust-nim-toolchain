@@ -20,6 +20,8 @@ LAMINARIAはCargo、Nimble、C、C++のpackage選択だけを先に解いて結�
 
 元のdependency graphは導出・再現・監査のprovenanceとして保存するが、利用者が再resolutionする実行時topologyにはしない。OS、kernel、driver、dynamic library等への物理的依存が必ずゼロになるという意味ではなく、残るものは明示・検証可能なruntime contractとしてexternalizeする。枝刈りは不要な義務を`ProvenIrrelevant`と証明して解決・生成workを減らす重要な最適化だが、この価値の本体ではない。
 
+さらに、testできないbinaryは完成artifactとみなさない。exact production artifact identityにtest contract、harness、target environment、control／observation、raw evidenceを結び付ける。test-profileやinstrumented binaryだけの成功でproduction binaryを認定せず、test-only dependencyをrelease artifactへ漏らさない。
+
 ## 現在地と中心的な未解決点
 
 現在までに、限定されたsource-derived IR、owned validation/interpretation/transformation、Nim planning kernelとRust executor、incremental discovery、demand-driven execution、identity、measurement、native/LLVM/WASM経路について個別の証拠がある。
@@ -34,9 +36,9 @@ ecosystem横断のpackage resolution自体には、*Package Managers à la Carte
 
 これは全Cargo/Nimble semantics、全C/C++ build system、全platform、最速compiler、production package manager、WASM対応、分散build、またはself-hostingの完成を意味しない。成功条件は、固定した現実的なmixed dependency workloadについて、正しいclosure、実行可能native binary、negative case、資源測定、architecture判断を得ることである。
 
-## 2レーンの研究プログラム
+## 3レーンの研究プログラム
 
-研究を、成果物の意味と完全性を担う**Lane A — Semantic and Artifact Closure**と、compiler計算の効率と物理実行を担う**Lane B — Efficient Compiler Computation**に分ける。両者は別graphを持たず、同じpackage/source/semantic/IR/artifact/ABI/symbol/link node、identity、provenanceを読む。source semanticsとIRは二つのlaneを接続する共有substrateである。
+研究を、成果物の意味と完全性を担う**Lane A — Semantic and Artifact Closure**、compiler計算の効率と物理実行を担う**Lane B — Efficient Compiler Computation**、exact artifactの制御・観測・反証・認定を担う**Lane C — Executable Verification and Testability**に分ける。三者は別graphを持たず、同じpackage/source/semantic/IR/artifact/ABI/symbol/link/test node、identity、provenanceを読む。source semanticsとIRは三laneを接続する共有substrateである。
 
 ### Lane A — Semantic and Artifact Closure
 
@@ -69,15 +71,21 @@ G1で解決したclosureをproduction Nim planner / Rust runtimeへ渡し、必�
 - 判断指標: wall-clock、peak RSS、output size、展開／枝刈り／mergeしたstate数、保持／枝刈りしたpackage/source/IR/artifact/symbol数、再計算node数、実行を回避した外部tool数
 - 停止条件: correctnessを維持したうえで、少なくとも一つのgraph algorithmまたは表現について採用・棄却・再定式化を判断できる
 
+### Lane C — Executable Verification and Testability
+
+#### C1 — exact production artifact harness
+
+exact production binaryをtest subjectとして、clean target environment、明示input／control、exit／signal／stdout／stderr／ABI／symbol／runtime observation、negative dependency、raw evidenceを一つの`TestContract`で実行する。instrumented/test-profile artifactは別identityとし、test-only dependencyをrelease artifactへ漏らさない。source／IR／artifact変更からretest集合を導出する研究はC3へ拡張する。
+
 ### 共有milestone gate
 
-- **M0 — contract lock:** Lane Aのobligation/artifact contractと、Lane Bのevent/identity/measurement contractを同じ固定graphについて確定する。
-- **M1 — first dependency-discharged native artifact（現在）:** A1/G1とA2/G2がnative artifactを成立させ、B1/G3が同じgraph上でcorrectness-equivalentな効率比較と一つのalgorithm判断を得る。
+- **M0 — contract lock:** Lane Aのobligation/artifact contract、Lane Bのevent/identity/measurement contract、Lane Cのtest subject/control/observation/oracle contractを同じ固定graphについて確定する。
+- **M1 — first dependency-discharged native artifact（現在）:** A1/G1とA2/G2がexact production native artifactを成立させ、B1/G3が同じgraph上でcorrectness-equivalentな効率比較と一つのalgorithm判断を得て、C1/C2がexact binary、cross-language path、ABI/runtime、negative dependency、pruning equivalenceを直接testする。
 - **M2 — representative native projects:** ecosystem coverageと、増分性・memory・publication correctnessを実projectへ広げる。
 - **M3 — self-hosted native toolchain:** stage0→stage1→stage2の依存義務とproducer lineageを、説明可能でresource-boundedなowned computationとして成立させる。
 - **M4 — qualified resilient release:** package/update/rollback契約と、対象profileに必要なlocalまたはdistributed recovery契約を満たす。
 
-意味IRの融合／分割やWASM target pipelineは有用な別研究だが、M1のnative evidenceの代わりにしない。詳細な2レーンportfolioは[Project Work Portfolio](03-work-items/project-portfolio.md)に定める。
+意味IRの融合／分割やWASM target pipelineは有用な別研究だが、M1のnative evidenceの代わりにしない。詳細な3レーンportfolioは[Project Work Portfolio](03-work-items/project-portfolio.md)に定める。
 
 ## その後のプロジェクト進行
 
@@ -108,6 +116,7 @@ semantic IR、target pipeline、measurement、identity、diagnostic、toolchain 
 - 先行研究と差分: [複数ecosystem依存とcompiler IRを結合して解く先行研究調査](02-research-areas/toolchains/cross-ecosystem-dependency-and-ir-resolution-landscape_ja.md)
 - 枝刈りのcorrectnessと計測: [Native executableをrootとするcross-layer枝刈り](02-research-areas/toolchains/cross-layer-reachability-pruning_ja.md)
 - 依存義務を成果物へ変換する契約: [異種依存義務をbuild時にdischargeするartifact contract](02-research-areas/toolchains/dependency-resolved-artifact-closure_ja.md)
+- 成果物のtestability: [Testable Native Artifactと第一級Test Harness](02-research-areas/toolchains/testable-native-artifact-harness_ja.md)
 - 全projectの成果・能力・未Issue化gap: [Project Work Portfolio](03-work-items/project-portfolio.md)
 - 実行順序: [Research Issue Plan](03-work-items/issue-plan.md)
 - 現在の実験: [最初のcross-ecosystem dependency graph実験](03-work-items/design/cross-ecosystem-dependency-graph-first-experiment.md)

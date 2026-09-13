@@ -40,11 +40,13 @@ The current Rust/C/C++ baseline is documented in [Rust/CargoにおけるC/C++ na
 
 [Dependency-discharge artifact contract](02-research-areas/toolchains/dependency-resolved-artifact-closure_ja.md) defines the user-facing result: package, source-semantic, language/intermediate-IR, ABI, symbol, and link obligations are transformed and discharged into a native artifact, while the original graph remains provenance and unavoidable runtime requirements remain explicit contracts. Pruning is a subordinate optimization of that process.
 
+[Testable Native Artifactと第一級Test Harness](02-research-areas/toolchains/testable-native-artifact-harness_ja.md) makes testability a cross-cutting artifact property: exact production subjects, test artifacts, controls, observations, target environments, test-only dependencies, and raw evidence are represented in the same production graph rather than left to an external fixture validator.
+
 These documents refine questions selected by the near-term program. They do not independently establish delivery priority.
 
 ## 03 — Work items
 
-- [Project work portfolio](03-work-items/project-portfolio.md) manages the two coupled research lanes, shared milestone gates, outcomes, unissued gaps, implementation, verification, release, and later expansion.
+- [Project work portfolio](03-work-items/project-portfolio.md) manages the three coupled research lanes, shared milestone gates, outcomes, unissued gaps, implementation, verification, release, and later expansion.
 - [Issue plan](03-work-items/issue-plan.md) maps the bounded GitHub-tracked projection to that portfolio.
 - `design/` contains issue-specific experiment contracts, specifications, and evidence. Implemented behavior is verified by direct executable tests against production code; design fixtures and historical catalogs are not verification authorities.
 - `review-contracts/` contains bounded review handoffs.

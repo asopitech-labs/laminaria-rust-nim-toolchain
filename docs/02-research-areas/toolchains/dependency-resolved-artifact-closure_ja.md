@@ -101,11 +101,17 @@ DependencyDischargedArtifact
   build_provenance
     source/material identities / builder identity / operations
   reproducibility_contract
+  test_contracts[]
+    exact subject identity / controls / observations / oracle
+  test_results[]
+    subject + harness + environment identities / raw evidence
 ```
 
 SLSA provenanceはartifactを`subject`、取得した依存を`resolvedDependencies`として記録し、どのbuild definitionとbuilderがartifactを生成したかをattestationにする。[^slsa] LAMINARIAのcertificateはこの形式を置き換えず、SLSA等へexport可能な内部provenanceを持つ。
 
 重要なのは、SBOMやprovenance fileがあるだけでclosure完成としないことだ。実際のbinary／bundleに含まれるloader dependency、symbol、resourceとcertificateを照合し、宣言されていないruntime dependencyを検出する。
+
+同様に、一度起動できただけではartifact完成としない。成果物はexact artifact digestに結び付いたtest contractとtest resultを持ち、再実行可能なharnessからfunctional、cross-language、ABI、runtime、negative dependency条件を検証できなければならない。instrumented／test-profile binaryと利用者へ渡すproduction binaryは別identityとして扱う。詳細は[Testable Native Artifactと第一級Test Harness](testable-native-artifact-harness_ja.md)に定める。
 
 ## 「依存から解放」の具体的意味
 
@@ -144,6 +150,7 @@ SLSA provenanceはartifactを`subject`、取得した依存を`resolvedDependenc
 - pruned dependencyをprovenanceから消さず、「候補だったが成果物へ影響しなかった」と区別できる。
 - secret、absolute temporary path、build-host固有の偶然をartifact contractへ固定しない。
 - closureの完全性はmanifestだけでなく、生成artifactの直接検査と起動で確認する。
+- exact production artifact identityにtest contractとtarget上の実行証拠が結び付き、test-only dependencyはrelease artifactへ漏れない。
 
 ## 直接的な実行可能テスト
 
@@ -157,6 +164,8 @@ SLSA provenanceはartifactを`subject`、取得した依存を`resolvedDependenc
 6. build-only dependencyがruntime closureに含まれない。
 7. 不要package/codeを加えても枝刈り後runtime closureとobservable behaviorが変わらない。
 8. 必要runtime dependencyを一つ除くと、欠落したidentity／ABI／symbolを特定して失敗する。
+9. exact production binaryをtest subjectとしてharnessから実行し、instrumented binaryだけの成功で代替しない。
+10. test-only package／symbol／runtimeがrelease artifactへ含まれず、test profileでは必要rootが保持される。
 
 手書きfixture manifestを正本にせず、production resolver、planner、compiler、linkerが生成したartifactとcertificateをtest対象にする。
 

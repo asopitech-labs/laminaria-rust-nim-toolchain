@@ -4,6 +4,8 @@ This document manages the work needed to reach LAMINARIA's project outcomes. It 
 
 GitHub issues are a projection of bounded work that benefits from external tracking. A missing issue does not mean missing work is out of scope, and an open issue does not make that work a current priority.
 
+**Cross-cutting invariant:** a binary without an executable test contract is not a completed artifact. Testability has its own research lane and participates in every milestone gate; it is not a post-build CI concern.
+
 ## Management model
 
 ```text
@@ -28,10 +30,11 @@ Work is managed at every level of this chain. An issue checklist, design documen
 5. Do not keep work active merely because its issue is open. Do not close a project gap merely because a related issue or fixture was completed.
 6. Use direct executable tests against production paths as verification authority. YAML catalogs, fixture-only validators, and validator tests may organize evidence but cannot be the source of truth.
 7. Reassess the portfolio whenever an experiment changes the graph model, compiler boundary, artifact contract, or project goal.
+8. Bind test results to the exact subject artifact, harness, environment, and raw evidence. An instrumented or test-profile artifact cannot silently certify a different production artifact.
 
-## Two research lanes
+## Three research lanes
 
-The project has two coupled research lanes. They answer different questions, but neither can deliver LAMINARIA alone.
+The project has three coupled research lanes. They answer different questions, but none can deliver LAMINARIA alone.
 
 ```text
 Lane A — Semantic and Artifact Closure
@@ -44,6 +47,13 @@ Lane A — Semantic and Artifact Closure
 Lane B — Efficient Compiler Computation
   How the required compiler computation is discovered, partitioned,
   pruned, incrementally recomputed, scheduled, retained, and placed
+                         |
+                         | test demands, selection, execution events,
+                         | failures, observations, raw evidence
+                         v
+Lane C — Executable Verification and Testability
+  How exact artifacts are controlled, observed, isolated, tested,
+  falsified, selected for retest, and qualified
 
                     shared milestone gate
                          |
@@ -51,7 +61,7 @@ Lane B — Efficient Compiler Computation
               runnable native artifact + evidence
 ```
 
-Lane A owns artifact meaning and completeness. Lane B owns computation strategy and resource behavior. Source semantics and language/intermediate IR are not assigned exclusively to either lane: Lane A uses them to decide what is required and whether an obligation is satisfied; Lane B uses the same facts to decide what computation exists and how it should execute. Duplicating separate graphs or IR summaries per lane is prohibited.
+Lane A owns artifact meaning and completeness. Lane B owns computation strategy and resource behavior. Lane C owns executable verification and testability. Source semantics and language/intermediate IR are not assigned exclusively to one lane: Lane A uses them to decide what is required and whether an obligation is satisfied; Lane B uses them to decide what computation exists and how it should execute; Lane C uses them to derive test obligations, controls, observations, oracles, and retest impact. Duplicating separate graphs, IR summaries, or expectation manifests per lane is prohibited.
 
 ### Lane A — Semantic and Artifact Closure
 
@@ -73,17 +83,27 @@ Lane A owns artifact meaning and completeness. Lane B owns computation strategy 
 | B3 — semantic partition, fusion, and scheduling | Partition/fusion and resource-aware schedules are derived from preserved semantics and measured against coarse compiler/action boundaries | #25/#27/#29-#34 |
 | B4 — resilient physical placement | Local/remote retention, transfer, recomputation, failure recovery, and heterogeneous execute-on/produces-for placement preserve logical identity | #6/#7/#39-#41 |
 
+### Lane C — Executable Verification and Testability
+
+| Milestone | Decision and evidence | Current tracking |
+| --- | --- | --- |
+| C0 — test contract and subject identity | `TestContract`, exact subject/harness/environment identities, controls, observations, oracle, isolation, target execution requirements, and raw result schema are fixed | New M0/M1 work; test-harness contract |
+| C1 — exact native artifact harness | The exact M1 production binary is exercised in a clean target environment; instrumented artifacts remain separate identities | New M1 issue |
+| C2 — semantic, ABI, and failure coverage | Cross-language semantics, ABI/symbol/runtime contracts, negative dependencies, crash/timeout/resource failures, and pruning equivalence are directly tested | G1-G3 integration; #10/#20/#44 |
+| C3 — incremental and distributed test selection | Source/IR/artifact/runtime changes derive the valid rebuild/retest set; execution is placed only on qualified target nodes and flakiness is measured | #7/#11/#19-#21/#40/#41 plus newly discovered tasks |
+| C4 — self-host and release qualification | Stage lineage/conformance and exact release candidate install/relocation/update/rollback/provenance contracts are executable and repeatable | #2/#23/#26 and future release tasks |
+
 ### Shared milestone gates
 
 The lanes synchronize at outcome gates. A lane-local experiment can finish without waiting for unrelated work, but a project milestone passes only when both required sides are present.
 
-| Gate | Required Lane A state | Required Lane B state | Result |
-| --- | --- | --- | --- |
-| M0 — contract lock | A0 native demand and obligation types fixed | B0 event/identity/measurement contract fixed for the same graph | One falsifiable experiment contract |
-| M1 — first native artifact | A1 and A2 pass | B1 produces correctness-equivalent measurements and one algorithm decision | First dependency-discharged native artifact; current GitHub milestone |
-| M2 — representative native projects | A3 supports or explicitly rejects selected real projects | B2 bounds invalidation, memory, and publication behavior on them | Reusable native toolchain subset with known limits |
-| M3 — self-hosted native toolchain | A4 proves stage lineage and dependency discharge | B3 makes the self-build computation explainable and resource-bounded | Stage1/stage2 owned self-hosting evidence |
-| M4 — qualified resilient release | O8 packaging/update contracts pass for qualified targets | B4 or an explicitly local-only profile passes recovery and placement requirements | Releasable artifact profile with stated operational scope |
+| Gate | Required Lane A state | Required Lane B state | Required Lane C state | Result |
+| --- | --- | --- | --- | --- |
+| M0 — contract lock | A0 native demand and obligation types fixed | B0 event/identity/measurement contract fixed | C0 test subject/control/observation/oracle contract fixed for the same graph | One falsifiable executable experiment contract |
+| M1 — first native artifact | A1 and A2 produce the exact production artifact | B1 produces correctness-equivalent measurements and one algorithm decision | C1 and the required part of C2 test the exact binary, cross-language path, ABI/runtime, negative dependency, and pruning equivalence | First tested dependency-discharged native artifact; current GitHub milestone |
+| M2 — representative native projects | A3 supports or explicitly rejects selected real projects | B2 bounds invalidation, memory, and publication behavior | C2/C3 bound test coverage, retest selection, environment matrix, and flakiness | Reusable tested native toolchain subset with known limits |
+| M3 — self-hosted native toolchain | A4 proves stage lineage and dependency discharge | B3 makes self-build computation explainable and resource-bounded | C4 proves stage conformance and excludes copied/external artifacts | Stage1/stage2 owned self-hosting evidence |
+| M4 — qualified resilient release | O8 packaging/update/rollback contracts pass | B4 or an explicitly local-only profile passes recovery and placement requirements | C4 tests exact release candidates across each qualified operational profile | Releasable artifact profile with stated operational scope |
 
 M0–M4 are evidence gates, not calendar phases. Optional WASM or advanced optimization work may inform a gate but cannot replace its native evidence.
 
@@ -91,7 +111,7 @@ M0–M4 are evidence gates, not calendar phases. Optional WASM or advanced optim
 
 | Outcome | Completion evidence | Current condition | Horizon |
 | --- | --- | --- | --- |
-| O1 — dependency-discharged native artifact | A mixed Cargo/Nimble/C/C++ project produces and runs a native artifact; every package/source/IR/ABI/symbol/link obligation is discharged, externalized, or rejected with production evidence | Active research milestone; no complete production path yet | Now |
+| O1 — dependency-discharged native artifact | A mixed Cargo/Nimble/C/C++ project produces a harness-tested exact production native artifact; every package/source/IR/ABI/symbol/link obligation is discharged, externalized, or rejected with production evidence | Active research milestone; no complete production path yet | Now |
 | O2 — owned Rust/Nim compiler path | Supported Rust and Nim source semantics lower through LAMINARIA-owned IR, legal transformations, target generation, and runtime support without hidden compiler fallback | Small source/IR/interpreter/WASM evidence exists; native coverage is incomplete | Now and Next |
 | O3 — efficient incremental computation | Correctness-equivalent demand resolution, pruning, invalidation, reuse, memory planning, and scheduling improve measured cost over eager/coarse baselines | Planning, tracing, reuse, and incremental pieces exist; coupled package-to-link evidence is missing | Now and Next |
 | O4 — practical ecosystem coverage | Real package metadata, generated inputs, C/C++ libraries, runtime capabilities, platform contracts, diagnostics, and security/license constraints are supported or rejected explicitly | Mostly reference/delegated paths and design contracts | Next |
@@ -115,6 +135,7 @@ These horizons express decision order, not a promise that every item in one row 
 | Native target production | Direct native-link baselines exist; the owned target experiment is currently WASM-shaped | Select and implement the smallest owned native object/code generation path and explicit final linker action | G2 #46; #5 must be re-evaluated for native priority |
 | Runtime capability derivation | Runtime needs are documented and #42 exists | Derive only demanded startup, allocation, unwind, panic, TLS, and platform support; externalize unsupported system contracts | **Required slice not yet attached to G2**; related #42 |
 | Clean artifact consumption | Artifact and closure contract is documented | Inspect actual loader dependencies/symbols/resources and execute in a clean environment without build tools or sources | G2 #46; related #20 |
+| First-class artifact test harness | Unit/integration tests and process evidence exist, but no production graph `TestContract` binds an exact subject artifact, harness, target environment, controls, observations, and raw result | Model test demands/dependencies separately from release dependencies; execute exact production artifacts; derive incremental test selection and release qualification from the same graph | **New shared M0/M1 gap** |
 | Cross-layer pruning | Reachability contract and compiler/linker baselines are documented | Implement shared roots and conservative retention from package candidates through source, IR, object, symbol, section, and runtime | G3 #47; #12 |
 | Incrementality and resource evidence | Incremental planner, executor, tracing, reuse, and benchmark fixtures exist | Apply them to the same coupled graph and separate avoided work, cache reuse, invalidation, scheduling, and memory effects | G3 #47; #6/#7/#11/#12/#19-#21 |
 | Explanation and negative knowledge | Structured plan rejection mechanisms exist | Explain package-to-artifact selection, discharge, externalization, pruning, and rejection without log archaeology | G1-G3; #10/#24 |
@@ -124,13 +145,14 @@ These horizons express decision order, not a promise that every item in one row 
 
 ## Active shared gate: M1
 
-The active gate is not “finish issues #45–#48.” It is to decide whether Lane A can produce a dependency-discharged native artifact while Lane B demonstrates a correctness-equivalent, measurable computation strategy on exactly the same graph. The issues are only bounded reporting surfaces.
+The active gate is not “finish issues #45–#48.” It is to decide whether Lane A can produce a dependency-discharged native artifact, Lane B can demonstrate a correctness-equivalent measurable computation strategy, and Lane C can directly falsify or qualify the exact artifact on the same graph. The issues are only bounded reporting surfaces.
 
 ### M1-W0 — freeze the observable artifact demand
 
 - Native executable entry point, target/host, export/dynamic roots, runtime profile, and expected behavior.
 - One Cargo crate, one Nimble package, one C library, and one C++ library whose results are all observable.
 - Positive graph, one cross-layer feedback case, and one pre-compilation incompatibility.
+- Exact production subject identity, test contract, harness controls/observations, target environment, and negative dependency behavior.
 
 ### M1-W1 — implement the common obligation vocabulary
 
