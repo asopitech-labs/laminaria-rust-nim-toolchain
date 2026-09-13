@@ -545,12 +545,63 @@ mod tests {
         resolve, ObligationKind, ObligationState, RejectionReason, RequiredActionKind, Role,
     };
     use std::collections::BTreeSet;
+    use std::sync::OnceLock;
 
-    fn positive_input() -> DependencyResolutionInput {
-        let runner = RecordingCommandRunner::new();
-        let layout = FixtureLayout::discover();
-        ingest_fixture_input(&runner, &layout, &["1.0.0"])
-            .expect("must ingest positive fixture input")
+    /// The real facts an ingestion pass gathered, plus every command it
+    /// actually attempted while gathering them.
+    struct FixtureIngestion {
+        input: DependencyResolutionInput,
+        recorded_commands: Vec<(String, Vec<String>)>,
+    }
+
+    /// Ingests the fixture's real `cargo metadata`/`nimble dump
+    /// --json`/`rustc -vV` facts exactly once per test process and
+    /// caches the result -- the same "gather the real fixture facts
+    /// once, reuse them across every test in this module" pattern
+    /// `incremental_executor.rs::tests::real_incremental_planner_binary`
+    /// already established, applied here to avoid `cargo test`'s own
+    /// parallel test threads issuing *concurrent* real `nimble dump
+    /// --json` invocations against the same package directory -- a
+    /// real, observed CI flake: concurrent invocations can trip
+    /// nimble's own toolchain-negotiation path and attempt a network
+    /// install that a sandboxed CI runner cannot complete. This
+    /// caching is test-only scaffolding: it never runs in production,
+    /// and it still never compiles, archives, or links anything --
+    /// `ingest_fixture_input` itself is exactly as read-only whether
+    /// called once or from every test.
+    fn positive_ingestion() -> &'static FixtureIngestion {
+        static CACHE: OnceLock<FixtureIngestion> = OnceLock::new();
+        CACHE.get_or_init(|| {
+            let runner = RecordingCommandRunner::new();
+            let layout = FixtureLayout::discover();
+            let input = ingest_fixture_input(&runner, &layout, &["1.0.0"])
+                .expect("must ingest positive fixture input");
+            FixtureIngestion {
+                input,
+                recorded_commands: runner.recorded_commands(),
+            }
+        })
+    }
+
+    fn negative_ingestion() -> &'static FixtureIngestion {
+        static CACHE: OnceLock<FixtureIngestion> = OnceLock::new();
+        CACHE.get_or_init(|| {
+            let runner = RecordingCommandRunner::new();
+            let layout = FixtureLayout::discover();
+            let input = ingest_fixture_input(&runner, &layout, &["2.0.0"])
+                .expect("must ingest negative fixture input");
+            FixtureIngestion {
+                input,
+                recorded_commands: runner.recorded_commands(),
+            }
+        })
+    }
+
+    fn all_commands_permitted(recorded: &[(String, Vec<String>)]) -> bool {
+        recorded.iter().all(|(program, args)| {
+            let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+            crate::command_runner::is_permitted(program, &args_ref)
+        })
     }
 
     /// Required test 1: the positive case resolves without ever
@@ -560,18 +611,13 @@ mod tests {
     /// already appears earlier in the emitted list).
     #[test]
     fn g1_positive_resolves_without_building_and_emits_complete_action_plan() {
-        let runner = RecordingCommandRunner::new();
-        let layout = FixtureLayout::discover();
-        let input = ingest_fixture_input(&runner, &layout, &["1.0.0"]).expect("must ingest");
+        let ingestion = positive_ingestion();
         assert!(
-            runner.recorded_commands().iter().all(|(program, args)| {
-                let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-                crate::command_runner::is_permitted(program, &args_ref)
-            }),
+            all_commands_permitted(&ingestion.recorded_commands),
             "no forbidden command may be attempted while ingesting the positive fixture"
         );
 
-        let closure = resolve(&input).expect("must resolve");
+        let closure = resolve(&ingestion.input).expect("must resolve");
 
         let mut seen_ids: BTreeSet<&str> = BTreeSet::new();
         for action in &closure.required_actions {
@@ -618,18 +664,13 @@ mod tests {
     /// diagnostic naming the required/declared symbol mismatch.
     #[test]
     fn g1_negative_rejects_cadd_v2_before_any_build_command() {
-        let runner = RecordingCommandRunner::new();
-        let layout = FixtureLayout::discover();
-        let input = ingest_fixture_input(&runner, &layout, &["2.0.0"]).expect("must ingest");
+        let ingestion = negative_ingestion();
         assert!(
-            runner.recorded_commands().iter().all(|(program, args)| {
-                let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-                crate::command_runner::is_permitted(program, &args_ref)
-            }),
+            all_commands_permitted(&ingestion.recorded_commands),
             "no forbidden command may be attempted while ingesting the negative fixture"
         );
 
-        let rejection = resolve(&input).expect_err("must reject");
+        let rejection = resolve(&ingestion.input).expect_err("must reject");
         assert_eq!(rejection.reason, RejectionReason::MissingSymbol);
         assert_eq!(rejection.obligation_id, "Symbol:c_add");
         assert!(rejection.detail.contains("c_add"));
@@ -651,7 +692,7 @@ mod tests {
     /// the complete obligations map.
     #[test]
     fn native_demand_reaches_every_retained_obligation() {
-        let closure = resolve(&positive_input()).expect("must resolve");
+        let closure = resolve(&positive_ingestion().input).expect("must resolve");
         let demand_id = closure
             .obligations
             .values()
@@ -702,7 +743,7 @@ mod tests {
     /// discharge it.
     #[test]
     fn g1_never_discharges_a_production_action_obligation() {
-        let closure = resolve(&positive_input()).expect("must resolve");
+        let closure = resolve(&positive_ingestion().input).expect("must resolve");
         let production_kinds = [
             ObligationKind::ArtifactProduction,
             ObligationKind::FinalLink,
@@ -740,9 +781,9 @@ mod tests {
     /// fixture's own stable, repo-relative source ids guarantee this).
     #[test]
     fn g1_plan_is_deterministic_for_identical_inputs() {
-        let input = positive_input();
-        let a = resolve(&input).expect("must resolve");
-        let b = resolve(&input).expect("must resolve");
+        let input = &positive_ingestion().input;
+        let a = resolve(input).expect("must resolve");
+        let b = resolve(input).expect("must resolve");
         let a_json = serde_json::to_string(&a).expect("serialize");
         let b_json = serde_json::to_string(&b).expect("serialize");
         assert_eq!(a_json, b_json);
@@ -758,7 +799,7 @@ mod tests {
     /// never silently accepted as satisfying a target-role obligation.
     #[test]
     fn host_tool_actions_cannot_satisfy_target_artifact_obligations() {
-        let mut input = positive_input();
+        let mut input = positive_ingestion().input.clone();
         for candidate in input.package_candidates.iter_mut() {
             if candidate.package_id == "cadd" {
                 candidate.role = Role::Host;
@@ -772,7 +813,7 @@ mod tests {
     /// minimal constructed input prevents plan publication entirely.
     #[test]
     fn unresolved_reachable_obligation_prevents_plan_publication() {
-        let mut input = positive_input();
+        let mut input = positive_ingestion().input.clone();
         input
             .package_candidates
             .retain(|c| c.package_id != "cppmax");
