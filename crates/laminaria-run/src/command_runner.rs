@@ -45,12 +45,27 @@ impl std::fmt::Display for IngestError {
 
 impl std::error::Error for IngestError {}
 
-/// The exact permitted-command allowlist issue #48 fixes: `cargo
-/// metadata --no-deps ...`, `nimble dump --json`, and `rustc -vV`.
-/// Anything else -- `cargo build`/`cargo run`, `nimble build`/`nimble
-/// install`, `rustc` with any other flags, `nim c`/`nim cpp`/`nlvm`,
+/// The permitted-command allowlist issue #48 fixes: `cargo metadata
+/// --no-deps ...`, `nimble dump --json`, and `rustc -vV`. Anything else
+/// -- `cargo build`/`cargo run`, `nimble build`/`nimble install`,
+/// `rustc` with any other flags, `nim c`/`nim cpp`/`nlvm`,
 /// `cc`/`clang`/`gcc`/`c++ -c` or equivalent, `ar`, a linker, or `nm` --
 /// is forbidden.
+///
+/// `nimble dump` is additionally required to carry the global
+/// `--offline` flag (`nimble --offline dump --json`). This is a
+/// hardening of the same permitted command, not a different one: a
+/// real, observed CI failure showed some nimble builds' `dump --json`
+/// performing an implicit "resolve/verify a matching nim toolchain"
+/// step that attempts a *network* nim download when a package's
+/// `requires "nim >= ..."` line doesn't pin an exact version already
+/// present -- entirely orthogonal to `dump`'s own read-only purpose of
+/// reporting manifest fields, and exactly the kind of opaque
+/// network/build side effect G1 must never trigger. `--offline`
+/// (nimble's own documented "don't use network" flag) suppresses that
+/// path while leaving `dump --json`'s reported output identical
+/// (verified locally: `nimble dump --json` and `nimble --offline dump
+/// --json` produce byte-identical output for this fixture).
 pub(crate) fn is_permitted(program: &str, args: &[&str]) -> bool {
     match program {
         "cargo" => {
@@ -58,7 +73,7 @@ pub(crate) fn is_permitted(program: &str, args: &[&str]) -> bool {
                 && args.contains(&"--no-deps")
                 && args.windows(2).any(|w| w == ["--format-version", "1"])
         }
-        "nimble" => args == ["dump", "--json"],
+        "nimble" => args == ["--offline", "dump", "--json"],
         "rustc" => args == ["-vV"],
         _ => false,
     }
@@ -159,8 +174,13 @@ mod tests {
                 "x"
             ]
         ));
-        assert!(is_permitted("nimble", &["dump", "--json"]));
+        assert!(is_permitted("nimble", &["--offline", "dump", "--json"]));
         assert!(is_permitted("rustc", &["-vV"]));
+    }
+
+    #[test]
+    fn nimble_dump_without_offline_is_not_permitted() {
+        assert!(!is_permitted("nimble", &["dump", "--json"]));
     }
 
     #[test]

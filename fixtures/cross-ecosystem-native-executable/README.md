@@ -88,7 +88,10 @@ scope (and issue #49/Lane C's), not this fixture's tests.
 ## Real toolchain commands this fixture's own ingestion uses
 
 - `cargo metadata --no-deps --format-version 1 --manifest-path app/Cargo.toml`
-- `nimble dump --json` (run inside `nimble/doubler/`)
+- `nimble --offline dump --json` (run inside `nimble/doubler/`; `--offline`
+  suppresses a real, observed CI failure where `dump` attempted an
+  implicit network nim-toolchain resolution -- it does not change the
+  reported fields)
 - `rustc -vV` (real host target triple)
 
 That is the complete list. `crates/laminaria-run/src/command_runner.rs`

@@ -124,7 +124,14 @@ pub fn ingest_nimble_package(
     runner: &dyn CommandRunner,
     nimble_dir: &Path,
 ) -> Result<NimbleManifestFacts, IngestError> {
-    let stdout = runner.run("nimble", &["dump", "--json"], Some(nimble_dir))?;
+    // `--offline` (nimble's own "don't use network" global flag)
+    // suppresses a real, observed CI failure: some nimble builds'
+    // `dump --json` performs an implicit network toolchain-resolution
+    // step for a `requires "nim >= ..."` line that doesn't pin an
+    // already-present exact version -- see
+    // `crate::command_runner::is_permitted`'s own doc comment. It does
+    // not change `dump`'s reported fields.
+    let stdout = runner.run("nimble", &["--offline", "dump", "--json"], Some(nimble_dir))?;
     // A real, observed CI difference from this machine's own local
     // `nimble`: a fresh install can print an informational banner to
     // stdout *before* the actual JSON object -- `nimble dump --json`'s
