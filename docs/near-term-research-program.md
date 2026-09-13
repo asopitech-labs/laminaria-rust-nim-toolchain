@@ -51,14 +51,14 @@ Research is divided into **Lane A — Semantic and Artifact Closure**, which own
 
 ### Lane C — Executable Verification and Testability
 
-1. **C1 — exact production artifact harness.** Execute the exact production binary as the test subject in a clean target environment under one `TestContract` defining inputs/controls, exit/signal/stdout/stderr/ABI/symbol/runtime observations, negative dependencies, and raw evidence. Instrumented/test-profile artifacts retain separate identities, test-only dependencies do not enter the release artifact, and later C3 work derives retest sets from source/IR/artifact changes.
+1. **C1 — exact production artifact harness (#49).** Execute the exact production binary as the test subject in a clean target environment under one `TestContract` defining inputs/controls, exit/signal/stdout/stderr/ABI/symbol/runtime observations, negative dependencies, and raw evidence. Instrumented/test-profile artifacts retain separate identities, test-only dependencies do not enter the release artifact, and later C3 work derives retest sets from source/IR/artifact changes.
 
 ### Shared milestone gates
 
 - **M0 — contract lock:** Fix Lane A's obligation/artifact contract, Lane B's event/identity/measurement contract, and Lane C's test-subject/control/observation/oracle contract for the same graph.
-- **M1 — first dependency-discharged native artifact (current):** A1/G1 and A2/G2 produce the exact production native artifact; B1/G3 provides a correctness-equivalent efficiency comparison and one algorithm decision; C1/C2 directly test the exact binary, cross-language path, ABI/runtime contracts, negative dependency, and pruning equivalence on the same graph.
-- **M2 — representative native projects:** Expand ecosystem coverage together with bounded invalidation, memory, and publication correctness.
-- **M3 — self-hosted native toolchain:** Establish stage0→stage1→stage2 obligation and producer lineage as explainable, resource-bounded owned computation.
+- **M1 — first tested dependency-discharged native artifact (current):** A1/G1 and A2/G2 produce the exact production native artifact; B1/G3 provides a correctness-equivalent efficiency comparison and one algorithm decision; C1/C2 directly test the exact binary, cross-language path, ABI/runtime contracts, negative dependency, and pruning equivalence on the same graph.
+- **M2 — representative tested native projects:** Expand ecosystem coverage together with bounded invalidation, memory, publication correctness, test selection, and environment coverage.
+- **M3 — tested self-hosted native toolchain:** Establish stage0→stage1→stage2 obligation and producer lineage as explainable, resource-bounded, conformantly tested owned computation.
 - **M4 — qualified resilient release:** Satisfy packaging/update/rollback contracts and the local or distributed recovery contract required by the selected profile.
 
 Semantic fusion/splitting and the WASM target pipeline remain useful separate research, but neither substitutes for M1 native evidence. The [project work portfolio](03-work-items/project-portfolio.md) defines the full three-lane progression.

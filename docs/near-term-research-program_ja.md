@@ -73,16 +73,16 @@ G1で解決したclosureをproduction Nim planner / Rust runtimeへ渡し、必�
 
 ### Lane C — Executable Verification and Testability
 
-#### C1 — exact production artifact harness
+#### C1 — exact production artifact harness（#49）
 
 exact production binaryをtest subjectとして、clean target environment、明示input／control、exit／signal／stdout／stderr／ABI／symbol／runtime observation、negative dependency、raw evidenceを一つの`TestContract`で実行する。instrumented/test-profile artifactは別identityとし、test-only dependencyをrelease artifactへ漏らさない。source／IR／artifact変更からretest集合を導出する研究はC3へ拡張する。
 
 ### 共有milestone gate
 
 - **M0 — contract lock:** Lane Aのobligation/artifact contract、Lane Bのevent/identity/measurement contract、Lane Cのtest subject/control/observation/oracle contractを同じ固定graphについて確定する。
-- **M1 — first dependency-discharged native artifact（現在）:** A1/G1とA2/G2がexact production native artifactを成立させ、B1/G3が同じgraph上でcorrectness-equivalentな効率比較と一つのalgorithm判断を得て、C1/C2がexact binary、cross-language path、ABI/runtime、negative dependency、pruning equivalenceを直接testする。
-- **M2 — representative native projects:** ecosystem coverageと、増分性・memory・publication correctnessを実projectへ広げる。
-- **M3 — self-hosted native toolchain:** stage0→stage1→stage2の依存義務とproducer lineageを、説明可能でresource-boundedなowned computationとして成立させる。
+- **M1 — first tested dependency-discharged native artifact（現在）:** A1/G1とA2/G2がexact production native artifactを成立させ、B1/G3が同じgraph上でcorrectness-equivalentな効率比較と一つのalgorithm判断を得て、C1/C2がexact binary、cross-language path、ABI/runtime、negative dependency、pruning equivalenceを直接testする。
+- **M2 — representative tested native projects:** ecosystem coverageと、増分性・memory・publication correctness、test selection、environment coverageを実projectへ広げる。
+- **M3 — tested self-hosted native toolchain:** stage0→stage1→stage2の依存義務とproducer lineageを、説明可能でresource-boundedかつconformance-testedなowned computationとして成立させる。
 - **M4 — qualified resilient release:** package/update/rollback契約と、対象profileに必要なlocalまたはdistributed recovery契約を満たす。
 
 意味IRの融合／分割やWASM target pipelineは有用な別研究だが、M1のnative evidenceの代わりにしない。詳細な3レーンportfolioは[Project Work Portfolio](03-work-items/project-portfolio.md)に定める。
