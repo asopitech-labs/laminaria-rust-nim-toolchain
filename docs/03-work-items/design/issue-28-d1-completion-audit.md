@@ -1,5 +1,7 @@
 # #28 D1 完了検収
 
+> **現在のgoalとの関係:** 以下のWASM項目は当時のD1 case setの検収履歴であり、現在のproject gateではない。正準programはCargo/Nimble/C/C++ closureとnative executableを要求し、WASMを任意targetとする。
+
 > **現在の扱い（2026-09-13）:** `laminaria-case-registry`によるcatalog自己検証は廃止した。以下は当時の検収履歴として保存し、現在の実装検証はproduction実装を直接呼ぶRust/Nimテストとexperiment runnerを正本とする。
 
 対象issue: #28（D1本体）、#35（D0、親issue #28）。検収担当: Claude

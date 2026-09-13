@@ -4,7 +4,7 @@
 
 The [compiler ownership contract](compiler-ownership-contract.md) governs research objectives and acceptance.
 
-Own compiler/IR/scheduler development is the main path, not optional later integration. Cargo/Nim ecosystem tools may resolve dependencies; existing compilation routes below are reference/observation or external-bootstrap baselines, not target-build alternatives. The Action Graph is not a substitute for a language IR.
+The current primary goal is to resolve the Cargo/Nimble/C/C++ dependency closure as one typed graph quickly and with low memory, then produce an ordinary runnable native binary. The owned compiler/IR/scheduler supports that path. WASM is an optional target, not the current goal. Existing compilation routes below are reference/observation or external-bootstrap baselines; the Action Graph is not a substitute for language IR.
 
 ## Rust Nim Unified Toolchain
 
@@ -96,9 +96,9 @@ Represent owned semantic processing, analysis dependency updates, legality check
 
 Study which IR computations remain integrated within one process/memory space and which become parallel or remote work. Consider semantic dependencies, analysis state, critical path, core/cache/NUMA topology, memory bandwidth/capacity and I/O/network cost together. Scheduling existing Rust CGUs and Nim C units remains a comparison baseline.
 
-### 4.6 Combinatorial Graph Resolution
+### 4.6 Cross-Ecosystem Combinatorial Graph Resolution
 
-This addresses the state space `Package × Target × Profile × Feature × Generic Instance × Host/Target × Backend × Native Compiler × Artifact Type × FFI Configuration`. Rather than generating the full Cartesian product of states, only the necessary graph is generated through lazy expansion, constraint propagation, canonicalization, memoization, equivalent-state merging, dominance pruning, SCC condensation, demand-driven artifact resolution, and incremental recomputation. This planning kernel is implemented in Nim.
+This preserves the distinct package/source/artifact/link semantics of Cargo, Nimble, C, and C++ while addressing `Ecosystem × Package × Version × Target × Profile × Feature × Generic Instance × Host/Target × Backend × Native Compiler × ABI × Artifact Type × FFI Configuration`. Rather than generating the full Cartesian product, lazy expansion, constraint propagation, canonicalization, memoization, equivalent-state merging, dominance pruning, SCC condensation, demand-driven artifact resolution, and incremental recomputation generate only the graph needed by the native executable. This planning kernel is implemented in Nim.
 
 ### 4.7 Artifact-Oriented Dependency Model
 

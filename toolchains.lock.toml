@@ -47,8 +47,10 @@ bin_dir = "~/.choosenim/toolchains/nim-2.2.10/bin"
 
 # --- Backend / target tools ---------------------------------------------
 #
-# LLVM/Clang/LLD, the WebAssembly toolchain, and other non-Rust/Nim
-# executables consumed by later backend-pipeline research (#13-#17).
+# LLVM/Clang/LLD, the optional WebAssembly toolchain, and other non-Rust/Nim
+# executables consumed by later backend-pipeline research (#13-#17). Their
+# presence in this research lock does not make WASM the current project goal;
+# the canonical milestone produces a native executable.
 # `selector = "system"` means "whatever resolves on PATH"; pin an exact
 # version selector once a bootstrap/install path exists for it. Prefer
 # `via = "rustup-llvm-tools"` or `via = "cargo"` (see lock.rs::ToolSelector)

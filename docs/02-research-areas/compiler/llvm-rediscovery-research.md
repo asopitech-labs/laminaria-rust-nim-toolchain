@@ -4,7 +4,7 @@
 
 The [compiler ownership contract](../../01-foundations/compiler-ownership-contract.md) governs research objectives and acceptance.
 
-Own compiler/IR/scheduler development is the main path, not optional later integration. Cargo/Nim ecosystem tools may resolve dependencies; existing compilation routes below are reference/observation or external-bootstrap baselines, not target-build alternatives. The Action Graph is not a substitute for a language IR.
+Cargo/Nimble/C/C++ tools may supply metadata, candidates, lockfiles, and sources, but LAMINARIA owns resolution of their combined typed closure and current native-executable path. Existing compilation routes below are reference/observation or external-bootstrap baselines. LLVM/WASM research does not override that priority.
 
 ## Position
 

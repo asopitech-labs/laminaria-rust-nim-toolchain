@@ -4,106 +4,87 @@
 
 ## 長期ゴール
 
-LAMINARIAの長期ゴールは、RustとNimのsource semanticsをLAMINARIA自身が解析し、独自のIR、変換、work分割／融合、scheduler、target生成を通して、最終的にLAMINARIA自身をbuildできることにある。
+LAMINARIAの長期ゴールは、Cargo、Nimble、C、C++の各ecosystemが持つpackage、source、生成物、toolchain、ABI、linkの関係を、一つの説明可能な依存関係グラフとして解決し、その解決結果からRust/Nimを含むprojectの**通常実行できるnative binary**を効率的、高速、省メモリに生成することにある。最終的にはLAMINARIA自身とその推移的依存を同じ経路でbuildする。
 
-CargoやNimbleをpackage管理や依存解決の入力として利用することはあっても、`rustc`、Nim compiler、LLVMなどへ対象sourceの意味解析、IR変換、code generationを委譲した経路は、この長期ゴールの達成経路とは数えない。
+LAMINARIAは対応するRust/Nim source semantics、IR、変換、work分割／融合、scheduler、native target生成を所有する。CargoやNimble、C/C++側のpackage metadata、manifest、lockfile、source取得、system library情報は入力として利用できるが、package managerが暗黙に起動するbuild script、compiler、linkerを依存解決そのものと混同しない。
 
-## 現在地
+## 成果物とtargetの優先順位
 
-現在までに、次の能力について個別の成立証拠がある。
+現在のprimary targetは、一般的なOSで直接起動できるnative executableである。object、archive、shared library、runtime、system libraryを明示的なgraph node/edgeとして解決し、最終linkまで到達して初めてvertical sliceが通ったと数える。
 
-- 限定されたRust/Nim source subsetからのLAMINARIA-owned IR生成
-- owned IR上の検証、解釈、限定された変換
-- 限定されたowned WebAssembly生成と実行
-- Nim planning kernelとRust executorによるplanning/execution
-- dynamic discovery、incremental session、demand-driven executionの限定実験
-- identity、measurement、native/LLVM経路のbaseline実験
+WebAssemblyは将来比較できる任意targetの一つであり、現在のゴール、必須milestone、またはarchitectureの既定値ではない。WASM生成や実行の既存証拠はtarget-generationの限定実験として保持するが、native binary生成やcross-ecosystem dependency resolutionの代わりにはしない。
 
-これらは完成したsubsystemではない。また、個別に成立しただけでは長期ゴールの中核仮説を支持しない。現在もっとも大きい未解決点は、**異なる言語のsource semanticsから得た表現を、既存compiler/backend境界より前で一つの計算として合成し、LAMINARIA自身の判断で変換・分割・生成できるか**である。
+## 現在地と中心的な未解決点
+
+現在までに、限定されたsource-derived IR、owned validation/interpretation/transformation、Nim planning kernelとRust executor、incremental discovery、demand-driven execution、identity、measurement、native/LLVM/WASM経路について個別の証拠がある。
+
+一方、固定したsource間の単一callが通ることは、実際のproject dependency graphを解決できる証拠ではない。package managerから得るfeatures、versions、target条件、build dependencies、generated source、native library、header、link order、ABI、toolchain制約を含む推移的closureは、単一のsemantic call compositionとは別の問題である。
+
+現在もっとも代替不可能な未解決点は、**Cargo圏、Nimble圏、C圏、C++圏をまたぐ異種の依存関係を、ecosystem固有の意味を失わず一つの需要駆動graphへ正規化し、候補爆発を抑えながら時間・ピークメモリ・再計算量を最小化して、native executableに必要なclosureを解けるか**である。
 
 ## 当面のゴール
 
-当面の研究ゴールを次の一つに固定する。
+> Cargo、Nimble、C、C++の各ecosystemから注入される外部依存を含む固定projectについて、LAMINARIAがpackage/source/artifact/toolchain/ABI/link関係を一つの型付き依存グラフとして解決し、選択理由と拒否理由を説明し、そのclosureから通常実行できるnative binaryを生成する。さらに、解決時間、ピークメモリ、展開・枝刈り・再計算した状態数を計測し、naiveな全候補展開より優れた解法を一つ判断する。
 
-> Rust sourceのcallerとNim sourceのcalleeから得たsemantic IRをLAMINARIAが一つの計算として合成し、言語境界を越えるowned transformationを適用し、owned target artifactを実行したうえで、同じ計算を融合する場合と分割する場合のどちらを選ぶべきかを、保持できるsemantic factsに基づいて一つ決定する。
-
-このゴールはmixed-language compilerの完成、最速化、全言語機能、全OS対応、分散build、またはself-hostingの完了を意味しない。成功条件は、固定した一つのworkloadについてarchitecture判断を得ることである。候補IRで成立しないことや、早期境界化が必要だと分かることも有効な結果である。
+これは全Cargo/Nimble semantics、全C/C++ build system、全platform、最速compiler、production package manager、WASM対応、分散build、またはself-hostingの完成を意味しない。成功条件は、固定した現実的なmixed dependency workloadについて、正しいclosure、実行可能native binary、negative case、資源測定、architecture判断を得ることである。
 
 ## 当面の研究プログラム
 
-### G1 — semantic compositionとowned vertical slice
+### G1 — cross-ecosystem dependency graph
 
-固定したRust caller / Nim calleeをsourceから別々に解析し、宣言と定義を解決して一つのowned IRへ合成する。言語境界を越える変換を一つ行い、変換前後のowned interpreterとowned WebAssemblyの結果を一致させる。signature mismatchを変換・生成前に拒否する。
+最小だが非自明なfixtureを固定する。少なくともCargo crate、Nimble package、C library、C++ libraryを各一つ含め、version/feature/target条件、生成またはadapter action、native link edgeを明示する。各ecosystemのidentityを保持したまま共通graphへ正規化し、要求artifactから必要closureだけを展開する。
 
-- 主Issue: #31
-- 根拠となるIssue: #3、#25、#5
-- 判断: 現在のsemantic representationで言語横断の計算を保持・変換・生成できるか
-- 停止条件: 成立、欠落semantic factの特定、または早期境界化が必要という判断のいずれか
+- 中心Issue: #8、#22、#44
+- 関連Issue: #3、#4、#5、#7、#18
+- positive case: 唯一の整合するclosureと、その選択理由を得る
+- negative case: version、feature、ABI、symbol、toolchainのいずれか一つが両立しないclosureを、compile開始前に構造化診断で拒否する
+- 停止条件: package/source/artifact/toolchain/linkの各edgeが追跡可能で、opaqueなpackage-manager buildへ逃げずにclosureを確定または拒否できる
 
-G1が終わるまで、一般的なscheduler改善、resource accounting、永続化、remote execution、追加platform、CLI完成度は、G1の証拠を成立させるために不可欠な場合だけ扱う。
+### G2 — native executable vertical slice
 
-### G2 — 融合／分割境界の比較
+G1で解決したclosureをproduction Nim planner / Rust runtimeへ渡し、必要なcompile、adapter、archive、link actionを実行して、対象OSで直接起動できるnative executableを生成する。単一callの成立ではなく、推移的外部依存を含むgraph全体が成果物へ到達することを検証する。
 
-G1と同じsource workloadを、少なくとも次の二つの候補で比較する。
+- 中心Issue: #6、#4、#5、#44
+- 関連Issue: #3、#10、#12、#20
+- 停止条件: binaryの起動結果、全入力とproducerのidentity、実行／省略action、最終link入力が直接的な実行可能テストで確認できる
 
-1. 合成IR内でcross-language callを変換・融合してからtarget生成する。
-2. call境界を残し、明示的なcontract/artifact境界として分割する。
+### G3 — 解決効率と増分性の比較
 
-性能競争を主目的にしない。比較するのは、必要なsemantic facts、変換合法性、provenance、再計算・無効化単位、生成artifact、説明可能性である。
+同じdependency workloadで、全候補を先に展開するbaselineと、lazy expansion、constraint propagation、canonicalization、memoization、equivalent-state merging、dominance pruning、SCC condensationを用いるcandidateを比較する。cold resolution、no-op、leaf dependency変更、feature/target条件変更を測る。
 
-- 主Issue: #25
-- 関連Issue: #13、#29、必要な範囲だけ#4/#7
-- 判断: LAMINARIA固有の最初のsemantic partition/fusion ruleを採用、棄却、または再定式化する
-- 停止条件: 固定workloadについて一つの境界判断と、その判断に必要だった事実を記録する
+- 中心Issue: #8、#7、#11、#12
+- 関連Issue: #6、#19〜#24
+- 判断指標: wall-clock、peak RSS、展開／枝刈り／mergeしたstate数、再計算node数、実行を回避した外部tool数
+- 停止条件: correctnessを維持したうえで、少なくとも一つのgraph algorithmまたは表現について採用・棄却・再定式化を判断できる
 
-### G3 — 同一owned pathの入力形態による反証
-
-G1/G2で選んだ同じowned pathを、Rust-only、Nim-only、mixedの各最小fixtureへ適用する。単一言語時に既存compilerへ退行しないこと、mixedだけを特別扱いしたarchitectureでないことを確認する。
-
-- 主Issue: #26
-- 関連Issue: #28、#3、#5
-- 判断: 選択したpathが入力言語数ではなくsemantic workloadを単位にできるか
-- 停止条件: 三形態で成立する、またはいずれかでarchitecture差が必要な理由を特定する
-
-G1〜G3を当面の研究マイルストーンとする。G1の結果が現在のIR仮説を棄却した場合は、G2/G3へ惰性で進まず、#25で表現仮説を再定式化する。
+G1〜G3を当面の研究マイルストーンとする。意味IRの融合／分割やWASM target pipelineは有用な別研究だが、このmilestoneの直列gateにしない。
 
 ## その後のプロジェクト進行
 
-### Phase 2 — semantic pressureの拡張
-
-制御フロー、再帰、ownership/aliasing、effect、runtime依存、foreign dependencyなど、現在の判断を壊し得るworkloadを一つずつ追加する。#32、#33、#34、#37、#42、#44を、網羅実装ではなく反例探索として使用する。
-
-### Phase 3 — work decompositionと実行architecture
-
-実在するowned compiler workから、Action境界、incremental invalidation、resource model、pull schedulingを再導出する。#6、#7、#8、#12、#13、#27、#36を使う。既に成立したgeneric scheduling機能を磨くことではなく、semantic partitionが実行計画をどう変えるかを判定する。
-
-### Phase 4 — 物理配置、永続化、異種node
-
-同じ論理workを、memory、local disk、peer、remote durable storeへどう配置するか、またWindows/macOS/Linux/Raspberry Piなど異なるhost/targetへどう配置するかを比較する。#38〜#41を中心に、#6/#7へ必要な制約だけ戻す。networkやstorageの一般的実装可能性ではなく、LAMINARIAのsemantic/invalidation境界が配置判断を変えるかを問う。
-
-### Phase 5 — coverage拡張とself-hosting
-
-前段で棄却されなかったowned pathのsource subsetとdependency形態を段階的に広げ、LAMINARIA自身のcrate/moduleをstage0→stage1→stage2で置き換える。#2を長期統合Issueとして使う。既存toolchainによるbootstrap buildは比較・移行手段であり、達成判定ではない。
+1. Cargo/Nimble/C/C++ semanticsとnative platform coverageを反例駆動で拡張する。
+2. 実在する解決済みgraphからcompiler workの分割／融合、incremental invalidation、resource-aware schedulingを再導出する。
+3. 同じ論理graphについてmemory、local disk、peer、remote durable storeへの配置を比較する。
+4. native executable経路のsource/dependency coverageをLAMINARIA自身のstage0→stage1→stage2へ広げる。
+5. WASM、shared library、その他のtargetを、native経路と同じtyped graphを消費する任意target variantとして評価する。
 
 ## supporting trackの扱い
 
-measurement、identity、diagnostic、toolchain profile、CI、platform compatibility、UX、baseline比較は、上記の判断を信頼可能にするためのsupporting trackである。#10、#11、#14〜#24、#30などは独立した完成品ロードマップとして進めず、P0実験の結論が変わり得る欠陥、または次の判断に必要な証拠があるときだけ起動する。
+semantic IR、target pipeline、measurement、identity、diagnostic、toolchain profile、CI、platform compatibility、UX、baseline比較は、G1〜G3の判断を信頼可能にするため必要な範囲で起動する。任意targetの完成や単一compiler pathの疎通を、dependency resolution milestoneの代わりにしない。
 
 ## タスク選択規則
 
-次のタスクは常に次の順で決める。
+1. 要求するnative artifactと対象host/targetを固定する。
+2. そのartifactのclosureへ関与するecosystemとconstraintを列挙する。
+3. 最大の未知を反証する最小のpositive/negative graphを固定する。
+4. correctnessと同時に、時間、peak memory、探索state、再計算量を直接測る。
+5. 結果を得た時点で停止し、graph model、algorithm、次のgoalを更新する。
 
-1. 現在の研究ゴールと判断ゲートを明記する。
-2. その判断を妨げる最大の未知を一つ選ぶ。
-3. 未知を反証できる最小のpositive/negative experimentを固定する。
-4. 既存技術で代替可能な工学は、実験成立に必要な最小量へ制限する。
-5. 結果を得た時点で停止し、次のゴールまたはarchitectureを更新する。
-
-したがって、現在の次のタスクはG1の最初の実験である。これは「次に空いているIssue」だからではなく、当面のゴール全体で最大の未知を直接判定するから選択される。
+したがって現在の次のタスクは、G1のcross-ecosystem dependency graph実験である。
 
 ## 現在の判断に必要な文書
 
 - 制約: [独自コンパイラ責務契約](01-foundations/compiler-ownership-contract_ja.md)と[研究優先順位ポリシー](01-foundations/research-prioritization-policy_ja.md)
+- 中心研究: [Cross-ecosystem dependency graph research](02-research-areas/toolchains/cross-ecosystem-dependency-graph.md)
 - 実行順序: [Research Issue Plan](03-work-items/issue-plan.md)
-- 現在の実験: [Issue #31 — 最初の最小言語横断owned-transformation実験](03-work-items/design/issue-31-first-minimal-experiment.md)
+- 現在の実験: [最初のcross-ecosystem dependency graph実験](03-work-items/design/cross-ecosystem-dependency-graph-first-experiment.md)
 - supporting trackと履歴を含む全体索引: [文書マップ](README.md)

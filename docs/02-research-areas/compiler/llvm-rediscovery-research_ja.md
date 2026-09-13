@@ -4,7 +4,7 @@
 
 [独自コンパイラの責務契約](../../01-foundations/compiler-ownership-contract_ja.md)を研究目的・完了判定の基準とする。
 
-独自コンパイラ・IR・スケジューラが本経路であり、任意の後続統合ではない。Cargo/Nim ecosystemは依存解決に利用できるが、以下に登場する既存コンパイル経路は比較・観測または外部bootstrapのbaselineであり、本ビルドの選択肢ではない。Action Graphは言語IRの代わりにならない。
+Cargo/Nimble/C/C++ toolはmetadata、候補、lockfile、sourceを供給できるが、ecosystem横断のtyped closureと現在のnative-executable経路はLAMINARIAが所有する。以下の既存コンパイル経路は比較・観測または外部bootstrapのbaselineであり、LLVM/WASM研究はこの優先順位を上書きしない。
 
 ## 位置付け
 

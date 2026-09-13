@@ -4,7 +4,7 @@
 
 [独自コンパイラの責務契約](compiler-ownership-contract_ja.md)を研究目的・完了判定の基準とする。
 
-独自コンパイラ・IR・スケジューラが本経路であり、任意の後続統合ではない。Cargo/Nim ecosystemは依存解決に利用できるが、以下に登場する既存コンパイル経路は比較・観測または外部bootstrapのbaselineであり、本ビルドの選択肢ではない。Action Graphは言語IRの代わりにならない。
+現在のprimary goalは、Cargo/Nimble/C/C++の依存関係closureを一つの型付きgraphとして高速・省メモリに解決し、通常実行できるnative binaryを生成することである。独自コンパイラ・IR・スケジューラはこの経路を支える。WASMは任意targetであって現在のgoalではない。以下の既存コンパイル経路は比較・観測または外部bootstrapのbaselineであり、Action Graphは言語IRの代わりにならない。
 
 ## Rust Nim Unified Toolchain
 
@@ -96,9 +96,9 @@ LAMINARIA自身のtarget loweringとコード生成を研究する。LLVM/Cranel
 
 独自IR上の計算をどこまで同一process・memory内で統合し、どこから並列・別nodeへ分割するかを研究する。意味依存、解析状態、critical path、core/cache/NUMA、memory帯域・容量、I/O/network費用を同時に扱う。既存Rust CGUとNim C unitのscheduleは比較baselineである。
 
-### 4.6 Combinatorial Graph Resolution
+### 4.6 Cross-Ecosystem Combinatorial Graph Resolution
 
-`Package × Target × Profile × Feature × Generic Instance × Host/Target × Backend × Native Compiler × Artifact Type × FFI Configuration` という状態空間を扱う。全状態をデカルト積として生成せず、lazy expansion、constraint propagation、canonicalization、memoization、equivalent-state merging、dominance pruning、SCC condensation、demand-driven artifact resolution、incremental recomputationによって必要なgraphだけを生成する。このplanning kernelをNimで実装する。
+Cargo/Nimble/C/C++の異なるpackage/source/artifact/link semanticsを保ったうえで、`Ecosystem × Package × Version × Target × Profile × Feature × Generic Instance × Host/Target × Backend × Native Compiler × ABI × Artifact Type × FFI Configuration` という状態空間を扱う。全状態をデカルト積として生成せず、lazy expansion、constraint propagation、canonicalization、memoization、equivalent-state merging、dominance pruning、SCC condensation、demand-driven artifact resolution、incremental recomputationによってnative executableに必要なgraphだけを生成する。このplanning kernelをNimで実装する。
 
 ### 4.7 Artifact-Oriented Dependency Model
 

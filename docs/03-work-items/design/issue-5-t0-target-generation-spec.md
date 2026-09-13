@@ -1,5 +1,7 @@
 # #5 T0 — 独自target生成契約の確定（設計提案）
 
+> **現在の位置付け:** WebAssemblyを選んだ理由はこの限定T0 code-generation実験にだけ適用する。projectの現在targetは、解決済みCargo/Nimble/C/C++ closureから生成する通常実行可能なnative executableであり、WASMは任意の後続targetである。
+
 対象issue: #5（「LAMINARIA-owned target lowering/code generation」の選定・実証、
 `docs/05-history/research-intent-audit-2026-09-10.md:109`）。T0はそのうち「最初に採用する
 target route」を確定する設計タスクであり、実装（T1以降）ではない。本書はゴール

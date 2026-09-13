@@ -10,8 +10,8 @@ Issueのcloseは、その領域の実装が完成したことを意味しない�
 
 作業候補は次の順で評価する。
 
-1. **代替不可能性**: 既存compiler、build system、scheduler、CAS、remote execution、OS機構を組み合わせるだけでは答えられないLAMINARIA固有の問いか。
-2. **反証力**: 失敗した場合に、LAMINARIAのIR、意味保持、変換、分割／融合、target生成またはself-hostingの仮説を棄却・変更できるか。
+1. **代替不可能性**: Cargo、Nimble、C、C++の異種依存を一つのgraphとして解くことなど、既存compiler、build system、scheduler、CAS、remote execution、OS機構を並べるだけでは答えられないLAMINARIA固有の問いか。
+2. **反証力**: 失敗した場合に、LAMINARIAの依存graph、解決algorithm、IR、意味保持、変換、native target生成またはself-hostingの仮説を棄却・変更できるか。
 3. **architecture識別力**: 複数のcandidate architectureから一つを選ぶ証拠になるか。単に「実装できた」だけでは研究上の優先度は低い。
 4. **最小性**: 判断に必要な最小のsource subset、workload、target、node数、failure caseであるか。
 5. **波及性**: 後続の複数Issueの前提を決めるか。
@@ -21,6 +21,9 @@ Issueのcloseは、その領域の実装が完成したことを意味しない�
 
 ### P0 — LAMINARIA固有仮説
 
+- Cargo/Nimble/C/C++から得るversion、feature、target、source、header、ABI、symbol、toolchain、link関係を、型付きの需要駆動graphとして正しく解決できるか。
+- 候補の直積を生成せず、正しいclosureを高速・省メモリ・増分的に求め、その選択／拒否理由を説明できるか。
+- 解決済みclosureから、一般的なOSが直接起動できるnative executableを生成できるか。
 - Rust/Nimのsource semanticsから、既存compiler IRを入口にせずLAMINARIA-owned representationを導けるか。
 - 言語境界を越えてsemantic factsを保持・合成し、合法な変換と拒否を説明できるか。
 - semantic factsに基づいてcompiler workを分割／融合し、既存のtranslation-unit、LLVM module、generic Action境界とは異なる判断を示せるか。
@@ -62,11 +65,13 @@ identity、最小計測、planner/runtime接続、diagnostic、runtime/ABI contr
 
 具体的な現在地、当面の終了条件、後続フェーズは [LAMINARIA 全体進行と当面の研究ゴール](../near-term-research-program_ja.md) をcanonical roadmapとする。このポリシーは選び方を定め、roadmapは現在どの判断を選んだかを定める。
 
-1. source-derived Rust/Nim IRを一つのsemantic workloadとして合成する。
-2. 合成後に言語境界を越えるowned transformationを一つ適用し、合法性と拒否を示す。
-3. 変換結果を既存compiler/backendへ委譲せずowned WebAssemblyへ生成・実行する。
-4. 同じworkloadで、融合した境界と分割した境界を比較し、LAMINARIA固有のpartition判断を一つ得る。
-5. その判断に必要な範囲だけ、資源会計、identity、persistence、heterogeneous placementを追加する。
-6. 有効だったsubsetをRust-only、Nim-only、mixed project、LAMINARIA自身へ順次拡張する。
+1. Cargo/Nimble/C/C++のpackage、source、artifact、toolchain、ABI、link関係を一つの型付きgraphへ正規化する。
+2. 要求native executableから必要closureだけを展開し、整合する一例とcompile前に拒否する一例を示す。
+3. 解決済みclosureをproduction planner/runtimeで実行し、通常実行できるnative binaryを生成・起動する。
+4. eager baselineと需要駆動candidateを、wall-clock、peak memory、探索state、再計算量で比較する。
+5. そのgraphを壊す反例に必要な範囲でsemantic IR、融合／分割、identity、persistence、heterogeneous placementを追加する。
+6. 有効だった範囲をLAMINARIA自身の推移的dependency closureとself-hostingへ拡張する。
+
+WebAssemblyは任意targetとして後続比較できるが、この優先順のgoalまたは必須gateではない。
 
 この順序はIssue番号順でも、未完了チェックボックス数順でもない。新しい証拠でarchitecture上の不確実性が変われば更新する。

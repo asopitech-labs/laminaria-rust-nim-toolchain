@@ -10,7 +10,7 @@ LAMINARIA treats performance and execution-path evidence as part of correctness 
 
 ## Rule
 
-A change is not accepted merely because tests pass. Where an issue claims improved scheduling, compiler/backend decomposition, cache reuse, native linking, backend selection, backend white-boxing, WASM target-pipeline decomposition or reduced work, the implementation must prove that the intended path ran and that resource behavior is consistent with the claim.
+A change is not accepted merely because tests pass. Where an issue claims correct or improved cross-ecosystem dependency resolution, scheduling, compiler/backend decomposition, cache reuse, native linking, backend selection, optional WASM target-pipeline decomposition, or reduced work, the implementation must prove that the intended path ran and that resource behavior is consistent with the claim. Current milestone evidence must include the produced native executable and its complete resolved/link closure.
 
 Functional correctness and execution correctness are separate requirements. Producing the correct final artifact does not prove that the intended graph, invalidation set, cache path, backend route, backend pipeline, scheduler, linker/post-link path or direct-link path was used.
 

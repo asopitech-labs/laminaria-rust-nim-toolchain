@@ -4,7 +4,7 @@
 
 The [compiler ownership contract](compiler-ownership-contract.md) governs research objectives and acceptance.
 
-Own compiler/IR/scheduler development is the main path, not optional later integration. Cargo/Nim ecosystem tools may resolve dependencies; existing compilation routes below are reference/observation or external-bootstrap baselines, not target-build alternatives. The Action Graph is not a substitute for a language IR.
+The current core is to resolve Cargo/Nimble/C/C++ relationships as one typed graph quickly and with low memory, then produce an ordinary runnable native binary from that closure. The owned compiler/IR/scheduler supports that path. WASM is an optional target, not the current goal. Existing routes below are reference/observation or external-bootstrap baselines; an Action Graph is not a substitute for language IR.
 
 ## Rust Nim Unified Toolchain
 
@@ -40,7 +40,7 @@ LAMINARIA treats this as an infrastructure problem rather than a collection of p
 
 LAMINARIA is not intended to be a thin command wrapper around `cargo build` and `nimble build`. An outer task runner cannot fully coordinate tools that each own an internal dependency graph, compiler pipeline, and parallel scheduler.
 
-The central thesis is that useful cross-language optimization requires owning semantic representations and compiler computations from source, so their dependencies and resource needs can be planned together:
+The central thesis is that normalizing Cargo, Nimble, C, and C++ package/source/artifact/toolchain/ABI/link constraints into one demand-driven graph, while preserving ecosystem identity, enables precise invalidation, candidate pruning, and resource-aware scheduling that opaque command chains cannot provide. Useful cross-language optimization additionally requires connecting owned semantic representations and compiler computations to that same graph:
 
 ```text
 Source Graph
@@ -70,16 +70,18 @@ This model separates five concerns that are often collapsed into a single build 
 
 ## 3. Research questions
 
-LAMINARIA is organized around the following questions:
+LAMINARIA is organized around the following questions. The first two are the current priority:
 
-1. Can LAMINARIA process Rust/Nim source into owned IR and compiler computations without discarding language-specific semantics?
-2. What is the minimum stable contract between compiler analysis, artifact planning, and execution?
-3. Can backend choice be modeled as a graph variant rather than a fixed property of a language toolchain?
-4. Which owned compiler computations should be grouped in memory or partitioned across cores/nodes under one resource-aware schedule?
-5. Can FFI generation and ABI validation become ordinary graph dependencies with precise invalidation?
-6. Can content identity be defined at compiler-stage and artifact boundaries so results can be reused across worktrees, CI checkouts, and machines?
-7. Can demand-driven expansion control the combinatorial space of targets, profiles, features, backends, host/target roles, artifact kinds, and FFI variants?
-8. Can the resulting system explain dependency choice, rebuilds, backend selection, cache misses, and critical paths to both humans and software agents?
+1. Can Cargo/Nimble/C/C++ version, feature, target, source/header, toolchain, ABI, symbol, and link constraints be unified into one correct typed closure?
+2. Can that closure be resolved quickly, with low memory and incremental recomputation, without constructing the candidate Cartesian product, and lead to an ordinary runnable native binary?
+3. Can LAMINARIA process Rust/Nim source into owned IR and compiler computations without discarding language-specific semantics?
+4. What is the minimum stable contract between compiler analysis, artifact planning, and execution?
+5. Can backend choice be modeled as a graph variant rather than a fixed property of a language toolchain?
+6. Which owned compiler computations should be grouped in memory or partitioned across cores/nodes under one resource-aware schedule?
+7. Can FFI generation and ABI validation become ordinary graph dependencies with precise invalidation?
+8. Can content identity be defined at compiler-stage and artifact boundaries so results can be reused across worktrees, CI checkouts, and machines?
+9. Can demand-driven expansion control the combinatorial space of targets, profiles, features, backends, host/target roles, artifact kinds, and FFI variants?
+10. Can the resulting system explain dependency choice, rebuilds, backend selection, cache misses, and critical paths to both humans and software agents?
 
 ## 4. Graph hierarchy
 

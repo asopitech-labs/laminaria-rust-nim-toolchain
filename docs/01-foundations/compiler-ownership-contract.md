@@ -6,22 +6,27 @@ LAMINARIA researches and develops **its own compiler, intermediate representatio
 
 The project itself is implemented in Rust and Nim and must ultimately compile itself through that same independent path. The implementation language split is not a split into Rust-toolchain and Nim-toolchain schedulers.
 
+The current artifact goal is an ordinary native executable that the host OS can launch directly. WebAssembly is an optional target, not this contract's default target, the current milestone, or a substitute for the native path.
+
 ## Ownership of the target compilation path
 
 The required direction is:
 
 ```text
+requested native executable
+  → typed dependency closure from Cargo / Nimble / C / C++ metadata
+  → package / source / artifact / toolchain / ABI / symbol / link graph
 Rust source / Nim source / both + resolved Rust/Nim dependency sources
   → LAMINARIA language processing and semantic analysis
   → LAMINARIA-owned IR(s), semantic facts and provenance
   → LAMINARIA analysis / transformations / partition decisions
   → LAMINARIA planning and resource-aware compiler-work scheduling
   → LAMINARIA target lowering and code generation
-  → LAMINARIA-produced target objects
+  → LAMINARIA-produced native objects
 declared C/C++ dependencies
   → prebuilt native artifacts or explicit C/C++ compile/adapter actions
 LAMINARIA-produced objects + foreign native artifacts
-  → target artifacts through explicit runtime / assembly / link contracts
+  → native executable through explicit runtime / assembly / link contracts
 ```
 
 This is an ownership contract, not a fixed sequence of passes. Planning, analysis and execution may interact incrementally. The number/form of IRs, SSA/CFG use, partition granularity and backend boundaries remain research questions. The build Action Graph and `PlanningInput -> ExecutionPlan` alone are not a language IR.
@@ -32,7 +37,8 @@ LAMINARIA must derive semantic facts from supported source constructs, not requi
 
 | Role | Permitted use of existing tools | What it proves |
 | --- | --- | --- |
-| Package/dependency resolution | Cargo/Nim/C/C++ ecosystem metadata, manifests, lockfiles, source acquisition and resolution | Dependency inputs, not compilation |
+| Package metadata/candidate acquisition | Cargo/Nimble/C/C++ metadata, manifests, lockfiles, source acquisition, registry and system-library facts | Inputs to the LAMINARIA resolver |
+| Cross-ecosystem dependency resolution | LAMINARIA solves version, feature, target, host/target, ABI, symbol, artifact, and link constraints in one typed graph | The closure required by the native executable and explanations for selections/rejections |
 | Lexical/syntactic parsing | A parsing library, a parser generator, or an existing compiler's own lexer/parser logic, used purely as a syntax-only component (tokens, concrete/abstract syntax tree, source positions) | A syntax tree, not meaning |
 | Reference / baseline | Existing compilers, LLVM and build systems in explicitly selected comparison experiments | Behavior and costs under the tested reference contract |
 | External bootstrap | Existing tools build the initial research executable | A starting executable, not independent compiler self-hosting |
@@ -40,7 +46,7 @@ LAMINARIA must derive semantic facts from supported source constructs, not requi
 | Declared foreign-native dependency | Compile an explicitly modeled C/C++ source/adapter unit, or consume an identified object/archive/shared library, as a dependency of LAMINARIA-produced target code | The foreign artifact and link input, not delegated Rust/Nim compilation |
 | Independent compilation | LAMINARIA owns source semantics, IR, transformations, code generation and compiler-work scheduling | Candidate evidence for the project goal |
 
-Resolution must not silently run compilation through a build script, procedural macro, plugin or transitive tool invocation. Such work needs an explicit LAMINARIA-supported implementation contract; unsupported constructs/dependencies return a diagnostic. Dependency acquisition is not permission to invoke `cargo build`, `rustc`, `nim c`, `nim cpp`, nlvm or Nimony for Rust/Nim target compilation, nor to route LAMINARIA-owned Rust/Nim semantics through generated C/C++ or another existing compiler backend.
+A package manager producing a lockfile inside one ecosystem is not the same as LAMINARIA resolving the final artifact closure across Cargo, Nimble, C, and C++. Resolution must not silently run compilation through a build script, procedural macro, plugin or transitive tool invocation. Such work needs an explicit LAMINARIA-supported implementation contract; unsupported constructs/dependencies return a diagnostic. Dependency acquisition is not permission to invoke `cargo build`, `rustc`, `nim c`, `nim cpp`, nlvm or Nimony for Rust/Nim target compilation, nor to route LAMINARIA-owned Rust/Nim semantics through generated C/C++ or another existing compiler backend.
 
 This restriction does **not** prohibit C/C++ compilation required by a declared foreign-native library dependency. LAMINARIA must preserve the distinction: an external C/C++ compiler may compile an identified foreign source or generated adapter unit, but it must not compile C/C++ emitted as the implementation of the Rust/Nim target unit. The foreign inputs, headers, flags, toolchain, outputs and link edges must be visible in the Program/Action Graph rather than hidden inside package resolution or an opaque outer build.
 
@@ -104,11 +110,11 @@ Current `self-build` and `build` command names do not change this classification
 
 ## Research order and acceptance
 
-Start **#25 + #3 + #6 + #8 together**: a small, declared Rust/Nim source subset, its independently derived semantic/IR contract, an executable transformation, and LAMINARIA-owned work scheduled by the production Nim planner/Rust runtime. Establish a narrow executable end-to-end slice; a hand-transcribed IR interpreter is useful earlier evidence but is not source compilation or target generation.
+Center the current work on **#8 + #22 + #44**, connecting only the required parts of #3/#4/#5/#6/#7. Resolve a small closure containing a Cargo crate, Nimble package, C library, and C++ library; compile/link it through the production Nim planner/Rust runtime; and launch the resulting native executable. A single source call or hand-transcribed IR interpreter is useful earlier evidence but is not cross-ecosystem dependency resolution or binary delivery.
 
 Use the necessary portions of #10/#11/#18–#21 for identity, semantics, path and resource evidence in parallel. #7/#12 add sound reuse and invalidation on this same path. #26 exposes Rust-only/Nim-only/mixed inputs without changing compiler ownership. #4 studies runtime/ABI integration; linking the Nim planner is not the prerequisite that replaces compiler research.
 
-Full language coverage, distributed execution, every LLVM concept and all profile matrices need not finish before a small compiler experiment. Conversely, independent compilation must not be deferred as optional “deeper integration” while delegated builds become the product goal.
+Full language coverage, distributed execution, WASM, every LLVM concept, and all profile matrices need not finish before this experiment. Conversely, the dependency graph must not collapse into opaque package-manager command sequences, and an ordinary runnable native binary belongs in the current vertical slice.
 
 Evidence must distinguish source-derived IR from hand-authored IR, legal/rejected transformations, logical dependencies from runtime placement, and actual in-process compiler events from process-level observations. Negative tests prevent existing compiler invocation or silent fallback. Correctness and executed/non-executed work are checked independently of speedup.
 

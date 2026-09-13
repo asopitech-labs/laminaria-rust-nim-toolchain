@@ -1,5 +1,7 @@
 # LAMINARIA — Hike極小Wasmコンパイラのエンジニアリング研究
 
+> 本書は任意WASM targetの比較研究であり、現在のproject goalやmilestoneを定めない。現在はCargo/Nimble/C/C++ dependency closureから通常実行できるnative binaryを生成することを優先する。
+
 ## 位置付け
 
 本書は、Hikeの現行コードをLAMINARIAへ採用できるかを評価する文書ではない。

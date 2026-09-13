@@ -1,5 +1,7 @@
 # #35 D0 仕様案 — LAMINARIA自身の複雑な混成ビルド構成と補完サンプルの仕様
 
+> **現在のgoalとの関係:** M10のnative/WASM pairingはこの限定D0 case setで当時採用した設計を記録するもので、project-wide goalや現在のmilestoneではない。正準programはCargo/Nimble/C/C++ dependency closureと通常実行できるnative binaryを優先し、WASMを任意target研究とする。
+
 > **検証正本の更新（2026-09-13）:** 実装済み挙動の正しさは `crates/laminaria-experiment`、`crates/laminaria-run`、`nim-planner/tests` のproduction実装を直接呼ぶテストとrunnerで判定する。旧D0 machine-readable catalogは[履歴資料](../../05-history/issue-35-d0-cases.yaml)として保存するが、専用validatorやvalidator自身のテストを持たず、実装検証の正本にはしない。
 
 - 対象Issue: [#35](https://github.com/asopitech-labs/laminaria-rust-nim-toolchain/issues/35)（親: [#28](https://github.com/asopitech-labs/laminaria-rust-nim-toolchain/issues/28)）

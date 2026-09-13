@@ -4,7 +4,7 @@
 
 [独自コンパイラの責務契約](compiler-ownership-contract_ja.md)を研究目的・完了判定の基準とする。
 
-独自コンパイラ・IR・スケジューラが本経路であり、任意の後続統合ではない。Cargo/Nim ecosystemは依存解決に利用できるが、以下に登場する既存コンパイル経路は比較・観測または外部bootstrapのbaselineであり、本ビルドの選択肢ではない。Action Graphは言語IRの代わりにならない。
+現在の中核は、Cargo/Nimble/C/C++の依存関係を一つの型付きgraphとして高速・省メモリに解き、そのclosureから通常実行できるnative binaryを生成することである。独自コンパイラ・IR・スケジューラはその経路を支える。WASMは任意targetであり現在のgoalではない。以下の既存コンパイル経路は比較・観測または外部bootstrapのbaselineであり、Action Graphは言語IRの代わりにならない。
 
 ## Rust Nim Unified Toolchain
 
@@ -38,7 +38,7 @@ Rust と Nim を組み合わせるプロジェクトでは、次の基盤が繰�
 
 LAMINARIA は `cargo build` と `nimble build` を包むだけの薄い command wrapper を目指さない。内部に依存グラフ、コンパイラパイプライン、並列 scheduler を持つツール同士は、外側の task runner だけでは完全に協調できない。
 
-有効な言語横断最適化には、ソースからの意味表現とコンパイラ計算を自身で保持・実行し、その依存と資源要求を一緒に計画する必要がある。
+中心仮説は、Cargo、Nimble、C、C++が別々に表すpackage/source/artifact/toolchain/ABI/link制約を、ecosystem固有identityを保った一つの需要駆動graphとして解けば、opaqueなcommand連鎖では不可能な正確なinvalidation、候補枝刈り、資源認識scheduleが可能になる、というものである。有効な言語横断最適化には、さらにsource意味表現とcompiler計算を自身で保持・実行し、その依存と資源要求を同じgraphへ接続する必要がある。
 
 ```text
 Source Graph
@@ -68,16 +68,18 @@ Rust Runtime Scheduler
 
 ## 3. 研究上の問い
 
-LAMINARIA は次の問いを中心に構成する。
+LAMINARIA は次の問いを中心に構成する。最初の二問が現在の優先事項である。
 
-1. Rust/Nimソースから独自IRとcompiler計算を、言語固有の意味を失わず構築できるか
-2. compiler analysis、artifact planning、execution 間の最小かつ安定した契約は何か
-3. backend 選択を言語 toolchain の固定属性ではなく、制約付き graph variant として扱えるか
-4. 独自compiler計算のどこをmemory内で統合し、どこをcore/nodeへ分割して一つの資源認識scheduleにするか
-5. FFI generation と ABI validation を、正確な invalidation を持つ通常の graph dependency にできるか
-6. compiler stage と artifact 境界で content identity を定義し、worktree、CI checkout、machine 間で再利用できるか
-7. target、profile、feature、backend、host/target role、artifact kind、FFI variant の組合せ爆発を demand-driven expansion で制御できるか
-8. dependency 選択、rebuild、backend 選択、cache miss、critical path を、人間と software agent の双方へ説明できるか
+1. Cargo/Nimble/C/C++のversion、feature、target、source/header、toolchain、ABI、symbol、link制約を正しいtyped closureへ統合できるか
+2. そのclosureを候補直積なしに高速・省メモリ・増分的に解き、通常実行できるnative binaryへ到達できるか
+3. Rust/Nimソースから独自IRとcompiler計算を、言語固有の意味を失わず構築できるか
+4. compiler analysis、artifact planning、execution 間の最小かつ安定した契約は何か
+5. backend 選択を言語 toolchain の固定属性ではなく、制約付き graph variant として扱えるか
+6. 独自compiler計算のどこをmemory内で統合し、どこをcore/nodeへ分割して一つの資源認識scheduleにするか
+7. FFI generation と ABI validation を、正確な invalidation を持つ通常の graph dependency にできるか
+8. compiler stage と artifact 境界で content identity を定義し、worktree、CI checkout、machine 間で再利用できるか
+9. target、profile、feature、backend、host/target role、artifact kind、FFI variant の組合せ爆発を demand-driven expansion で制御できるか
+10. dependency 選択、rebuild、backend 選択、cache miss、critical path を、人間と software agent の双方へ説明できるか
 
 ## 4. グラフ階層
 

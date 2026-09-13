@@ -4,17 +4,17 @@ This file maps the GitHub issue set to the research program. The GitHub issues a
 
 The [research issue prioritization and minimal-hypothesis policy](../01-foundations/research-prioritization-policy.md) governs how work is selected and when an issue may stop. Existing acceptance lists are research backlogs and evidence menus, not requests for finished products or mandatory all-at-once completion. Project-wide priority follows non-substitutability and falsification power, not issue number or unchecked-box count.
 
-The [project progression and near-term research goal](../near-term-research-program.md) is the canonical current roadmap. The active milestone is G1–G3: first establish or reject one cross-language owned semantic vertical slice, then decide one fused/split boundary for the same workload, then try to falsify that path with Rust-only, Nim-only, and mixed inputs. Later issue tracks are not parallel product-completion commitments.
+The [project progression and near-term research goal](../near-term-research-program.md) is the canonical current roadmap. The active milestone is G1–G3: resolve a typed Cargo/Nimble/C/C++ dependency closure, produce and run an ordinary native executable from it, then compare resolution algorithms by time, peak memory, explored states, and recomputation. A single language call path is not dependency-graph completion. Later issue tracks are not parallel product-completion commitments.
 
 ## Compiler ownership and execution order — corrected 2026-09-10
 
-The [compiler ownership contract](../01-foundations/compiler-ownership-contract.md) governs this plan. The goal is an independent Rust/Nim compiler, IR and scheduler that ultimately compile LAMINARIA itself. External-compiler orchestration/self-build is reference/bootstrap evidence, not the primary delivery milestone.
+The [compiler ownership contract](../01-foundations/compiler-ownership-contract.md) governs this plan. The current artifact goal is a native executable backed by a resolved Cargo/Nimble/C/C++ graph. The independent Rust/Nim compiler, IR, and scheduler must ultimately compile LAMINARIA itself and its transitive dependencies. External-compiler orchestration/self-build is reference/bootstrap evidence, not the primary delivery milestone; WebAssembly is an optional target track.
 
-1. **#25 + #3 + #6 + #8 together:** declare a supported source subset, derive and implement its semantic IR/transformations, connect compiler work to the production Nim planner/Rust runtime, and implement a narrow owned target-generation path. Preserve foreign declarations as semantic inputs rather than discarding them or requiring Nim-generated C/C++.
-2. **#10/#11/#18–#21 in parallel:** minimum source/IR/producer/path/resource evidence, separate from external reference/bootstrap runs. Full measurement/profile coverage is not a serial gate.
-3. **#7/#12:** sound identity, invalidation, reuse and work elimination in the owned compiler; retain existing coarse experiments as baselines.
-4. **#26:** Rust-only/Nim-only/mixed public inputs all use that same owned path, never fall back to the respective existing compiler. A Nim input with a supported C/C++ dependency remains a valid Nim project: its Nim unit follows the owned path while separately modeled foreign source/artifact and link actions satisfy the native dependency.
-5. **#2:** expand supported language/dependency coverage to compile the real Rust + Nim implementation through independent stage0 → stage1 → stage2 generations.
+1. **#8 + #22 + #44, with required parts of #3/#4/#5/#7/#18:** ingest Cargo/Nimble/C/C++ metadata and resolve one typed package/source/artifact/toolchain/ABI/symbol/link closure, preserving ecosystem identity and rejecting one conflict before compilation.
+2. **#6 + #4 + #5 + #44:** execute that closure through the production Nim planner/Rust runtime and produce and run one ordinary native executable with explicit compile/adapter/archive/final-link edges.
+3. **#7/#8/#11/#12 + #19–#24 as needed:** compare eager and demand-driven resolution for correctness, wall-clock, peak memory, state expansion/pruning/merging, invalidation, and avoided work.
+4. **#3/#25/#26:** broaden source semantics and partition/fusion only against counterexamples found in the real dependency graph. Rust-only, Nim-only, and mixed inputs use the same owned path.
+5. **#2:** expand surviving source/dependency coverage to the real Rust + Nim implementation through independent stage0 → stage1 → stage2 generations.
 
 #4 runtime/ABI integration supports delivery but is not a replacement for compiler development. #5/#13 define owned target routes and compiler-work boundaries; #44, defined by `docs/02-research-areas/compiler/nim-c-cpp-library-integration.md`, owns foreign declarations, native dependency production, explicit adapter generation and final-link participation. #14–#17 remain prior-art/comparison experiments feeding #25. #22–#24 distinguish owned compiler profiles from external reference/bootstrap matrices.
 
@@ -57,7 +57,7 @@ Kbuild, distcc/icecream, LLVM ThinLTO/DTLTO and Bazel Remote Execution are prior
 6. Unified Action Graph and resource-aware scheduling — #6
 7. Artifact identity, incremental invalidation and CAS — #7
 8. Variant-space control in the Nim Planning Kernel — #8
-9. WASM mixed-language integration/topology — #9
+9. Optional WASM mixed-language integration/topology — #9
 10. Agent-oriented explainability and evidence schema — #10
 11. Work elimination, execution correctness and no-op build invariants — #12
 12. Multi-version Rust/Nim toolchain selection and artifact compatibility — #22
@@ -69,7 +69,7 @@ Kbuild, distcc/icecream, LLVM ThinLTO/DTLTO and Bazel Remote Execution are prior
 14. Expand backend routes into nested observable/checkpoint/execution graphs and define checkpoint economics — #13
 15. White-box LLVM pass/codegen/LTO pipeline boundaries without pass-per-process decomposition — #14
 16. Map ThinLTO/DTLTO dynamic backend jobs into the LAMINARIA scheduler and cache graph — #15
-17. Decompose the WebAssembly target pipeline through `wasm-ld`, Binaryen, WIT and componentization — #16
+17. Optionally decompose the WebAssembly target pipeline through `wasm-ld`, Binaryen, WIT and componentization — #16
 18. Evaluate shared LLVM IR/LTO convergence across Rust, Nim 2 and Nimony routes — #17
 
 The detailed architecture is documented in:
@@ -121,9 +121,9 @@ Later research may extend these schemas with backend-specific data, but must not
 
 #44 preserves Nim's ability to reuse foreign libraries when LAMINARIA skips Nim-generated C/C++. It owns `importc`/`importcpp`-style semantic declarations, foreign source/prebuilt artifact/adapter actions, native toolchain identity and final-link edges. #4 owns Rust–Nim cross-language runtime/ABI research; #5 owns the target-generation route for LAMINARIA-produced code; #26 owns public project compilation through the common owned path. C/C++ compilation of a declared foreign dependency is not a fallback implementation of the Nim target unit.
 
-### #9 versus #16
+### Optional WASM track: #9 versus #16
 
-#9 compares mixed-language WebAssembly integration topologies and boundary costs. #16 white-boxes the target production pipeline itself: relocatable Wasm, `wasm-ld`, Core Wasm, Binaryen, WIT/adapters and componentization.
+#9 compares mixed-language WebAssembly integration topologies and boundary costs. #16 white-boxes the target production pipeline itself: relocatable Wasm, `wasm-ld`, Core Wasm, Binaryen, WIT/adapters and componentization. Both are optional target research after the native dependency-closure milestone; neither defines the project goal or blocks G1–G3.
 
 ### #4 versus #17
 
@@ -135,7 +135,7 @@ Later research may extend these schemas with backend-specific data, but must not
 
 ### Horizontal distribution versus #6/#7/#13–#17/#25
 
-The horizontal-distribution charter compares object-level, LLVM-derived backend-level and action-level remote partitions. #6 owns placement/resource accounting, #7 owns identity/invalidation/reuse, #13 owns logical/checkpoint/execution boundary economics, #14–#17 supply LLVM/ThinLTO/WASM baselines, and #25 owns the independent semantic-fact-derived partition. Remote execution is evidence about placement and cost; it must not silently become a new semantic substrate or hidden scheduler.
+The horizontal-distribution charter compares object-level, LLVM-derived backend-level and action-level remote partitions. #6 owns placement/resource accounting, #7 owns identity/invalidation/reuse, #13 owns logical/checkpoint/execution boundary economics, #14–#17 supply optional LLVM/ThinLTO/WASM baselines, and #25 owns the independent semantic-fact-derived partition. Remote execution is evidence about placement and cost; it must not silently become a new semantic substrate or hidden scheduler.
 
 Persistence is part of that decision. #7 must distinguish logical artifacts from physical replicas and compare keeping, materializing, replicating, transferring and recomputing them across memory, local storage, peer caches and remote durable stores. The relevant cost includes CPU, memory, storage I/O, network I/O, serialization, hashing, consistency, recovery and retention—not only cache-hit rate.
 

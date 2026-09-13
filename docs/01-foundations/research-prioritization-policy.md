@@ -10,8 +10,8 @@ Closing an issue means that enough evidence exists to support, reject, reformula
 
 Evaluate candidate work in this order:
 
-1. **Non-substitutability**: does it answer a LAMINARIA-specific question that cannot be answered by composing existing compilers, build systems, schedulers, CAS products, remote execution, or OS facilities?
-2. **Falsification power**: could failure change or reject a hypothesis about LAMINARIA's IR, semantic preservation, transformations, partition/fusion, target generation, or self-hosting?
+1. **Non-substitutability**: does it answer a LAMINARIA-specific question—such as resolving heterogeneous Cargo, Nimble, C, and C++ dependencies as one graph—that cannot be answered by merely composing existing compilers, build systems, schedulers, CAS products, remote execution, or OS facilities?
+2. **Falsification power**: could failure change or reject a hypothesis about LAMINARIA's dependency graph, resolution algorithm, IR, semantic preservation, native target generation, or self-hosting?
 3. **Architectural discrimination**: does it distinguish candidate architectures, rather than merely show that an implementation is possible?
 4. **Minimality**: does it use the smallest source subset, workload, target, node count, and failure case needed for the decision?
 5. **Leverage**: does it settle assumptions shared by multiple later issues?
@@ -21,6 +21,9 @@ Evaluate candidate work in this order:
 
 ### P0 — LAMINARIA-specific hypotheses
 
+- Correctly resolve Cargo/Nimble/C/C++ version, feature, target, source, header, ABI, symbol, toolchain, and link relationships as one demand-driven typed graph.
+- Find the correct closure quickly, with low memory and incremental recomputation, without materializing the candidate Cartesian product; explain both selection and rejection.
+- Produce an ordinary OS-runnable native executable from the resolved closure.
 - Derive LAMINARIA-owned representations from Rust/Nim source semantics without requiring existing compiler IR as input.
 - Preserve and compose semantic facts across the language boundary, explaining both legal transformations and rejections.
 - Use semantic facts to partition or fuse compiler work and demonstrate a decision that is not merely a translation-unit, LLVM-module, or generic Action boundary.
@@ -62,11 +65,13 @@ Generality, completeness, extensibility, tuning, API polish, and additional plat
 
 The canonical statement of current evidence, the near-term stopping condition, and later phases is [LAMINARIA Project Progression and Near-Term Research Goal](../near-term-research-program.md). This policy defines how work is selected; that roadmap records which decision is currently selected.
 
-1. Compose source-derived Rust and Nim IR as one semantic workload.
-2. Apply one owned cross-language transformation and demonstrate both legality and rejection.
-3. Generate and execute owned WebAssembly from the transformed result without delegated compilation.
-4. Compare fused and split boundaries for the same workload and obtain one LAMINARIA-specific partition decision.
-5. Add resource accounting, identity, persistence, and heterogeneous placement only where that decision requires them.
-6. Expand the validated subset to Rust-only, Nim-only, mixed projects, and ultimately LAMINARIA itself.
+1. Normalize Cargo/Nimble/C/C++ package, source, artifact, toolchain, ABI, and link relationships into one typed graph.
+2. Demand-expand only the closure of a requested native executable; show one consistent result and one pre-compilation rejection.
+3. Execute the resolved closure through the production planner/runtime and build and run an ordinary native binary.
+4. Compare eager and demand-driven resolution by wall time, peak memory, explored states, and recomputation.
+5. Add semantic IR, fusion/partition, identity, persistence, and heterogeneous placement only where counterexamples to that graph require them.
+6. Expand the surviving path to LAMINARIA's own transitive dependency closure and self-hosting.
+
+WebAssembly may be compared later as an optional target, but it is neither the goal nor a required gate in this ordering.
 
 This is not issue-number order or unchecked-box order. Update it when new evidence changes the architecture's uncertainty.

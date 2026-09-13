@@ -1,10 +1,12 @@
 # LAMINARIA 研究プログラム
 
+[当面の研究プログラム](../near-term-research-program_ja.md)が現在の優先順位を決める。現在のmilestoneはCargo/Nimble/C/C++のecosystem横断依存解決と、そこからの通常実行可能なnative binary生成である。以下のtrackは研究inventoryであって実行順ではなく、WebAssemblyは任意target研究である。
+
 ## 責務の訂正（2026-09-10）
 
 [独自コンパイラの責務契約](compiler-ownership-contract_ja.md)を研究目的・完了判定の基準とする。
 
-独自コンパイラ・IR・スケジューラが本経路であり、任意の後続統合ではない。Cargo/Nim ecosystemは依存解決に利用できるが、以下に登場する既存コンパイル経路は比較・観測または外部bootstrapのbaselineであり、本ビルドの選択肢ではない。Action Graphは言語IRの代わりにならない。
+Cargo/Nimble/C/C++ toolはmetadata、候補、lockfile、sourceを供給できるが、ecosystem横断のtyped closureはLAMINARIAが解決する。以下に登場する既存コンパイル経路は比較・観測または外部bootstrapのbaselineであり、本ビルドの選択肢ではない。Action Graphは言語IRの代わりにならない。
 
 ## 目的
 
@@ -143,9 +145,9 @@ backend checkpoint identityでは、入力artifactだけでなくtoolchain versi
 
 constraint propagation、canonicalization、memoization、equivalent-state merging、SCC、demand propagation、pruningで必要な状態だけを展開する。
 
-## 研究トラックG — WebAssembly Target Pipeline
+## 任意研究トラックG — WebAssembly Target Pipeline
 
-WebAssemblyをLLVM/Cranelift等と同列のbackend familyとして扱わない。
+WebAssemblyは現在のgoalでもnative executable deliveryのgateでもない。任意実験として選択した場合も、LLVM/Cranelift等と同列のbackend familyとして扱わない。
 
 少なくとも次のdimensionを分離する。
 

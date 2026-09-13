@@ -2,13 +2,15 @@
 
 **Rust Nim Unified Toolchain**
 
-LAMINARIA researches and develops **its own compiler, IRs, and scheduler for Rust and Nim**. It is not an orchestrator whose compilation engine is Cargo/rustc, Nim, or LLVM. Rust-only, Nim-only and mixed source use the same LAMINARIA-owned compilation substrate.
+LAMINARIA researches and develops a **cross-ecosystem dependency resolver, compiler, IRs, and scheduler for Rust and Nim**. Its current delivery goal is an ordinary runnable native binary whose complete Cargo/Nimble/C/C++ dependency closure is resolved as one typed graph. It is not an orchestrator whose compilation engine is Cargo/rustc, Nim, or LLVM.
 
-`Source + resolved dependencies → owned semantic analysis / IR → owned transformations and compiler-work planning → resource-aware execution → owned target generation`
+`Native executable demand → Cargo/Nimble/C/C++ dependency closure → owned semantic analysis / IR → artifact/action plan → resource-aware execution → native objects/link → runnable binary`
 
-Cargo/Nim ecosystem tools may supply package/dependency resolution. Existing compilers and backends are separately identified reference/observation and external-bootstrap tools, not target-build fallbacks. LLVM is prior art whose design pressures are independently re-derived, not a fixed foundation or an optional route that substitutes for compiler ownership.
+Cargo/Nimble/C/C++ ecosystem tools may supply metadata, lockfiles, sources, and system-library facts. LAMINARIA must normalize and solve the combined graph rather than treating a package manager's opaque build as resolution. Existing compilers and backends are separately identified reference/observation and external-bootstrap tools, not hidden Rust/Nim target-build fallbacks.
 
-LAMINARIA itself is implemented in Rust and Nim: the **Nim Planning Kernel** owns deterministic graph/constraint computation; the **Rust Runtime Scheduler** owns execution, OS effects and live resource accounting. The ultimate self-hosting goal is to compile this Rust + Nim implementation and its dependencies using LAMINARIA's own compiler.
+LAMINARIA itself is implemented in Rust and Nim: the **Nim Planning Kernel** owns deterministic graph/constraint computation; the **Rust Runtime Scheduler** owns execution, OS effects and live resource accounting. The ultimate self-hosting goal is to resolve and compile this Rust + Nim implementation and its transitive native dependencies through the same path.
+
+WebAssembly is an optional future target and comparison surface. It is not the current goal or a prerequisite for the native executable milestone.
 
 Vertical integration and horizontal distribution are joint research subjects: compiler work, analysis lifetime, memory/cache/NUMA, storage/network, persistence and heterogeneous host/target placement must be planned together. Single-language speedups are an evaluation opportunity, not a prerequisite or a claim of current performance.
 
@@ -20,6 +22,9 @@ Start with the [project progression and near-term research goal](docs/near-term-
 
 ## Core concepts
 
+- Cross-Ecosystem Dependency Graph
+- Cargo / Nimble / C / C++ Resolution
+- Native Executable Production
 - Unified Program Graph
 - Compiler Pipeline Decomposition
 - Multi-version Rust / Nim Toolchain Variants
@@ -39,7 +44,7 @@ Start with the [project progression and near-term research goal](docs/near-term-
 - Nim Planning Kernel
 - Rust Runtime Scheduler
 - Cross-Language Critical Path
-- WebAssembly Target Pipeline
+- WebAssembly Target Pipeline (optional target research)
 - Agent-Oriented / Explainable Toolchain
 
 ## Environment and toolchain setup
@@ -56,7 +61,7 @@ cargo run -p laminaria-cli -- doctor --json   # machine-readable EnvironmentFing
 
 Named toolchain selectors live in [`toolchains.lock.toml`](toolchains.lock.toml); `rust-toolchain.toml` only pins the toolchain used to build LAMINARIA's own Rust code, not the toolchains under measurement.
 
-`scripts/bootstrap.sh` prefers exact, non-system-package-manager sources where one exists (`rustup` toolchains + its `llvm-tools` component, `choosenim` for exact Nim versions, `cargo install --version` for pure-Rust CLI tools); a system package manager is only used for the couple of tools with no such alternative (`clang`/`llvm-config`, Binaryen's `wasm-opt`). For a fully reproducible bootstrap independent of any one host's package manager state — e.g. to sanity-check the toolchain set on a clean machine — [`docker/bootstrap.Dockerfile`](docker/bootstrap.Dockerfile) builds and runs the same stack in a container:
+`scripts/bootstrap.sh` prefers exact, non-system-package-manager sources where one exists (`rustup` toolchains + its `llvm-tools` component, `choosenim` for exact Nim versions, `cargo install --version` for pure-Rust CLI tools); a system package manager is only used for the couple of tools with no such alternative (`clang`/`llvm-config`, Binaryen's `wasm-opt`). The research lock also inventories tools for optional tracks such as WASM; their presence does not make those tracks current milestones. For a fully reproducible bootstrap independent of any one host's package manager state — e.g. to sanity-check the toolchain set on a clean machine — [`docker/bootstrap.Dockerfile`](docker/bootstrap.Dockerfile) builds and runs the same stack in a container:
 
 ### Required Windows development path
 

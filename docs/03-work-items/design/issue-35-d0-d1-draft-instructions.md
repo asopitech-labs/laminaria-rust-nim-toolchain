@@ -1,5 +1,7 @@
 # D1実装指示（発行済み・D1完了）
 
+> **現在のgoalとの関係:** M10のnative/WASM goalへの言及は、この完了済みcase履歴だけに適用する。現在のproject goalはecosystem横断dependency resolutionとnative executableであり、WASMは任意targetである。
+
 > **現在の扱い（2026-09-13）:** 本書と旧D0 case catalogは指示・採択履歴である。実装済み挙動の検証正本はproduction実装を直接呼ぶRust/Nimテストとrunnerであり、case catalog専用validatorは使用しない。
 
 - **現在の状態（本追記、履歴は下記の旧状態欄を含め一切改変していない）**:

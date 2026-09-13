@@ -6,22 +6,27 @@ LAMINARIAは、**RustとNimを対象とした独自コンパイラ、独自の�
 
 LAMINARIA自身をRustとNimで実装し、最終的には同じ独自コンパイル経路で自身をコンパイルする。実装言語の分担は、Rust用ツールチェーンとNim用ツールチェーンを別々に動かす分担ではない。
 
+現在の成果物ゴールは、一般的なOSが直接起動できるnative executableである。WebAssemblyは任意targetであり、この契約の既定target、現在のmilestone、またはnative経路の代替ではない。
+
 ## 本コンパイル経路の責務
 
 必要なのは次の経路である。
 
 ```text
-Rustソース / Nimソース / 両方 + 解決済みRust/Nim依存ソース
+要求されたnative executable
+  → Cargo / Nimble / C / C++ metadataから型付きdependency closureを解決
+  → package / source / artifact / toolchain / ABI / symbol / link graph
+Rustソース / Nimソース / 両方 + 解決されたRust/Nim依存ソース
   → LAMINARIA自身の言語処理・意味解析
   → LAMINARIA独自IR群・意味情報・由来
   → LAMINARIA自身の解析・変換・計算分割
   → LAMINARIAの計画・資源認識スケジューリング
   → LAMINARIA自身のターゲットlowering・コード生成
-  → LAMINARIA生成ターゲットobject
+  → LAMINARIA生成native object
 宣言済みC/C++依存
   → 構成を特定した既存native成果物、または明示的なC/C++ compile/adapter Action
 LAMINARIA生成object + foreign native成果物
-  → runtime・assembly・link契約を明示したターゲット成果物
+  → runtime・assembly・link契約を明示したnative executable
 ```
 
 これは責務の契約であり、固定のpass順序ではない。計画・解析・実行は増分的に相互作用し得る。IRの数や形、SSA/CFGの採否、分割粒度、backend境界そのものが研究対象である。ビルドAction Graphや `PlanningInput -> ExecutionPlan` だけでは言語のIRにはならない。
@@ -32,7 +37,8 @@ LAMINARIA生成object + foreign native成果物
 
 | 役割 | 既存ツールを使う範囲 | 証明できること |
 | --- | --- | --- |
-| パッケージ管理・依存解決 | Cargo/Nim/C/C++ ecosystemのmetadata、manifest、lockfile、ソース取得と依存解決 | コンパイルへの入力 |
+| パッケージmetadata・候補取得 | Cargo/Nimble/C/C++ ecosystemのmetadata、manifest、lockfile、source取得、registry/system-library情報 | LAMINARIA resolverへの入力 |
+| Ecosystem横断依存解決 | LAMINARIAがversion、feature、target、host/target、ABI、symbol、artifact、link制約を一つの型付きgraphで解く | native executableに必要なclosureと選択／拒否理由 |
 | 字句・構文解析 | パーサーライブラリ、パーサージェネレータ、または既存コンパイラ自身の字句解析・構文解析ロジックを、構文専用の部品(トークン・具象/抽象構文木・ソース位置)としてのみ使用する | 構文木であり、意味ではない |
 | 比較・観測baseline | 明示的に選んだ実験で既存コンパイラ、LLVM、build systemを実行 | その比較条件での挙動・コスト |
 | 外部bootstrap | 最初の研究実行ファイルを既存ツールで作る | 開始点の用意のみ |
@@ -40,7 +46,7 @@ LAMINARIA生成object + foreign native成果物
 | 宣言済みforeign-native依存 | 明示されたC/C++ source/adapter unitをcompileする、またはidentityを持つobject/archive/shared libraryをLAMINARIA生成コードの依存として取り込む | foreign成果物とlink入力。Rust/Nim compile委譲ではない |
 | 独自コンパイル | 意味解析・IR・変換・コード生成・内部計算のscheduleをLAMINARIAが担う | 本来の研究目標の候補証拠 |
 
-依存解決を口実にbuild script、procedural macro、plugin、推移的ツール呼び出しからコンパイルを隠れて実行してはならない。これらにはLAMINARIAで対応する明示的な実装契約が必要であり、未対応の構文や依存は診断して停止する。ソース取得の許可は、Rust/Nim本体のtarget compilationを `cargo build`、`rustc`、`nim c`、`nim cpp`、nlvm、Nimonyへ委譲する許可ではなく、LAMINARIAが所有するRust/Nim意味をgenerated C/C++や既存backendへ逃がす許可でもない。
+package managerが一つのecosystem内でlockfileを作れることと、LAMINARIAがCargo/Nimble/C/C++をまたぐ最終artifact closureを解けることは別である。依存解決を口実にbuild script、procedural macro、plugin、推移的ツール呼び出しからコンパイルを隠れて実行してはならない。これらにはLAMINARIAで対応する明示的な実装契約が必要であり、未対応の構文や依存は診断して停止する。ソース取得の許可は、Rust/Nim本体のtarget compilationを `cargo build`、`rustc`、`nim c`、`nim cpp`、nlvm、Nimonyへ委譲する許可ではなく、LAMINARIAが所有するRust/Nim意味をgenerated C/C++や既存backendへ逃がす許可でもない。
 
 この制限は、宣言済みforeign-native library依存に必要なC/C++ compilationを禁止しない。外部C/C++ compilerは、identityを持つforeign sourceまたは生成adapter unitをcompileできるが、Rust/Nim target unitの実装として生成されたC/C++をcompileしてはならない。foreign入力、header、flag、toolchain、出力、link edgeはProgram/Action Graphに表れ、package resolutionやopaqueなouter buildに隠さない。
 
@@ -83,11 +89,11 @@ Rust-only、Nim-only、混成のすべてで同じLAMINARIA独自コンパイラ
 
 ## 研究順序と完了判定
 
-**#25 + #3 + #6 + #8を一緒に着手する。** 小さく範囲を宣言したRust/Nimソース、その意味・独自IR契約、実行可能な変換を作り、LAMINARIA自身のコンパイラ計算を本番Nim planner/Rust runtimeに接続する。小さくても端から端まで実行できるスライスを作る。手書きIRのinterpreterは先行実験として有用だが、ソースのコンパイルやターゲット生成とは区別する。
+**#8 + #22 + #44を中心に、#3/#4/#5/#6/#7の必要部分を接続する。** Cargo crate、Nimble package、C library、C++ libraryを含む小さなclosureを解き、本番Nim planner/Rust runtimeでcompile/linkしてnative executableを起動する。単一source callや手書きIR interpreterは先行実験として有用だが、ecosystem横断依存解決やbinary deliveryとは区別する。
 
 #10/#11/#18–#21の必要部分はidentity・意味・経路・資源の証拠として並行して整える。#7/#12は同じ経路で安全な再利用・無効化を研究する。#26は同じコンパイラのRust-only/Nim-only/混成入口を提供する。#4はruntime/ABI統合を研究するが、Nim plannerをlinkする作業をコンパイラ研究の代替の先行ゲートにしない。
 
-全言語機能、分散実行、LLVMの全概念、全profile行列の完成を小さな実験の前提にはしない。一方、独自コンパイルを任意の「深い統合」として先送りし、外部委譲ビルドを製品ゴールにしない。
+全言語機能、分散実行、WASM、LLVMの全概念、全profile行列の完成を小さな実験の前提にはしない。一方、依存graphをopaqueなpackage-manager command列へ退化させず、通常実行できるnative binaryまでを現在のvertical sliceに含める。
 
 証拠は、ソースから導出したIRと手書きIR、合法・拒否した変換、論理依存と実行配置、プロセス観測と独自in-process compiler eventを区別する。既存コンパイラ呼び出し・自動fallbackを防ぐ否定テストを持ち、速度とは別に正しさと実行／省略した計算を検証する。
 

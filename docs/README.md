@@ -1,6 +1,6 @@
 # LAMINARIA documentation map
 
-Start with [Project Progression and Near-Term Research Goal](near-term-research-program.md) ([日本語](near-term-research-program_ja.md)). It is the canonical entry point for the current goal, decision gates, milestone order, and task-selection rule. Do not choose work by scanning the directories below or by issue number alone.
+Start with [Project Progression and Near-Term Research Goal](near-term-research-program.md) ([日本語](near-term-research-program_ja.md)). It is the canonical entry point for the current goal: resolve the Cargo/Nimble/C/C++ dependency closure and produce a runnable native binary efficiently. WebAssembly is an optional target, not the current milestone.
 
 The numbered directories are downstream layers, not parallel roadmaps:
 
@@ -34,7 +34,7 @@ Japanese entry points are [当面の研究ゴール](near-term-research-program_
 
 ## 02 — Research areas
 
-`compiler/` covers owned semantic IR, transformations, target generation, native integration, and compiler prior art. `execution/` covers work partition and physical distribution. `measurement/` covers evidence validity. `toolchains/` covers reference/bootstrap profiles and operator UX.
+`compiler/` covers owned semantic IR, transformations, target generation, native integration, and compiler prior art. `execution/` covers work partition and physical distribution. `measurement/` covers evidence validity. `toolchains/` covers the current [cross-ecosystem dependency-graph research](02-research-areas/toolchains/cross-ecosystem-dependency-graph.md) ([日本語](02-research-areas/toolchains/cross-ecosystem-dependency-graph_ja.md)), reference/bootstrap profiles, and operator UX.
 
 These documents refine questions selected by the near-term program. They do not independently establish delivery priority.
 
@@ -44,7 +44,7 @@ These documents refine questions selected by the near-term program. They do not 
 - `design/` contains issue-specific experiment contracts, specifications, and evidence. Implemented behavior is verified by direct executable tests against production code; design fixtures and historical catalogs are not verification authorities.
 - `review-contracts/` contains bounded review handoffs.
 
-The active G1 experiment starts at [Issue #31 — first minimal cross-language owned-transformation experiment](03-work-items/design/issue-31-first-minimal-experiment.md).
+The active experiment starts at the [first cross-ecosystem dependency-graph experiment](03-work-items/design/cross-ecosystem-dependency-graph-first-experiment.md). Issue #31 remains a bounded semantic/WASM experiment, not the current project gate.
 
 ## 04 — Guides
 

@@ -1,10 +1,12 @@
 # LAMINARIA Research Program
 
+The [near-term research program](../near-term-research-program.md) governs current priority. The present milestone is cross-ecosystem Cargo/Nimble/C/C++ dependency resolution followed by an ordinary runnable native executable. Tracks below are a research inventory, not a sequence; WebAssembly is optional target research.
+
 ## Ownership correction (2026-09-10)
 
 The [compiler ownership contract](compiler-ownership-contract.md) governs research objectives and acceptance.
 
-Own compiler/IR/scheduler development is the main path, not optional later integration. Cargo/Nim ecosystem tools may resolve dependencies; existing compilation routes below are reference/observation or external-bootstrap baselines, not target-build alternatives. The Action Graph is not a substitute for a language IR.
+Cargo/Nimble/C/C++ tools may supply metadata, candidates, lockfiles, and sources, but LAMINARIA owns resolution of their combined typed closure. Existing compilation routes below are reference/observation or external-bootstrap baselines, not target-build alternatives. The Action Graph is not a substitute for a language IR.
 
 ## Purpose
 
@@ -128,9 +130,9 @@ Avoid eagerly materializing:
 
 Use constraint propagation, canonicalization, memoization, equivalent-state merging, SCC condensation, demand propagation and pruning.
 
-## Track G — WebAssembly Target Pipeline
+## Optional Track G — WebAssembly Target Pipeline
 
-WebAssembly is not modeled as a peer backend value to LLVM or Cranelift. Separate:
+WebAssembly is not the current goal or a gate for native executable delivery. When selected for an optional experiment, it is not modeled as a peer backend value to LLVM or Cranelift. Separate:
 
 ```text
 Backend Engine
