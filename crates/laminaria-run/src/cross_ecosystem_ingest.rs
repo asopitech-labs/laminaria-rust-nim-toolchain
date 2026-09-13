@@ -559,47 +559,65 @@ mod tests {
         recorded_commands: Vec<(String, Vec<String>)>,
     }
 
-    /// Ingests the fixture's real `cargo metadata`/`nimble dump
-    /// --json`/`rustc -vV` facts exactly once per test process and
-    /// caches the result -- the same "gather the real fixture facts
-    /// once, reuse them across every test in this module" pattern
+    /// Both fixture variants' ingestion results, gathered together
+    /// behind one lock.
+    struct BothIngestions {
+        positive: FixtureIngestion,
+        negative: FixtureIngestion,
+    }
+
+    /// Ingests both fixture variants' real `cargo metadata`/`nimble
+    /// dump --json`/`rustc -vV` facts, strictly one at a time, exactly
+    /// once per test process, and caches the result -- the same
+    /// "gather the real fixture facts once, reuse them across every
+    /// test in this module" pattern
     /// `incremental_executor.rs::tests::real_incremental_planner_binary`
-    /// already established, applied here to avoid `cargo test`'s own
-    /// parallel test threads issuing *concurrent* real `nimble dump
-    /// --json` invocations against the same package directory -- a
-    /// real, observed CI flake: concurrent invocations can trip
-    /// nimble's own toolchain-negotiation path and attempt a network
-    /// install that a sandboxed CI runner cannot complete. This
-    /// caching is test-only scaffolding: it never runs in production,
-    /// and it still never compiles, archives, or links anything --
-    /// `ingest_fixture_input` itself is exactly as read-only whether
-    /// called once or from every test.
-    fn positive_ingestion() -> &'static FixtureIngestion {
-        static CACHE: OnceLock<FixtureIngestion> = OnceLock::new();
+    /// already established. Both variants share one `OnceLock` (rather
+    /// than one each) specifically because `cargo test`'s own parallel
+    /// test threads would otherwise be free to run the positive and
+    /// negative ingestion *concurrently* with each other, and both
+    /// invoke real `nimble dump --json` against the very same
+    /// `nimble/doubler` package directory -- a real, observed CI flake:
+    /// two concurrent invocations against one nimble package directory
+    /// can trip nimble's own toolchain-negotiation path and attempt a
+    /// network install that a sandboxed CI runner cannot complete, even
+    /// though each individual invocation succeeds reliably when run
+    /// alone. This caching is test-only scaffolding: it never runs in
+    /// production, and it still never compiles, archives, or links
+    /// anything -- `ingest_fixture_input` itself is exactly as
+    /// read-only whether called once or from every test.
+    fn both_ingestions() -> &'static BothIngestions {
+        static CACHE: OnceLock<BothIngestions> = OnceLock::new();
         CACHE.get_or_init(|| {
-            let runner = RecordingCommandRunner::new();
             let layout = FixtureLayout::discover();
-            let input = ingest_fixture_input(&runner, &layout, &["1.0.0"])
+
+            let positive_runner = RecordingCommandRunner::new();
+            let positive_input = ingest_fixture_input(&positive_runner, &layout, &["1.0.0"])
                 .expect("must ingest positive fixture input");
-            FixtureIngestion {
-                input,
-                recorded_commands: runner.recorded_commands(),
+
+            let negative_runner = RecordingCommandRunner::new();
+            let negative_input = ingest_fixture_input(&negative_runner, &layout, &["2.0.0"])
+                .expect("must ingest negative fixture input");
+
+            BothIngestions {
+                positive: FixtureIngestion {
+                    input: positive_input,
+                    recorded_commands: positive_runner.recorded_commands(),
+                },
+                negative: FixtureIngestion {
+                    input: negative_input,
+                    recorded_commands: negative_runner.recorded_commands(),
+                },
             }
         })
     }
 
+    fn positive_ingestion() -> &'static FixtureIngestion {
+        &both_ingestions().positive
+    }
+
     fn negative_ingestion() -> &'static FixtureIngestion {
-        static CACHE: OnceLock<FixtureIngestion> = OnceLock::new();
-        CACHE.get_or_init(|| {
-            let runner = RecordingCommandRunner::new();
-            let layout = FixtureLayout::discover();
-            let input = ingest_fixture_input(&runner, &layout, &["2.0.0"])
-                .expect("must ingest negative fixture input");
-            FixtureIngestion {
-                input,
-                recorded_commands: runner.recorded_commands(),
-            }
-        })
+        &both_ingestions().negative
     }
 
     fn all_commands_permitted(recorded: &[(String, Vec<String>)]) -> bool {
