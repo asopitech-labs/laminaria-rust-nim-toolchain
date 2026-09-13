@@ -266,6 +266,7 @@ hostで起動できないtest executableについて、static registration、emu
 - snapshotの一括更新をsemantic承認にしない。
 - mock expectationをactual ABI、symbol、loader、filesystem behaviorの代替にしない。
 - framework出力を変換したYAMLと、そのYAML専用validatorと、そのvalidator testを三重保守しない。
+- config/lockのproject名、件数、SHA、属性をtestへ再列挙して第二の正本にしない。
 - zero-testsを成功として扱わない。
 - benchmarkの改善をcorrectness evidenceにしない。
 

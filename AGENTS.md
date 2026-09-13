@@ -2,6 +2,10 @@
 
 ## Single-source executable verification
 
+The canonical fixture rules are [docs/01-foundations/fixture-policy.md](docs/01-foundations/fixture-policy.md).
+Treat fixtures as production-consumed inputs, states, counterexamples, or workloads—not
+as a second implementation of a configuration, document, or production algorithm.
+
 - Do not encode one behavior contract redundantly as a hand-maintained YAML
   fixture, a fixture-only validator, and unit tests for that validator when
   the same agent changes all three. This merely expands the change surface and
@@ -14,6 +18,14 @@
   implementation is correct. If a fixture is retained, test the production
   implementation by consuming it directly, rather than duplicating its rules
   in a fixture-only validator.
+- Do not repeat a checked-in configuration or lock's complete names, counts,
+  revisions, features, or attributes in a test. Test the production consumer's
+  generic behavior with minimal constructed inputs; the declaration remains the
+  sole authority for its values.
+- Freeze an expected value only when it has an independent oracle: an external
+  standard, a documented manual derivation, an independent reference, a semantic
+  relation, or a reduced real failure. Output captured from the implementation
+  under test is not an independent expected result.
 
 ## Windows build execution
 

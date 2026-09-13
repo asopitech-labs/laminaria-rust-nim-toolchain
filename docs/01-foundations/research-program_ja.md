@@ -16,6 +16,10 @@ LAMINARIAは、RustとNimのコンパイル、依存解決、コード生成、�
 
 ## 研究ポリシー
 
+fixtureには[Fixture Policy](fixture-policy_ja.md)を適用する。fixtureが固定するのは
+production pathが直接消費する入力、状態、反例、workloadであり、config catalog、文書、
+実装から得た答え、fixture-only validatorのcopyではない。
+
 LAMINARIAでは、単にビルドが通る、テストが通る、期待値が返るだけでは研究課題の完了とみなさない。
 
 機能的正しさと実行経路の正しさは別の要件である。正しい最終成果物が得られても、不要な処理をすべて再実行していた、誤ったbackend/scheduler経路を通った、opaqueな外部buildやbackendへ黙って委譲した、といった場合はincremental、scheduling、native linking、backend white-boxing、work eliminationの成立を証明しない。
@@ -291,7 +295,7 @@ LLVM artifactがlink可能であることと、language-level ABI互換やcross-
 
 ## 完了条件
 
-研究Issueは、committed code、commands、fixtures、measurement evidenceから第三者が主張を再現できる場合にのみ完了とする。
+研究Issueは、committed code、commands、必要な場合はpolicy準拠のfixtures、measurement evidenceから第三者が主張を再現できる場合にのみ完了とする。direct executable testで十分ならfixtureは必須ではない。
 
 controlled incremental testでは最終成果物だけでなくexpected execution setも検証する。すべてをrebuildして正しいbinaryを得ただけではincremental executionの正しさを証明しない。
 

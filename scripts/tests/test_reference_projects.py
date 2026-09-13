@@ -151,34 +151,6 @@ class ReferenceSetupTests(unittest.TestCase):
         self.lock.write_text("[]")
         self.assertEqual(self.run_cli("setup"), 1)
 
-    def test_checked_in_lock_contains_expected_pinned_projects(self):
-        projects = refs.load_lock(refs.DEFAULT_LOCK)
-        self.assertEqual(
-            [p["name"] for p in projects],
-            [
-                "CMake",
-                "Catch2",
-                "Nim",
-                "bazel",
-                "buck2",
-                "cargo",
-                "cargo-nextest",
-                "googletest",
-                "kani",
-                "libabigail",
-                "linux",
-                "llvm-project",
-                "miri",
-                "nimony",
-                "nlvm",
-                "nx",
-                "pants",
-                "rust",
-                "rustc-perf",
-            ],
-        )
-        self.assertEqual([p["name"] for p in projects if p.get("requires_case_sensitive_fs")], ["linux"])
-
 
 if __name__ == "__main__":
     unittest.main()

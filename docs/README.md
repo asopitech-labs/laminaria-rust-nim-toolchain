@@ -29,6 +29,7 @@ Japanese entry points are [当面の研究ゴール](near-term-research-program_
 - [Research prioritization policy](01-foundations/research-prioritization-policy.md) / [日本語](01-foundations/research-prioritization-policy_ja.md)
 - [Research foundations](01-foundations/research-foundations.md) / [日本語](01-foundations/research-foundations_ja.md)
 - [Research program and evidence policy](01-foundations/research-program.md) / [日本語](01-foundations/research-program_ja.md)
+- [Fixture policy](01-foundations/fixture-policy.md) / [日本語](01-foundations/fixture-policy_ja.md)
 - [Project proposal](01-foundations/project-proposal.md) / [日本語](01-foundations/project-proposal_ja.md)
 - [Metrics-first policy](01-foundations/metrics-policy.md)
 

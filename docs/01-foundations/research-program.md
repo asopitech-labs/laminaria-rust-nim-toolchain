@@ -16,6 +16,10 @@ This document defines the research program used to turn that project direction i
 
 ## Research policy
 
+Fixtures follow the [Fixture Policy](fixture-policy.md): they freeze production-consumed
+inputs, states, counterexamples, or workloads, not copies of configuration catalogs,
+documentation, implementation-derived answers, or fixture-only validators.
+
 LAMINARIA does not count an implementation as successful merely because it builds or passes a functional test. Every research track must record the execution path actually used, the artifacts actually produced, and the resource behavior observed.
 
 Functional correctness and execution correctness are separate requirements. A correct final artifact produced by rebuilding too much work, using the wrong backend/scheduler path, or silently delegating to an opaque outer tool or backend does not prove an incremental, scheduling, native-linking, backend-white-boxing or work-elimination claim.
@@ -253,7 +257,7 @@ The evaluation framework must be able to capture, as applicable:
 
 ## Completion rule
 
-A research issue is complete only when its claim can be reproduced from committed code, commands, fixtures and evidence. Passing tests alone is insufficient where the issue is about architecture, scheduling, performance, resource use, compiler/backend boundaries, linking, cache behavior, incremental execution or work elimination.
+A research issue is complete only when its claim can be reproduced from committed code, commands, policy-compliant fixtures where needed, and evidence. A fixture is not mandatory when a direct executable test is sufficient. Passing tests alone is insufficient where the issue is about architecture, scheduling, performance, resource use, compiler/backend boundaries, linking, cache behavior, incremental execution or work elimination.
 
 Backend white-boxing is not complete when internals are merely visualized. At least one checkpoint must demonstrate measured work-elimination/reuse value, and at least one overly fine candidate boundary must be measured and rejected when its overhead or optimization damage exceeds its benefit.
 

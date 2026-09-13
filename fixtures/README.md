@@ -1,5 +1,13 @@
 # Fixtures
 
+The canonical rules for what a fixture may freeze, how its oracle is justified,
+and why configuration/documentation must not be copied into fixture expectations
+are in the [Fixture Policy](../docs/01-foundations/fixture-policy.md)
+([日本語](../docs/01-foundations/fixture-policy_ja.md)). Every fixture used for new
+milestone evidence must identify its category, production consumer, independent
+oracle, and provenance. This index describes workloads; it is not an executable
+expectation catalog and does not independently qualify their production paths.
+
 ## Evidence classification correction (2026-09-10)
 
 This file preserves historical fixture/measurement and implementation evidence, not the current research delivery order. Existing-compiler builds and driver self-builds recorded below are **reference/bootstrap/delegated-build baselines**, not proof of LAMINARIA compiler ownership or independent self-hosting. The [compiler ownership contract](../docs/01-foundations/compiler-ownership-contract.md) governs current issue acceptance; historical checklists do not close the revised requirements.

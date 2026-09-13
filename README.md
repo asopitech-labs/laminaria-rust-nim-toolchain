@@ -81,7 +81,7 @@ Per `docs/02-research-areas/measurement/measurement-foundation.md` §2, this is 
 
 ## Documentation
 
-The documentation is intentionally rooted at the [project progression and near-term research goal](docs/near-term-research-program.md). See the [documentation map](docs/README.md) for the reading order and complete directory structure. For implemented behavior, direct executable tests against the production Rust/Nim code are authoritative; design fixtures and fixture-only validators are not.
+The documentation is intentionally rooted at the [project progression and near-term research goal](docs/near-term-research-program.md). See the [documentation map](docs/README.md) for the reading order and complete directory structure. For implemented behavior, direct executable tests against the production Rust/Nim code are authoritative; the [fixture policy](docs/01-foundations/fixture-policy.md) defines when a fixture is a legitimate input, state, counterexample, workload, or artifact subject rather than a duplicate specification.
 
 ### Reference-project source setup
 
