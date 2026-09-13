@@ -4,7 +4,12 @@
 
 Can LAMINARIA compose source-derived Rust and Nim semantic IR before an ABI/backend boundary, apply one owned transformation across that language boundary, and generate an executable owned WebAssembly artifact?
 
-This is the current P0 experiment selected by `docs/research-prioritization-policy.md`. It tests a LAMINARIA-specific claim. It does not ask for a finished mixed-language compiler.
+This is G1 of the current milestone fixed by
+`docs/near-term-research-program.md` and selected under
+`docs/research-prioritization-policy.md`. It tests the largest unresolved
+LAMINARIA-specific claim before G2 can compare fused and split boundaries or
+G3 can broaden the input forms. It does not ask for a finished mixed-language
+compiler.
 
 ## Fixed input
 
@@ -86,3 +91,6 @@ Any of the three is a valid research result. Do not extend the task to the
 reverse direction, multiple files per language, general linking, runtime
 capabilities, incremental reuse, resource accounting, distributed execution,
 all language features, or production CLI integration.
+
+Report the G1 conclusion and stop. Do not begin G2 or G3 from this task; the
+project roadmap must be updated or reaffirmed from the G1 evidence first.

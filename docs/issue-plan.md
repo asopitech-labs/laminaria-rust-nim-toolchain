@@ -4,6 +4,8 @@ This file maps the GitHub issue set to the research program. The GitHub issues a
 
 The [research issue prioritization and minimal-hypothesis policy](research-prioritization-policy.md) governs how work is selected and when an issue may stop. Existing acceptance lists are research backlogs and evidence menus, not requests for finished products or mandatory all-at-once completion. Project-wide priority follows non-substitutability and falsification power, not issue number or unchecked-box count.
 
+The [project progression and near-term research goal](near-term-research-program.md) is the canonical current roadmap. The active milestone is G1–G3: first establish or reject one cross-language owned semantic vertical slice, then decide one fused/split boundary for the same workload, then try to falsify that path with Rust-only, Nim-only, and mixed inputs. Later issue tracks are not parallel product-completion commitments.
+
 ## Compiler ownership and execution order — corrected 2026-09-10
 
 The [compiler ownership contract](compiler-ownership-contract.md) governs this plan. The goal is an independent Rust/Nim compiler, IR and scheduler that ultimately compile LAMINARIA itself. External-compiler orchestration/self-build is reference/bootstrap evidence, not the primary delivery milestone.

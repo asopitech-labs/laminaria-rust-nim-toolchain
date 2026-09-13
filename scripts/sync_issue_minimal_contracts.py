@@ -18,6 +18,7 @@ from dataclasses import dataclass
 START = "<!-- minimal-hypothesis-contract:start -->"
 END = "<!-- minimal-hypothesis-contract:end -->"
 POLICY = "https://github.com/asopitech-labs/laminaria-rust-nim-toolchain/blob/main/docs/research-prioritization-policy_ja.md"
+ROADMAP = "https://github.com/asopitech-labs/laminaria-rust-nim-toolchain/blob/main/docs/near-term-research-program_ja.md"
 
 
 @dataclass(frozen=True)
@@ -84,6 +85,7 @@ def block(number: int, contract: Contract) -> str:
 ## 現段階の最小仮説検証契約（2026-09-13）
 
 [研究Issueの優先順位・最小仮説検証ポリシー]({POLICY})をこのIssueの既存本文・チェックリストより優先する。
+[全体進行と当面の研究ゴール]({ROADMAP})が現在のphaseとIssue間の順序を定める。このIssueが現在phaseに含まれない場合、単独で完成へ進めない。
 
 - **優先度**: {contract.priority}
 - **最小仮説**: {contract.hypothesis}

@@ -60,6 +60,8 @@ identity、最小計測、planner/runtime接続、diagnostic、runtime/ABI contr
 
 ## プロジェクト全体の現在の優先順
 
+具体的な現在地、当面の終了条件、後続フェーズは [LAMINARIA 全体進行と当面の研究ゴール](near-term-research-program_ja.md) をcanonical roadmapとする。このポリシーは選び方を定め、roadmapは現在どの判断を選んだかを定める。
+
 1. source-derived Rust/Nim IRを一つのsemantic workloadとして合成する。
 2. 合成後に言語境界を越えるowned transformationを一つ適用し、合法性と拒否を示す。
 3. 変換結果を既存compiler/backendへ委譲せずowned WebAssemblyへ生成・実行する。

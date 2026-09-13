@@ -60,6 +60,8 @@ Generality, completeness, extensibility, tuning, API polish, and additional plat
 
 ## Current project-wide priority
 
+The canonical statement of current evidence, the near-term stopping condition, and later phases is [LAMINARIA Project Progression and Near-Term Research Goal](near-term-research-program.md). This policy defines how work is selected; that roadmap records which decision is currently selected.
+
 1. Compose source-derived Rust and Nim IR as one semantic workload.
 2. Apply one owned cross-language transformation and demonstrate both legality and rejection.
 3. Generate and execute owned WebAssembly from the transformed result without delegated compilation.
