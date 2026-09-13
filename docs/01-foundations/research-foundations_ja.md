@@ -4,7 +4,7 @@
 
 [独自コンパイラの責務契約](compiler-ownership-contract_ja.md)を研究目的・完了判定の基準とする。
 
-現在の中核は、Cargo/Nimble/C/C++の依存関係を一つの型付きgraphとして高速・省メモリに解き、そのclosureから通常実行できるnative binaryを生成することである。独自コンパイラ・IR・スケジューラはその経路を支える。WASMは任意targetであり現在のgoalではない。以下の既存コンパイル経路は比較・観測または外部bootstrapのbaselineであり、Action Graphは言語IRの代わりにならない。
+現在の中核は、Cargo/Nimble/C/C++のpackage選択をsource semantics、language/intermediate IR、ABI、symbol、linkと同じ型付きgraph上で高速・省メモリに協調解決し、各依存義務をbuild時にdischargeして、通常実行できるnative binaryを生成することである。独自コンパイラ・IR・スケジューラはその経路を支える。枝刈りは不要義務を早期に除く最適化であり、WASMは任意targetであって現在のgoalではない。以下の既存コンパイル経路は比較・観測または外部bootstrapのbaselineであり、Action Graphは言語IRの代わりにならない。
 
 ## Rust Nim Unified Toolchain
 
@@ -38,7 +38,7 @@ Rust と Nim を組み合わせるプロジェクトでは、次の基盤が繰�
 
 LAMINARIA は `cargo build` と `nimble build` を包むだけの薄い command wrapper を目指さない。内部に依存グラフ、コンパイラパイプライン、並列 scheduler を持つツール同士は、外側の task runner だけでは完全に協調できない。
 
-中心仮説は、Cargo、Nimble、C、C++が別々に表すpackage/source/artifact/toolchain/ABI/link制約を、ecosystem固有identityを保った一つの需要駆動graphとして解けば、opaqueなcommand連鎖では不可能な正確なinvalidation、候補枝刈り、資源認識scheduleが可能になる、というものである。有効な言語横断最適化には、さらにsource意味表現とcompiler計算を自身で保持・実行し、その依存と資源要求を同じgraphへ接続する必要がある。
+中心仮説は、Cargo、Nimble、C、C++が別々に表すpackage制約を、source意味表現、language/intermediate IR、artifact/toolchain/ABI/symbol/link制約と一つの需要駆動graphで協調して解き、各義務をnative artifactへの変換としてdischargeできる、というものである。これにより元のgraphはprovenanceとして残るが、利用者が再解決する必要はなくなる。そのうえで、opaqueなcommand連鎖では不可能な正確なinvalidation、候補・code枝刈り、資源認識scheduleを評価する。
 
 ```text
 Source Graph
@@ -70,7 +70,7 @@ Rust Runtime Scheduler
 
 LAMINARIA は次の問いを中心に構成する。最初の二問が現在の優先事項である。
 
-1. Cargo/Nimble/C/C++のversion、feature、target、source/header、toolchain、ABI、symbol、link制約を正しいtyped closureへ統合できるか
+1. Cargo/Nimble/C/C++のversion、feature、target、source/header制約をsource semantics、language/intermediate IR、toolchain、ABI、symbol、linkと協調解決し、全依存義務をdischarge／externalize／rejectできるか
 2. そのclosureを候補直積なしに高速・省メモリ・増分的に解き、通常実行できるnative binaryへ到達できるか
 3. Rust/Nimソースから独自IRとcompiler計算を、言語固有の意味を失わず構築できるか
 4. compiler analysis、artifact planning、execution 間の最小かつ安定した契約は何か

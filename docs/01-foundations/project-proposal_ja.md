@@ -166,6 +166,10 @@ laminaria explain-cache-miss
 
 agentがcompiler outputを推測するのではなく、compiler/build graphそのものを観測可能にする。
 
+### 4.14 Dependency-Discharged Native Artifact
+
+Cargo/Nimble/C/C++間のpackage選択を、source/module/type/FFI semantics、language-to-intermediate IR lowering、artifact/toolchain/ABI/symbol/link orderと協調して解く。各依存義務をspecialization、lowering、generation、link、embeddingで成果物へ変換して`Discharged`にするか、runtime contractへ`Externalized`するか、理由付きで`Rejected`する。元のecosystem graphはprovenanceとして保持するが、利用者が再構築すべき実行時graphにはしない。枝刈りと最小runtime closureは、この契約を効率的かつ小さく実現する従属的な最適化として扱う。
+
 ## 5. RustとNimの役割
 
 ### Nim Planning Kernel
@@ -216,6 +220,7 @@ LAMINARIAの特徴は、build systemの上位からcompilerを操作するだけ
 - **仮説F:** compiler stage単位のcontent identityにより、crate/package単位より細かいartifact reuseが成立する。
 - **仮説G:** 組合せ状態を事前生成せずdemand-drivenに探索することで、variant explosionを制御できる。
 - **仮説H:** compiler graphをstructured interfaceとして公開することで、AI agentがbuild failure、cache miss、backend selection、critical pathを直接分析できる。
+- **仮説I:** package選択、source semantics、language/intermediate IR、ABI、symbol、linkにまたがる依存義務をbuild時に協調解決・変換・dischargeすることで、元のecosystem graphをprovenanceとして残しつつ、利用者がそれを再resolutionせず実行できるnative artifactを生成できる。残る外部依存は明示・検証可能なruntime contractにする。
 
 ## 9. 評価ワークロード
 

@@ -36,6 +36,10 @@ Japanese entry points are [当面の研究ゴール](near-term-research-program_
 
 `compiler/` covers owned semantic IR, transformations, target generation, native integration, and compiler prior art. `execution/` covers work partition and physical distribution. `measurement/` covers evidence validity. `toolchains/` covers the current [cross-ecosystem dependency-graph research](02-research-areas/toolchains/cross-ecosystem-dependency-graph.md) ([日本語](02-research-areas/toolchains/cross-ecosystem-dependency-graph_ja.md)), reference/bootstrap profiles, and operator UX.
 
+The current Rust/C/C++ baseline is documented in [Rust/CargoにおけるC/C++ native依存のbuild model](02-research-areas/toolchains/rust-c-cpp-native-build-model_ja.md). The primary prior-art survey is [複数ecosystem依存とcompiler IRを結合して解く先行研究調査](02-research-areas/toolchains/cross-ecosystem-dependency-and-ir-resolution-landscape_ja.md). [Native executableをrootとするcross-layer枝刈り](02-research-areas/toolchains/cross-layer-reachability-pruning_ja.md) defines how demand pruning, compiler DCE, and linker garbage collection form one evidence-backed reachability contract.
+
+[Dependency-discharge artifact contract](02-research-areas/toolchains/dependency-resolved-artifact-closure_ja.md) defines the user-facing result: package, source-semantic, language/intermediate-IR, ABI, symbol, and link obligations are transformed and discharged into a native artifact, while the original graph remains provenance and unavoidable runtime requirements remain explicit contracts. Pruning is a subordinate optimization of that process.
+
 These documents refine questions selected by the near-term program. They do not independently establish delivery priority.
 
 ## 03 — Work items

@@ -4,7 +4,7 @@
 
 The [compiler ownership contract](compiler-ownership-contract.md) governs research objectives and acceptance.
 
-The current core is to resolve Cargo/Nimble/C/C++ relationships as one typed graph quickly and with low memory, then produce an ordinary runnable native binary from that closure. The owned compiler/IR/scheduler supports that path. WASM is an optional target, not the current goal. Existing routes below are reference/observation or external-bootstrap baselines; an Action Graph is not a substitute for language IR.
+The current core is to jointly resolve Cargo/Nimble/C/C++ package choices with source semantics, language/intermediate IR, ABI, symbols, and links in one typed graph quickly and with low memory, discharge each dependency obligation at build time, and produce an ordinary runnable native binary. The owned compiler/IR/scheduler supports that path. Pruning is an optimization that avoids irrelevant obligations; WASM is an optional target, not the current goal. Existing routes below are reference/observation or external-bootstrap baselines; an Action Graph is not a substitute for language IR.
 
 ## Rust Nim Unified Toolchain
 
@@ -40,7 +40,7 @@ LAMINARIA treats this as an infrastructure problem rather than a collection of p
 
 LAMINARIA is not intended to be a thin command wrapper around `cargo build` and `nimble build`. An outer task runner cannot fully coordinate tools that each own an internal dependency graph, compiler pipeline, and parallel scheduler.
 
-The central thesis is that normalizing Cargo, Nimble, C, and C++ package/source/artifact/toolchain/ABI/link constraints into one demand-driven graph, while preserving ecosystem identity, enables precise invalidation, candidate pruning, and resource-aware scheduling that opaque command chains cannot provide. Useful cross-language optimization additionally requires connecting owned semantic representations and compiler computations to that same graph:
+The central thesis is that jointly resolving Cargo, Nimble, C, and C++ package constraints with owned source semantics, language/intermediate IR, artifacts, toolchains, ABIs, symbols, and links in one demand-driven graph can discharge each obligation through transformation into a native artifact. The original graph remains provenance rather than a graph users must resolve again. This coupled model then enables precise invalidation, candidate/code pruning, and resource-aware scheduling that opaque command chains cannot provide:
 
 ```text
 Source Graph
@@ -72,7 +72,7 @@ This model separates five concerns that are often collapsed into a single build 
 
 LAMINARIA is organized around the following questions. The first two are the current priority:
 
-1. Can Cargo/Nimble/C/C++ version, feature, target, source/header, toolchain, ABI, symbol, and link constraints be unified into one correct typed closure?
+1. Can Cargo/Nimble/C/C++ version, feature, target, and source/header constraints be coupled with source semantics, language/intermediate IR, toolchains, ABIs, symbols, and links so every dependency obligation is discharged, externalized, or rejected?
 2. Can that closure be resolved quickly, with low memory and incremental recomputation, without constructing the candidate Cartesian product, and lead to an ordinary runnable native binary?
 3. Can LAMINARIA process Rust/Nim source into owned IR and compiler computations without discarding language-specific semantics?
 4. What is the minimum stable contract between compiler analysis, artifact planning, and execution?

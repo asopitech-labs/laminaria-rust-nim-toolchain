@@ -4,6 +4,10 @@
 
 [当面の研究プログラム](../../near-term-research-program_ja.md)は、ecosystem横断の依存解決を現在の中心研究に置く。本書はその問題を定義する。`cargo build`、`nimble build`、CMake/Meson、platform linkerを四つのopaque actionとして包む提案ではない。
 
+Rust/Cargoが現在C/C++依存をbuildする実際の境界は、[Rust/CargoにおけるC/C++ native依存のbuild model](rust-c-cpp-native-build-model_ja.md)に整理する。
+
+既存のbuild tool、package solver、incremental compiler、multi-level IRがどの層まで解き、どこにopaque境界を残すかは、[複数ecosystem依存とcompiler IRを結合して解く先行研究調査](cross-ecosystem-dependency-and-ir-resolution-landscape_ja.md)で比較する。Package Managers à la Carteがcross-ecosystem package resolutionの直接先行研究であることから、LAMINARIAの主張はpackage solver単独ではなく、source semantics、multi-level IR、native ABI、symbol、link closureまでの増分協調解決に置く。
+
 ## 代替不可能な問題
 
 RustからNimへの単一callが成功しても、言語経路またはABI経路が一つ通ったことしか示さない。package ecosystemが注入するclosureは次を含み得る。
@@ -40,6 +44,10 @@ RustからNimへの単一callが成功しても、言語経路またはABI経路
 ## 効率仮説
 
 package、version、feature、target、backend、toolchain、ABI、artifact kindの直積を先に生成しない。eager expansionと、demand-driven expansion、constraint propagation、canonicalization、memoization、equivalent-state merging、dominance pruning、SCC condensationを比較する。
+
+枝刈りは候補stateだけでなく、native executableから到達不能なpackage、source/module、semantic item、IR、object/archive member、symbol/section、runtime artifactまで対象とする。後段DCEとlinker GCに加え、安全に確定できる不要workをcompile前に回避する。詳細は[cross-layer枝刈り](cross-layer-reachability-pruning_ja.md)に定義する。
+
+graphの完了条件は到達closureを列挙するだけではない。package、source semantics、language/intermediate IR、ABI、symbol、linkの各依存義務が、成果物への変換によって`Discharged`、明示runtime contractとして`Externalized`、または理由付きで`Rejected`に到達しなければならない。これにより元のCargo/Nimble/C/C++ graphはprovenanceとして残る一方、artifact利用者が再resolutionすべきgraphではなくなる。詳細は[dependency-discharge artifact contract](dependency-resolved-artifact-closure_ja.md)に定義する。
 
 correctnessを必須とし、正しいresolver間で次を比較する。
 

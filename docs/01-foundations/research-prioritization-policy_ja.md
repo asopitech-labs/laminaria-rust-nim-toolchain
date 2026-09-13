@@ -21,7 +21,7 @@ Issueのcloseは、その領域の実装が完成したことを意味しない�
 
 ### P0 — LAMINARIA固有仮説
 
-- Cargo/Nimble/C/C++から得るversion、feature、target、source、header、ABI、symbol、toolchain、link関係を、型付きの需要駆動graphとして正しく解決できるか。
+- Cargo/Nimble/C/C++から得るversion、feature、target、source、header制約をsource semantics、language/intermediate IR、ABI、symbol、toolchain、linkと需要駆動で協調解決し、全依存義務をdischarge／externalize／rejectできるか。
 - 候補の直積を生成せず、正しいclosureを高速・省メモリ・増分的に求め、その選択／拒否理由を説明できるか。
 - 解決済みclosureから、一般的なOSが直接起動できるnative executableを生成できるか。
 - Rust/Nimのsource semanticsから、既存compiler IRを入口にせずLAMINARIA-owned representationを導けるか。
@@ -65,7 +65,7 @@ identity、最小計測、planner/runtime接続、diagnostic、runtime/ABI contr
 
 具体的な現在地、当面の終了条件、後続フェーズは [LAMINARIA 全体進行と当面の研究ゴール](../near-term-research-program_ja.md) をcanonical roadmapとする。このポリシーは選び方を定め、roadmapは現在どの判断を選んだかを定める。
 
-1. Cargo/Nimble/C/C++のpackage、source、artifact、toolchain、ABI、link関係を一つの型付きgraphへ正規化する。
+1. Cargo/Nimble/C/C++のpackage制約、source semantics、language/intermediate IR、artifact、toolchain、ABI、symbol、link関係を一つの型付きgraphで協調解決し、依存義務のdischarge状態を表す。
 2. 要求native executableから必要closureだけを展開し、整合する一例とcompile前に拒否する一例を示す。
 3. 解決済みclosureをproduction planner/runtimeで実行し、通常実行できるnative binaryを生成・起動する。
 4. eager baselineと需要駆動candidateを、wall-clock、peak memory、探索state、再計算量で比較する。

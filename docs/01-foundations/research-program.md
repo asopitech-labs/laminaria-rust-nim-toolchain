@@ -1,12 +1,12 @@
 # LAMINARIA Research Program
 
-The [near-term research program](../near-term-research-program.md) governs current priority. The present milestone is cross-ecosystem Cargo/Nimble/C/C++ dependency resolution followed by an ordinary runnable native executable. Tracks below are a research inventory, not a sequence; WebAssembly is optional target research.
+The [near-term research program](../near-term-research-program.md) governs current priority. The present milestone jointly resolves Cargo/Nimble/C/C++ package choices, source semantics, language/intermediate IR, ABI, symbols, and links, discharges their dependency obligations at build time, and produces an ordinary runnable native executable. Pruning is a means of making that resolution and transformation efficient. Tracks below are a research inventory, not a sequence; WebAssembly is optional target research.
 
 ## Ownership correction (2026-09-10)
 
 The [compiler ownership contract](compiler-ownership-contract.md) governs research objectives and acceptance.
 
-Cargo/Nimble/C/C++ tools may supply metadata, candidates, lockfiles, and sources, but LAMINARIA owns resolution of their combined typed closure. Existing compilation routes below are reference/observation or external-bootstrap baselines, not target-build alternatives. The Action Graph is not a substitute for a language IR.
+Cargo/Nimble/C/C++ tools may supply metadata, candidates, lockfiles, and sources, but LAMINARIA owns resolution of their combined typed closure and transformation of source/IR/ABI/link obligations into the artifact. Existing compilation routes below are reference/observation or external-bootstrap baselines, not target-build alternatives. The Action Graph is not a substitute for a language IR.
 
 ## Purpose
 

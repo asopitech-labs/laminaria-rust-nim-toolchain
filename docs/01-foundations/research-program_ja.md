@@ -1,12 +1,12 @@
 # LAMINARIA 研究プログラム
 
-[当面の研究プログラム](../near-term-research-program_ja.md)が現在の優先順位を決める。現在のmilestoneはCargo/Nimble/C/C++のecosystem横断依存解決と、そこからの通常実行可能なnative binary生成である。以下のtrackは研究inventoryであって実行順ではなく、WebAssemblyは任意target研究である。
+[当面の研究プログラム](../near-term-research-program_ja.md)が現在の優先順位を決める。現在のmilestoneはCargo/Nimble/C/C++のpackage選択、source semantics、language/intermediate IR、ABI、symbol、linkを協調解決し、依存義務をbuild時にdischargeした通常実行可能なnative binaryを生成することである。枝刈りはこの解決・変換を効率化する手段であり、以下のtrackは研究inventoryであって実行順ではない。WebAssemblyは任意target研究である。
 
 ## 責務の訂正（2026-09-10）
 
 [独自コンパイラの責務契約](compiler-ownership-contract_ja.md)を研究目的・完了判定の基準とする。
 
-Cargo/Nimble/C/C++ toolはmetadata、候補、lockfile、sourceを供給できるが、ecosystem横断のtyped closureはLAMINARIAが解決する。以下に登場する既存コンパイル経路は比較・観測または外部bootstrapのbaselineであり、本ビルドの選択肢ではない。Action Graphは言語IRの代わりにならない。
+Cargo/Nimble/C/C++ toolはmetadata、候補、lockfile、sourceを供給できるが、ecosystem横断のtyped closureと、そこからsource/IR/ABI/link義務を成果物へ変換する過程はLAMINARIAが解決する。以下に登場する既存コンパイル経路は比較・観測または外部bootstrapのbaselineであり、本ビルドの選択肢ではない。Action Graphは言語IRの代わりにならない。
 
 ## 目的
 

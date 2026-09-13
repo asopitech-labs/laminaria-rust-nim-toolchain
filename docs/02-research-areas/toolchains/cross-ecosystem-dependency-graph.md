@@ -4,6 +4,8 @@
 
 The [near-term research program](../../near-term-research-program.md) makes cross-ecosystem dependency resolution the current core research theme. This document defines that problem. It is not a proposal to wrap `cargo build`, `nimble build`, CMake, Meson, or a platform linker as four opaque actions.
 
+The [Rust/Cargo C/C++ native-build model](rust-c-cpp-native-build-model_ja.md) records the current boundary. The [prior-art survey](cross-ecosystem-dependency-and-ir-resolution-landscape_ja.md) compares package solvers, polyglot build graphs, incremental semantic systems, multi-level IR, and linker-integrated IR. *Package Managers à la Carte* is direct prior art for cross-ecosystem package resolution, so LAMINARIA's research claim is not a package solver alone; it is coupled incremental resolution through source semantics, multi-level IR, native ABI, symbols, and link closure.
+
 ## The non-substitutable problem
 
 A successful Rust-to-Nim call proves a language or ABI path. It does not prove resolution of the graph injected by package ecosystems. The required closure may combine:
@@ -40,6 +42,10 @@ Resolution ends only when every demanded artifact has an identified producer or 
 ## Efficiency hypothesis
 
 The candidate resolver should avoid constructing the Cartesian product of all packages, versions, features, targets, backends, toolchains, ABIs, and artifact kinds. The research compares eager expansion with demand-driven expansion plus constraint propagation, canonicalization, memoization, equivalent-state merging, dominance pruning, and SCC condensation.
+
+Pruning applies beyond candidate states. Starting from the native executable, the system should avoid unreachable packages, sources/modules, semantic items, IR, objects/archive members, symbols/sections, and runtime artifacts as early as correctness permits. Late DCE and linker garbage collection reduce output size but cannot recover parse, type-check, monomorphization, or code-generation work already performed. The [cross-layer pruning contract](cross-layer-reachability-pruning_ja.md) defines roots, conservative retention, evidence, and measurements.
+
+Graph completion is not merely enumeration of a reachable closure. Every package, source-semantic, language/intermediate-IR, ABI, symbol, and link obligation must become `Discharged` through transformation into the artifact, `Externalized` as an explicit runtime contract, or `Rejected` with a reason. The original Cargo/Nimble/C/C++ graph thereby remains provenance rather than a graph the artifact consumer must resolve again. The [dependency-discharge artifact contract](dependency-resolved-artifact-closure_ja.md) defines this property.
 
 Correctness is mandatory. Among correct resolvers, compare:
 

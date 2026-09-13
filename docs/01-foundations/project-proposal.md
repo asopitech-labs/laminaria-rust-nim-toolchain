@@ -166,6 +166,10 @@ laminaria explain-cache-miss
 
 Rather than having the agent infer compiler output, the compiler/build graph itself is made observable.
 
+### 4.14 Dependency-Discharged Native Artifact
+
+Jointly resolve Cargo/Nimble/C/C++ package choices with source/module/type/FFI semantics, language-to-intermediate-IR lowering, artifacts, toolchains, ABIs, symbols, and link order. Transform every dependency obligation into the artifact as `Discharged` through specialization, lowering, generation, linking, or embedding; mark it `Externalized` as an explicit runtime contract; or reject it with a reason. Preserve the original ecosystem graph as provenance, not as a runtime graph consumers must reconstruct. Pruning and a minimal runtime closure are subordinate optimizations that make this contract efficient and small.
+
 ## 5. The Roles of Rust and Nim
 
 ### Nim Planning Kernel
@@ -216,6 +220,7 @@ What distinguishes LAMINARIA is not merely operating the compiler from above the
 - **Hypothesis F:** Content identity at the granularity of compiler stages enables artifact reuse finer-grained than at the crate/package level.
 - **Hypothesis G:** Exploring the combinatorial state space demand-driven, rather than pre-generating it, controls variant explosion.
 - **Hypothesis H:** Exposing the compiler graph as a structured interface lets AI agents directly analyze build failures, cache misses, backend selection, and the critical path.
+- **Hypothesis I:** Jointly resolving, transforming, and discharging dependency obligations across package choices, source semantics, language/intermediate IR, ABI, symbols, and links can produce a native artifact that users run without re-resolving the original ecosystem graph, while preserving that graph as provenance and expressing every remaining dependency as an explicit, verifiable runtime contract.
 
 ## 9. Evaluation Workloads
 

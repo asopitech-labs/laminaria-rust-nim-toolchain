@@ -21,7 +21,7 @@ Evaluate candidate work in this order:
 
 ### P0 — LAMINARIA-specific hypotheses
 
-- Correctly resolve Cargo/Nimble/C/C++ version, feature, target, source, header, ABI, symbol, toolchain, and link relationships as one demand-driven typed graph.
+- Jointly resolve Cargo/Nimble/C/C++ version, feature, target, source, and header constraints with source semantics, language/intermediate IR, ABIs, symbols, toolchains, and links in one demand-driven typed graph, so every dependency obligation is discharged, externalized, or rejected.
 - Find the correct closure quickly, with low memory and incremental recomputation, without materializing the candidate Cartesian product; explain both selection and rejection.
 - Produce an ordinary OS-runnable native executable from the resolved closure.
 - Derive LAMINARIA-owned representations from Rust/Nim source semantics without requiring existing compiler IR as input.
@@ -65,7 +65,7 @@ Generality, completeness, extensibility, tuning, API polish, and additional plat
 
 The canonical statement of current evidence, the near-term stopping condition, and later phases is [LAMINARIA Project Progression and Near-Term Research Goal](../near-term-research-program.md). This policy defines how work is selected; that roadmap records which decision is currently selected.
 
-1. Normalize Cargo/Nimble/C/C++ package, source, artifact, toolchain, ABI, and link relationships into one typed graph.
+1. Jointly resolve Cargo/Nimble/C/C++ package constraints, source semantics, language/intermediate IR, artifacts, toolchains, ABIs, symbols, and links in one typed graph that records dependency-obligation discharge state.
 2. Demand-expand only the closure of a requested native executable; show one consistent result and one pre-compilation rejection.
 3. Execute the resolved closure through the production planner/runtime and build and run an ordinary native binary.
 4. Compare eager and demand-driven resolution by wall time, peak memory, explored states, and recomputation.

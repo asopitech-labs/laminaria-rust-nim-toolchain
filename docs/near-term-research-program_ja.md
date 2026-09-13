@@ -14,17 +14,23 @@ LAMINARIAは対応するRust/Nim source semantics、IR、変換、work分割／�
 
 WebAssemblyは将来比較できる任意targetの一つであり、現在のゴール、必須milestone、またはarchitectureの既定値ではない。WASM生成や実行の既存証拠はtarget-generationの限定実験として保持するが、native binary生成やcross-ecosystem dependency resolutionの代わりにはしない。
 
+## 成果物が与える価値
+
+LAMINARIAはCargo、Nimble、C、C++のpackage選択だけを先に解いて結果を配るものではない。packageからsource/module/type/FFI、language IRからintermediate IRへのlowering、artifact/toolchain/ABI/symbol/linkまでを協調して解き、各依存義務をspecialization、lowering、code generation、static link、embedding、または明示的externalizationによってbuild時に**discharge（充足して消込）**する。その利用者は元のpackage manager、compiler、header、feature、ABI、link-order graphを再構築せず、生成されたnative artifactを実行できる。
+
+元のdependency graphは導出・再現・監査のprovenanceとして保存するが、利用者が再resolutionする実行時topologyにはしない。OS、kernel、driver、dynamic library等への物理的依存が必ずゼロになるという意味ではなく、残るものは明示・検証可能なruntime contractとしてexternalizeする。枝刈りは不要な義務を`ProvenIrrelevant`と証明して解決・生成workを減らす重要な最適化だが、この価値の本体ではない。
+
 ## 現在地と中心的な未解決点
 
 現在までに、限定されたsource-derived IR、owned validation/interpretation/transformation、Nim planning kernelとRust executor、incremental discovery、demand-driven execution、identity、measurement、native/LLVM/WASM経路について個別の証拠がある。
 
 一方、固定したsource間の単一callが通ることは、実際のproject dependency graphを解決できる証拠ではない。package managerから得るfeatures、versions、target条件、build dependencies、generated source、native library、header、link order、ABI、toolchain制約を含む推移的closureは、単一のsemantic call compositionとは別の問題である。
 
-現在もっとも代替不可能な未解決点は、**Cargo圏、Nimble圏、C圏、C++圏をまたぐ異種の依存関係を、ecosystem固有の意味を失わず一つの需要駆動graphへ正規化し、候補爆発を抑えながら時間・ピークメモリ・再計算量を最小化して、native executableに必要なclosureを解けるか**である。
+ecosystem横断のpackage resolution自体には、*Package Managers à la Carte*という直接的な形式先行研究がある。したがって現在もっとも代替不可能な未解決点は、**Cargo、Nimble、C、C++のpackage選択を、sourceから発見されるmodule・type・FFI事実、multi-level IR lowering、native artifact・ABI・symbol・link orderと一つの需要駆動typed graph上で増分協調解決し、候補爆発を抑えながら時間・ピークメモリ・再計算量を最小化できるか**である。
 
 ## 当面のゴール
 
-> Cargo、Nimble、C、C++の各ecosystemから注入される外部依存を含む固定projectについて、LAMINARIAがpackage/source/artifact/toolchain/ABI/link関係を一つの型付き依存グラフとして解決し、選択理由と拒否理由を説明し、そのclosureから通常実行できるnative binaryを生成する。さらに、解決時間、ピークメモリ、展開・枝刈り・再計算した状態数を計測し、naiveな全候補展開より優れた解法を一つ判断する。
+> Cargo、Nimble、C、C++の各ecosystemから注入される外部依存を含む固定projectについて、LAMINARIAがpackage選択、source/semantic事実、language-to-intermediate IR lowering、artifact/toolchain/ABI/symbol/link関係を一つの型付き依存グラフ上で増分協調解決する。各依存義務をdischarge、externalize、または理由付きでrejectし、利用者が元のecosystem graphを再解決せず直接実行できるnative binaryを生成する。到達不能なworkの早期枝刈りを含む解法について、解決時間、ピークメモリ、output size、展開・枝刈り・再計算した状態数を測り、naiveな全候補・code展開より優れた方式を一つ判断する。
 
 これは全Cargo/Nimble semantics、全C/C++ build system、全platform、最速compiler、production package manager、WASM対応、分散build、またはself-hostingの完成を意味しない。成功条件は、固定した現実的なmixed dependency workloadについて、正しいclosure、実行可能native binary、negative case、資源測定、architecture判断を得ることである。
 
@@ -32,7 +38,7 @@ WebAssemblyは将来比較できる任意targetの一つであり、現在のゴ
 
 ### G1 — cross-ecosystem dependency graph
 
-最小だが非自明なfixtureを固定する。少なくともCargo crate、Nimble package、C library、C++ libraryを各一つ含め、version/feature/target条件、生成またはadapter action、native link edgeを明示する。各ecosystemのidentityを保持したまま共通graphへ正規化し、要求artifactから必要closureだけを展開する。
+最小だが非自明なfixtureを固定する。少なくともCargo crate、Nimble package、C library、C++ libraryを各一つ含め、version/feature/target条件、生成またはadapter action、native link edgeを明示する。package層はPackage Calculusへ写すか、写せない正確なsemantic divergenceを記録する。その結果をsource/semanticとnative-artifact constraintへ接続し、各ecosystemのidentityを保持したまま要求artifactから必要closureだけを展開する。
 
 - 中心Issue: #8、#22、#44
 - 関連Issue: #3、#4、#5、#7、#18
@@ -42,19 +48,19 @@ WebAssemblyは将来比較できる任意targetの一つであり、現在のゴ
 
 ### G2 — native executable vertical slice
 
-G1で解決したclosureをproduction Nim planner / Rust runtimeへ渡し、必要なcompile、adapter、archive、link actionを実行して、対象OSで直接起動できるnative executableを生成する。単一callの成立ではなく、推移的外部依存を含むgraph全体が成果物へ到達することを検証する。
+G1で解決したclosureをproduction Nim planner / Rust runtimeへ渡し、必要なsemantic validation、lowering、compile、adapter、archive、link actionを実行して、対象OSで直接起動できるnative executableを生成する。単一callの成立ではなく、推移的外部依存に由来するpackage/source/IR/ABI/link義務がそれぞれ`Discharged`、`Externalized`、または`Rejected`へ到達することを検証する。不要codeはearly pruning、compiler DCE、linker GCで除去し、FFI export、constructor、dynamic-retention root、runtime supportは保守的に保持する。
 
 - 中心Issue: #6、#4、#5、#44
 - 関連Issue: #3、#10、#12、#20
-- 停止条件: binaryの起動結果、全入力とproducerのidentity、実行／省略action、最終link入力が直接的な実行可能テストで確認できる
+- 停止条件: binaryの起動結果、各依存義務のdischarge/externalization evidence、全入力とproducerのidentity、実行／省略action、最終link入力、保持／枝刈りしたsymbol/sectionが直接的な実行可能テストで確認できる
 
-### G3 — 解決効率と増分性の比較
+### G3 — 解決効率、枝刈り、増分性の比較
 
-同じdependency workloadで、全候補を先に展開するbaselineと、lazy expansion、constraint propagation、canonicalization、memoization、equivalent-state merging、dominance pruning、SCC condensationを用いるcandidateを比較する。cold resolution、no-op、leaf dependency変更、feature/target条件変更を測る。
+同じdependency workloadで、全候補・codeを先に展開するbaselineと、lazy expansion、cross-layer reachability pruning、constraint propagation、canonicalization、memoization、equivalent-state merging、dominance pruning、SCC condensationを用いるcandidateを比較する。cold resolution、no-op、leaf dependency変更、root-set変更、feature/target条件変更を測る。
 
 - 中心Issue: #8、#7、#11、#12
 - 関連Issue: #6、#19〜#24
-- 判断指標: wall-clock、peak RSS、展開／枝刈り／mergeしたstate数、再計算node数、実行を回避した外部tool数
+- 判断指標: wall-clock、peak RSS、output size、展開／枝刈り／mergeしたstate数、保持／枝刈りしたpackage/source/IR/artifact/symbol数、再計算node数、実行を回避した外部tool数
 - 停止条件: correctnessを維持したうえで、少なくとも一つのgraph algorithmまたは表現について採用・棄却・再定式化を判断できる
 
 G1〜G3を当面の研究マイルストーンとする。意味IRの融合／分割やWASM target pipelineは有用な別研究だが、このmilestoneの直列gateにしない。
@@ -73,7 +79,7 @@ semantic IR、target pipeline、measurement、identity、diagnostic、toolchain 
 
 ## タスク選択規則
 
-1. 要求するnative artifactと対象host/targetを固定する。
+1. 要求するnative artifact、保持すべきexport/dynamic root、対象host/targetを固定する。
 2. そのartifactのclosureへ関与するecosystemとconstraintを列挙する。
 3. 最大の未知を反証する最小のpositive/negative graphを固定する。
 4. correctnessと同時に、時間、peak memory、探索state、再計算量を直接測る。
@@ -85,6 +91,9 @@ semantic IR、target pipeline、measurement、identity、diagnostic、toolchain 
 
 - 制約: [独自コンパイラ責務契約](01-foundations/compiler-ownership-contract_ja.md)と[研究優先順位ポリシー](01-foundations/research-prioritization-policy_ja.md)
 - 中心研究: [Cross-ecosystem dependency graph research](02-research-areas/toolchains/cross-ecosystem-dependency-graph.md)
+- 先行研究と差分: [複数ecosystem依存とcompiler IRを結合して解く先行研究調査](02-research-areas/toolchains/cross-ecosystem-dependency-and-ir-resolution-landscape_ja.md)
+- 枝刈りのcorrectnessと計測: [Native executableをrootとするcross-layer枝刈り](02-research-areas/toolchains/cross-layer-reachability-pruning_ja.md)
+- 依存義務を成果物へ変換する契約: [異種依存義務をbuild時にdischargeするartifact contract](02-research-areas/toolchains/dependency-resolved-artifact-closure_ja.md)
 - 実行順序: [Research Issue Plan](03-work-items/issue-plan.md)
 - 現在の実験: [最初のcross-ecosystem dependency graph実験](03-work-items/design/cross-ecosystem-dependency-graph-first-experiment.md)
 - supporting trackと履歴を含む全体索引: [文書マップ](README.md)

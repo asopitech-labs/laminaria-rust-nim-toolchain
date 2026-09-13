@@ -38,7 +38,7 @@ LAMINARIA生成object + foreign native成果物
 | 役割 | 既存ツールを使う範囲 | 証明できること |
 | --- | --- | --- |
 | パッケージmetadata・候補取得 | Cargo/Nimble/C/C++ ecosystemのmetadata、manifest、lockfile、source取得、registry/system-library情報 | LAMINARIA resolverへの入力 |
-| Ecosystem横断依存解決 | LAMINARIAがversion、feature、target、host/target、ABI、symbol、artifact、link制約を一つの型付きgraphで解く | native executableに必要なclosureと選択／拒否理由 |
+| Ecosystem横断依存解決・discharge | LAMINARIAがversion、feature、target、host/target、source semantics、language/intermediate IR、ABI、symbol、artifact、link制約を一つの型付きgraphで協調して解く | native executableに必要なclosure、各義務のdischarge／externalization、選択／拒否理由 |
 | 字句・構文解析 | パーサーライブラリ、パーサージェネレータ、または既存コンパイラ自身の字句解析・構文解析ロジックを、構文専用の部品(トークン・具象/抽象構文木・ソース位置)としてのみ使用する | 構文木であり、意味ではない |
 | 比較・観測baseline | 明示的に選んだ実験で既存コンパイラ、LLVM、build systemを実行 | その比較条件での挙動・コスト |
 | 外部bootstrap | 最初の研究実行ファイルを既存ツールで作る | 開始点の用意のみ |
@@ -46,7 +46,7 @@ LAMINARIA生成object + foreign native成果物
 | 宣言済みforeign-native依存 | 明示されたC/C++ source/adapter unitをcompileする、またはidentityを持つobject/archive/shared libraryをLAMINARIA生成コードの依存として取り込む | foreign成果物とlink入力。Rust/Nim compile委譲ではない |
 | 独自コンパイル | 意味解析・IR・変換・コード生成・内部計算のscheduleをLAMINARIAが担う | 本来の研究目標の候補証拠 |
 
-package managerが一つのecosystem内でlockfileを作れることと、LAMINARIAがCargo/Nimble/C/C++をまたぐ最終artifact closureを解けることは別である。依存解決を口実にbuild script、procedural macro、plugin、推移的ツール呼び出しからコンパイルを隠れて実行してはならない。これらにはLAMINARIAで対応する明示的な実装契約が必要であり、未対応の構文や依存は診断して停止する。ソース取得の許可は、Rust/Nim本体のtarget compilationを `cargo build`、`rustc`、`nim c`、`nim cpp`、nlvm、Nimonyへ委譲する許可ではなく、LAMINARIAが所有するRust/Nim意味をgenerated C/C++や既存backendへ逃がす許可でもない。
+package managerが一つのecosystem内でlockfileを作れることと、LAMINARIAがCargo/Nimble/C/C++をまたぐpackage選択、source semantics、language/intermediate IR、ABI、symbol、linkの依存義務を最終artifactへdischargeできることは別である。元のgraphを配布用closureへ写すだけでもない。依存解決を口実にbuild script、procedural macro、plugin、推移的ツール呼び出しからコンパイルを隠れて実行してはならない。これらにはLAMINARIAで対応する明示的な実装契約が必要であり、未対応の構文や依存は診断して停止する。ソース取得の許可は、Rust/Nim本体のtarget compilationを `cargo build`、`rustc`、`nim c`、`nim cpp`、nlvm、Nimonyへ委譲する許可ではなく、LAMINARIAが所有するRust/Nim意味をgenerated C/C++や既存backendへ逃がす許可でもない。
 
 この制限は、宣言済みforeign-native library依存に必要なC/C++ compilationを禁止しない。外部C/C++ compilerは、identityを持つforeign sourceまたは生成adapter unitをcompileできるが、Rust/Nim target unitの実装として生成されたC/C++をcompileしてはならない。foreign入力、header、flag、toolchain、出力、link edgeはProgram/Action Graphに表れ、package resolutionやopaqueなouter buildに隠さない。
 
