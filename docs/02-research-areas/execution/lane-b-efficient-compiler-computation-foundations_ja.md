@@ -216,7 +216,6 @@ M1ではdistributed executionやglobal optimal schedulerを要求しない。ま
 10. Buck2 documentation, [Modern DICE](https://buck2.build/docs/insights_and_knowledge/modern_dice/) and [Architecture](https://buck2.build/docs/concepts/architecture/).
 11. Clang documentation, [ThinLTO](https://clang.llvm.org/docs/ThinLTO.html).
 12. Bazel documentation, [Remote execution overview](https://bazel.build/remote/rbe).
-13. Marchal et al., “Limiting the Memory Footprint when Dynamically Scheduling DAGs on Shared-Memory Platforms,” JPDC 2019, [DOI](https://doi.org/10.1016/j.jpdc.2018.10.003).
+13. Marchal et al., “Limiting the Memory Footprint when Dynamically Scheduling DAGs on Shared-Memory Platforms,” JPDC 2019, [publisher page](https://www.sciencedirect.com/science/article/pii/S0743731518305112).
 14. Jin et al., “New Tools for Peak Memory Scheduling,” [arXiv:2312.13526](https://arxiv.org/abs/2312.13526).
 15. LLVM, [Link Time Optimization: Design and Implementation](https://llvm.org/docs/LinkTimeOptimization.html).
-
