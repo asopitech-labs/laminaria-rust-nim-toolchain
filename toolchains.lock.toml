@@ -5,10 +5,10 @@
 # (`cargo run -p laminaria-cli -- doctor`) resolves each selector below to an
 # exact ToolchainFingerprint (executable path, digest, resolved
 # version/commit, bundled LLVM, ...) and records both the selector and the
-# resolution together, per docs/multi-version-toolchains.md section 8.
+# resolution together, per docs/02-research-areas/toolchains/multi-version-toolchains.md section 8.
 #
 # `latest` is never a valid selector value here — see
-# docs/measurement-foundation.md section 3.
+# docs/02-research-areas/measurement/measurement-foundation.md section 3.
 
 schema_version = "0.1.0"
 

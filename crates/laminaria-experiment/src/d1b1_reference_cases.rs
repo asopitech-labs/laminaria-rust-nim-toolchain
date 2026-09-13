@@ -1,5 +1,6 @@
 //! Issue #28 D1-b1: re-runs the *existing* fixtures/tests named by
-//! `docs/design/issue-35-d0-cases.yaml`'s M4/M5 cases and records the
+//! the historical M4/M5 scenarios recorded in
+//! `docs/05-history/issue-35-d0-cases.yaml` and records the
 //! raw evidence, the exact reproduction command, and the
 //! `execution_role` classification already fixed at D0 -- this module
 //! never re-selects a case's role, source layout, or expected value; it

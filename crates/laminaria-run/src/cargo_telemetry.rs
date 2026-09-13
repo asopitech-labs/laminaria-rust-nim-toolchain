@@ -1,5 +1,5 @@
 //! Level 2 compiler-native telemetry for Cargo builds
-//! (`docs/measurement-foundation.md` section 7): parses Cargo's own real
+//! (`docs/02-research-areas/measurement/measurement-foundation.md` section 7): parses Cargo's own real
 //! `--message-format=json` output, studied from Cargo's actual source
 //! (`.reference/cargo/src/util/machine_message.rs`'s `Message` trait and
 //! its `Artifact`/`FromCompiler`/`BuildScript`/`BuildFinished` structs)

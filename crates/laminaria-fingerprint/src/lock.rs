@@ -1,5 +1,5 @@
 //! Parses the repository-owned `toolchains.lock.toml` manifest described in
-//! `docs/multi-version-toolchains.md` section 8. The lock file is the set of
+//! `docs/02-research-areas/toolchains/multi-version-toolchains.md` section 8. The lock file is the set of
 //! *requested selectors*; doctor resolves each one to an exact fingerprint.
 
 use std::collections::BTreeMap;
@@ -47,11 +47,11 @@ pub struct NimToolchainSelector {
     /// `PATH`, which is what lets multiple exact Nim toolchains coexist
     /// and be independently selected rather than only ever reporting the
     /// one Nim install that happens to be on `PATH`
-    /// (`docs/multi-version-toolchains.md` section 2).
+    /// (`docs/02-research-areas/toolchains/multi-version-toolchains.md` section 2).
     #[serde(default)]
     pub bin_dir: Option<PathBuf>,
     /// Exact source revision for Nimony/Nim 3 (or nlvm) builds — see
-    /// `docs/multi-version-toolchains.md` section 8's conceptual schema.
+    /// `docs/02-research-areas/toolchains/multi-version-toolchains.md` section 8's conceptual schema.
     /// Recorded on the fingerprint as a requested fact; this crate does not
     /// attempt to verify it against the resolved binary.
     #[serde(default)]
@@ -68,7 +68,7 @@ pub struct ToolSelector {
     /// - `"rustup-llvm-tools"`: resolved from a Rust toolchain's own sysroot
     ///   (`rustup component add llvm-tools`) instead of `PATH` — this LLVM
     ///   identity is exactly the one bundled with the resolved rustc, per
-    ///   `docs/multi-version-toolchains.md` section 8's "bundled or
+    ///   `docs/02-research-areas/toolchains/multi-version-toolchains.md` section 8's "bundled or
     ///   selected LLVM/backend identity" field, rather than an independently
     ///   versioned system install;
     /// - `"cargo"`: installed with `cargo install <tool> --version

@@ -3,7 +3,9 @@
 //! Measures the real Nim planner's own demand-closure pruning
 //! (`nim-planner/src/planning_kernel.nim`, issue #27) directly over a
 //! `PlanningInput` -- no Cargo workspace, no fixture files on disk,
-//! per `docs/design/issue-35-d0-cases.yaml`'s `M8-many-unrequested-nim-planner`
+//! for the historical `M8-many-unrequested-nim-planner` scenario in
+//! `docs/05-history/issue-35-d0-cases.yaml`. Production tests and this
+//! runner, rather than that retired catalog, are the verification authority.
 //! case. `used-core`/`used-util` are siblings (`fixture-bin` depends on
 //! both, they don't depend on each other); `unused-pkg-*` never connects
 //! to `fixture-bin-out`'s demand at all.
@@ -196,7 +198,7 @@ pub struct ScaleOutcome {
     /// parse), as a real `ScenarioReport` built from persisted `Run`s.
     pub scenario_report: Option<ScenarioReport>,
     pub scenario_report_error: Option<String>,
-    /// The Nim-kernel-only wall time (`docs/design/issue-35-d0-cases.yaml`'s
+    /// The Nim-kernel-only wall time (`docs/05-history/issue-35-d0-cases.yaml`'s
     /// own confirmed `measurement_boundary`), a *separate* item from
     /// `scenario_report.wall_seconds` -- never conflated with the
     /// round-trip time above.

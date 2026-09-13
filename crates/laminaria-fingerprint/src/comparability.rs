@@ -1,7 +1,7 @@
 //! Environment comparability policy.
 //!
-//! `docs/measurement-foundation.md` section 2 and the "Environment rule" in
-//! `docs/issue-plan.md`: a reproducible environment and a representative
+//! `docs/02-research-areas/measurement/measurement-foundation.md` section 2 and the "Environment rule" in
+//! `docs/03-work-items/issue-plan.md`: a reproducible environment and a representative
 //! performance environment are different concerns, WSL/native Linux/macOS/
 //! containers are distinct environment classes, and Runs with different
 //! `EnvironmentFingerprint` values are not directly comparable for

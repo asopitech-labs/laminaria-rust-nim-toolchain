@@ -1,6 +1,6 @@
 //! Resolves each named Nim toolchain in `toolchains.lock.toml` to an exact
 //! `NimToolchainFingerprint`. Nim 2 and Nimony/Nim 3 share this same
-//! abstraction (`docs/multi-version-toolchains.md` section 2): when a lock
+//! abstraction (`docs/02-research-areas/toolchains/multi-version-toolchains.md` section 2): when a lock
 //! entry sets `bin_dir`, that toolchain is resolved from an explicit
 //! directory rather than from `PATH`, which is what lets multiple exact Nim
 //! installs coexist and be independently selected — the same job `rustup`

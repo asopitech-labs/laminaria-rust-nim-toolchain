@@ -4,8 +4,8 @@ Implements a source-derived owned IR for a declared Rust/Nim subset (fixed-
 width integers, explicit wrapping arithmetic, function calls, conditionals,
 local bindings), replacing `fixtures/laminaria-semantic-substrate-prototype`'s
 hand-transcribed representation for the same `add_or_double`/`double`
-workload, per `docs/compiler-ownership-contract.md`'s corrected research
-order (`docs/issue-plan.md`: "#25 + #3 + #6 + #8 together"). See
+workload, per `docs/01-foundations/compiler-ownership-contract.md`'s corrected research
+order (`docs/03-work-items/issue-plan.md`: "#25 + #3 + #6 + #8 together"). See
 `crates/laminaria-ir/src/lib.rs`'s own top-level doc comment for the full
 scope statement and the Task 2 seam this is built around.
 
@@ -30,7 +30,7 @@ scope statement and the Task 2 seam this is built around.
 - **`rust_frontend.rs` uses `syn` for syntax only** (tokenizing/parsing into
   a `syn::File`/`syn::Expr` tree; zero semantic analysis, zero type
   checking, zero macro expansion) -- explicitly within
-  `docs/compiler-ownership-contract.md`'s lexical/syntactic-parsing-reuse
+  `docs/01-foundations/compiler-ownership-contract.md`'s lexical/syntactic-parsing-reuse
   boundary (added to that doc as part of this task, after the user
   resolved an open question about exactly where that boundary sits). Every
   semantic fact is derived by this crate's own code walking that tree.
@@ -130,7 +130,7 @@ IR's primary single-evaluation discipline for effectful arguments --
 baseline and as a live comparison point for later work, not as dead code.
 
 This is not adopted as "ANF is the final answer" in the SSA-vs-ANF sense
-`docs/llvm-rediscovery-research.md` warns against assuming -- only as "for
+`docs/02-research-areas/compiler/llvm-rediscovery-research.md` warns against assuming -- only as "for
 *this* specific hazard (single-evaluation/order preservation of call
 arguments across a substitution), the structural binding-insertion
 candidate dominates the post-hoc-checking candidate on the evidence

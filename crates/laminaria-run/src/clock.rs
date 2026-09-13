@@ -1,4 +1,4 @@
-//! One monotonic clock per Run (`docs/measurement-foundation.md` section 6):
+//! One monotonic clock per Run (`docs/02-research-areas/measurement/measurement-foundation.md` section 6):
 //! every process/compiler event this crate records is a nanosecond offset
 //! from a single `RunClock` anchor, never a wall-clock timestamp read a
 //! second time from a different source -- that's what makes events from

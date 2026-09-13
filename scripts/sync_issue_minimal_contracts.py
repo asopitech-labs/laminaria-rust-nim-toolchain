@@ -17,7 +17,7 @@ from dataclasses import dataclass
 
 START = "<!-- minimal-hypothesis-contract:start -->"
 END = "<!-- minimal-hypothesis-contract:end -->"
-POLICY = "https://github.com/asopitech-labs/laminaria-rust-nim-toolchain/blob/main/docs/research-prioritization-policy_ja.md"
+POLICY = "https://github.com/asopitech-labs/laminaria-rust-nim-toolchain/blob/main/docs/01-foundations/research-prioritization-policy_ja.md"
 ROADMAP = "https://github.com/asopitech-labs/laminaria-rust-nim-toolchain/blob/main/docs/near-term-research-program_ja.md"
 
 

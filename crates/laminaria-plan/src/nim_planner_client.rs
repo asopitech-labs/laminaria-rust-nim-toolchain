@@ -10,7 +10,7 @@
 //! and panic/exception-unwind-boundary questions that direct linking
 //! would force (issue #4's own text permits "an explicit validated
 //! adapter" as a pinned bootstrap route without settling the wider
-//! ABI-free research question) -- see `docs/self-build.md`.
+//! ABI-free research question) -- see `docs/04-guides/self-build.md`.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};

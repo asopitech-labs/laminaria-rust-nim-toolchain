@@ -1,6 +1,6 @@
 //! Source-derived owned IR for a declared Rust/Nim subset (issues #25/#3),
 //! implemented jointly with the #6/#8 planner/scheduler contract shape per
-//! `docs/compiler-ownership-contract.md`'s corrected research order.
+//! `docs/01-foundations/compiler-ownership-contract.md`'s corrected research order.
 //!
 //! ## Scope of this task
 //!
@@ -11,7 +11,7 @@
 //! request. Both `rust_frontend`/`nim_frontend` reject anything outside
 //! this subset with a [`diagnostics::Diagnostic`] naming the real
 //! construct and source span -- never a panic, never a partial IR, never a
-//! fallback to invoking `rustc`/`nim` (`docs/compiler-ownership-contract.md`'s
+//! fallback to invoking `rustc`/`nim` (`docs/01-foundations/compiler-ownership-contract.md`'s
 //! "Separate roles" table).
 //!
 //! ## What this closes from the existing fixture

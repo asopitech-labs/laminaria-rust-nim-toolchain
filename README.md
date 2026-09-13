@@ -16,7 +16,7 @@ Vertical integration and horizontal distribution are joint research subjects: co
 
 The current `build`/`plan-build` and `self-build` commands still schedule coarse Cargo/Nim actions sequentially. They are **delegated-build/bootstrap baselines**, not the intended compiler or independent self-hosting. The semantic-substrate fixture contains hand-authored IR, a limited evaluator/transform and an LLVM comparison projection; it is not a Rust/Nim source compiler.
 
-See the [compiler ownership contract](docs/compiler-ownership-contract.md), [日本語の責務契約](docs/compiler-ownership-contract_ja.md), [research prioritization policy](docs/research-prioritization-policy.md), [日本語の研究優先順位ポリシー](docs/research-prioritization-policy_ja.md), [project progression and near-term goal](docs/near-term-research-program.md), [全体進行と当面の研究ゴール](docs/near-term-research-program_ja.md), and [audit and corrected issue order](docs/research-intent-audit-2026-09-10.md). Current issues are minimal hypothesis tests, not requests for finished-product subsystems; project-wide priority follows non-substitutability and falsification power rather than issue number or unchecked-box count. [Project-build](docs/project-build.md) and [self-build](docs/self-build.md) retain accurate instructions for the current baseline commands; this documentation correction does not change their behavior.
+Start with the [project progression and near-term research goal](docs/near-term-research-program.md) ([日本語](docs/near-term-research-program_ja.md)). It is the canonical source for the current milestone and task order. The [documentation map](docs/README.md) then leads from that goal to foundations, research areas, issue-specific work, operational guides, and history. Current issues are minimal hypothesis tests, not requests for finished-product subsystems.
 
 ## Core concepts
 
@@ -70,11 +70,13 @@ wslc run --rm --pull never laminaria-bootstrap doctor
 ```
 
 The complete lifecycle and canonical commands are in the
-[Windows `wslc` container development procedure](docs/windows-wslc-development.md).
+[Windows `wslc` container development procedure](docs/04-guides/windows-wslc-development.md).
 
-Per `docs/measurement-foundation.md` §2, this is for bootstrap/correctness reproduction only — canonical performance measurements should run natively on the host being measured, and `doctor` records `environment_class = "container"` so such runs are never silently compared to a native baseline.
+Per `docs/02-research-areas/measurement/measurement-foundation.md` §2, this is for bootstrap/correctness reproduction only — canonical performance measurements should run natively on the host being measured, and `doctor` records `environment_class = "container"` so such runs are never silently compared to a native baseline.
 
 ## Documentation
+
+The documentation is intentionally rooted at the [project progression and near-term research goal](docs/near-term-research-program.md). See the [documentation map](docs/README.md) for the reading order and complete directory structure. For implemented behavior, direct executable tests against the production Rust/Nim code are authoritative; design fixtures and fixture-only validators are not.
 
 ### Reference-project source setup
 
@@ -91,33 +93,8 @@ python3 scripts/reference_projects.py status                    # offline verifi
 Existing clones are verified, never reset or overwritten. Linux's source tree
 requires a case-sensitive volume; use `--exclude linux` on other volumes and
 set up Linux separately with `--root`. Submodules are not fetched.
-See [the setup procedure and reference map](docs/reference-projects.md) for
+See [the setup procedure and reference map](docs/04-guides/reference-projects.md) for
 Windows commands, destination selection, recovery, and revision updates.
-
-### Research and implementation documents
-
-- [Hike極小Wasmコンパイラのエンジニアリング研究](docs/hike-micro-wasm-engineering-research_ja.md)
-- [Windows `wslc` container development procedure](docs/windows-wslc-development.md)
-- [Agent-oriented toolchain UX and bounded planning (English)](docs/agent-oriented-toolchain-ux.md)
-- [エージェント指向ツールチェーンUX・探索抑制方針 (日本語)](docs/agent-oriented-toolchain-ux_ja.md)
-- [Validated toolchain profiles and progressive configuration (English)](docs/validated-toolchain-profiles.md)
-- [検証済みツールチェーンプロファイルと段階設定 (日本語)](docs/validated-toolchain-profiles_ja.md)
-- [Multi-version Rust/Nim toolchain policy (English)](docs/multi-version-toolchains.md)
-- [Rust/Nim複数コンパイラバージョン対応方針 (日本語)](docs/multi-version-toolchains_ja.md)
-- [Measurement foundation and environment/trace strategy (English)](docs/measurement-foundation.md)
-- [計測基盤・環境・処理フロー観測方針 (日本語)](docs/measurement-foundation_ja.md)
-- [Backend pipeline white-boxing research direction (English)](docs/backend-pipeline-whiteboxing.md)
-- [Backend Pipeline White-boxing 研究方針 (日本語)](docs/backend-pipeline-whiteboxing_ja.md)
-- [Research foundations and architecture direction (English)](docs/research-foundations.md)
-- [研究基盤とアーキテクチャ方針 (日本語)](docs/research-foundations_ja.md)
-- [Research program and evidence policy (English)](docs/research-program.md)
-- [研究プログラムと証拠ポリシー (日本語)](docs/research-program_ja.md)
-- [Rust–Nim native linking research plan (English)](docs/rust-nim-native-linking.md)
-- [Rust–Nim Native Linking 研究計画 (日本語)](docs/rust-nim-native-linking_ja.md)
-- [Metrics-first research policy](docs/metrics-policy.md)
-- [Research issue plan](docs/issue-plan.md)
-- [Project proposal (English)](docs/project-proposal.md)
-- [Project proposal (Japanese)](docs/project-proposal_ja.md)
 
 ## License
 

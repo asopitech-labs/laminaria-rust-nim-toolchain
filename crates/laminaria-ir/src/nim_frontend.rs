@@ -2,7 +2,7 @@
 //!
 //! Nim has no off-the-shelf Rust-side syntax-parsing library the way Rust
 //! has `syn`, and Nim's own compiler is not invocable as a library. Per
-//! `docs/compiler-ownership-contract.md`'s lexical/syntactic-parsing-reuse
+//! `docs/01-foundations/compiler-ownership-contract.md`'s lexical/syntactic-parsing-reuse
 //! boundary, this hand-written tokenizer + recursive-descent parser is
 //! grounded directly in the real Nim compiler's own lexer/parser (studied
 //! from this repo's existing shallow clone at `.reference/Nim/compiler/

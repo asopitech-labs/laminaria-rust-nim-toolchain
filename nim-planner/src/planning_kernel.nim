@@ -8,7 +8,7 @@
 ## Every non-trivial step below is a named port of a real, studied
 ## reference-project algorithm (`.reference/buck2`, `.reference/bazel`,
 ## `.reference/pants`, `.reference/nx` -- see the approved plan's
-## "Grounded design choices" section and `docs/self-build.md`), not an
+## "Grounded design choices" section and `docs/04-guides/self-build.md`), not an
 ## invented one:
 ## - dependency edges are derived from artifact producer/consumer
 ##   matching, the way Buck2's `BuildArtifact` carries its producing
@@ -251,7 +251,7 @@ proc decodePlanningInputOrReject*(root: JsonNode): tuple[input: Option[PlanningI
   ## rejection requirement and this plan's explicit ordering guarantee --
   ## plus the actual JSON decode. Exported separately from `plan` itself
   ## so a caller that needs to measure `plan`'s own wall time exclusively
-  ## (`docs/design/issue-35-d0-cases.yaml`'s `M8-many-unrequested-nim-planner`
+  ## (`docs/05-history/issue-35-d0-cases.yaml`'s `M8-many-unrequested-nim-planner`
   ## case's confirmed `measurement_boundary`) can call this decode step
   ## and the timed `plan` call separately, rather than timing the
   ## combined `planFromJson` (schema gate + decode + plan), which is a

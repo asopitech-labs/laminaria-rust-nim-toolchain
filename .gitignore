@@ -40,7 +40,7 @@ runs/
 # Local clones of reference/prior-art projects named in docs/ (e.g.
 # rust-lang/cargo, nim-lang/Nim, nim-lang/nimony, rust-lang/rustc-perf) --
 # kept locally for actually reading real implementations before writing
-# LAMINARIA's own, never committed. See docs/reference-projects.md.
+# LAMINARIA's own, never committed. See docs/04-guides/reference-projects.md.
 .reference/
 
 # Python reference-setup test caches

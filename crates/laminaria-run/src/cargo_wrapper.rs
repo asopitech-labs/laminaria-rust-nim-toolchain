@@ -1,7 +1,7 @@
 //! Per-`rustc`-invocation measurement via wrapper substitution -- **not**
 //! OS-level process-tree walking (ptrace/`/proc`). This is the technique
 //! `rust-lang/rustc-perf` (the reference project
-//! `docs/measurement-foundation.md` section 16 names) actually uses in its
+//! `docs/02-research-areas/measurement/measurement-foundation.md` section 16 names) actually uses in its
 //! production collector (`collector/src/bin/rustc-fake.rs`,
 //! `collector/src/compile/execute/mod.rs`'s `.env("RUSTC", &*FAKE_RUSTC)`):
 //! override Cargo's `RUSTC` environment variable to point at a thin wrapper

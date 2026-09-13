@@ -2,10 +2,10 @@
 
 ## Evidence classification correction (2026-09-10)
 
-This file preserves historical fixture/measurement and implementation evidence, not the current research delivery order. Existing-compiler builds and driver self-builds recorded below are **reference/bootstrap/delegated-build baselines**, not proof of LAMINARIA compiler ownership or independent self-hosting. The [compiler ownership contract](../../docs/compiler-ownership-contract.md) governs current issue acceptance; historical checklists do not close the revised requirements.
+This file preserves historical fixture/measurement and implementation evidence, not the current research delivery order. Existing-compiler builds and driver self-builds recorded below are **reference/bootstrap/delegated-build baselines**, not proof of LAMINARIA compiler ownership or independent self-hosting. The [compiler ownership contract](../../docs/01-foundations/compiler-ownership-contract.md) governs current issue acceptance; historical checklists do not close the revised requirements.
 
 
-Implements a first, honest slice of `docs/measurement-foundation.md`'s
+Implements a first, honest slice of `docs/02-research-areas/measurement/measurement-foundation.md`'s
 Run schema and process/resource tracer. This file records the empirical
 checks the design leans on, and precisely what's covered vs. still open
 — see `src/lib.rs`'s own doc comment for the summary, and each module's
@@ -16,7 +16,7 @@ doc comment for its own scope.
 The obvious first instinct for "parent/child process relationships are
 preserved" (issue #19's acceptance criteria) is OS-level process-tree
 walking: `ptrace`, `/proc` polling on Linux, `libproc` on macOS. Before
-writing any of that, `docs/measurement-foundation.md` section 16's named
+writing any of that, `docs/02-research-areas/measurement/measurement-foundation.md` section 16's named
 reference project — `rust-lang/rustc-perf` — was actually cloned and its
 real collector source read (not re-derived from general knowledge of the
 problem domain). It does **not** do OS-level tree walking anywhere in its
@@ -203,7 +203,7 @@ count.
 
 ## Level 0 (minimal wrapper) vs. Level 1 (resource tracing) overhead — measured, not asserted
 
-Issue #19 Experiment 6 and `docs/measurement-foundation.md` section 12
+Issue #19 Experiment 6 and `docs/02-research-areas/measurement/measurement-foundation.md` section 12
 both ask for observer overhead to be measured, not just implemented
 around. `tracer::trace_root_command_level0` (`std::process::Child::wait`,
 no `wait4`/`libc` at all) is the "minimal wrapper" baseline; `laminaria
@@ -239,7 +239,7 @@ level1 (steady state): 0.034736, 0.035079  (mean ~0.03491s)
 trivial command and a real no-op Cargo rebuild, on this platform. Not
 zero, but small relative to a single extra syscall's noise floor at this
 sample size — a genuine measurement, not a claim that the overhead is
-negligible by design. `docs/measurement-foundation.md` section 11's own
+negligible by design. `docs/02-research-areas/measurement/measurement-foundation.md` section 11's own
 guidance (store every raw sample, don't trust one wall-clock number)
 applies here too: this is 3-5 samples on one machine, not a rigorous
 statistical claim — sufficient to demonstrate the comparison is now
@@ -281,7 +281,7 @@ no-op number alone represents).
 
 ## Level 2 compiler telemetry for Nim — no JSON stream exists, so Nim's own hint output is parsed instead
 
-`docs/measurement-foundation.md` section 7's "Nim / Nimony" adapter
+`docs/02-research-areas/measurement/measurement-foundation.md` section 7's "Nim / Nimony" adapter
 explicitly anticipates this case: *"do not assume Nim 2 and Nimony
 expose the same adapter/capability set"* as Cargo. Searched Nim's real
 compiler source (`.reference/Nim/compiler/`) for a `--message-format=
@@ -356,7 +356,7 @@ result — not something to normalize away.
 
 ## Level 2 compiler telemetry for Cargo — Cargo's own JSON messages, studied from Cargo's real source
 
-`docs/measurement-foundation.md` section 7 names "Cargo JSON messages may
+`docs/02-research-areas/measurement/measurement-foundation.md` section 7 names "Cargo JSON messages may
 assist artifact/process relationships" as the concrete Level 2 adapter
 for Rust/Cargo. Studied from Cargo's actual source
 (`.reference/cargo/src/util/machine_message.rs`) before implementing
@@ -1972,7 +1972,7 @@ both confirmed and fixed in the same round:
    the global lock" time overlapped with another's "actually computing"
    time, and the measurement couldn't tell the two apart. Fixed by
    replacing wall-clock intervals with a new
-   [`ComputeConcurrencyProbe`](../laminaria-run/src/compiler_work_executor.rs):
+   [`ComputeConcurrencyProbe`](src/compiler_work_executor.rs):
    an `AtomicUsize`-based active/peak counter, entered via an RAII guard
    placed *inside* each of the four `dispatch_*` functions, wrapping only
    their own actual `laminaria_ir` call(s) -- never the brief

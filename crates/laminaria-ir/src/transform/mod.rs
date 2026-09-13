@@ -6,7 +6,7 @@
 //! remains unimplemented"). Both candidates inline every call to a named
 //! callee inside a named caller's body, run through the identical safety
 //! battery in this crate's tests, and are compared honestly rather than
-//! one being assumed correct upfront (`docs/llvm-rediscovery-research.md`'s
+//! one being assumed correct upfront (`docs/02-research-areas/compiler/llvm-rediscovery-research.md`'s
 //! own "do not adopt concepts because they already exist" stance, applied
 //! here to ANF/SSA-style binding disciplines, not just LLVM):
 //!

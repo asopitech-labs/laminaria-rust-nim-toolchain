@@ -3,7 +3,7 @@
 //! returns `Result<Program, Vec<Diagnostic>>` -- never a panic, never a
 //! partial/best-effort `Program`, and never a fallback to invoking
 //! `rustc`/`nim` to get an answer some other way. This is a direct
-//! requirement from `docs/compiler-ownership-contract.md`'s "Separate
+//! requirement from `docs/01-foundations/compiler-ownership-contract.md`'s "Separate
 //! roles" table: an unsupported construct or a malformed input is a
 //! diagnostic, not a silently-degraded success or a delegated compile.
 

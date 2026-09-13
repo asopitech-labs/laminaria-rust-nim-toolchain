@@ -1,5 +1,5 @@
 ## Issue #36 T0's session-scoped incremental planning state machine
-## (`docs/design/issue-36-t0-incremental-contract.md`, commit `9d730ec`):
+## (`docs/03-work-items/design/issue-36-t0-incremental-contract.md`, commit `9d730ec`):
 ## `IncrementalSession` owns the accumulated graph, demand closure, cycle
 ## detection, and ready frontier (T0 §2 principle 4) across a whole
 ## `StartSession`..`CloseSession` session. Reuses `planning_kernel.findCycle`

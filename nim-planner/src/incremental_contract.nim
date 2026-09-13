@@ -1,5 +1,5 @@
 ## Issue #36 T0's accepted session-scoped incremental-planning wire
-## protocol (`docs/design/issue-36-t0-incremental-contract.md`, commit
+## protocol (`docs/03-work-items/design/issue-36-t0-incremental-contract.md`, commit
 ## `9d730ec`), mirroring `crates/laminaria-plan/src/incremental.rs`
 ## field-for-field by hand -- the same convention `contract.nim` already
 ## uses for `crates/laminaria-plan/src/types.rs` (see that module's own

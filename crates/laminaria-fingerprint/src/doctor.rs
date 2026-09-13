@@ -1,7 +1,7 @@
 //! Orchestrates `EnvironmentFingerprint` + per-toolchain fingerprint
 //! resolution into one `ToolchainReport`, and renders it either as
 //! machine-readable JSON or a human-readable summary. This is the `doctor`
-//! responsibility described in `docs/measurement-foundation.md` section 14.
+//! responsibility described in `docs/02-research-areas/measurement/measurement-foundation.md` section 14.
 
 use std::path::{Path, PathBuf};
 

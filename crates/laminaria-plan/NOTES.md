@@ -290,7 +290,7 @@ production `PlanningInput` builder in this workspace
 (`laminaria-run::self_build::self_build_planning_input`,
 `project_build::project_planning_input`) already gives every
 side-effecting action a real declared output for exactly this reason (a
-convention `docs/self-build.md`'s own "never a fabricated `Integrate`
+convention `docs/04-guides/self-build.md`'s own "never a fabricated `Integrate`
 step" language already states) -- only a handful of test fixtures
 (`nim-planner`'s own `test_planning_kernel.nim`, `laminaria-plan`'s
 `nim_planner_client.rs::sample_input`/cycle-rejection test,

@@ -42,7 +42,7 @@ proc main() =
   ## `planFromJson` itself uses), *outside* the timed interval below --
   ## issue #28 D1-a's own measurement review found the previous version
   ## of this file timed the combined `planFromJson` (gate + decode +
-  ## `plan`), wider than `docs/design/issue-35-d0-cases.yaml`'s
+  ## `plan`), wider than `docs/05-history/issue-35-d0-cases.yaml`'s
   ## `M8-many-unrequested-nim-planner` case's own confirmed
   ## `measurement_boundary` ("計測開始はplanning_kernel.plan呼び出し直前、
   ## 終了はExecutionPlan受領直後"). `decodePlanningInputOrReject` is the

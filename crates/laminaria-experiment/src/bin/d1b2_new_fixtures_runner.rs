@@ -1,7 +1,7 @@
 //! `cargo run -p laminaria-experiment --bin laminaria-d1b2-new-fixtures`
 //!
 //! Issue #28 D1-b2: re-runs the two new fixtures named by
-//! `docs/design/issue-35-d0-cases.yaml` (M7's `fixtures/
+//! the historical `docs/05-history/issue-35-d0-cases.yaml` (M7's `fixtures/
 //! long-chain-wide-branches`, M8-many-unrequested-cargo's `fixtures/
 //! many-unrequested-targets`) and reports pass/fail against each case's
 //! own D0-pinned `expected` value. Raw per-case logs are written under

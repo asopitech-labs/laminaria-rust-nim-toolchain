@@ -1,5 +1,5 @@
 //! Issue #36 T0's accepted session-scoped incremental-planning wire
-//! protocol (`docs/design/issue-36-t0-incremental-contract.md`, commit
+//! protocol (`docs/03-work-items/design/issue-36-t0-incremental-contract.md`, commit
 //! `9d730ec`), §3/§4/§6.4. This is the Rust-owned source of truth;
 //! `nim-planner/src/incremental_contract.nim` mirrors it field-for-field
 //! by hand, the same convention `crate::types`/`nim-planner/src/

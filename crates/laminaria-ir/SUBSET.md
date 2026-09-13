@@ -9,7 +9,7 @@ this table exists to surface, not a decorative completeness claim.
 
 Legend: **A** = accepted into the IR, **R** = rejected with a diagnostic
 (never a panic, never a partial `Program`, never a fallback to invoking
-`rustc`/`nim` -- `docs/compiler-ownership-contract.md`), **I** = ignored
+`rustc`/`nim` -- `docs/01-foundations/compiler-ownership-contract.md`), **I** = ignored
 (not inspected at all, because it lies outside the requested-functions
 closure).
 

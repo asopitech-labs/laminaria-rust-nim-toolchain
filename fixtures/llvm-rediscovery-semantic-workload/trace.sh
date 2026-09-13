@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Issue #25's first experiment (docs/llvm-rediscovery-research.md):
+# Issue #25's first experiment (docs/02-research-areas/compiler/llvm-rediscovery-research.md):
 # trace the semantic contract in ../CONTRACT.md through each compiler's
 # own stages, for Rust and Nim independently, starting from source --
 # not from pre-existing merged LLVM IR (that's fixtures/

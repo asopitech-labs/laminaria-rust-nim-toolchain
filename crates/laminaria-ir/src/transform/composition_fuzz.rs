@@ -39,7 +39,7 @@ use std::path::PathBuf;
 
 /// A tiny deterministic PRNG (splitmix64) -- no external `rand` dependency
 /// (this crate declares none beyond `syn`/`proc-macro2`, matching
-/// `docs/compiler-ownership-contract.md`'s minimal-reuse stance), and fully
+/// `docs/01-foundations/compiler-ownership-contract.md`'s minimal-reuse stance), and fully
 /// reproducible for a fixed seed, per issue #27's own A4 requirement
 /// ("固定seedの生成テストで検証...再現可能に").
 struct Rng(u64);

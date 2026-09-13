@@ -2,11 +2,11 @@
 
 ## Evidence classification correction (2026-09-10)
 
-This file preserves historical fixture/measurement and implementation evidence, not the current research delivery order. Existing-compiler builds and driver self-builds recorded below are **reference/bootstrap/delegated-build baselines**, not proof of LAMINARIA compiler ownership or independent self-hosting. The [compiler ownership contract](../../docs/compiler-ownership-contract.md) governs current issue acceptance; historical checklists do not close the revised requirements.
+This file preserves historical fixture/measurement and implementation evidence, not the current research delivery order. Existing-compiler builds and driver self-builds recorded below are **reference/bootstrap/delegated-build baselines**, not proof of LAMINARIA compiler ownership or independent self-hosting. The [compiler ownership contract](../../docs/01-foundations/compiler-ownership-contract.md) governs current issue acceptance; historical checklists do not close the revised requirements.
 
 
 #11's "direct native-link workload" Core workload: the minimal Layer 1
-proof from `docs/rust-nim-native-linking.md` — "one Rust-produced object
+proof from `docs/02-research-areas/compiler/rust-nim-native-linking.md` — "one Rust-produced object
 and one Nim-produced object in the same link, with an intentionally
 simple symbol relationship and no generated C header contract." This
 fixture is what future direct native-link research (issue #4) builds its
@@ -26,12 +26,12 @@ still fundamentally C's, because a C compiler is what produced them.
 That is a real, useful finding on its own — "no generated header" is not
 nothing — but it is **not** the same claim as "Rust and Nim participate
 in one native link without being constrained by C's ABI at all," which
-is `docs/rust-nim-native-linking.md`'s actual framing (a Rust codegen
+is `docs/02-research-areas/compiler/rust-nim-native-linking.md`'s actual framing (a Rust codegen
 pipeline and a Nim codegen pipeline sharing one artifact/link model, not
 each independently targeting C's calling convention and happening to
 agree).
 
-Per this project's own `docs/research-program.md` Track J, there are at
+Per this project's own `docs/01-foundations/research-program.md` Track J, there are at
 least three distinct Nim-side native-code routes, evaluated separately
 by design:
 
@@ -545,7 +545,7 @@ Every experiment above has Nim call into Rust. This reverses it: Rust
 calls a Nim-provided function pointer directly (`rust_calls_callback(cb:
 extern "C" fn(i32) -> i32, x: i32)`). A plain function pointer with no
 captured environment is exactly the "closures/function values" class
-`docs/rust-nim-native-linking.md`'s compatibility matrix already lists
+`docs/02-research-areas/compiler/rust-nim-native-linking.md`'s compatibility matrix already lists
 as usable when nothing is captured — verified here, not just declared
 usable in principle.
 
@@ -635,7 +635,7 @@ to run later in Nim-generated code once safely back on the Nim side.
 **This is a real, route-dependent divergence in a safety property, not
 a bug in this fixture** — the two Nim-side routes give different safety
 guarantees for the identical source and identical scenario, precisely
-the kind of thing `docs/multi-version-toolchains.md` and this project's
+the kind of thing `docs/02-research-areas/toolchains/multi-version-toolchains.md` and this project's
 own frontend/route identity tracking exist to make visible rather than
 average over. Practical implication: a Nim callback that might raise,
 invoked through a raw Rust function pointer, is a *route-dependent*
@@ -645,7 +645,7 @@ regardless of which Nim compiler produced the calling code.
 
 ## Explicitly not attempted, and why (Layer 3/4 scope)
 
-Per `docs/rust-nim-native-linking.md`'s own required "compatibility
+Per `docs/02-research-areas/compiler/rust-nim-native-linking.md`'s own required "compatibility
 matrix" and non-goals, the following are **not** claimed compatible and
 were not attempted here — attempting them without the matching Layer 4
 (runtime/failure semantics) groundwork would risk exactly the "unsafe
@@ -690,14 +690,14 @@ container's own representation never crosses the boundary.
   before use and never holds one across a call boundary where the other
   side could run code — see the growth-invalidation caveat above.
 
-These are Layer 4 concerns (`docs/rust-nim-native-linking.md`'s runtime
+These are Layer 4 concerns (`docs/02-research-areas/compiler/rust-nim-native-linking.md`'s runtime
 and failure semantics layer) and are left as open, explicitly-flagged
 gaps for whoever picks up issue #4's Layer 4 work next, not silently
 assumed away.
 
 ## Non-claims
 
-Per `docs/rust-nim-native-linking.md`'s non-goals: this fixture does not
+Per `docs/02-research-areas/compiler/rust-nim-native-linking.md`'s non-goals: this fixture does not
 claim arbitrary Rust/Nim value layouts are compatible, does not invent a
 new ABI, and does not test runtime/failure semantics beyond the two
 pointer-validity caveats above (growth-triggered reallocation, and
@@ -715,7 +715,7 @@ compatibility matrix, and not the rest of Layer 4-6 (thread/TLS
 obligations, exceptions, WASM). All of it is `nim c`-route evidence
 only, per the scope warning above. Issue #4's own research is expected
 to extend this with more type classes, the remaining runtime/failure/
-optimization layers `docs/rust-nim-native-linking.md` describes, and —
+optimization layers `docs/02-research-areas/compiler/rust-nim-native-linking.md` describes, and —
 per the scope warning above — the actual C-free route this issue is
 ultimately about.
 
@@ -903,7 +903,7 @@ mentioned above.
 
 ## `c-abi-baseline/`: Layer 5's required comparison against a conventional C ABI boundary
 
-`docs/rust-nim-native-linking.md`'s Layer 5 requires comparing this
+`docs/02-research-areas/compiler/rust-nim-native-linking.md`'s Layer 5 requires comparing this
 project's direct path against "conventional C ABI baseline" — its own
 framing: *"C ABI as mandatory architectural boundary versus C ABI/
 adapters as one possible boundary artifact chosen only where required."*

@@ -1,6 +1,6 @@
 //! `PlanningInput -> ExecutionPlan` contract and Nim Planning Kernel
 //! subprocess client for LAMINARIA (issue #8), the Rust half of
-//! `nim-planner/`. See `docs/self-build.md` for the full protocol.
+//! `nim-planner/`. See `docs/04-guides/self-build.md` for the full protocol.
 
 pub mod compiler_work;
 pub mod incremental;

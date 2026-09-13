@@ -3,7 +3,7 @@
 # counterpart to ../nim-bin/main.nim, against the *same* unmodified
 # ../rust-lib static library, and reports the comparison evidence
 # (object/binary size, generated-C size, symbol/relocation inspection,
-# build step cost) docs/rust-nim-native-linking.md's Layer 5 requires.
+# build step cost) docs/02-research-areas/compiler/rust-nim-native-linking.md's Layer 5 requires.
 # See ../NOTES.md for how to read the output.
 set -euo pipefail
 cd "$(dirname "$0")"

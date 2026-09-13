@@ -8,7 +8,7 @@
 //! without requiring the caller to build `nim-planner` by hand first.
 //! Building LAMINARIA's own already-existing Nim planner source via
 //! `nim c` is the project's own established build convention (see
-//! `docs/self-build.md`), not a compiler-ownership-contract violation --
+//! `docs/04-guides/self-build.md`), not a compiler-ownership-contract violation --
 //! this never invokes `nim c`/`nimble` on any *target* being measured,
 //! only on `nim-planner/` itself.
 

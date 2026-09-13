@@ -2,7 +2,7 @@
 
 ## Evidence classification correction (2026-09-10)
 
-This file preserves historical fixture/measurement and implementation evidence, not the current research delivery order. Existing-compiler builds and driver self-builds recorded below are **reference/bootstrap/delegated-build baselines**, not proof of LAMINARIA compiler ownership or independent self-hosting. The [compiler ownership contract](../docs/compiler-ownership-contract.md) governs current issue acceptance; historical checklists do not close the revised requirements.
+This file preserves historical fixture/measurement and implementation evidence, not the current research delivery order. Existing-compiler builds and driver self-builds recorded below are **reference/bootstrap/delegated-build baselines**, not proof of LAMINARIA compiler ownership or independent self-hosting. The [compiler ownership contract](../docs/01-foundations/compiler-ownership-contract.md) governs current issue acceptance; historical checklists do not close the revised requirements.
 
 
 Committed, versioned reference workloads for the LAMINARIA measurement spine
@@ -111,7 +111,7 @@ Nim's default cache lives outside the repo entirely).
   issue's "unexpected extra actions" acceptance criterion.
 
 - `direct-native-link/` — the "direct native-link workload" workload: the
-  minimal Layer 1 proof from `docs/rust-nim-native-linking.md` ("one
+  minimal Layer 1 proof from `docs/02-research-areas/compiler/rust-nim-native-linking.md` ("one
   Rust-produced object and one Nim-produced object in the same link, with
   an intentionally simple symbol relationship and no generated C header
   contract"). Reverses every other Rust/Nim fixture's direction — Nim is
@@ -125,7 +125,7 @@ Nim's default cache lives outside the repo entirely).
 
 - `rust-nim-llvm-lto-compatibility/` — the "Rust/Nim 2/Nimony shared
   LLVM/LTO compatibility workload": the minimal first proof from
-  `docs/research-program.md` Track J. Not "can the linker resolve
+  `docs/01-foundations/research-program.md` Track J. Not "can the linker resolve
   symbols across two native objects" (every other fixture here) but
   "can Rust's own LLVM IR and Nim's own LLVM IR (via `nlvm`) be merged
   into *one module* with `llvm-link`, before either side reaches native

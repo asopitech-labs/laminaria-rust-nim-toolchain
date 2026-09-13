@@ -1,12 +1,12 @@
 //! Versioned JSON contract for LAMINARIA's Nim Planning Kernel (issue #8):
 //! `plan(PlanningInput) -> ExecutionPlan`, per
-//! `docs/research-foundations.md` section 7's naming.
+//! `docs/01-foundations/research-foundations.md` section 7's naming.
 //!
 //! This module is the Rust-owned source of truth for the contract;
 //! `nim-planner/src/contract.nim` mirrors it field-for-field by hand (see
 //! that module's own doc comment) since there is no shared schema
 //! generator -- every JSON key here is chosen to match the Nim side
-//! exactly. See `docs/self-build.md` for the full protocol and which
+//! exactly. See `docs/04-guides/self-build.md` for the full protocol and which
 //! design choice came from which studied reference project
 //! (`.reference/{buck2,bazel,pants,nx}`).
 
@@ -71,7 +71,7 @@ pub enum ActionKind {
     /// (`laminaria-ir::rust_frontend`/`nim_frontend`,
     /// `laminaria-ir::transform`), not an existing compiler/backend
     /// invocation -- carries a [`CompilerWorkDescriptor`] on `Action`.
-    /// `docs/compiler-ownership-contract.md` governs this: none of these
+    /// `docs/01-foundations/compiler-ownership-contract.md` governs this: none of these
     /// four ever shell out to `rustc`/`nim`/`llc`.
     LowerSource,
     ValidateIr,

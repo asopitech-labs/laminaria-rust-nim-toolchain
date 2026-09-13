@@ -1,4 +1,4 @@
-//! Level 0/1 process tracer (`docs/measurement-foundation.md` section 6):
+//! Level 0/1 process tracer (`docs/02-research-areas/measurement/measurement-foundation.md` section 6):
 //! spawns the Run's root command, redirects its stdout/stderr to files, and
 //! reaps it with `wait4` (Unix) so the returned `ProcessRecord` carries not
 //! just lifecycle/exit-status (Level 0) but CPU/RSS/I/O/fault/
@@ -33,7 +33,7 @@ pub const COVERAGE_NOTE: &str = "resource_usage is cumulative over the root proc
 
 pub const LEVEL0_COVERAGE_NOTE: &str = "Level 0 lifecycle-only tracing: exit status and wall \
     timestamps only, no resource accounting (no wait4 call at all) -- deliberately, this is the \
-    minimal-wrapper baseline docs/measurement-foundation.md section 12 and issue #19 Experiment 6 \
+    minimal-wrapper baseline docs/02-research-areas/measurement/measurement-foundation.md section 12 and issue #19 Experiment 6 \
     ask for, to measure Level 1's own observer overhead against";
 
 pub const NON_UNIX_LEVEL1_FALLBACK_NOTE: &str = "Level 1 (wait4-based resource accounting) was \
@@ -116,7 +116,7 @@ pub fn trace_root_command(
 
 /// The Level 0 counterpart to `trace_root_command`: portable lifecycle
 /// tracing only (`std::process::Child::wait`, no `wait4`/`libc` at all) --
-/// the "minimal wrapper" baseline `docs/measurement-foundation.md` section
+/// the "minimal wrapper" baseline `docs/02-research-areas/measurement/measurement-foundation.md` section
 /// 12 and issue #19 Experiment 6 ask every heavier probe level to be
 /// measured against. `resource_usage` is always all-`None`, with every
 /// field explicitly listed in `unsupported_fields` -- not because the
@@ -333,7 +333,7 @@ fn resource_usage_from_rusage(rusage: &libc::rusage) -> ResourceUsage {
 pub fn reap(_pid: u32) -> io::Result<(ExitStatusRecord, ResourceUsage)> {
     // Level 1 (resource accounting) is Unix-only in this first pass --
     // explicitly unsupported here rather than fabricating zeros, per
-    // docs/measurement-foundation.md section 6's acceptance criterion.
+    // docs/02-research-areas/measurement/measurement-foundation.md section 6's acceptance criterion.
     // A caller on a non-Unix target should fall back to Level 0 lifecycle
     // tracing only (not implemented as a separate path in this crate yet).
     Err(io::Error::new(
@@ -485,7 +485,7 @@ mod tests {
         assert_eq!(status.code, Some(3));
         assert_eq!(status.signal, None);
         // Evidence collected up to the failure must still be present, not
-        // discarded (docs/measurement-foundation.md's "failure/cancellation
+        // discarded (docs/02-research-areas/measurement/measurement-foundation.md's "failure/cancellation
         // does not discard partial evidence" acceptance criterion).
         assert!(record.resource_usage.user_cpu_seconds.is_some());
         assert_eq!(

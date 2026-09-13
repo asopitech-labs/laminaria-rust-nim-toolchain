@@ -1,5 +1,5 @@
 //! Writes and reads the `runs/<run-id>/` on-disk layout
-//! (`docs/measurement-foundation.md` section 5's candidate layout) and
+//! (`docs/02-research-areas/measurement/measurement-foundation.md` section 5's candidate layout) and
 //! regenerates `summary.json` from already-written raw evidence.
 
 use std::fs;
@@ -58,7 +58,7 @@ pub fn write_run(runs_root: &Path, run: &Run) -> io::Result<PathBuf> {
     write_jsonl(&dir.join("processes.jsonl"), &run.process_trace.processes)?;
     // Level 2 (compiler telemetry) evidence is not yet produced as its own
     // JSONL stream (see Run::compiler_telemetry instead) -- this file still
-    // exists (empty), matching docs/measurement-foundation.md section 5's
+    // exists (empty), matching docs/02-research-areas/measurement/measurement-foundation.md section 5's
     // candidate layout, so a later writer can append to it without a
     // layout migration.
     touch(&dir.join("compiler-events.jsonl"))?;

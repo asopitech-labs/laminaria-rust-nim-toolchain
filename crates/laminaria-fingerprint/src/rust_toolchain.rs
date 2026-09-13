@@ -1,5 +1,5 @@
 //! Resolves each named Rust toolchain in `toolchains.lock.toml` to an exact
-//! `RustToolchainFingerprint`, per `docs/multi-version-toolchains.md`
+//! `RustToolchainFingerprint`, per `docs/02-research-areas/toolchains/multi-version-toolchains.md`
 //! sections 2-3: the requested selector (e.g. "stable") and the resolved
 //! compiler identity are kept as separate, both-recorded fields.
 

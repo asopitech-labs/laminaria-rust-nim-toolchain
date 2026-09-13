@@ -1,6 +1,6 @@
 //! Versioned Run envelope and Level 0/1/2 process/resource/compiler
 //! tracer for LAMINARIA (issue #19), following
-//! `docs/measurement-foundation.md`.
+//! `docs/02-research-areas/measurement/measurement-foundation.md`.
 //!
 //! This crate implements a first, honest slice of that design, not the
 //! whole thing. See each module's doc comment for exactly what it covers;
@@ -394,7 +394,7 @@ pub fn generate_run_id() -> String {
 /// `probe_level` selects `ProbeLevel::Level1ProcessResource` (the default,
 /// full `wait4`-based resource accounting plus Cargo/Nim wrapper
 /// substitution where applicable) or `ProbeLevel::Level0Lifecycle` (the
-/// minimal-wrapper baseline `docs/measurement-foundation.md` section 12
+/// minimal-wrapper baseline `docs/02-research-areas/measurement/measurement-foundation.md` section 12
 /// and issue #19 Experiment 6 ask every heavier probe level to be
 /// measured against -- no resource accounting, no wrapper substitution,
 /// portable `Child::wait` only). Any other `ProbeLevel` falls back to
@@ -508,7 +508,7 @@ pub fn run_and_record_with_doctor(
                 ));
             }
         }
-        // Level 2 compiler telemetry (docs/measurement-foundation.md
+        // Level 2 compiler telemetry (docs/02-research-areas/measurement/measurement-foundation.md
         // section 7): Cargo's own --message-format=json, studied from
         // Cargo's real source before relying on it (see cargo_telemetry's
         // module doc). Only for the subcommands independently verified
@@ -547,7 +547,7 @@ pub fn run_and_record_with_doctor(
                 ));
             }
         }
-        // Level 2 compiler telemetry for Nim (docs/measurement-foundation.md
+        // Level 2 compiler telemetry for Nim (docs/02-research-areas/measurement/measurement-foundation.md
         // section 7): unlike Cargo, this needs no extra flag -- Nim's hint
         // stream is on by default -- so it's simply parsed afterward from
         // stderr.log (see nim_telemetry's module doc for why stderr, not
@@ -645,7 +645,7 @@ pub fn run_and_record_with_doctor(
             if is_level0 {
                 known_gaps.push(
                     "this Run used Level 0 (lifecycle-only) tracing deliberately -- the \
-                     minimal-wrapper baseline docs/measurement-foundation.md section 12 and \
+                     minimal-wrapper baseline docs/02-research-areas/measurement/measurement-foundation.md section 12 and \
                      issue #19 Experiment 6 ask for, to measure heavier probe levels' own \
                      observer overhead against; no resource_usage or wrapper substitution was \
                      even attempted, not merely unavailable"

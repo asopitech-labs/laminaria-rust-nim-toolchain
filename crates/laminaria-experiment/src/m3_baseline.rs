@@ -7,7 +7,9 @@
 //! shared between that test and this module -- not a parallel
 //! reimplementation) and its opt-in-traced production entry point
 //! (`run_compiler_work_plan_with_concurrency_trace`), per
-//! `docs/design/issue-35-d0-cases.yaml`'s `M3-owned-independent-chains`
+//! the historical `M3-owned-independent-chains` scenario recorded in
+//! `docs/05-history/issue-35-d0-cases.yaml`. Production tests and this
+//! runner, rather than that retired catalog, are the verification authority.
 //! case: real Nim planner -> Rust plan validation -> the same owned
 //! executor, at CPU budget 1 and 2, a fresh `ArtifactStore` and
 //! concurrency counter per repetition, warmup discarded before the
@@ -68,7 +70,7 @@ pub const RUST_SOURCE_TEXT: &str = "fn f(x: i32) -> i32 { x }";
 pub const NIM_SOURCE_TEXT: &str = "proc g(x: int32): int32 =\n  x\n";
 
 /// Names the case + accepted spec revision this measurement is evidence
-/// for (`docs/design/issue-35-d0-spec.md` section 10).
+/// for (`docs/03-work-items/design/issue-35-d0-spec.md` section 10).
 pub const WORKLOAD_ID: &str = "M3-owned-independent-chains@issue35-d0-accepted-c812d70-v1";
 
 const TELEMETRY_KIND: &str = "m3-owned-baseline-v1";

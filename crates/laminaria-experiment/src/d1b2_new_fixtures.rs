@@ -1,5 +1,6 @@
 //! Issue #28 D1-b2: wires the two *new* fixtures
-//! `docs/design/issue-35-d0-cases.yaml` names (`fixtures/
+//! the historical scenarios that `docs/05-history/issue-35-d0-cases.yaml`
+//! names (`fixtures/
 //! long-chain-wide-branches` for M7, `fixtures/many-unrequested-targets`
 //! for M8-many-unrequested-cargo) into re-runnable evidence, matching the
 //! `d1b1_reference_cases`/`d1b1_planner_cases` pattern: reproduce, don't

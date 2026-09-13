@@ -1687,14 +1687,11 @@ mod tests {
             );
     }
 
-    /// Pure-logic coverage for [`ExecutionReport::verify_slot_invariants`]
-    /// itself (issue #36 T1 completion review, point 4): runs on every
-    /// platform (no real Nim binary needed), and -- following this
-    /// project's own established practice of proving a validator is not
-    /// a rubber stamp (`scripts/validate_issue36_t0_cases.py`'s own test
-    /// suite deliberately breaks copies of a known-good input) --
-    /// exercises both a genuinely valid timeline and three distinct ways
-    /// a timeline could violate T0 §9's invariants.
+    /// Direct executable coverage for
+    /// [`ExecutionReport::verify_slot_invariants`] itself (issue #36 T1
+    /// completion review, point 4). It runs on every platform without a
+    /// Nim binary and exercises the production implementation against a
+    /// valid timeline and three distinct invariant violations.
     #[test]
     fn verify_slot_invariants_catches_every_kind_of_violation_and_accepts_a_valid_timeline() {
         fn report_from(events: Vec<(&str, SlotEventKind)>) -> ExecutionReport {

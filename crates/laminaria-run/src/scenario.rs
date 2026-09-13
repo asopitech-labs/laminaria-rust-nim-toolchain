@@ -9,7 +9,7 @@
 //! the whole issue):
 //!
 //! - Only the four scenarios issue #21 names as the ones to start with
-//!   (`docs/measurement-foundation.md`'s own required list): cold build,
+//!   (`docs/02-research-areas/measurement/measurement-foundation.md`'s own required list): cold build,
 //!   true no-op, a Rust implementation-only edit, a Nim
 //!   implementation-only edit. Backend/config-only, link-only,
 //!   worktree-relocation, and every ThinLTO/Wasm-later-extension scenario

@@ -2,10 +2,10 @@
 
 ## Evidence classification correction (2026-09-10)
 
-This file preserves historical fixture/measurement and implementation evidence, not the current research delivery order. Existing-compiler builds and driver self-builds recorded below are **reference/bootstrap/delegated-build baselines**, not proof of LAMINARIA compiler ownership or independent self-hosting. The [compiler ownership contract](../../docs/compiler-ownership-contract.md) governs current issue acceptance; historical checklists do not close the revised requirements.
+This file preserves historical fixture/measurement and implementation evidence, not the current research delivery order. Existing-compiler builds and driver self-builds recorded below are **reference/bootstrap/delegated-build baselines**, not proof of LAMINARIA compiler ownership or independent self-hosting. The [compiler ownership contract](../../docs/01-foundations/compiler-ownership-contract.md) governs current issue acceptance; historical checklists do not close the revised requirements.
 
 
-Issue #25's first experiment, per `docs/llvm-rediscovery-research.md`'s
+Issue #25's first experiment, per `docs/02-research-areas/compiler/llvm-rediscovery-research.md`'s
 rediscovery method ("start from semantic workloads... do not begin
 research from pre-existing LLVM IR"). Separate from `fixtures/
 rust-nim-llvm-lto-compatibility/` (#17's fixture, which starts from

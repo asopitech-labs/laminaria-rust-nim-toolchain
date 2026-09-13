@@ -3,7 +3,7 @@
 ## sidesteps -- every call so far has Nim call into Rust. This reverses
 ## it: Rust calls a Nim-provided function pointer directly. A plain
 ## function pointer (no captured environment) is exactly the
-## "closures/function values" class `docs/rust-nim-native-linking.md`'s
+## "closures/function values" class `docs/02-research-areas/compiler/rust-nim-native-linking.md`'s
 ## compatibility matrix lists as usable when nothing is captured --
 ## verified here, not just declared usable in principle.
 ##

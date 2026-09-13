@@ -1,7 +1,9 @@
 //! Issue #28 D1-a regression coverage for `M3-owned-independent-chains`:
 //! runs the real owned baseline (real Nim planner, real
 //! `compiler_work_executor` dispatch) and checks the exact
-//! `docs/design/issue-35-d0-cases.yaml` `pass_criteria.d1` properties --
+//! the production M3 baseline behavior. The retired D0 catalog in
+//! `docs/05-history/issue-35-d0-cases.yaml` is provenance only; these
+//! direct executable assertions are the verification authority --
 //! not merely that it runs without panicking. Requires `nim` on `PATH`
 //! (builds `nim-planner/bin/laminaria-planner` if missing), same as
 //! `laminaria-run`'s own real-binary tests.

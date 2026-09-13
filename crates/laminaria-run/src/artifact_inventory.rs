@@ -5,7 +5,7 @@
 //! enumeration, changed-candidate detection, and content hashing measured
 //! as three *separate* costs -- so "nothing changed" never hides a
 //! full-tree hash behind a cache-hit statistic
-//! (`docs/measurement-foundation.md` section 8; issue #20's "No-op-safe
+//! (`docs/02-research-areas/measurement/measurement-foundation.md` section 8; issue #20's "No-op-safe
 //! inventory" and "Artifact detection costs are separately measurable"
 //! acceptance criteria).
 //!

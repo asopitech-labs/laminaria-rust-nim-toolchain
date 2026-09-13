@@ -1,5 +1,5 @@
 ## Versioned JSON contract for LAMINARIA's Nim Planning Kernel (issue #8):
-## `plan(PlanningInput) -> ExecutionPlan`, per `docs/research-foundations.md`
+## `plan(PlanningInput) -> ExecutionPlan`, per `docs/01-foundations/research-foundations.md`
 ## section 7's `PlanningInput`/`ExecutionPlan` naming.
 ##
 ## This module mirrors `crates/laminaria-plan/src/types.rs` field-for-field.
@@ -7,7 +7,7 @@
 ## Rust module's serde output exactly (Rust's default derive already
 ## lowercases/underscores field names the same way), since this contract
 ## crosses the Rust<->Nim subprocess boundary as JSON over stdin/stdout
-## (`docs/self-build.md`) -- there is no shared schema-generation tool, so
+## (`docs/04-guides/self-build.md`) -- there is no shared schema-generation tool, so
 ## the two sides are kept in sync by hand and by the shared fixtures used
 ## in both `nimble test` and `cargo test -p laminaria-plan`.
 ##

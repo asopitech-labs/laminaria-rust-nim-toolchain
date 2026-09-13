@@ -11,7 +11,7 @@ enum ProbeLevelArg {
     /// Portable lifecycle tracing only: exit status and wall timestamps,
     /// no resource accounting, no Cargo/Nim wrapper substitution -- the
     /// minimal-wrapper baseline to compare Level 1's own overhead against
-    /// (docs/measurement-foundation.md section 12, issue #19 Experiment 6).
+    /// (docs/02-research-areas/measurement/measurement-foundation.md section 12, issue #19 Experiment 6).
     Level0,
     /// Full `wait4`-based resource accounting plus Cargo/Nim wrapper
     /// substitution where applicable. The default.
@@ -61,7 +61,7 @@ enum Commands {
         #[arg(long)]
         workload_id: String,
         /// Which pre-state/change/requested-artifact scenario this Run
-        /// represents (docs/measurement-foundation.md section 9). Free-form
+        /// represents (docs/02-research-areas/measurement/measurement-foundation.md section 9). Free-form
         /// for now -- the scenario state machine itself is not yet enforced.
         #[arg(long)]
         scenario_id: String,

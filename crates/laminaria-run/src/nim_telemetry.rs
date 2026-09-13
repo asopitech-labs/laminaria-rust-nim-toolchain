@@ -1,5 +1,5 @@
 //! Level 2 compiler-native telemetry for `nim c`/`nim cpp` builds
-//! (`docs/measurement-foundation.md` section 7's "Nim / Nimony" adapter,
+//! (`docs/02-research-areas/measurement/measurement-foundation.md` section 7's "Nim / Nimony" adapter,
 //! which explicitly anticipates this: *"Investigate stage timing/artifact
 //! diagnostics per exact Nim 2 and Nimony revision... do not assume Nim 2
 //! and Nimony expose the same adapter/capability set"* as Cargo).

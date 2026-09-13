@@ -2,7 +2,7 @@
 
 ## Evidence classification correction (2026-09-10)
 
-This file preserves historical fixture/measurement and implementation evidence, not the current research delivery order. Existing-compiler builds and driver self-builds recorded below are **reference/bootstrap/delegated-build baselines**, not proof of LAMINARIA compiler ownership or independent self-hosting. This fixture contains hand-authored IR and a limited evaluator/transform; its LLVM projection is a comparison experiment, not a Rust/Nim source frontend or independent target generator. The [compiler ownership contract](../../docs/compiler-ownership-contract.md) governs current issue acceptance; historical checklists do not close the revised requirements.
+This file preserves historical fixture/measurement and implementation evidence, not the current research delivery order. Existing-compiler builds and driver self-builds recorded below are **reference/bootstrap/delegated-build baselines**, not proof of LAMINARIA compiler ownership or independent self-hosting. This fixture contains hand-authored IR and a limited evaluator/transform; its LLVM projection is a comparison experiment, not a Rust/Nim source frontend or independent target generator. The [compiler ownership contract](../../docs/01-foundations/compiler-ownership-contract.md) governs current issue acceptance; historical checklists do not close the revised requirements.
 
 **Real, source-derived successor (2026-09-10): `crates/laminaria-ir`.** This
 fixture's own `repr.rs` names its central limitation directly ("transcribed
@@ -10,7 +10,7 @@ by hand ... not derived mechanically" from `rust-src/add_or_double.rs`/
 `nim-src/add_or_double.nim`). `crates/laminaria-ir` parses that *same*
 workload for real, through hand-written frontends for a declared Rust/Nim
 subset (`rust_frontend.rs` uses the `syn` crate for syntax-only parsing per
-`docs/compiler-ownership-contract.md`'s lexical-parsing-reuse boundary;
+`docs/01-foundations/compiler-ownership-contract.md`'s lexical-parsing-reuse boundary;
 `nim_frontend.rs` is grounded directly in the real Nim compiler's own
 `lexer.nim`/`parser.nim`), carries real source provenance on every IR node,
 and replaces this fixture's bare `has_side_effects: bool` fact with an

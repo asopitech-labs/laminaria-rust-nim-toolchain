@@ -1,7 +1,7 @@
 //! `direct-native-link` fixture — Rust side.
 //!
 //! #11's "direct native-link workload" Core workload: the minimal Layer 1
-//! proof from `docs/rust-nim-native-linking.md` ("one Rust-produced
+//! proof from `docs/02-research-areas/compiler/rust-nim-native-linking.md` ("one Rust-produced
 //! object and one Nim-produced object in the same link, with an
 //! intentionally simple symbol relationship and no generated C header
 //! contract"). Every other Rust/Nim fixture here has Rust as the build
@@ -94,7 +94,7 @@ pub extern "C" fn rust_status_code(s: Status) -> i32 {
 // --- Issue #4 Layer 2/3 feasibility: fixed-layout struct and pointer
 // round-trips, extending past #11's own Layer-1-only scope above. See
 // `NOTES.md` for the methodology and results, and
-// `docs/rust-nim-native-linking.md` for what these Layers mean.
+// `docs/02-research-areas/compiler/rust-nim-native-linking.md` for what these Layers mean.
 //
 // `Point` is declared independently here and in `../nim-bin/main.nim` —
 // neither side reads the other's definition or a shared header. Layer 3

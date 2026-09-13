@@ -1,5 +1,5 @@
 //! Issue #5 T1: the first owned target-generation route, per
-//! `docs/design/issue-5-t0-target-generation-spec.md` (accepted, commit
+//! `docs/03-work-items/design/issue-5-t0-target-generation-spec.md` (accepted, commit
 //! `414b276`). Lowers a [`ValidatedProgram`] directly into a WebAssembly
 //! 1.0 (MVP) binary module -- a pure, in-process function; no external
 //! compiler/assembler/linker/WASM toolchain is ever invoked from this

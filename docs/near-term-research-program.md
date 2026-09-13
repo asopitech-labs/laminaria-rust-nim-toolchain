@@ -1,5 +1,7 @@
 # LAMINARIA Project Progression and Near-Term Research Goal
 
+This is the canonical starting point for LAMINARIA documentation and task selection. The [documentation map](README.md) organizes every other document as a downstream foundation, research area, work item, guide, or historical record.
+
 ## Long-term goal
 
 LAMINARIA ultimately owns the path from Rust and Nim source semantics through its IR, transformations, work partition/fusion, scheduler, and target generation, and uses that path to build LAMINARIA itself. Package managers may provide dependency metadata, but delegating target-source semantics, IR transformation, or code generation to existing Rust, Nim, or LLVM compilers does not satisfy this path.
@@ -38,3 +40,10 @@ Measurement, identity, diagnostics, toolchain profiles, CI, platform coverage, U
 Fix the current goal and decision gate first; select its largest uncertainty; define the smallest positive and negative experiment that can falsify it; minimize substitutable engineering; stop when the decision is possible; then update the architecture and next goal.
 
 The current next task is therefore G1's first experiment, not because #31 is next numerically, but because it directly tests the largest uncertainty in the near-term program.
+
+## Documents for the current decision
+
+- Governing constraints: [compiler ownership contract](01-foundations/compiler-ownership-contract.md) and [research prioritization policy](01-foundations/research-prioritization-policy.md)
+- Execution map: [research issue plan](03-work-items/issue-plan.md)
+- Current experiment: [Issue #31 — first minimal cross-language owned-transformation experiment](03-work-items/design/issue-31-first-minimal-experiment.md)
+- All supporting and historical material: [documentation map](README.md)

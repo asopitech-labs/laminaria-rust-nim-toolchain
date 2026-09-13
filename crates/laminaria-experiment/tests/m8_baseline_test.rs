@@ -1,6 +1,8 @@
 //! Issue #28 D1-a regression coverage for `M8-many-unrequested-nim-planner`:
 //! runs the real owned baseline (real Nim planner) at all three scales
-//! and checks the exact `docs/design/issue-35-d0-cases.yaml`
+//! and directly checks the production M8 baseline behavior. The retired
+//! `docs/05-history/issue-35-d0-cases.yaml` catalog is provenance, not
+//! the verification authority. These tests cover the exact
 //! `pass_criteria.d1` property (`unused-pkg-*` never appears in
 //! `ordered_actions`) -- not merely that it runs without panicking.
 #![cfg(unix)]

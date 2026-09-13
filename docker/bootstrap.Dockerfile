@@ -1,8 +1,8 @@
 # Bootstrap/correctness reproduction environment for issue #18.
 #
-# Per docs/measurement-foundation.md section 2 ("Separate reproducibility
+# Per docs/02-research-areas/measurement/measurement-foundation.md section 2 ("Separate reproducibility
 # from performance isolation") and the Environment rule in
-# docs/issue-plan.md: containers may be used to reproduce bootstrap and
+# docs/03-work-items/issue-plan.md: containers may be used to reproduce bootstrap and
 # correctness, but canonical performance baselines should normally execute
 # natively on the measured host, so VM filesystem bridges and container-host
 # effects are not silently attributed to the compiler. This image exists to
@@ -10,7 +10,7 @@
 # prove the toolchain bootstraps reproducibly independent of any one
 # developer machine's system package manager state — not to replace native
 # runs. `doctor` records environment_class = "container" for any Run
-# executed here, and docs/measurement-foundation.md's comparability policy
+# executed here, and docs/02-research-areas/measurement/measurement-foundation.md's comparability policy
 # (crates/laminaria-fingerprint/src/comparability.rs) refuses to silently
 # treat a container Run as comparable to a native one.
 #

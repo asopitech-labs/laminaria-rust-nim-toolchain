@@ -16,7 +16,7 @@
 //! declared subset (fixed-width integers, explicit wrapping arithmetic,
 //! function calls, conditionals, local bindings) -- not a general-purpose
 //! IR, and not a claim that this shape is the final answer for LAMINARIA's
-//! eventual compiler (see `docs/llvm-rediscovery-research.md`: arriving at a
+//! eventual compiler (see `docs/02-research-areas/compiler/llvm-rediscovery-research.md`: arriving at a
 //! different architecture later is equally acceptable).
 
 use std::collections::BTreeMap;

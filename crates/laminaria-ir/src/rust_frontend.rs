@@ -5,7 +5,7 @@
 //! semantic analysis, zero type checking, and zero macro expansion. Every
 //! semantic fact (what `+` means, what `i32` means, whether a construct is
 //! in the supported subset) is derived by this module's own code walking
-//! that tree. This matches `docs/compiler-ownership-contract.md`'s
+//! that tree. This matches `docs/01-foundations/compiler-ownership-contract.md`'s
 //! lexical/syntactic-parsing-reuse boundary directly: a parsing library
 //! producing a syntax tree is not itself "meaning."
 //!

@@ -1,6 +1,6 @@
 //! Schema types for `EnvironmentFingerprint` / `ToolchainFingerprint`, as
-//! specified in `docs/measurement-foundation.md` (#11/#18) and
-//! `docs/multi-version-toolchains.md` (#18/#22).
+//! specified in `docs/02-research-areas/measurement/measurement-foundation.md` (#11/#18) and
+//! `docs/02-research-areas/toolchains/multi-version-toolchains.md` (#18/#22).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 /// Schema version of the fingerprint records emitted by this crate.
 /// Bump whenever a field is added, renamed, or removed so stored Runs remain
-/// interpretable (`docs/measurement-foundation.md` section 5).
+/// interpretable (`docs/02-research-areas/measurement/measurement-foundation.md` section 5).
 pub const SCHEMA_VERSION: &str = "0.1.0";
 
 /// Identity of an on-disk executable: where it was resolved from and a
@@ -34,7 +34,7 @@ pub struct RustToolchainFingerprint {
     /// string rather than the requested selector — kept separate from
     /// `resolved_version` so nightly-only capability requirements can be
     /// checked without parsing a version string ad hoc every time
-    /// (`docs/multi-version-toolchains.md` section 3).
+    /// (`docs/02-research-areas/toolchains/multi-version-toolchains.md` section 3).
     pub channel: Option<String>,
     /// Bundled/selected LLVM identity, where the resolved rustc build
     /// exposes it. Left `None` rather than guessed when unavailable.
@@ -59,7 +59,7 @@ pub struct NimToolchainFingerprint {
     /// lock entry's `revision` field. Recorded explicitly rather than
     /// folded into `requested_selector` — a moving `selector` and an exact
     /// `revision` answer different questions
-    /// (`docs/multi-version-toolchains.md` sections 2 and 8).
+    /// (`docs/02-research-areas/toolchains/multi-version-toolchains.md` sections 2 and 8).
     pub requested_source_revision: Option<String>,
     pub target_os: Option<String>,
     pub target_cpu: Option<String>,
@@ -101,7 +101,7 @@ pub struct RepositoryState {
 }
 
 /// Environment-level fingerprint, independent of any single toolchain.
-/// Field set follows `docs/measurement-foundation.md` section 4.
+/// Field set follows `docs/02-research-areas/measurement/measurement-foundation.md` section 4.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnvironmentFingerprint {
     pub schema_version: String,

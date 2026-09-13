@@ -5,7 +5,7 @@
 //! each `nim_build`/`cargo_build` action as a real, traced `Run`
 //! (reusing this crate's own RUSTC-wrapper/CC-wrapper tracer paths via
 //! `run_and_record`, never a bare `Command::output()`), then assembles
-//! the results into one generation root. See `docs/self-build.md` for
+//! the results into one generation root. See `docs/04-guides/self-build.md` for
 //! the full stage0/stage1 protocol.
 //!
 //! **Concurrency bound: 1** (strictly sequential), stated explicitly as

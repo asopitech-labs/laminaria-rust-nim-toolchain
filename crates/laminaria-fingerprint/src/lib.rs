@@ -2,8 +2,8 @@
 //!
 //! Implements the `EnvironmentFingerprint` / `ToolchainFingerprint` schema
 //! and the `doctor` responsibility from issue #18, following the canonical
-//! design in `docs/measurement-foundation.md` and
-//! `docs/multi-version-toolchains.md`.
+//! design in `docs/02-research-areas/measurement/measurement-foundation.md` and
+//! `docs/02-research-areas/toolchains/multi-version-toolchains.md`.
 
 pub mod comparability;
 pub mod doctor;

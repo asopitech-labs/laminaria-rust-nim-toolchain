@@ -6,7 +6,7 @@ third-party dependencies).
 nlvm is a reference/exploratory Nim-to-LLVM backend used by this repo's
 own `nlvm-experiment` CI job to observe an alternative compilation route
 -- it is never LAMINARIA's owned target-generation path (see
-docs/compiler-ownership-contract.md). This script exists only to fetch
+docs/01-foundations/compiler-ownership-contract.md). This script exists only to fetch
 that external reference binary reliably; it makes no claim about, and
 has no effect on, LAMINARIA's own compiler ownership.
 

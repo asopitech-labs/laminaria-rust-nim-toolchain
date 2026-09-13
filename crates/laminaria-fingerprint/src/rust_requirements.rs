@@ -1,7 +1,7 @@
 //! Cargo `rust-version` (MSRV) / edition discovery and evaluation against
 //! resolved Rust toolchains.
 //!
-//! `docs/multi-version-toolchains.md` section 3 requires these to be kept
+//! `docs/02-research-areas/toolchains/multi-version-toolchains.md` section 3 requires these to be kept
 //! as separate constraints rather than collapsed into one generic
 //! `version` field: a package's declared MSRV, its edition, and the
 //! compiler that actually resolved/ran are three different things. This

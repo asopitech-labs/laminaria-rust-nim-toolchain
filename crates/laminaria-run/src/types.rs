@@ -1,4 +1,4 @@
-//! The versioned `Run` schema, as specified in `docs/measurement-foundation.md`
+//! The versioned `Run` schema, as specified in `docs/02-research-areas/measurement/measurement-foundation.md`
 //! section 5 (issue #19). This is the first permanent-code implementation of
 //! the model every later Action Graph / scheduler / `explain-*` path is
 //! meant to consume -- see that doc's section 14 for the responsibility
@@ -14,10 +14,10 @@ use laminaria_fingerprint::{EnvironmentFingerprint, ToolchainReport};
 /// Schema version of the `Run` records this crate emits. Bump whenever a
 /// field is added, renamed, or removed so stored `runs/<run-id>/run.json`
 /// files remain interpretable by a later reader
-/// (`docs/measurement-foundation.md` section 5).
+/// (`docs/02-research-areas/measurement/measurement-foundation.md` section 5).
 pub const SCHEMA_VERSION: &str = "0.1.0";
 
-/// The layered-probe model from `docs/measurement-foundation.md` section 6.
+/// The layered-probe model from `docs/02-research-areas/measurement/measurement-foundation.md` section 6.
 /// Attached to every `ProcessRecord` and to `MeasurementOverhead` so a
 /// reader knows exactly what capability produced a given field set, rather
 /// than assuming every `Run` observed the same depth.
@@ -41,7 +41,7 @@ pub enum ProbeLevel {
 
 /// The command this Run measures. Environment variables are recorded only
 /// as explicit overrides passed to the child, never as a dump of the
-/// tracer's own process environment (`docs/measurement-foundation.md`
+/// tracer's own process environment (`docs/02-research-areas/measurement/measurement-foundation.md`
 /// section 4's "must not store secrets" rule applies here too).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RootCommand {
@@ -53,7 +53,7 @@ pub struct RootCommand {
 
 /// Resource usage for one `ProcessRecord`. Every field is `Option` and
 /// absent fields are named in `unsupported_fields` -- per
-/// `docs/measurement-foundation.md` section 6's explicit acceptance
+/// `docs/02-research-areas/measurement/measurement-foundation.md` section 6's explicit acceptance
 /// criterion, "missing platform fields are explicit null/unsupported
 /// states, not fabricated zeros." A field being `None` without a matching
 /// entry in `unsupported_fields` means the probe ran and legitimately
@@ -97,7 +97,7 @@ pub struct ProcessRecord {
     pub argv: Vec<String>,
     pub cwd: Option<PathBuf>,
     /// Nanoseconds since `Run`'s monotonic clock anchor
-    /// (`docs/measurement-foundation.md` section 6's "one Run monotonic
+    /// (`docs/02-research-areas/measurement/measurement-foundation.md` section 6's "one Run monotonic
     /// clock" -- never a raw wall-clock timestamp from a different source).
     pub start_elapsed_ns: u64,
     pub end_elapsed_ns: Option<u64>,
@@ -136,14 +136,14 @@ pub struct MeasurementOverhead {
     /// Wall time spent in this crate's own tracer bookkeeping (process
     /// spawn/reap/record-building), not the measured command's own
     /// runtime. Compare against a Level 0-only Run of the same scenario to
-    /// get the overhead delta `docs/measurement-foundation.md` section 12
+    /// get the overhead delta `docs/02-research-areas/measurement/measurement-foundation.md` section 12
     /// requires -- this crate does not yet compute that delta itself.
     pub tracer_overhead_seconds: Option<f64>,
     pub notes: Vec<String>,
 }
 
 /// Preparation performed before the timed root command ran (toolchain
-/// selection, cache clears) -- `docs/measurement-foundation.md` sections 9
+/// selection, cache clears) -- `docs/02-research-areas/measurement/measurement-foundation.md` sections 9
 /// and 10. Not yet populated by this crate's tracer; present in the schema
 /// so a caller building on top of `laminaria-run` has somewhere to record
 /// it without a schema migration.
@@ -153,7 +153,7 @@ pub struct PreparationRecord {
     pub cache_clears: Vec<String>,
 }
 
-/// `docs/measurement-foundation.md` section 10. Not yet populated -- see
+/// `docs/02-research-areas/measurement/measurement-foundation.md` section 10. Not yet populated -- see
 /// `PreparationRecord`'s doc comment for the same reasoning.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CacheState {
@@ -161,7 +161,7 @@ pub struct CacheState {
 }
 
 /// The complete, versioned Run envelope
-/// (`docs/measurement-foundation.md` section 5). `environment_fingerprint`
+/// (`docs/02-research-areas/measurement/measurement-foundation.md` section 5). `environment_fingerprint`
 /// and `resolved_toolchain_fingerprint` reuse `laminaria-fingerprint`'s
 /// own schema (issue #18) directly rather than re-deriving environment
 /// identity -- the whole point of that crate existing first.
@@ -189,13 +189,13 @@ pub struct Run {
     /// Compiler-native telemetry (Level 2). Always `None` from this
     /// crate today -- see `ProbeLevel::Level2CompilerTelemetry`.
     pub compiler_telemetry: Option<serde_json::Value>,
-    /// Artifact inventory deltas (`docs/measurement-foundation.md`
+    /// Artifact inventory deltas (`docs/02-research-areas/measurement/measurement-foundation.md`
     /// section 8). Always `None` from this crate today.
     pub artifact_delta: Option<serde_json::Value>,
     pub measurement_overhead: Option<MeasurementOverhead>,
 }
 
-/// A derived, regeneratable view of a `Run` -- `docs/measurement-foundation.md`
+/// A derived, regeneratable view of a `Run` -- `docs/02-research-areas/measurement/measurement-foundation.md`
 /// section 5's `summary.json`. Deliberately holds nothing that isn't
 /// reconstructible from `run.json` alone
 /// (`crate::store::regenerate_summary`), so the "raw evidence can
@@ -219,7 +219,7 @@ pub struct Summary {
 
 /// One `"reason": "compiler-artifact"` message from Cargo's real JSON
 /// message stream (`--message-format=json`), reduced to the fields
-/// `docs/measurement-foundation.md` section 8 (artifact inventory) and
+/// `docs/02-research-areas/measurement/measurement-foundation.md` section 8 (artifact inventory) and
 /// section 10 (explicit cache state) actually need. Field names and shape
 /// verified against Cargo's own source
 /// (`.reference/cargo/src/util/machine_message.rs`'s `Artifact` struct),
@@ -242,7 +242,7 @@ pub struct CompilerArtifactRecord {
 }
 
 /// Level 2 compiler-native telemetry for a Cargo build
-/// (`docs/measurement-foundation.md` section 7's "Rust / Cargo" adapter).
+/// (`docs/02-research-areas/measurement/measurement-foundation.md` section 7's "Rust / Cargo" adapter).
 /// Populated from Cargo's real `--message-format=json` output by
 /// `crate::cargo_telemetry::parse_cargo_json_messages`, stored on
 /// `Run::compiler_telemetry` as a generic `serde_json::Value` (that field
@@ -267,7 +267,7 @@ pub struct CargoCompilerTelemetry {
 }
 
 /// Level 2 compiler-native telemetry for a `nim c`/`nim cpp` build
-/// (`docs/measurement-foundation.md` section 7's "Nim / Nimony" adapter).
+/// (`docs/02-research-areas/measurement/measurement-foundation.md` section 7's "Nim / Nimony" adapter).
 /// A deliberately different shape from `CargoCompilerTelemetry` -- not
 /// shoehorned into the same struct -- because it comes from a
 /// structurally different source: Nim has no `--message-format=json`

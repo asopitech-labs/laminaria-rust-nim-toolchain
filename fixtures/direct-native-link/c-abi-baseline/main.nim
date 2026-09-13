@@ -1,4 +1,4 @@
-## Layer 5 required evidence (docs/rust-nim-native-linking.md): a
+## Layer 5 required evidence (docs/02-research-areas/compiler/rust-nim-native-linking.md): a
 ## workload-matched "conventional C ABI baseline" counterpart to
 ## ../nim-bin/main.nim. The doc's own framing is:
 ##

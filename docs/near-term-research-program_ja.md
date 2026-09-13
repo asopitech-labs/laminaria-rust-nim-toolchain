@@ -1,5 +1,7 @@
 # LAMINARIA 全体進行と当面の研究ゴール
 
+本書をLAMINARIA文書群とタスク選択の正準な起点とする。[文書マップ](README.md)では、他の全文書を本書から下流の基盤、研究領域、作業項目、手順、履歴として整理する。
+
 ## 長期ゴール
 
 LAMINARIAの長期ゴールは、RustとNimのsource semanticsをLAMINARIA自身が解析し、独自のIR、変換、work分割／融合、scheduler、target生成を通して、最終的にLAMINARIA自身をbuildできることにある。
@@ -98,3 +100,10 @@ measurement、identity、diagnostic、toolchain profile、CI、platform compatib
 5. 結果を得た時点で停止し、次のゴールまたはarchitectureを更新する。
 
 したがって、現在の次のタスクはG1の最初の実験である。これは「次に空いているIssue」だからではなく、当面のゴール全体で最大の未知を直接判定するから選択される。
+
+## 現在の判断に必要な文書
+
+- 制約: [独自コンパイラ責務契約](01-foundations/compiler-ownership-contract_ja.md)と[研究優先順位ポリシー](01-foundations/research-prioritization-policy_ja.md)
+- 実行順序: [Research Issue Plan](03-work-items/issue-plan.md)
+- 現在の実験: [Issue #31 — 最初の最小言語横断owned-transformation実験](03-work-items/design/issue-31-first-minimal-experiment.md)
+- supporting trackと履歴を含む全体索引: [文書マップ](README.md)

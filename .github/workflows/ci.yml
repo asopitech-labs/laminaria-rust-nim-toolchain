@@ -108,16 +108,10 @@ jobs:
       - name: cargo test
         run: cargo test --workspace
 
-      # nim-planner's own Nim-level unit tests (planning_kernel.plan,
-      # issue #36's incremental_kernel) were, until now, never actually
-      # invoked in CI at all -- only indirectly, through the Rust-side
-      # integration tests that spawn the compiled laminaria-planner
-      # binary (crates/laminaria-plan/src/nim_planner_client.rs). Adding
-      # this now rather than leaving it as a repeat of that same,
-      # pre-existing gap: incremental_kernel's own test suite has no
-      # Rust-side caller yet (the session client lands in a later step
-      # of this same task), so it would otherwise go completely
-      # unexercised in CI in the meantime.
+      # Direct executable verification of the production Nim planning
+      # implementations. These tests, together with the Rust workspace
+      # tests above, are the behavioral authority; documentation fixtures
+      # and fixture-only validators are not.
       - name: nim-planner unit tests (planning_kernel, incremental_kernel)
         run: |
           cd nim-planner
@@ -169,7 +163,7 @@ jobs:
       # c` + `cargo build --release`, deliberately not `laminaria
       # self-build`); stage0's own `laminaria` binary then plans (via the
       # real Nim Planning Kernel) and executes the construction of
-      # stage1. See docs/self-build.md for the full protocol and why
+      # stage1. See docs/04-guides/self-build.md for the full protocol and why
       # `nim c`, not `nimble build`, is used here (nimble was found to
       # exit 0 on a genuine compile failure).
       - name: Build stage0 (nim-planner + Rust host, an ordinary un-planned build)
@@ -458,7 +452,7 @@ jobs:
 
       # Issue #19 Experiment 6: minimal (Level 0) vs resource-traced
       # (Level 1) modes must be comparable for observer overhead
-      # (docs/measurement-foundation.md section 12). Checked here on a CI
+      # (docs/02-research-areas/measurement/measurement-foundation.md section 12). Checked here on a CI
       # runner too, not just this project's own dev machine -- confirms
       # --probe-level level0 actually skips resource accounting (every
       # resource_usage field null) and Cargo/Nim wrapper substitution
@@ -659,7 +653,7 @@ jobs:
   # Linux binary).
   # nlvm is Nim's existing LLVM-direct backend -- a reference/exploratory
   # route this job observes for comparison, never LAMINARIA's own owned
-  # target-generation path (docs/compiler-ownership-contract.md governs
+  # target-generation path (docs/01-foundations/compiler-ownership-contract.md governs
   # that distinction). This job's own continuous-release asset used to be
   # hardcoded by name; nlvm cuts a new "continuous" release under the
   # same tag on every push to its own master, so that name goes stale the
@@ -837,7 +831,7 @@ jobs:
           cd fixtures/rust-nim-llvm-lto-compatibility
           ./build.sh
 
-      # Issue #25's first experiment (docs/llvm-rediscovery-research.md):
+      # Issue #25's first experiment (docs/02-research-areas/compiler/llvm-rediscovery-research.md):
       # trace a minimal semantic contract (see fixtures/
       # llvm-rediscovery-semantic-workload/CONTRACT.md) through Rust's and
       # Nim's own compiler stages independently, starting from source --
@@ -884,26 +878,3 @@ jobs:
 
       - name: doctor inside the container
         run: docker run --rm laminaria-bootstrap doctor
-
-  # issue #36 T0's own review requirement: a YAML validation script must
-  # actually run in CI, not just exist locally (docs/design/issue-36-t0-
-  # incremental-contract.md's "第2版改訂" header, fix requirement 5).
-  # A separate, lean job rather than folding into `rust` above: this is
-  # pure Python and needs neither the Rust nor the Nim toolchain, and
-  # PyYAML is an explicit, verified `pip install` here rather than an
-  # assumed-preinstalled package (the same "never silently assume an
-  # external dependency is just there" discipline scripts/resolve_nlvm_asset.py
-  # already follows for its own GitHub API dependency).
-  docs-validation:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install PyYAML
-        run: python3 -m pip install --quiet pyyaml
-
-      - name: Run validate_issue36_t0_cases.py's own test suite
-        run: python3 -m unittest scripts.tests.test_validate_issue36_t0_cases -v
-
-      - name: Validate docs/design/issue-36-t0-cases.yaml
-        run: python3 scripts/validate_issue36_t0_cases.py

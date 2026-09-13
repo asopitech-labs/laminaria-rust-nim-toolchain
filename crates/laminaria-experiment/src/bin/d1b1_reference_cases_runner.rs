@@ -1,7 +1,8 @@
 //! `cargo run -p laminaria-experiment --bin laminaria-d1b1-reference-cases`
 //!
 //! Issue #28 D1-b1: re-runs the existing M4/M5 fixtures named by
-//! `docs/design/issue-35-d0-cases.yaml` and reports pass/fail against
+//! the historical `docs/05-history/issue-35-d0-cases.yaml` and directly
+//! reports pass/fail against
 //! each case's own D0-pinned `expected` value. Raw per-case logs (the
 //! exact command, stdout, stderr, exit status) are written under
 //! `runs/d1b1/<case-id>.log` -- this binary's own stdout is a summary
