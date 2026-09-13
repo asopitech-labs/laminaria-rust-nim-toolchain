@@ -67,6 +67,7 @@ The current next task is therefore G1's cross-ecosystem dependency-graph experim
 - Prior art and research gap: [cross-ecosystem dependency and compiler-IR resolution survey](02-research-areas/toolchains/cross-ecosystem-dependency-and-ir-resolution-landscape_ja.md)
 - Pruning contract: [cross-layer reachability pruning](02-research-areas/toolchains/cross-layer-reachability-pruning_ja.md)
 - Artifact obligation discharge: [dependency-discharge artifact contract](02-research-areas/toolchains/dependency-resolved-artifact-closure_ja.md)
+- Whole-project outcomes, capabilities, and unissued gaps: [project work portfolio](03-work-items/project-portfolio.md)
 - Execution map: [research issue plan](03-work-items/issue-plan.md)
 - Current experiment: [first cross-ecosystem dependency-graph experiment](03-work-items/design/cross-ecosystem-dependency-graph-first-experiment.md)
 - All supporting and historical material: [documentation map](README.md)

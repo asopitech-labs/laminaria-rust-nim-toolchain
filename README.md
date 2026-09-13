@@ -2,9 +2,9 @@
 
 **Rust Nim Unified Toolchain**
 
-LAMINARIA researches and develops a **cross-ecosystem dependency resolver, compiler, IRs, and scheduler for Rust and Nim**. Its current delivery goal is an ordinary runnable native binary whose complete Cargo/Nimble/C/C++ dependency closure is resolved as one typed graph. It is not an orchestrator whose compilation engine is Cargo/rustc, Nim, or LLVM.
+LAMINARIA researches and develops a **cross-ecosystem dependency resolver, compiler, IRs, and scheduler for Rust and Nim**. Its current delivery goal is an ordinary runnable native binary for which Cargo/Nimble/C/C++ package choices, source semantics, language/intermediate IR, ABI, symbols, and link obligations are jointly resolved and discharged or explicitly externalized. It is not an orchestrator whose compilation engine is Cargo/rustc, Nim, or LLVM.
 
-`Native executable demand → Cargo/Nimble/C/C++ dependency closure → owned semantic analysis / IR → artifact/action plan → resource-aware execution → native objects/link → runnable binary`
+`Native executable demand → Cargo/Nimble/C/C++ package constraints ↔ owned source semantics / language and intermediate IR ↔ artifact/ABI/symbol/link constraints → obligation discharge / explicit externalization → runnable native artifact`
 
 Cargo/Nimble/C/C++ ecosystem tools may supply metadata, lockfiles, sources, and system-library facts. LAMINARIA must normalize and solve the combined graph rather than treating a package manager's opaque build as resolution. Existing compilers and backends are separately identified reference/observation and external-bootstrap tools, not hidden Rust/Nim target-build fallbacks.
 
@@ -18,7 +18,7 @@ Vertical integration and horizontal distribution are joint research subjects: co
 
 The current `build`/`plan-build` and `self-build` commands still schedule coarse Cargo/Nim actions sequentially. They are **delegated-build/bootstrap baselines**, not the intended compiler or independent self-hosting. The semantic-substrate fixture contains hand-authored IR, a limited evaluator/transform and an LLVM comparison projection; it is not a Rust/Nim source compiler.
 
-Start with the [project progression and near-term research goal](docs/near-term-research-program.md) ([日本語](docs/near-term-research-program_ja.md)). It is the canonical source for the current milestone and task order. The [documentation map](docs/README.md) then leads from that goal to foundations, research areas, issue-specific work, operational guides, and history. Current issues are minimal hypothesis tests, not requests for finished-product subsystems.
+Start with the [project progression and near-term research goal](docs/near-term-research-program.md) ([日本語](docs/near-term-research-program_ja.md)). It is the canonical source for the current milestone and task order. The [project work portfolio](docs/03-work-items/project-portfolio.md) tracks whole-project outcomes, capabilities, unissued gaps, implementation, verification, release, and later expansion. The [documentation map](docs/README.md) then leads to foundations, research areas, issue-specific work, operational guides, and history. GitHub issues are bounded tracking projections, not the project backlog itself.
 
 ## Core concepts
 

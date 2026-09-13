@@ -18,7 +18,7 @@ near-term-research-program.md     current goal and progression (start here)
 1. Read the [near-term program](near-term-research-program.md) to identify the active goal and stopping condition.
 2. Use [compiler ownership](01-foundations/compiler-ownership-contract.md) and [research prioritization](01-foundations/research-prioritization-policy.md) to constrain what counts as evidence and how the next experiment is selected.
 3. Open only the relevant research-area document for the active decision.
-4. Use the [issue plan](03-work-items/issue-plan.md) and issue-specific work item to execute or review that experiment.
+4. Use the [project work portfolio](03-work-items/project-portfolio.md) to see outcomes, capabilities, unissued gaps, and horizons; then use the [issue plan](03-work-items/issue-plan.md) only for the GitHub-tracked projection.
 5. Consult guides for commands and history for provenance; neither overrides the current program.
 
 Japanese entry points are [当面の研究ゴール](near-term-research-program_ja.md), [独自コンパイラ責務契約](01-foundations/compiler-ownership-contract_ja.md), and [研究優先順位ポリシー](01-foundations/research-prioritization-policy_ja.md).
@@ -44,7 +44,8 @@ These documents refine questions selected by the near-term program. They do not 
 
 ## 03 — Work items
 
-- [Issue plan](03-work-items/issue-plan.md) maps issues to the program.
+- [Project work portfolio](03-work-items/project-portfolio.md) manages the whole project from outcomes through unissued gaps, implementation, verification, release, and later expansion.
+- [Issue plan](03-work-items/issue-plan.md) maps the bounded GitHub-tracked projection to that portfolio.
 - `design/` contains issue-specific experiment contracts, specifications, and evidence. Implemented behavior is verified by direct executable tests against production code; design fixtures and historical catalogs are not verification authorities.
 - `review-contracts/` contains bounded review handoffs.
 

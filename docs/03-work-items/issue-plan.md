@@ -1,10 +1,12 @@
 # Research Issue Plan
 
-This file maps the GitHub issue set to the research program. The GitHub issues are the execution tracker; this document preserves the intended research decomposition and dependency order.
+This file maps the GitHub issue set to the research program. It is an issue projection, not the project work authority. The [project work portfolio](project-portfolio.md) manages outcomes, capabilities, unissued gaps, decisions, experiments, implementation, verification, release work, and later expansion. GitHub issues track only bounded portions of that work.
 
 The [research issue prioritization and minimal-hypothesis policy](../01-foundations/research-prioritization-policy.md) governs how work is selected and when an issue may stop. Existing acceptance lists are research backlogs and evidence menus, not requests for finished products or mandatory all-at-once completion. Project-wide priority follows non-substitutability and falsification power, not issue number or unchecked-box count.
 
-The [project progression and near-term research goal](../near-term-research-program.md) is the canonical current roadmap. The active milestone is G1–G3: resolve a typed Cargo/Nimble/C/C++ dependency closure, produce and run an ordinary native executable from it, then compare resolution algorithms by time, peak memory, explored states, and recomputation. A single language call path is not dependency-graph completion. Later issue tracks are not parallel product-completion commitments.
+The [project progression and near-term research goal](../near-term-research-program.md) is the canonical current roadmap. The active milestone is G1–G3: jointly resolve package/source-semantic/language-and-intermediate-IR/artifact/ABI/symbol/link obligations, discharge or externalize them into an ordinary runnable native artifact, then compare resolution algorithms by time, peak memory, explored states, pruning, and recomputation. A single language call path is not dependency-graph completion. Completing the G1–G3 issue set is also not completion of the project portfolio.
+
+Current GitHub tracking surfaces are #45 as the bounded integration milestone, #48 for G1, #46 for G2, and #47 for G3. Existing #3/#5-#8/#10-#12/#18-#22/#42/#44 retain their subsystem responsibilities. Work without a suitable issue remains explicitly listed in the portfolio rather than being forced into the nearest existing issue.
 
 ## Compiler ownership and execution order — corrected 2026-09-10
 
