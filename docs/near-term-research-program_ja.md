@@ -67,19 +67,19 @@ G1〜G3を当面の研究マイルストーンとする。G1の結果が現在�
 
 ## その後のプロジェクト進行
 
-### P2 — semantic pressureの拡張
+### Phase 2 — semantic pressureの拡張
 
 制御フロー、再帰、ownership/aliasing、effect、runtime依存、foreign dependencyなど、現在の判断を壊し得るworkloadを一つずつ追加する。#32、#33、#34、#37、#42、#44を、網羅実装ではなく反例探索として使用する。
 
-### P3 — work decompositionと実行architecture
+### Phase 3 — work decompositionと実行architecture
 
 実在するowned compiler workから、Action境界、incremental invalidation、resource model、pull schedulingを再導出する。#6、#7、#8、#12、#13、#27、#36を使う。既に成立したgeneric scheduling機能を磨くことではなく、semantic partitionが実行計画をどう変えるかを判定する。
 
-### P4 — 物理配置、永続化、異種node
+### Phase 4 — 物理配置、永続化、異種node
 
 同じ論理workを、memory、local disk、peer、remote durable storeへどう配置するか、またWindows/macOS/Linux/Raspberry Piなど異なるhost/targetへどう配置するかを比較する。#38〜#41を中心に、#6/#7へ必要な制約だけ戻す。networkやstorageの一般的実装可能性ではなく、LAMINARIAのsemantic/invalidation境界が配置判断を変えるかを問う。
 
-### P5 — coverage拡張とself-hosting
+### Phase 5 — coverage拡張とself-hosting
 
 前段で棄却されなかったowned pathのsource subsetとdependency形態を段階的に広げ、LAMINARIA自身のcrate/moduleをstage0→stage1→stage2で置き換える。#2を長期統合Issueとして使う。既存toolchainによるbootstrap buildは比較・移行手段であり、達成判定ではない。
 
