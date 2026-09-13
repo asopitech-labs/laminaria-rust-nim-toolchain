@@ -21,6 +21,8 @@ TestContract
 
 「test用buildが通る」ことと、「利用者へ渡すproduction binaryをtestした」ことを区別する。instrumentation、mock、test-only export、assertion、sanitizer等を含むbinaryは重要な証拠を作れるが、別identityのartifactである。production artifactの合格には、そのexact digestを対象とするblack-box／runtime／loader testが必要である。
 
+Rustのlibtest/nextest/`assert_cmd`/Miri/Kani等と、C++のGoogleTest/Catch2/CTest/lit/sanitizer/ABI tool等の役割比較、adapter設計、M0/M1での採用範囲は[「Rust/C++ test tool landscapeとLAMINARIAへの適用」](rust-cpp-testing-tool-landscape_ja.md)を参照する。既存frameworkはcomponent evidenceとして取り込み、framework固有test executableをproduction artifactと同一視しない。
+
 ## Lane Cの責務と他laneへのfeedback
 
 ### Lane Aへのfeedback

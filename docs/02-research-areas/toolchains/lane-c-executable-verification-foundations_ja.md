@@ -6,6 +6,8 @@
 
 Lane CはCI設定やtest runnerの付属作業ではない。Lane Aが閉じた依存義務が実行時にも成立するか、Lane Bの枝刈り・増分再利用が意味を変えていないかを判定する、独立した研究レーンである。
 
+Rust/C++の個別tool、test executableとproduction executableのidentity差、mixed-language sanitizer、CTest/nextest adapter、ABI inspectionの詳細は[「Rust/C++ test tool landscapeとLAMINARIAへの適用」](rust-cpp-testing-tool-landscape_ja.md)に分離した。本書の`TestContract`とM0/M1要件が上位契約であり、個別toolはfault classに応じて選ぶ実装候補である。
+
 ## 1. 検証対象を固定する
 
 最低限の`TestContract`は次を分離して持つ。
@@ -233,6 +235,8 @@ static semantic edges、runtime observations、uncertainty fallbackをunionす�
 
 M1では万能compiler verifierを作らない。Bazelのhermetic environment contract、lit/compiletestのstatusとtest mode、Csmith/EMI/QuickCheckのoracle多様化、Alive2のinstance validation、SLSAのsubject digest bindingを比較基準として、固定mixed workloadのexact production artifactを直接testする。成功はtest数ではなく、上記10 testがproduction graphから実行され、raw evidenceとartifact identityを結び、少なくとも一つの意図的faultを正しい層で検出することで判定する。
 
+Rust側はlibtest/`cargo test`をcomponent adapterとして受け入れ、必要に応じnextest、trybuild、proptest、Miri、sanitizer等を追加する。C++側はfixture projectが既に使うGoogleTestまたはCatch2をCTestから実行し、frameworkを二重導入しない。いずれもproduction executableとは別subjectであるため、exact artifactのprocess/loader/closure test、object/symbol/ABI inspectionを独立した必須gateとする。選定根拠と制約は[tool landscape](rust-cpp-testing-tool-landscape_ja.md)に従う。
+
 ## 参考文献
 
 1. Bazel, [Test Encyclopedia](https://bazel.build/reference/test-encyclopedia) and [Hermeticity](https://bazel.build/concepts/hermeticity).
@@ -248,4 +252,3 @@ M1では万能compiler verifierを作らない。Bazelのhermetic environment co
 11. Gligoric et al., “Practical Regression Test Selection with Dynamic File Dependencies,” ISSTA 2015, [author PDF](https://users.ece.utexas.edu/~gligoric/papers/GligoricETAL15Ekstazi.pdf).
 12. Reproducible Builds, [Definition](https://reproducible-builds.org/docs/definition/).
 13. SLSA v1.2, [Provenance](https://slsa.dev/spec/v1.2/provenance) and [Verifying artifacts](https://slsa.dev/spec/v1.2/verifying-artifacts).
-

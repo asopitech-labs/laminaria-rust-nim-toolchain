@@ -90,6 +90,7 @@ The current next task is therefore G1's cross-ecosystem dependency-graph experim
 - Pruning contract: [cross-layer reachability pruning](02-research-areas/toolchains/cross-layer-reachability-pruning_ja.md)
 - Artifact obligation discharge: [dependency-discharge artifact contract](02-research-areas/toolchains/dependency-resolved-artifact-closure_ja.md)
 - Artifact testability: [testable native artifact and first-class harness](02-research-areas/toolchains/testable-native-artifact-harness_ja.md)
+- Rust/C++ test-tool baseline: [Rust/C++ test tool landscape and application to LAMINARIA](02-research-areas/toolchains/rust-cpp-testing-tool-landscape_ja.md)
 - Whole-project outcomes, capabilities, and unissued gaps: [project work portfolio](03-work-items/project-portfolio.md)
 - Execution map: [research issue plan](03-work-items/issue-plan.md)
 - Current experiment: [first cross-ecosystem dependency-graph experiment](03-work-items/design/cross-ecosystem-dependency-graph-first-experiment.md)

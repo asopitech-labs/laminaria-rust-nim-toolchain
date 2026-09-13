@@ -118,6 +118,7 @@ semantic IR、target pipeline、measurement、identity、diagnostic、toolchain 
 - 枝刈りのcorrectnessと計測: [Native executableをrootとするcross-layer枝刈り](02-research-areas/toolchains/cross-layer-reachability-pruning_ja.md)
 - 依存義務を成果物へ変換する契約: [異種依存義務をbuild時にdischargeするartifact contract](02-research-areas/toolchains/dependency-resolved-artifact-closure_ja.md)
 - 成果物のtestability: [Testable Native Artifactと第一級Test Harness](02-research-areas/toolchains/testable-native-artifact-harness_ja.md)
+- Rust/C++ test toolの基準: [Rust/C++ test tool landscapeとLAMINARIAへの適用](02-research-areas/toolchains/rust-cpp-testing-tool-landscape_ja.md)
 - 全projectの成果・能力・未Issue化gap: [Project Work Portfolio](03-work-items/project-portfolio.md)
 - 実行順序: [Research Issue Plan](03-work-items/issue-plan.md)
 - 現在の実験: [最初のcross-ecosystem dependency graph実験](03-work-items/design/cross-ecosystem-dependency-graph-first-experiment.md)

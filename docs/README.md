@@ -44,6 +44,8 @@ The three lane foundation reports turn that landscape into explicit baselines, h
 
 [Testable Native Artifactと第一級Test Harness](02-research-areas/toolchains/testable-native-artifact-harness_ja.md) makes testability a cross-cutting artifact property: exact production subjects, test artifacts, controls, observations, target environments, test-only dependencies, and raw evidence are represented in the same production graph rather than left to an external fixture validator.
 
+[Rust/C++ test tool landscapeとLAMINARIAへの適用](02-research-areas/toolchains/rust-cpp-testing-tool-landscape_ja.md) separates test frameworks, runners, process harnesses, property/fuzz/model tools, sanitizers, ABI inspectors, mutation/coverage, and benchmarks by subject identity and fault class. Its central constraint is that libtest, GoogleTest, Catch2, and instrumented variants cannot silently certify a different production binary.
+
 These documents refine questions selected by the near-term program. They do not independently establish delivery priority.
 
 ## 03 — Work items
