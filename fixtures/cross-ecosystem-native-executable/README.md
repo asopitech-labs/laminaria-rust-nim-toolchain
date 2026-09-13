@@ -26,9 +26,10 @@ validator test exists or should be added for this fixture
   own `requires "nim >= 2.0.0"` to the exact nim `2.2.10` this repo
   already pins elsewhere (`toolchains.lock.toml`'s `nim2_pinned`) -- a
   real nimble artifact (`nimble lock`'s own output), not a G1 code
-  workaround, and required so `nimble dump --json` can resolve its own
-  `nimDir`-reporting toolchain lookup from this lock file's exact
-  pinned revision instead of scanning/downloading candidate versions
+  workaround, and required so `nimble dump --json`'s own
+  `nimDir`-reporting toolchain lookup resolves against this lock
+  file's exact pinned revision on a fresh CI runner instead of
+  crashing
   (see `crates/laminaria-run/src/command_runner.rs`'s own doc comment
   for the real CI failure this fixes).
 - **`c/cadd/v1/`** -- one C library exporting `c_add`: `cadd.c` includes
@@ -96,10 +97,10 @@ scope (and issue #49/Lane C's), not this fixture's tests.
 ## Real toolchain commands this fixture's own ingestion uses
 
 - `cargo metadata --no-deps --format-version 1 --manifest-path app/Cargo.toml`
-- `nimble --offline --disableNimBinaries dump --json` (run inside
-  `nimble/doubler/`; both flags suppress a real, observed CI failure
-  where `dump` attempted an implicit nim-toolchain management step --
-  neither changes the reported fields)
+- `nimble dump --json` (run inside `nimble/doubler/`; `nimble.lock`
+  in that same directory is what makes this resolve correctly against
+  real CI's nimble, not an added flag -- see this file's own note
+  above)
 - `rustc -vV` (real host target triple)
 
 That is the complete list. `crates/laminaria-run/src/command_runner.rs`

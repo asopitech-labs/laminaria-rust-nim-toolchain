@@ -99,25 +99,6 @@ jobs:
           }
           "$PINNED_NIM" --version
 
-      # TEMPORARY diagnostic for issue #48's nimble dump --json CI
-      # failure (real crash: "index out of bounds, the container is
-      # empty [IndexDefect]" from fatal.nim(62) sysFatal). Multiple
-      # flag/lock-file mitigations tried in the Rust code did not
-      # change the crash, so this captures full, unredacted stdout+
-      # stderr from the real CI nimble directly, to diagnose instead
-      # of guessing further. Remove once the real fix lands.
-      - name: DIAGNOSTIC -- nimble dump --json against the real fixture
-        run: |
-          which nimble
-          nimble --version
-          cd fixtures/cross-ecosystem-native-executable/nimble/doubler
-          echo "--- plain nimble dump --json ---"
-          nimble dump --json || echo "exit=$?"
-          echo "--- nimble --offline --disableNimBinaries dump --json ---"
-          nimble --offline --disableNimBinaries dump --json || echo "exit=$?"
-          echo "--- nimble --offline --disableNimBinaries --verbose dump --json ---"
-          nimble --offline --disableNimBinaries --verbose dump --json || echo "exit=$?"
-
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
 

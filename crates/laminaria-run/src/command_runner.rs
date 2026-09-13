@@ -52,26 +52,19 @@ impl std::error::Error for IngestError {}
 /// `cc`/`clang`/`gcc`/`c++ -c` or equivalent, `ar`, a linker, or `nm` --
 /// is forbidden.
 ///
-/// `nimble dump` is additionally required to carry two global flags
-/// (`nimble --offline --disableNimBinaries dump --json`). This is a
-/// hardening of the same permitted command, not a different one:
-/// recent nimble ("vnext") versions have `dump` itself perform an
-/// implicit "resolve/manage a matching nim toolchain" step -- checking
-/// whether a nim binary *nimble itself already manages* (under
-/// `~/.nimble/nimbinaries`, unrelated to whatever `nim` a project's own
-/// PATH/choosenim selection already provides) satisfies the package's
-/// `requires "nim >= ..."` line, and downloading/installing one under
-/// its own management if not. This is entirely orthogonal to `dump`'s
-/// own read-only purpose of reporting manifest fields, and is exactly
-/// the kind of opaque network/build side effect G1 must never trigger
-/// -- a real, observed CI failure hit this path (a network nim
-/// download, then later an internal nimble crash resolving it).
-/// `--offline` (nimble's own "don't use network" flag) and
-/// `--disableNimBinaries` (nimble's own flag to disable its nim-binary
-/// management subsystem entirely) together suppress this path, leaving
-/// `dump --json`'s reported output identical (verified locally: plain
-/// `nimble dump --json` and `nimble --offline --disableNimBinaries dump
-/// --json` produce byte-identical output for this fixture).
+/// `nimble dump --json` is exactly the command issue #48 names --
+/// see `fixtures/cross-ecosystem-native-executable/nimble/doubler/nimble.lock`'s
+/// own doc comment (in this repo's fixture README) for why a real
+/// `nimble.lock` file is required alongside it: recent nimble
+/// ("vnext") versions have `dump` itself perform an implicit
+/// "resolve/manage a matching nim toolchain" step to populate its own
+/// `nimDir` field. Without a lock file pinning an exact revision, that
+/// step can crash (`--offline`/`--disableNimBinaries` were tried and
+/// made this *worse*, not better -- they disable the very
+/// lock-file-aware resolution path that succeeds); with the lock file
+/// present, plain `nimble dump --json` resolves it correctly and
+/// reports unchanged manifest fields (verified against real CI
+/// output).
 pub(crate) fn is_permitted(program: &str, args: &[&str]) -> bool {
     match program {
         "cargo" => {
@@ -79,7 +72,7 @@ pub(crate) fn is_permitted(program: &str, args: &[&str]) -> bool {
                 && args.contains(&"--no-deps")
                 && args.windows(2).any(|w| w == ["--format-version", "1"])
         }
-        "nimble" => args == ["--offline", "--disableNimBinaries", "dump", "--json"],
+        "nimble" => args == ["dump", "--json"],
         "rustc" => args == ["-vV"],
         _ => false,
     }
@@ -180,21 +173,8 @@ mod tests {
                 "x"
             ]
         ));
-        assert!(is_permitted(
-            "nimble",
-            &["--offline", "--disableNimBinaries", "dump", "--json"]
-        ));
+        assert!(is_permitted("nimble", &["dump", "--json"]));
         assert!(is_permitted("rustc", &["-vV"]));
-    }
-
-    #[test]
-    fn nimble_dump_without_both_hardening_flags_is_not_permitted() {
-        assert!(!is_permitted("nimble", &["dump", "--json"]));
-        assert!(!is_permitted("nimble", &["--offline", "dump", "--json"]));
-        assert!(!is_permitted(
-            "nimble",
-            &["--disableNimBinaries", "dump", "--json"]
-        ));
     }
 
     #[test]

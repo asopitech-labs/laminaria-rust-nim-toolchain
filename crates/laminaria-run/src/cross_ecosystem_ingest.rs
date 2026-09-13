@@ -124,18 +124,12 @@ pub fn ingest_nimble_package(
     runner: &dyn CommandRunner,
     nimble_dir: &Path,
 ) -> Result<NimbleManifestFacts, IngestError> {
-    // `--offline` + `--disableNimBinaries` (nimble's own "don't use
-    // network" and "don't manage nim binaries" global flags) suppress a
-    // real, observed CI failure: recent nimble ("vnext") builds' `dump
-    // --json` performs an implicit nim-toolchain management step for a
-    // `requires "nim >= ..."` line -- see
-    // `crate::command_runner::is_permitted`'s own doc comment. Neither
-    // flag changes `dump`'s reported fields.
-    let stdout = runner.run(
-        "nimble",
-        &["--offline", "--disableNimBinaries", "dump", "--json"],
-        Some(nimble_dir),
-    )?;
+    // Exactly the command issue #48 names -- see
+    // `crate::command_runner::is_permitted`'s own doc comment and the
+    // fixture's own `nimble/doubler/nimble.lock` for why a real lock
+    // file, not an extra flag, is what makes this resolve correctly
+    // against real CI's nimble ("vnext") toolchain-management step.
+    let stdout = runner.run("nimble", &["dump", "--json"], Some(nimble_dir))?;
     // A real, observed CI difference from this machine's own local
     // `nimble`: a fresh install can print an informational banner to
     // stdout *before* the actual JSON object -- `nimble dump --json`'s
