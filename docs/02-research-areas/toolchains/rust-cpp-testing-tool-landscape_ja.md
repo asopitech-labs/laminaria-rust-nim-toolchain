@@ -279,6 +279,19 @@ hostで起動できないtest executableについて、static registration、emu
 6. object/ABI structure oracleとruntime behavior oracleが不一致のとき、どのobligationを再openするか。
 7. fuzz corpus、property counterexample、reduced IRをgraph nodeとして保持し、compiler/toolchain更新後に効率的に再選択する方法。
 
+## 11. 参考実装と再現可能性
+
+本調査を文献一覧だけで終わらせないため、architecture上の代表実装を
+[`reference-projects.lock.json`](../../../reference-projects.lock.json)へ完全commit
+SHA付きで登録した。Rust標準test/compiletestは既存の`rust`、LLVM系toolは既存の
+`llvm-project`を参照し、新たに`cargo-nextest`、`googletest`、`Catch2`、`CMake`、
+`miri`、`kani`、`libabigail`を追加した。
+
+取得、offline再検証、読む実装境界、完了条件は
+[参考プロジェクト再現手順](../../04-guides/reference-projects.md)
+を正本とする。調査上の主張を更新するときは、参照したproject名、lock SHA、source path、
+観察した境界を残す。moving branchの最新実装を暗黙に根拠へ混ぜない。
+
 ## Sources
 
 1. Rust Project, [The `#[test]` attribute / `rustc --test`](https://doc.rust-lang.org/rustc/tests/).

@@ -85,13 +85,14 @@ The documentation is intentionally rooted at the [project progression and near-t
 
 ### Reference-project source setup
 
-The 12 locally used prior-art repositories are pinned by full commit SHA in
+The 19 locally used prior-art repositories are pinned by full commit SHA in
 [`reference-projects.lock.json`](reference-projects.lock.json). With Python 3.11+
 and Git, reproduce their source checkouts without installing any compiler:
 
 ```sh
 python3 scripts/reference_projects.py setup buck2 bazel pants nx  # selected projects
-python3 scripts/reference_projects.py setup                     # all 12
+python3 scripts/reference_projects.py setup cargo-nextest googletest Catch2 CMake miri kani libabigail  # test research set
+python3 scripts/reference_projects.py setup                     # all 19
 python3 scripts/reference_projects.py status                    # offline verification
 ```
 

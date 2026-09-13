@@ -61,6 +61,8 @@ The active experiment starts at the [first cross-ecosystem dependency-graph expe
 
 Procedures for reference-project setup, Windows development, project builds, and delegated self-build baselines live here. A working baseline is not evidence that an owned compiler milestone is complete.
 
+The [reproducible reference-project setup](04-guides/reference-projects.md) pins prior-art source by full commit SHA. It includes a focused Rust/C++ test-research set and the commands and completion conditions needed to reproduce those checkouts without treating upstream test success as LAMINARIA artifact qualification.
+
 ## 05 — History
 
 Dated audits and retired machine-readable research catalogs live here to preserve why contracts changed. Historical documents provide provenance and do not override the current near-term program or direct executable tests.
