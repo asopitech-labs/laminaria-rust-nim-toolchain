@@ -34,13 +34,28 @@ Cross-ecosystem package resolution now has direct formal prior art in *Package M
 
 This does not mean completing all Cargo/Nimble semantics, all C/C++ build systems, every platform, the fastest compiler, a production package manager, WASM support, distributed builds, or self-hosting. The milestone requires a correct closure, a runnable native binary, a negative case, resource measurements, and one architectural decision for a fixed realistic mixed-dependency workload.
 
-## Near-term research program
+## Two-lane research program
 
-1. **G1 — cross-ecosystem dependency graph (#8/#22/#44; related #3/#4/#5/#7/#18).** Map at least one Cargo crate, Nimble package, C library, and C++ library through the Package Calculus or document the exact semantic divergence, then connect the result to source/semantic and native-artifact constraints in a typed graph while retaining ecosystem identity. Demand-expand only the closure required by the executable. Resolve one consistent case and reject one incompatible version/feature/ABI/symbol/toolchain case before compilation.
-2. **G2 — native-executable vertical slice (#6/#4/#5/#44; related #3/#10/#12/#20).** Send G1's closure through the production Nim planner and Rust runtime, execute explicit semantic-validation/lowering/compile/adapter/archive/link actions, and directly test a native executable. Require every package/source/IR/ABI/link obligation to reach `Discharged`, `Externalized`, or `Rejected` with evidence. Record every input/producer identity, executed and skipped action, final link input, and retained/pruned symbol or section. Preserve FFI exports, constructors, dynamic-retention roots, and runtime support conservatively.
-3. **G3 — resolution efficiency, pruning, and incrementality (#8/#7/#11/#12; related #6/#19–#24).** Compare eager candidate/code expansion with demand-driven constraint propagation, cross-layer reachability pruning, canonicalization, memoization, equivalent-state merging, dominance pruning, and SCC condensation. Measure cold resolution, no-op, leaf-change, root-set change, and feature/target-condition changes by wall time, peak RSS, output size, package/source/IR/artifact/symbol pruning, recomputation, and avoided external-tool executions.
+Research is divided into **Lane A — Semantic and Artifact Closure**, which owns artifact meaning and completeness, and **Lane B — Efficient Compiler Computation**, which owns compiler-computation strategy and physical resource behavior. They do not maintain separate graphs: both consume the same package/source/semantic/IR/artifact/ABI/symbol/link nodes, identities, and provenance. Source semantics and IR are their shared substrate.
 
-G1–G3 are the current milestone. Semantic fusion/splitting and the WASM target pipeline remain useful separate research, but neither is a serial gate for this milestone.
+### Lane A — Semantic and Artifact Closure
+
+1. **A1 / G1 — cross-ecosystem dependency graph (#48; related #8/#22/#44/#3/#4/#5/#7/#18).** Map at least one Cargo crate, Nimble package, C library, and C++ library through the Package Calculus or document the exact semantic divergence, then connect the result to source/semantic and native-artifact constraints in a typed graph while retaining ecosystem identity. Demand-expand only the closure required by the executable. Resolve one consistent case and reject one incompatible version/feature/ABI/symbol/toolchain case before compilation.
+2. **A2 / G2 — native-executable vertical slice (#46; related #6/#4/#5/#44/#3/#10/#12/#20/#42).** Send G1's closure through the production Nim planner and Rust runtime, execute explicit semantic-validation/lowering/compile/adapter/archive/link actions, and directly test a native executable. Require every package/source/IR/ABI/link obligation to reach `Discharged`, `Externalized`, or `Rejected` with evidence. Record every input/producer identity, executed and skipped action, final link input, and retained/pruned symbol or section. Preserve FFI exports, constructors, dynamic-retention roots, and runtime support conservatively.
+
+### Lane B — Efficient Compiler Computation
+
+1. **B1 / G3 — resolution efficiency, pruning, and incrementality (#47; related #8/#7/#11/#12/#6/#19–#24).** Compare eager candidate/code expansion with demand-driven constraint propagation, cross-layer reachability pruning, canonicalization, memoization, equivalent-state merging, dominance pruning, and SCC condensation. Measure cold resolution, no-op, leaf-change, root-set change, and feature/target-condition changes by wall time, peak RSS, output size, package/source/IR/artifact/symbol pruning, recomputation, and avoided external-tool executions.
+
+### Shared milestone gates
+
+- **M0 — contract lock:** Fix Lane A's obligation/artifact contract and Lane B's event/identity/measurement contract for the same graph.
+- **M1 — first dependency-discharged native artifact (current):** A1/G1 and A2/G2 produce the native artifact; B1/G3 provides a correctness-equivalent efficiency comparison and one algorithm decision on that graph.
+- **M2 — representative native projects:** Expand ecosystem coverage together with bounded invalidation, memory, and publication correctness.
+- **M3 — self-hosted native toolchain:** Establish stage0→stage1→stage2 obligation and producer lineage as explainable, resource-bounded owned computation.
+- **M4 — qualified resilient release:** Satisfy packaging/update/rollback contracts and the local or distributed recovery contract required by the selected profile.
+
+Semantic fusion/splitting and the WASM target pipeline remain useful separate research, but neither substitutes for M1 native evidence. The [project work portfolio](03-work-items/project-portfolio.md) defines the full two-lane progression.
 
 ## Progression after the current milestone
 

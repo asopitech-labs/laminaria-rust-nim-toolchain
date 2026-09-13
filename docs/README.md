@@ -44,7 +44,7 @@ These documents refine questions selected by the near-term program. They do not 
 
 ## 03 — Work items
 
-- [Project work portfolio](03-work-items/project-portfolio.md) manages the whole project from outcomes through unissued gaps, implementation, verification, release, and later expansion.
+- [Project work portfolio](03-work-items/project-portfolio.md) manages the two coupled research lanes, shared milestone gates, outcomes, unissued gaps, implementation, verification, release, and later expansion.
 - [Issue plan](03-work-items/issue-plan.md) maps the bounded GitHub-tracked projection to that portfolio.
 - `design/` contains issue-specific experiment contracts, specifications, and evidence. Implemented behavior is verified by direct executable tests against production code; design fixtures and historical catalogs are not verification authorities.
 - `review-contracts/` contains bounded review handoffs.

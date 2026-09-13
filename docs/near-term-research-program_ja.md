@@ -34,9 +34,13 @@ ecosystem横断のpackage resolution自体には、*Package Managers à la Carte
 
 これは全Cargo/Nimble semantics、全C/C++ build system、全platform、最速compiler、production package manager、WASM対応、分散build、またはself-hostingの完成を意味しない。成功条件は、固定した現実的なmixed dependency workloadについて、正しいclosure、実行可能native binary、negative case、資源測定、architecture判断を得ることである。
 
-## 当面の研究プログラム
+## 2レーンの研究プログラム
 
-### G1 — cross-ecosystem dependency graph
+研究を、成果物の意味と完全性を担う**Lane A — Semantic and Artifact Closure**と、compiler計算の効率と物理実行を担う**Lane B — Efficient Compiler Computation**に分ける。両者は別graphを持たず、同じpackage/source/semantic/IR/artifact/ABI/symbol/link node、identity、provenanceを読む。source semanticsとIRは二つのlaneを接続する共有substrateである。
+
+### Lane A — Semantic and Artifact Closure
+
+#### A1 / G1 — cross-ecosystem dependency graph
 
 最小だが非自明なfixtureを固定する。少なくともCargo crate、Nimble package、C library、C++ libraryを各一つ含め、version/feature/target条件、生成またはadapter action、native link edgeを明示する。package層はPackage Calculusへ写すか、写せない正確なsemantic divergenceを記録する。その結果をsource/semanticとnative-artifact constraintへ接続し、各ecosystemのidentityを保持したまま要求artifactから必要closureだけを展開する。
 
@@ -46,7 +50,7 @@ ecosystem横断のpackage resolution自体には、*Package Managers à la Carte
 - negative case: version、feature、ABI、symbol、toolchainのいずれか一つが両立しないclosureを、compile開始前に構造化診断で拒否する
 - 停止条件: package/source/artifact/toolchain/linkの各edgeが追跡可能で、opaqueなpackage-manager buildへ逃げずにclosureを確定または拒否できる
 
-### G2 — native executable vertical slice
+#### A2 / G2 — native executable vertical slice
 
 G1で解決したclosureをproduction Nim planner / Rust runtimeへ渡し、必要なsemantic validation、lowering、compile、adapter、archive、link actionを実行して、対象OSで直接起動できるnative executableを生成する。単一callの成立ではなく、推移的外部依存に由来するpackage/source/IR/ABI/link義務がそれぞれ`Discharged`、`Externalized`、または`Rejected`へ到達することを検証する。不要codeはearly pruning、compiler DCE、linker GCで除去し、FFI export、constructor、dynamic-retention root、runtime supportは保守的に保持する。
 
@@ -54,7 +58,9 @@ G1で解決したclosureをproduction Nim planner / Rust runtimeへ渡し、必�
 - 関連Issue: #3、#10、#12、#20
 - 停止条件: binaryの起動結果、各依存義務のdischarge/externalization evidence、全入力とproducerのidentity、実行／省略action、最終link入力、保持／枝刈りしたsymbol/sectionが直接的な実行可能テストで確認できる
 
-### G3 — 解決効率、枝刈り、増分性の比較
+### Lane B — Efficient Compiler Computation
+
+#### B1 / G3 — 解決効率、枝刈り、増分性の比較
 
 同じdependency workloadで、全候補・codeを先に展開するbaselineと、lazy expansion、cross-layer reachability pruning、constraint propagation、canonicalization、memoization、equivalent-state merging、dominance pruning、SCC condensationを用いるcandidateを比較する。cold resolution、no-op、leaf dependency変更、root-set変更、feature/target条件変更を測る。
 
@@ -63,7 +69,15 @@ G1で解決したclosureをproduction Nim planner / Rust runtimeへ渡し、必�
 - 判断指標: wall-clock、peak RSS、output size、展開／枝刈り／mergeしたstate数、保持／枝刈りしたpackage/source/IR/artifact/symbol数、再計算node数、実行を回避した外部tool数
 - 停止条件: correctnessを維持したうえで、少なくとも一つのgraph algorithmまたは表現について採用・棄却・再定式化を判断できる
 
-G1〜G3を当面の研究マイルストーンとする。意味IRの融合／分割やWASM target pipelineは有用な別研究だが、このmilestoneの直列gateにしない。
+### 共有milestone gate
+
+- **M0 — contract lock:** Lane Aのobligation/artifact contractと、Lane Bのevent/identity/measurement contractを同じ固定graphについて確定する。
+- **M1 — first dependency-discharged native artifact（現在）:** A1/G1とA2/G2がnative artifactを成立させ、B1/G3が同じgraph上でcorrectness-equivalentな効率比較と一つのalgorithm判断を得る。
+- **M2 — representative native projects:** ecosystem coverageと、増分性・memory・publication correctnessを実projectへ広げる。
+- **M3 — self-hosted native toolchain:** stage0→stage1→stage2の依存義務とproducer lineageを、説明可能でresource-boundedなowned computationとして成立させる。
+- **M4 — qualified resilient release:** package/update/rollback契約と、対象profileに必要なlocalまたはdistributed recovery契約を満たす。
+
+意味IRの融合／分割やWASM target pipelineは有用な別研究だが、M1のnative evidenceの代わりにしない。詳細な2レーンportfolioは[Project Work Portfolio](03-work-items/project-portfolio.md)に定める。
 
 ## その後のプロジェクト進行
 
