@@ -45,10 +45,12 @@
 //! crate does not itself touch `laminaria-plan`, `nim-planner`,
 //! `laminaria-run`, or `laminaria-cli`; that is Task 2's own scope.
 
+pub mod c_header_discover;
 pub mod diagnostics;
 pub mod discover;
 pub mod foreign_discover;
 pub mod interpreter;
+pub mod nim_export_discover;
 pub mod nim_frontend;
 pub mod rust_frontend;
 pub mod transform;

@@ -52,6 +52,7 @@ pub mod artifact_inventory;
 pub mod cargo_telemetry;
 pub mod cargo_wrapper;
 pub mod clock;
+pub mod command_runner;
 pub mod compiler_work_executor;
 pub mod cross_ecosystem_ingest;
 pub mod incremental_executor;

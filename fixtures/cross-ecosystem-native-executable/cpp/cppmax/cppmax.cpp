@@ -5,7 +5,11 @@
 // below is exactly that adapter (per
 // `docs/02-research-areas/compiler/nim-c-cpp-library-integration_ja.md`'s
 // own "C++にはoverload resolution...templateが加わる...明示的なC++
-// adapter/instantiation unitを生成" requirement).
+// adapter/instantiation unitを生成" requirement). Includes its own
+// header so the header's declaration and this implementation cannot
+// silently drift apart.
+#include "cppmax.h"
+
 template <typename T>
 static T max_value(T a, T b) {
     return a > b ? a : b;

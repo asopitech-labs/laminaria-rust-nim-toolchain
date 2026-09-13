@@ -3,7 +3,10 @@
  * negative case (one of the work instruction's own named examples),
  * not a fabricated missing-symbol claim: this variant really renamed
  * its exported entry point to `c_add_v2`, so it genuinely does not
- * export `c_add` at all. */
+ * export `c_add` at all. Includes its own header so the header's
+ * declaration and this implementation cannot silently drift apart. */
+#include "cadd.h"
+
 int c_add_v2(int a, int b) {
     return a + b;
 }

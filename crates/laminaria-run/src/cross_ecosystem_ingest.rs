@@ -1,82 +1,58 @@
-//! Issue #48 (G1): ecosystem-fact ingestion adapters for the typed
+//! Issue #48 (G1): ecosystem-fact ingestion for the typed
 //! dependency-obligation graph (`laminaria_plan::dependency_graph`).
-//! Every function here does real I/O -- `cargo metadata`, `nimble dump
-//! --json`, real `cc`/`clang++`/`nim` compilation of the fixture's own
-//! foreign libraries, real `nm` symbol inspection. This is deliberately
-//! the *only* place in this vertical slice that spawns a process;
-//! `laminaria_plan::dependency_graph::resolve` itself never does (see
-//! that module's own `the_resolver_never_spawns_a_subprocess` guard).
 //!
-//! ## What is, and is not, "opaque build delegation" here
+//! ## G1's exact boundary
 //!
-//! `cargo metadata --no-deps` and `nimble dump --json` are read-only
-//! manifest-introspection commands: neither compiles anything nor
-//! executes a build script/task. Compiling the fixture's *foreign* C/
-//! C++ library sources, and the foreign Nimble package's own Nim
-//! implementation, with the real system toolchain is explicitly
-//! permitted by `docs/01-foundations/compiler-ownership-contract_ja.md`
-//! ("宣言済みforeign-native library依存に必要なC/C++ compilationを禁止しない") --
-//! it is never LAMINARIA's own Rust/Nim target compilation delegated to
-//! an external compiler (`app`'s own Rust source is never compiled by
-//! this module at all). These foreign compiles happen once, cached
-//! behind a `OnceLock` (the same "build the real fixture toolchain
-//! output once, reuse it across every test in this module" pattern
-//! `incremental_executor.rs::tests::real_incremental_planner_binary`
-//! already established), analogous to a `Cargo.lock` or a prebuilt
-//! archive already existing *before* resolution runs -- the pure
-//! resolver in `laminaria_plan::dependency_graph` only ever consumes
-//! their already-produced, already-inspected output as plain
-//! [`laminaria_plan::dependency_graph::FixtureFacts`] data.
+//! Every function here is **read-only**. It builds a
+//! [`laminaria_plan::dependency_graph::DependencyResolutionInput`] from:
+//!
+//! - real, read-only `cargo metadata --no-deps` output;
+//! - real, read-only `nimble dump --json` output;
+//! - real C/C++ header text, read from disk and scanned by
+//!   [`laminaria_ir::c_header_discover`] for declared prototypes;
+//! - real Nim source text, read from disk and scanned by
+//!   [`laminaria_ir::nim_export_discover`] for `{.exportc.}` pragmas;
+//! - real Rust source text, read from disk and scanned by
+//!   [`laminaria_ir::foreign_discover`] for `extern "C"` requirements.
+//!
+//! **No function in this module compiles, archives, links, builds, or
+//! installs anything, and none inspects a compiled artifact.** Every
+//! subprocess this module ever spawns goes through
+//! [`crate::command_runner::CommandRunner`], whose own
+//! `is_permitted` allowlist is the single place the compiler/
+//! archiver/linker/build/install boundary is enforced -- see that
+//! module's own doc comment. Declared-export facts come from pure text
+//! scanning, never from compiling a candidate and inspecting the
+//! result with `nm`: this is the exact correction issue #48 makes over
+//! the prior `compile_c_candidate`/`compile_cpp_candidate`/
+//! `compile_nimble_candidate`/`nm`-based implementation those functions
+//! (deliberately removed here) used to provide.
+//!
+//! `laminaria_plan::dependency_graph::resolve` itself never spawns a
+//! process at all (see that module's own doc comment); G2 (issue #46)
+//! is where a [`laminaria_plan::dependency_graph::RequiredAction`] is
+//! actually executed.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
+use laminaria_ir::c_header_discover::discover_c_declared_functions;
 use laminaria_ir::foreign_discover::discover_foreign_function_requirements;
+use laminaria_ir::nim_export_discover::discover_exportc_declarations;
 use laminaria_plan::dependency_graph::{
-    CargoFacts, Ecosystem, FfiRequirementFacts, NativeCandidateFacts, NimbleFacts, Role,
+    AbiConstraintFacts, ArtifactOutputFacts, ArtifactOutputKind, DependencyResolutionInput,
+    Ecosystem, FfiExportFacts, FfiRequirementFacts, LoweringRequirementFacts,
+    PackageCandidateFacts, Role, RuntimeRequirementFacts, SourceModuleFacts,
 };
 
-#[derive(Debug)]
-pub enum IngestError {
-    Io(String),
-    Parse(String),
-}
-
-impl std::fmt::Display for IngestError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            IngestError::Io(detail) => write!(f, "ingestion I/O error: {detail}"),
-            IngestError::Parse(detail) => write!(f, "ingestion parse error: {detail}"),
-        }
-    }
-}
-
-impl std::error::Error for IngestError {}
-
-fn run(command: &str, args: &[&str], cwd: Option<&Path>) -> Result<String, IngestError> {
-    let mut cmd = Command::new(command);
-    cmd.args(args);
-    if let Some(dir) = cwd {
-        cmd.current_dir(dir);
-    }
-    let output = cmd
-        .output()
-        .map_err(|e| IngestError::Io(format!("failed to spawn {command}: {e}")))?;
-    if !output.status.success() {
-        return Err(IngestError::Io(format!(
-            "{command} {args:?} exited {}: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr)
-        )));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
+pub use crate::command_runner::{
+    CommandRunner, IngestError, RealCommandRunner, RecordingCommandRunner,
+};
 
 /// The real host target triple, from `rustc -vV`'s own `host:` line --
-/// this fixture is never cross-compiled, so the host triple is also
-/// the demanded target triple.
-pub fn host_target_triple() -> Result<String, IngestError> {
-    let stdout = run("rustc", &["-vV"], None)?;
+/// this fixture is never cross-compiled, so the host triple is also the
+/// demanded target triple.
+pub fn host_target_triple(runner: &dyn CommandRunner) -> Result<String, IngestError> {
+    let stdout = runner.run("rustc", &["-vV"], None)?;
     for line in stdout.lines() {
         if let Some(host) = line.strip_prefix("host: ") {
             return Ok(host.trim().to_string());
@@ -87,9 +63,19 @@ pub fn host_target_triple() -> Result<String, IngestError> {
     ))
 }
 
-/// Real, read-only Cargo manifest introspection (never a build).
-pub fn ingest_cargo_metadata(manifest_path: &Path) -> Result<CargoFacts, IngestError> {
-    let stdout = run(
+/// One package's real, read-only Cargo manifest facts (`cargo metadata
+/// --no-deps`, never a build).
+pub struct CargoManifestFacts {
+    pub package_name: String,
+    pub version: String,
+    pub features: Vec<String>,
+}
+
+pub fn ingest_cargo_metadata(
+    runner: &dyn CommandRunner,
+    manifest_path: &Path,
+) -> Result<CargoManifestFacts, IngestError> {
+    let stdout = runner.run(
         "cargo",
         &[
             "metadata",
@@ -119,29 +105,32 @@ pub fn ingest_cargo_metadata(manifest_path: &Path) -> Result<CargoFacts, IngestE
         .map(|m| m.keys().cloned().collect())
         .unwrap_or_default();
     features.sort();
-    let target_triple = host_target_triple()?;
-    Ok(CargoFacts {
+    Ok(CargoManifestFacts {
         package_name,
         version,
         features,
-        target_triple,
     })
 }
 
-/// Real, read-only Nimble manifest introspection (never a build) --
-/// `nimble dump --json` is Nimble's own manifest-dump command, the
-/// direct analog of `cargo metadata`.
-pub fn ingest_nimble_package(nimble_dir: &Path) -> Result<NimbleFacts, IngestError> {
-    let stdout = run("nimble", &["dump", "--json"], Some(nimble_dir))?;
+/// One package's real, read-only Nimble manifest facts (`nimble dump
+/// --json`, never a build).
+pub struct NimbleManifestFacts {
+    pub package_name: String,
+    pub version: String,
+    pub requires: Vec<String>,
+}
+
+pub fn ingest_nimble_package(
+    runner: &dyn CommandRunner,
+    nimble_dir: &Path,
+) -> Result<NimbleManifestFacts, IngestError> {
+    let stdout = runner.run("nimble", &["dump", "--json"], Some(nimble_dir))?;
     // A real, observed CI difference from this machine's own local
-    // `nimble`: a fresh install can print an informational banner (e.g.
-    // "Tip: N messages have been suppressed, use --verbose to show
-    // them.") to stdout *before* the actual JSON object, depending on
-    // nimble's own cached package-list/verbosity state -- never on
-    // stderr, so it cannot be separated by stream alone. `nimble dump
-    // --json`'s own output is always exactly one top-level JSON object,
-    // so parsing from the first `{` is a real robustness fix for a real
-    // observed tool quirk, not a cover for a resolver bug.
+    // `nimble`: a fresh install can print an informational banner to
+    // stdout *before* the actual JSON object -- `nimble dump --json`'s
+    // own output is always exactly one top-level JSON object, so
+    // parsing from the first `{` is a real robustness fix for a real
+    // observed tool quirk.
     let json_start = stdout.find('{').ok_or_else(|| {
         IngestError::Parse(format!(
             "nimble dump --json produced no JSON object at all; raw output: {stdout:?}"
@@ -170,21 +159,24 @@ pub fn ingest_nimble_package(nimble_dir: &Path) -> Result<NimbleFacts, IngestErr
                 .collect()
         })
         .unwrap_or_default();
-    Ok(NimbleFacts {
+    Ok(NimbleManifestFacts {
         package_name,
         version,
         requires,
     })
 }
 
-/// Real, shallow syn-based FFI discovery over `app`'s own real source
-/// (`laminaria_ir::foreign_discover`) -- never a fabricated requirement
-/// list.
-pub fn discover_app_ffi_requirements(
-    main_rs_path: &Path,
+/// Real, shallow syn-based FFI *requirement* discovery over real Rust
+/// source text (`laminaria_ir::foreign_discover`) -- never a fabricated
+/// requirement list. `source_id` is the stable identity to record as
+/// `declaring_source` (e.g. `"app/src/main.rs"`), never the filesystem
+/// path itself.
+pub fn discover_ffi_requirements(
+    source_path: &Path,
+    source_id: &str,
 ) -> Result<Vec<FfiRequirementFacts>, IngestError> {
     let source =
-        std::fs::read_to_string(main_rs_path).map_err(|e| IngestError::Io(e.to_string()))?;
+        std::fs::read_to_string(source_path).map_err(|e| IngestError::Io(e.to_string()))?;
     let found = discover_foreign_function_requirements(&source)
         .map_err(|diags| IngestError::Parse(format!("{diags:?}")))?;
     Ok(found
@@ -196,7 +188,7 @@ pub fn discover_app_ffi_requirements(
                 .map(|h| h.name.clone())
                 .unwrap_or_else(|| r.name.clone());
             FfiRequirementFacts {
-                declaring_package: "app".to_string(),
+                declaring_source: source_id.to_string(),
                 symbol: r.name,
                 abi: r.abi,
                 param_count: r.param_count,
@@ -206,161 +198,49 @@ pub fn discover_app_ffi_requirements(
         .collect())
 }
 
-/// Real `nm -g --defined-only` symbol inspection of an already-produced
-/// archive/object -- parses only genuine `<address> <type> <name>`
-/// symbol-table lines (skipping `nm`'s own per-member archive header
-/// lines, e.g. `cadd.o:`, and blank separator lines), and strips the
-/// leading `_` Mach-O's own C-symbol-decoration convention adds so a
-/// symbol name compares equal across platforms.
-fn real_provided_symbols(archive_or_object: &Path) -> Result<Vec<String>, IngestError> {
-    let stdout = run(
-        "nm",
-        &[
-            "-g",
-            "--defined-only",
-            archive_or_object
-                .to_str()
-                .ok_or_else(|| IngestError::Parse("archive path is not valid UTF-8".to_string()))?,
-        ],
-        None,
-    )?;
-    let mut symbols: Vec<String> = Vec::new();
-    for line in stdout.lines() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() == 3 && parts[1].chars().all(|c| c.is_ascii_alphabetic()) {
-            symbols.push(parts[2].trim_start_matches('_').to_string());
-        }
-    }
-    symbols.sort();
-    symbols.dedup();
-    Ok(symbols)
+/// Real, text-only C/C++ header-declaration discovery
+/// (`laminaria_ir::c_header_discover`) -- never a compiled-artifact
+/// symbol table.
+pub fn discover_c_declared_exports(
+    header_path: &Path,
+    source_id: &str,
+) -> Result<Vec<FfiExportFacts>, IngestError> {
+    let text = std::fs::read_to_string(header_path).map_err(|e| IngestError::Io(e.to_string()))?;
+    Ok(discover_c_declared_functions(&text)
+        .into_iter()
+        .map(|f| FfiExportFacts {
+            declaring_source: source_id.to_string(),
+            symbol: f.name,
+            abi: "C".to_string(),
+        })
+        .collect())
 }
 
-/// Compiles one real, declared-foreign C translation unit into a real
-/// static archive with the system `cc`, then inspects its real exported
-/// symbols with `nm` -- a declared foreign-dependency compilation, never
-/// LAMINARIA's own target compilation.
-pub fn compile_c_candidate(
-    source_file: &Path,
-    out_dir: &Path,
-    package_id: &str,
-    version: &str,
-) -> Result<NativeCandidateFacts, IngestError> {
-    std::fs::create_dir_all(out_dir).map_err(|e| IngestError::Io(e.to_string()))?;
-    let object = out_dir.join(format!("{package_id}-{version}.o"));
-    let archive = out_dir.join(format!("lib{package_id}-{version}.a"));
-    run(
-        "cc",
-        &[
-            "-c",
-            "-o",
-            object.to_str().unwrap(),
-            source_file.to_str().unwrap(),
-        ],
-        None,
-    )?;
-    run(
-        "ar",
-        &["rcs", archive.to_str().unwrap(), object.to_str().unwrap()],
-        None,
-    )?;
-    let provided_symbols = real_provided_symbols(&archive)?;
-    Ok(NativeCandidateFacts {
-        package_id: package_id.to_string(),
-        version: version.to_string(),
-        ecosystem: Ecosystem::C,
-        role: Role::Target,
-        archive_path: archive.to_string_lossy().into_owned(),
-        provided_symbols,
-        target_triple: host_target_triple()?,
-    })
-}
-
-/// Compiles one real, declared-foreign C++ translation unit (including
-/// its explicit `extern "C"` adapter/instantiation) into a real static
-/// archive with the system `clang++`/`c++`, then inspects its real
-/// exported symbols with `nm`.
-pub fn compile_cpp_candidate(
-    source_file: &Path,
-    out_dir: &Path,
-    package_id: &str,
-    version: &str,
-) -> Result<NativeCandidateFacts, IngestError> {
-    std::fs::create_dir_all(out_dir).map_err(|e| IngestError::Io(e.to_string()))?;
-    let object = out_dir.join(format!("{package_id}-{version}.o"));
-    let archive = out_dir.join(format!("lib{package_id}-{version}.a"));
-    run(
-        "c++",
-        &[
-            "-c",
-            "-o",
-            object.to_str().unwrap(),
-            source_file.to_str().unwrap(),
-        ],
-        None,
-    )?;
-    run(
-        "ar",
-        &["rcs", archive.to_str().unwrap(), object.to_str().unwrap()],
-        None,
-    )?;
-    let provided_symbols = real_provided_symbols(&archive)?;
-    Ok(NativeCandidateFacts {
-        package_id: package_id.to_string(),
-        version: version.to_string(),
-        ecosystem: Ecosystem::Cpp,
-        role: Role::Target,
-        archive_path: archive.to_string_lossy().into_owned(),
-        provided_symbols,
-        target_triple: host_target_triple()?,
-    })
-}
-
-/// Builds the real Nimble package's own Nim implementation into a real
-/// static library with the real `nim c --app:staticlib` (the same
-/// technique `fixtures/rust-nim-c-abi-baseline`'s own `build.rs` already
-/// uses), then inspects its real exported symbols with `nm`. Building a
-/// *foreign* Nimble package's own source with the real Nim compiler is
-/// the Nimble-ecosystem analog of `compile_c_candidate`/
-/// `compile_cpp_candidate` -- never LAMINARIA's own Rust/Nim target
-/// compilation.
-pub fn compile_nimble_candidate(
-    nim_source_file: &Path,
-    out_dir: &Path,
-    package_id: &str,
-    version: &str,
-) -> Result<NativeCandidateFacts, IngestError> {
-    std::fs::create_dir_all(out_dir).map_err(|e| IngestError::Io(e.to_string()))?;
-    let archive = out_dir.join(format!("lib{package_id}-{version}.a"));
-    let nimcache = out_dir.join("nimcache");
-    run(
-        "nim",
-        &[
-            "c",
-            "--app:staticlib",
-            "--noMain",
-            "--hints:off",
-            &format!("--nimcache:{}", nimcache.display()),
-            &format!("-o:{}", archive.display()),
-            nim_source_file.to_str().unwrap(),
-        ],
-        None,
-    )?;
-    let provided_symbols = real_provided_symbols(&archive)?;
-    Ok(NativeCandidateFacts {
-        package_id: package_id.to_string(),
-        version: version.to_string(),
-        ecosystem: Ecosystem::Nimble,
-        role: Role::Target,
-        archive_path: archive.to_string_lossy().into_owned(),
-        provided_symbols,
-        target_triple: host_target_triple()?,
-    })
+/// Real, text-only Nim `{.exportc.}` discovery
+/// (`laminaria_ir::nim_export_discover`) -- never a compiled-artifact
+/// symbol table.
+pub fn discover_nim_declared_exports(
+    nim_source_path: &Path,
+    source_id: &str,
+) -> Result<Vec<FfiExportFacts>, IngestError> {
+    let text =
+        std::fs::read_to_string(nim_source_path).map_err(|e| IngestError::Io(e.to_string()))?;
+    Ok(discover_exportc_declarations(&text)
+        .into_iter()
+        .map(|p| FfiExportFacts {
+            declaring_source: source_id.to_string(),
+            symbol: p.exported_symbol,
+            abi: "C".to_string(),
+        })
+        .collect())
 }
 
 /// The fixture's own fixed layout
 /// (`fixtures/cross-ecosystem-native-executable/`), one path accessor
-/// per real ecosystem input.
+/// per real ecosystem input. This struct, and this struct alone, is
+/// allowed to name this project's own fixture paths -- every reader
+/// function above takes arbitrary paths/text and knows nothing about
+/// `app`/`doubler`/`cadd`/`cppmax`.
 pub struct FixtureLayout {
     pub root: PathBuf,
 }
@@ -395,337 +275,511 @@ impl FixtureLayout {
         self.root.join("c/cadd/v1/cadd.c")
     }
 
+    pub fn cadd_v1_h(&self) -> PathBuf {
+        self.root.join("c/cadd/v1/cadd.h")
+    }
+
     pub fn cadd_v2_c(&self) -> PathBuf {
         self.root.join("c/cadd/v2/cadd.c")
+    }
+
+    pub fn cadd_v2_h(&self) -> PathBuf {
+        self.root.join("c/cadd/v2/cadd.h")
     }
 
     pub fn cppmax_cpp(&self) -> PathBuf {
         self.root.join("cpp/cppmax/cppmax.cpp")
     }
+
+    pub fn cppmax_h(&self) -> PathBuf {
+        self.root.join("cpp/cppmax/cppmax.h")
+    }
 }
 
-// The whole module, not per-function: every test here builds and
-// inspects real foreign C/C++/Nimble candidates via `cc`/`c++`/`ar`/
-// `nm`/`nim`/`nimble`/`cargo metadata`/`rustc -vV`, none of which this
-// repo's `windows` CI job installs (same reasoning
-// `laminaria-ir/src/lib.rs`'s own `fixture_parity_tests` module already
-// documents: gating only individual test functions would leave this
-// module's own imports/helpers unconditionally compiled on a platform
-// that can never use them, tripping `-D warnings`' `unused_imports`/
-// `dead_code` the same way a prior round of this exact project's CI
-// caught directly).
+/// Builds one C-family candidate's `PackageCandidateFacts` from its
+/// real source+header pair, reading declared exports from the header
+/// text only -- never compiling either file.
+fn ingest_c_candidate(
+    source_id_prefix: &str,
+    c_path: &Path,
+    h_path: &Path,
+    package_id: &str,
+    version: &str,
+    target_triple: &str,
+) -> Result<(Vec<SourceModuleFacts>, PackageCandidateFacts), IngestError> {
+    let c_id = format!("{source_id_prefix}.c");
+    let h_id = format!("{source_id_prefix}.h");
+    let declared_exports = discover_c_declared_exports(h_path, &h_id)?;
+    let _ = c_path; // the .c file is a real source obligation, never scanned for exports (its header is authoritative)
+    let sources = vec![
+        SourceModuleFacts {
+            id: c_id.clone(),
+            ecosystem: Ecosystem::C,
+            package_id: package_id.to_string(),
+        },
+        SourceModuleFacts {
+            id: h_id,
+            ecosystem: Ecosystem::C,
+            package_id: package_id.to_string(),
+        },
+    ];
+    let candidate = PackageCandidateFacts {
+        ecosystem: Ecosystem::C,
+        package_id: package_id.to_string(),
+        version: version.to_string(),
+        role: Role::Target,
+        target_triple: target_triple.to_string(),
+        sources: sources.iter().map(|s| s.id.clone()).collect(),
+        declared_exports,
+        declared_constraints: vec![],
+    };
+    Ok((sources, candidate))
+}
+
+/// Assembles the complete, real
+/// [`DependencyResolutionInput`] for the positive fixture scenario, with
+/// `cadd_candidate_versions` selecting which real `cadd` variant(s) to
+/// offer as candidates -- `&["1.0.0"]` for the positive case,
+/// `&["2.0.0"]` for the negative case. Every fact here comes from a
+/// real read-only command or a real source/header file; nothing is
+/// invented, and nothing is compiled.
+pub fn ingest_fixture_input(
+    runner: &dyn CommandRunner,
+    layout: &FixtureLayout,
+    cadd_candidate_versions: &[&str],
+) -> Result<DependencyResolutionInput, IngestError> {
+    let target_triple = host_target_triple(runner)?;
+    let cargo = ingest_cargo_metadata(runner, &layout.app_manifest())?;
+    let nimble = ingest_nimble_package(runner, &layout.nimble_dir())?;
+
+    let app_source_id = "app/src/main.rs".to_string();
+    let doubler_source_id = "nimble/doubler/src/doubler.nim".to_string();
+
+    let ffi_requirements = discover_ffi_requirements(&layout.app_main_rs(), &app_source_id)?;
+
+    let mut sources = vec![
+        SourceModuleFacts {
+            id: app_source_id.clone(),
+            ecosystem: Ecosystem::Cargo,
+            package_id: cargo.package_name.clone(),
+        },
+        SourceModuleFacts {
+            id: doubler_source_id.clone(),
+            ecosystem: Ecosystem::Nimble,
+            package_id: nimble.package_name.clone(),
+        },
+    ];
+
+    let mut package_candidates = vec![
+        PackageCandidateFacts {
+            ecosystem: Ecosystem::Cargo,
+            package_id: cargo.package_name.clone(),
+            version: cargo.version.clone(),
+            role: Role::Target,
+            target_triple: target_triple.clone(),
+            sources: vec![app_source_id.clone()],
+            declared_exports: vec![],
+            declared_constraints: cargo
+                .features
+                .iter()
+                .map(|f| format!("feature:{f}"))
+                .collect(),
+        },
+        PackageCandidateFacts {
+            ecosystem: Ecosystem::Nimble,
+            package_id: nimble.package_name.clone(),
+            version: nimble.version.clone(),
+            role: Role::Target,
+            target_triple: target_triple.clone(),
+            sources: vec![doubler_source_id.clone()],
+            declared_exports: discover_nim_declared_exports(
+                &layout.nimble_main_nim(),
+                &doubler_source_id,
+            )?,
+            declared_constraints: nimble
+                .requires
+                .iter()
+                .map(|r| format!("requires:{r}"))
+                .collect(),
+        },
+    ];
+
+    for version in cadd_candidate_versions {
+        let (v_sources, v_candidate) = match *version {
+            "1.0.0" => ingest_c_candidate(
+                "c/cadd/v1/cadd",
+                &layout.cadd_v1_c(),
+                &layout.cadd_v1_h(),
+                "cadd",
+                "1.0.0",
+                &target_triple,
+            )?,
+            "2.0.0" => ingest_c_candidate(
+                "c/cadd/v2/cadd",
+                &layout.cadd_v2_c(),
+                &layout.cadd_v2_h(),
+                "cadd",
+                "2.0.0",
+                &target_triple,
+            )?,
+            other => {
+                return Err(IngestError::Parse(format!(
+                    "unknown cadd candidate version requested: {other}"
+                )))
+            }
+        };
+        sources.extend(v_sources);
+        package_candidates.push(v_candidate);
+    }
+
+    let cppmax_c_id = "cpp/cppmax/cppmax.cpp".to_string();
+    let cppmax_h_id = "cpp/cppmax/cppmax.h".to_string();
+    sources.push(SourceModuleFacts {
+        id: cppmax_c_id.clone(),
+        ecosystem: Ecosystem::Cpp,
+        package_id: "cppmax".to_string(),
+    });
+    sources.push(SourceModuleFacts {
+        id: cppmax_h_id.clone(),
+        ecosystem: Ecosystem::Cpp,
+        package_id: "cppmax".to_string(),
+    });
+    package_candidates.push(PackageCandidateFacts {
+        ecosystem: Ecosystem::Cpp,
+        package_id: "cppmax".to_string(),
+        version: "1.0.0".to_string(),
+        role: Role::Target,
+        target_triple: target_triple.clone(),
+        sources: vec![cppmax_c_id, cppmax_h_id.clone()],
+        declared_exports: discover_c_declared_exports(&layout.cppmax_h(), &cppmax_h_id)?,
+        declared_constraints: vec![],
+    });
+
+    let lowering_requirements = vec![
+        LoweringRequirementFacts {
+            package_id: cargo.package_name.clone(),
+            source_id: app_source_id.clone(),
+            description: "Rust application source is lowering-feasible for the demanded target"
+                .to_string(),
+        },
+        LoweringRequirementFacts {
+            package_id: nimble.package_name.clone(),
+            source_id: doubler_source_id,
+            description: "Nim package source is lowering-feasible for the demanded target"
+                .to_string(),
+        },
+    ];
+
+    let abi_constraints = ffi_requirements
+        .iter()
+        .map(|r| AbiConstraintFacts {
+            boundary_symbol: r.symbol.clone(),
+            abi: r.abi.clone(),
+            target_triple: target_triple.clone(),
+        })
+        .collect();
+
+    let declared_outputs = vec![
+        ArtifactOutputFacts {
+            id: format!("object:{}", cargo.package_name),
+            package_id: cargo.package_name.clone(),
+            kind: ArtifactOutputKind::RustObject,
+        },
+        ArtifactOutputFacts {
+            id: format!("archive:{}", nimble.package_name),
+            package_id: nimble.package_name.clone(),
+            kind: ArtifactOutputKind::NimStaticLibrary,
+        },
+        ArtifactOutputFacts {
+            id: "object:cadd".to_string(),
+            package_id: "cadd".to_string(),
+            kind: ArtifactOutputKind::CObject,
+        },
+        ArtifactOutputFacts {
+            id: "archive:cadd".to_string(),
+            package_id: "cadd".to_string(),
+            kind: ArtifactOutputKind::CStaticArchive,
+        },
+        ArtifactOutputFacts {
+            id: "object:cppmax".to_string(),
+            package_id: "cppmax".to_string(),
+            kind: ArtifactOutputKind::CppAdapterObject,
+        },
+        ArtifactOutputFacts {
+            id: "archive:cppmax".to_string(),
+            package_id: "cppmax".to_string(),
+            kind: ArtifactOutputKind::CppStaticArchive,
+        },
+        ArtifactOutputFacts {
+            id: format!("executable:{}", cargo.package_name),
+            package_id: cargo.package_name.clone(),
+            kind: ArtifactOutputKind::NativeExecutable,
+        },
+    ];
+
+    let runtime_requirements = vec![RuntimeRequirementFacts {
+        target_triple: target_triple.clone(),
+        description: format!(
+            "OS ABI/dynamic loader contract for target '{target_triple}' is not bundled"
+        ),
+    }];
+
+    Ok(DependencyResolutionInput {
+        demand_entry_point: cargo.package_name,
+        target_triple,
+        host_toolchain_id: "nim".to_string(),
+        sources,
+        package_candidates,
+        ffi_requirements,
+        lowering_requirements,
+        abi_constraints,
+        declared_outputs,
+        runtime_requirements,
+    })
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
-    use std::sync::OnceLock;
-
     use laminaria_plan::dependency_graph::{
-        resolve, DischargeKind, FixtureFacts, ObligationState, RejectionReason, Role,
+        resolve, ObligationKind, ObligationState, RejectionReason, RequiredActionKind, Role,
     };
+    use std::collections::BTreeSet;
 
-    fn out_dir(label: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "laminaria-g1-fixture-{label}-{}",
-            std::process::id()
-        ))
+    fn positive_input() -> DependencyResolutionInput {
+        let runner = RecordingCommandRunner::new();
+        let layout = FixtureLayout::discover();
+        ingest_fixture_input(&runner, &layout, &["1.0.0"])
+            .expect("must ingest positive fixture input")
     }
 
-    /// Builds every real candidate archive exactly once per test
-    /// process and caches the result -- the same "build the real
-    /// fixture output once, reuse across tests" pattern
-    /// `incremental_executor.rs::tests::real_incremental_planner_binary`
-    /// already established, applied here to three foreign toolchains
-    /// instead of one Nim binary. This preparation step is what a real
-    /// `Cargo.lock`/prebuilt-archive already existing *before*
-    /// resolution runs stands in for -- it is not part of "the
-    /// resolver" (required test 7 checks the resolver itself never
-    /// spawns a process; this function is explicitly outside that
-    /// boundary and is never called by `resolve`).
-    struct FixtureCandidates {
-        cadd_v1: NativeCandidateFacts,
-        cadd_v2: NativeCandidateFacts,
-        cppmax: NativeCandidateFacts,
-        doubler: NativeCandidateFacts,
-        ffi_requirements: Vec<FfiRequirementFacts>,
-        cargo: CargoFacts,
-        nimble: NimbleFacts,
-        target_triple: String,
-    }
-
-    fn prepare_fixture_candidate_facts() -> &'static FixtureCandidates {
-        static CACHE: OnceLock<FixtureCandidates> = OnceLock::new();
-        CACHE.get_or_init(|| {
-            let layout = FixtureLayout::discover();
-            let cadd_v1 =
-                compile_c_candidate(&layout.cadd_v1_c(), &out_dir("cadd-v1"), "cadd", "1.0.0")
-                    .expect("must compile cadd v1");
-            let cadd_v2 =
-                compile_c_candidate(&layout.cadd_v2_c(), &out_dir("cadd-v2"), "cadd", "2.0.0")
-                    .expect("must compile cadd v2");
-            let cppmax =
-                compile_cpp_candidate(&layout.cppmax_cpp(), &out_dir("cppmax"), "cppmax", "1.0.0")
-                    .expect("must compile cppmax");
-            let doubler = compile_nimble_candidate(
-                &layout.nimble_main_nim(),
-                &out_dir("doubler"),
-                "doubler",
-                "0.1.0",
-            )
-            .expect("must compile doubler");
-            let ffi_requirements = discover_app_ffi_requirements(&layout.app_main_rs())
-                .expect("must discover real FFI requirements");
-            let cargo =
-                ingest_cargo_metadata(&layout.app_manifest()).expect("must ingest cargo metadata");
-            let nimble =
-                ingest_nimble_package(&layout.nimble_dir()).expect("must ingest nimble dump");
-            let target_triple = host_target_triple().expect("must resolve host target triple");
-            FixtureCandidates {
-                cadd_v1,
-                cadd_v2,
-                cppmax,
-                doubler,
-                ffi_requirements,
-                cargo,
-                nimble,
-                target_triple,
-            }
-        })
-    }
-
-    fn facts_with_cadd_candidates(candidates: Vec<NativeCandidateFacts>) -> FixtureFacts {
-        let f = prepare_fixture_candidate_facts();
-        let mut native_candidates: BTreeMap<String, Vec<NativeCandidateFacts>> = BTreeMap::new();
-        native_candidates.insert("cadd".to_string(), candidates);
-        native_candidates.insert("cppmax".to_string(), vec![f.cppmax.clone()]);
-        native_candidates.insert("doubler".to_string(), vec![f.doubler.clone()]);
-        FixtureFacts {
-            demand_entry_point: "app".to_string(),
-            target_triple: f.target_triple.clone(),
-            cargo: f.cargo.clone(),
-            nimble: f.nimble.clone(),
-            host_toolchain_id: "nim".to_string(),
-            ffi_requirements: f.ffi_requirements.clone(),
-            native_candidates,
-        }
-    }
-
-    fn positive_facts() -> FixtureFacts {
-        let f = prepare_fixture_candidate_facts();
-        facts_with_cadd_candidates(vec![f.cadd_v1.clone()])
-    }
-
-    fn negative_facts_only_incompatible_cadd() -> FixtureFacts {
-        let f = prepare_fixture_candidate_facts();
-        facts_with_cadd_candidates(vec![f.cadd_v2.clone()])
-    }
-
-    /// Required test 1: the success case, fed into the production
-    /// resolver, yields the necessary typed obligations.
+    /// Required test 1: the positive case resolves without ever
+    /// attempting a forbidden command, and the resulting closure
+    /// contains the exact required action kinds with a valid dependency
+    /// ordering (every action's own `depends_on` names an action that
+    /// already appears earlier in the emitted list).
     #[test]
-    fn the_success_case_yields_the_necessary_typed_obligations() {
-        let closure = resolve(&positive_facts()).expect("must resolve");
+    fn g1_positive_resolves_without_building_and_emits_complete_action_plan() {
+        let runner = RecordingCommandRunner::new();
+        let layout = FixtureLayout::discover();
+        let input = ingest_fixture_input(&runner, &layout, &["1.0.0"]).expect("must ingest");
         assert!(
-            !closure.obligations.is_empty(),
-            "a resolved closure must actually contain obligations"
+            runner.recorded_commands().iter().all(|(program, args)| {
+                let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+                crate::command_runner::is_permitted(program, &args_ref)
+            }),
+            "no forbidden command may be attempted while ingesting the positive fixture"
         );
-        assert!(closure.obligations.values().any(|o| o.kind
-            == laminaria_plan::dependency_graph::ObligationKind::Symbol
-            && o.state == ObligationState::Discharged));
-        assert!(closure
+
+        let closure = resolve(&input).expect("must resolve");
+
+        let mut seen_ids: BTreeSet<&str> = BTreeSet::new();
+        for action in &closure.required_actions {
+            for dep in &action.depends_on {
+                assert!(
+                    seen_ids.contains(dep.as_str()),
+                    "action '{}' depends on '{}' which has not been emitted yet",
+                    action.id,
+                    dep
+                );
+            }
+            seen_ids.insert(&action.id);
+        }
+
+        let kinds: Vec<RequiredActionKind> =
+            closure.required_actions.iter().map(|a| a.kind).collect();
+        for expected in [
+            RequiredActionKind::CompileRustObject,
+            RequiredActionKind::CompileNimStaticLibrary,
+            RequiredActionKind::CompileCObject,
+            RequiredActionKind::CompileCppAdapterObject,
+            RequiredActionKind::ArchiveStaticLibrary,
+            RequiredActionKind::LinkNativeExecutable,
+            RequiredActionKind::PreflightRuntimeContract,
+            RequiredActionKind::PublishProvenance,
+        ] {
+            assert!(
+                kinds.contains(&expected),
+                "missing required action kind {expected:?}"
+            );
+        }
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|k| **k == RequiredActionKind::ArchiveStaticLibrary)
+                .count(),
+            2,
+            "exactly one archive action for cadd and one for cppmax"
+        );
+    }
+
+    /// Required test 2: the real negative scenario (only `cadd@2.0.0`
+    /// offered) is rejected before any build command, with a structured
+    /// diagnostic naming the required/declared symbol mismatch.
+    #[test]
+    fn g1_negative_rejects_cadd_v2_before_any_build_command() {
+        let runner = RecordingCommandRunner::new();
+        let layout = FixtureLayout::discover();
+        let input = ingest_fixture_input(&runner, &layout, &["2.0.0"]).expect("must ingest");
+        assert!(
+            runner.recorded_commands().iter().all(|(program, args)| {
+                let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+                crate::command_runner::is_permitted(program, &args_ref)
+            }),
+            "no forbidden command may be attempted while ingesting the negative fixture"
+        );
+
+        let rejection = resolve(&input).expect_err("must reject");
+        assert_eq!(rejection.reason, RejectionReason::MissingSymbol);
+        assert_eq!(rejection.obligation_id, "Symbol:c_add");
+        assert!(rejection.detail.contains("c_add"));
+        assert!(rejection.detail.contains("c_add_v2"));
+        assert_eq!(rejection.demand_entry_point, "app");
+        assert!(
+            rejection
+                .considered_candidates
+                .iter()
+                .any(|c| c.contains("cadd@2.0.0") && c.contains("c/cadd/v2/cadd.h")),
+            "rejection must name the considered v2 candidate and its source header: {:?}",
+            rejection.considered_candidates
+        );
+    }
+
+    /// Required test 3: the native executable demand reaches every
+    /// retained obligation by actually following `depends_on`, checked
+    /// separately per ecosystem -- never inferred from mere presence in
+    /// the complete obligations map.
+    #[test]
+    fn native_demand_reaches_every_retained_obligation() {
+        let closure = resolve(&positive_input()).expect("must resolve");
+        let demand_id = closure
             .obligations
             .values()
-            .any(|o| o.kind == laminaria_plan::dependency_graph::ObligationKind::Link));
-        assert!(!closure.required_actions.is_empty());
-    }
+            .find(|o| o.kind == ObligationKind::NativeExecutableDemand)
+            .map(|o| o.id.clone())
+            .expect("a NativeExecutableDemand obligation must exist");
 
-    /// Required test 2: all four ecosystems' real inputs are reachable
-    /// from the observable executable demand -- checked by BFS over
-    /// `requested_by` edges from the `Link` obligation (the demand's own
-    /// obligation), confirming a real Cargo, Nimble, C, and C++
-    /// obligation is each present in the reached set. (`requested_by`
-    /// points from dependent to dependency, so this walks the graph in
-    /// the "what does the demand actually need" direction, the same
-    /// direction `ArtifactRef`'s own dependency-derivation convention
-    /// already uses.)
-    #[test]
-    fn all_four_ecosystems_real_inputs_are_reachable_from_the_native_executable_demand() {
-        let closure = resolve(&positive_facts()).expect("must resolve");
-        let mut reached: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-        let mut frontier = vec!["Link:native_executable".to_string()];
+        let mut reached: BTreeSet<String> = BTreeSet::new();
+        let mut frontier = vec![demand_id];
         while let Some(id) = frontier.pop() {
             if !reached.insert(id.clone()) {
                 continue;
             }
             if let Some(obligation) = closure.obligations.get(&id) {
-                for dep in &obligation.requested_by {
-                    frontier.push(dep.clone());
-                }
+                frontier.extend(obligation.depends_on.iter().cloned());
             }
-            // Also follow "produced by the same package" edges for
-            // ArtifactProduction/Abi obligations, whose own
-            // `requested_by` points at the PackageSelection obligation
-            // that in turn was fed by the Symbol obligation -- already
-            // covered by the loop above since ArtifactProduction's
-            // `requested_by` names the PackageSelection id directly.
         }
-        // Symbol obligations are `requested_by` the Link obligation
-        // directly; PackageSelection/ArtifactProduction/Abi obligations
-        // are reached transitively via each Symbol obligation's own
-        // provider-package chain recorded in the resolver -- assert
-        // reachability of at least one real obligation per ecosystem by
-        // scanning every obligation whose id references a package this
-        // closure actually selected.
-        let ecosystems_present: std::collections::BTreeSet<_> =
-            closure.obligations.values().map(|o| o.ecosystem).collect();
+
+        for (id, obligation) in &closure.obligations {
+            if obligation.state.is_rejected() {
+                continue;
+            }
+            assert!(
+                reached.contains(id),
+                "retained obligation '{id}' is unreachable from the demand"
+            );
+        }
+
         for expected in [
-            laminaria_plan::dependency_graph::Ecosystem::Cargo,
-            laminaria_plan::dependency_graph::Ecosystem::Nimble,
-            laminaria_plan::dependency_graph::Ecosystem::C,
-            laminaria_plan::dependency_graph::Ecosystem::Cpp,
+            Ecosystem::Cargo,
+            Ecosystem::Nimble,
+            Ecosystem::C,
+            Ecosystem::Cpp,
         ] {
             assert!(
-                ecosystems_present.contains(&expected),
-                "expected an obligation from ecosystem {expected:?} in the resolved closure"
+                closure
+                    .obligations
+                    .iter()
+                    .any(|(id, o)| reached.contains(id) && o.ecosystem == expected),
+                "no reachable obligation belongs to ecosystem {expected:?}"
             );
         }
-        assert!(reached.contains("Link:native_executable"));
     }
 
-    /// Required test 3: an unresolved retained obligation must make
-    /// closure production fail -- constructed here by declaring a
-    /// package with candidates that satisfy none of the graph's own
-    /// bookkeeping (an FFI requirement whose expected provider package
-    /// has zero real candidates at all).
+    /// Required test 4: no artifact/link/runtime/provenance obligation
+    /// is ever `Discharged`/`Externalized` in G1's own output; each
+    /// such obligation instead names the required G2 action that will
+    /// discharge it.
     #[test]
-    fn an_unresolved_retained_obligation_makes_production_fail() {
-        let f = prepare_fixture_candidate_facts();
-        let mut facts = facts_with_cadd_candidates(vec![f.cadd_v1.clone()]);
-        facts.native_candidates.remove("cppmax");
-        let rejection = resolve(&facts)
-            .expect_err("must fail when a required provider has no candidate at all");
-        assert_eq!(rejection.reason, RejectionReason::MissingSymbol);
-    }
-
-    /// Required test 4: the negative case (only the incompatible `cadd`
-    /// variant available) is rejected with a structured reason before
-    /// any G2 action request is generated.
-    #[test]
-    fn the_negative_case_is_rejected_before_any_action_request_is_generated() {
-        let rejection = resolve(&negative_facts_only_incompatible_cadd()).expect_err("must reject");
-        assert_eq!(rejection.reason, RejectionReason::MissingSymbol);
-        assert!(rejection.detail.contains("c_add"));
-        // `GraphRejection` carries no `required_actions` field at all --
-        // structurally, a rejection can never smuggle out a G2 action
-        // request.
-    }
-
-    /// Required test 5: a host-role obligation (the `nim` compiler
-    /// itself, used only to build the foreign Nimble package) never
-    /// satisfies a target-role symbol requirement.
-    #[test]
-    fn a_host_role_obligation_never_satisfies_a_target_role_symbol_requirement() {
-        let closure = resolve(&positive_facts()).expect("must resolve");
-        let host_obligations: Vec<_> = closure
-            .obligations
-            .values()
-            .filter(|o| o.role == Role::Host)
-            .collect();
-        assert!(
-            !host_obligations.is_empty(),
-            "the host toolchain obligation must be present"
-        );
-        for host_obligation in &host_obligations {
-            assert!(
-                !closure.obligations.values().any(|o| {
-                    o.role == Role::Target && o.requested_by.contains(&host_obligation.id)
-                }),
-                "a host-role obligation must never be the thing a target-role obligation was \
-                 satisfied by"
-            );
-        }
-        let symbol_obligations: Vec<_> = closure
-            .obligations
-            .values()
-            .filter(|o| o.kind == laminaria_plan::dependency_graph::ObligationKind::Symbol)
-            .collect();
-        assert!(!symbol_obligations.is_empty());
-        for symbol_obligation in symbol_obligations {
-            assert_eq!(symbol_obligation.role, Role::Target);
+    fn g1_never_discharges_a_production_action_obligation() {
+        let closure = resolve(&positive_input()).expect("must resolve");
+        let production_kinds = [
+            ObligationKind::ArtifactProduction,
+            ObligationKind::FinalLink,
+            ObligationKind::Runtime,
+            ObligationKind::Provenance,
+        ];
+        let mut checked = 0;
+        for obligation in closure.obligations.values() {
+            if !production_kinds.contains(&obligation.kind) {
+                continue;
+            }
+            checked += 1;
             assert_eq!(
-                symbol_obligation.discharge_kind,
-                Some(DischargeKind::StaticallyLinked)
+                obligation.state,
+                ObligationState::Satisfied,
+                "production obligation '{}' must be Satisfied, not {:?}",
+                obligation.id,
+                obligation.state
             );
-        }
-    }
-
-    /// Required test 6: the same real facts resolve to an identical
-    /// closure every time (no hash-order nondeterminism, no incidental
-    /// timestamp/path leakage into identity-bearing fields beyond the
-    /// real, stable archive paths this test's own fixed `out_dir`
-    /// labels already pin).
-    #[test]
-    fn the_same_real_facts_resolve_to_an_identical_closure_every_time() {
-        let facts = positive_facts();
-        let a = resolve(&facts).expect("must resolve");
-        let b = resolve(&facts).expect("must resolve");
-        assert_eq!(a, b);
-    }
-
-    /// Required test 7: this crate's own ingestion functions are the
-    /// only place a compiler/manifest tool is invoked; the resolver
-    /// itself (a separate crate, `laminaria-plan`) never substitutes an
-    /// opaque `cargo build`/`nimble build`/`nim c` (on `app`'s own
-    /// source) for resolver success. `laminaria_plan::dependency_graph`'s
-    /// own `the_resolver_never_spawns_a_subprocess` test already proves
-    /// this at the source level for the resolver; this test proves the
-    /// complementary fact that `app`'s own Rust source is never itself
-    /// compiled or linked anywhere in this ingestion module -- `rustc`
-    /// is invoked only as `["-vV"]` (a version/host-triple query, never
-    /// a compile), and neither `cargo build`/`cargo run` nor any
-    /// `rustc`/`cc`/`c++`/`nim` compile-flag invocation ever appears.
-    /// Only the fixture's *declared foreign* C/C++/Nimble dependencies'
-    /// real source is compiled, per this module's own top-of-file
-    /// ownership-boundary doc comment.
-    #[test]
-    fn app_own_rust_source_is_never_compiled_or_linked_by_this_ingestion_module() {
-        let source = include_str!("cross_ecosystem_ingest.rs");
-        // Must match this file's own `mod tests` gate exactly (currently
-        // `#[cfg(all(test, unix))]`, not the plain `#[cfg(test)]` other
-        // modules in this workspace use) -- a mismatched marker string
-        // silently returns the *whole file* as "production_source"
-        // (including this very doc comment's own mentions of "cargo
-        // build"), which is exactly the CRLF/marker-mismatch class of
-        // bug this project's own `wasm_target.rs`
-        // (`source_never_spawns_a_subprocess`) hit before: verified by
-        // intentionally reverting this line during development and
-        // watching this test fail against its own doc comment.
-        let test_module_marker = "#[cfg(all(test, unix))]";
-        let production_source = source
-            .split(test_module_marker)
-            .next()
-            .expect("this file always contains its own test module marker");
-        for forbidden in [
-            "cargo build",
-            "cargo run",
-            "\"build\"",
-            "rustc\", &[\"-c\"",
-            "rustc\", &[\"-o\"",
-        ] {
             assert!(
-                !production_source.contains(forbidden),
-                "this ingestion module must never compile/link/run app's own Rust source \
-                 (found forbidden token: {forbidden:?})"
+                obligation.required_action.is_some(),
+                "production obligation '{}' must name the G2 action that will discharge it",
+                obligation.id
             );
         }
         assert!(
-            production_source.contains(r#"run("rustc", &["-vV"]"#),
-            "the only permitted rustc invocation is a version/host-triple query"
+            checked > 0,
+            "the closure must actually contain production obligations"
         );
-        assert_eq!(
-            production_source.matches("\"rustc\"").count(),
-            1,
-            "rustc must be invoked exactly once, for its own version query only"
+    }
+
+    /// Required test 5: the same normalized input resolves to a
+    /// byte-for-byte identical serialized plan every time -- identities
+    /// never contain a temporary-directory path or a timestamp (the
+    /// fixture's own stable, repo-relative source ids guarantee this).
+    #[test]
+    fn g1_plan_is_deterministic_for_identical_inputs() {
+        let input = positive_input();
+        let a = resolve(&input).expect("must resolve");
+        let b = resolve(&input).expect("must resolve");
+        let a_json = serde_json::to_string(&a).expect("serialize");
+        let b_json = serde_json::to_string(&b).expect("serialize");
+        assert_eq!(a_json, b_json);
+        assert!(
+            !a_json.contains("/tmp"),
+            "identities must never leak a temp-directory path"
+        );
+        assert!(!a_json.contains(std::env::temp_dir().to_string_lossy().as_ref()));
+    }
+
+    /// Required test 6: a host-role candidate that would otherwise
+    /// match a required symbol is rejected with `HostTargetRoleMismatch`,
+    /// never silently accepted as satisfying a target-role obligation.
+    #[test]
+    fn host_tool_actions_cannot_satisfy_target_artifact_obligations() {
+        let mut input = positive_input();
+        for candidate in input.package_candidates.iter_mut() {
+            if candidate.package_id == "cadd" {
+                candidate.role = Role::Host;
+            }
+        }
+        let rejection = resolve(&input).expect_err("a host-role-only candidate must not resolve");
+        assert_eq!(rejection.reason, RejectionReason::HostTargetRoleMismatch);
+    }
+
+    /// Required test 7: removing a required source/provider from a
+    /// minimal constructed input prevents plan publication entirely.
+    #[test]
+    fn unresolved_reachable_obligation_prevents_plan_publication() {
+        let mut input = positive_input();
+        input
+            .package_candidates
+            .retain(|c| c.package_id != "cppmax");
+        let result = resolve(&input);
+        assert!(
+            result.is_err(),
+            "removing the cppmax provider must prevent plan publication"
         );
     }
 }
