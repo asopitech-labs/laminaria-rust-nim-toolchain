@@ -1,0 +1,15 @@
+[workspace]
+
+[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[features]
+default = ["use_nim_double"]
+use_nim_double = []
+
+[[bin]]
+name = "app"
+path = "src/main.rs"
