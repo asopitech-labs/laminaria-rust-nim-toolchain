@@ -6,6 +6,53 @@ on:
   pull_request:
 
 jobs:
+  # Path-based gating for the two jobs below whose own real dependency
+  # surface is narrow enough to state precisely and safely (verified by
+  # reading each job's own steps, not guessed): `nlvm-experiment`'s
+  # fixture crate (`fixtures/direct-native-link/rust-lib`) declares its
+  # own `[workspace]` and is not a member of the root Cargo workspace,
+  # so it cannot be affected by a change to `crates/**`; `docker-bootstrap`
+  # genuinely does `cargo build --workspace` plus three more fixtures
+  # inside its own Dockerfile, so its filter lists all of that, not just
+  # `docker/**`. `windows` and `rust` below stay unconditional -- their
+  # own real dependency surface is "the whole Rust workspace" (fmt/
+  # clippy/test) plus dozens of other fixtures each with their own
+  # narrower scope; giving each of those the same treatment is a much
+  # larger, separate piece of work, not done in this pass. The point of
+  # this job is to stop paying nlvm-experiment's/docker-bootstrap's own
+  # real, multi-minute cost (an LLVM toolchain download, a from-scratch
+  # Docker image build) on a change neither could possibly observe --
+  # e.g. a documentation-only commit -- not to narrow the primary
+  # correctness gate.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      nlvm: ${{ steps.filter.outputs.nlvm }}
+      docker_bootstrap: ${{ steps.filter.outputs.docker_bootstrap }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            nlvm:
+              - 'fixtures/direct-native-link/**'
+              - 'fixtures/rust-nim-llvm-lto-compatibility/**'
+              - 'fixtures/llvm-rediscovery-semantic-workload/**'
+              - 'fixtures/laminaria-semantic-substrate-prototype/**'
+              - 'scripts/resolve_nlvm_asset.py'
+              - '.github/workflows/ci.yml'
+            docker_bootstrap:
+              - 'crates/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'docker/**'
+              - 'fixtures/rust-heavy-workspace/**'
+              - 'fixtures/nim-heavy-workspace/**'
+              - 'fixtures/rust-nim-c-abi-baseline/**'
+              - 'fixtures/wide-parallel-graph/**'
+              - '.github/workflows/ci.yml'
+
   # A separate, deliberately lean job rather than adding windows-latest to
   # the `rust` matrix below: that job's fixture steps are bash/jq-heavy and
   # Unix-specific throughout (rm -rf, awk, /tmp paths, Nim install), and
@@ -660,6 +707,8 @@ jobs:
   # moment upstream rebuilds -- scripts/resolve_nlvm_asset.py resolves it
   # freshly, verified, every run instead.
   nlvm-experiment:
+    needs: changes
+    if: needs.changes.outputs.nlvm == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -869,6 +918,8 @@ jobs:
   # native (non-Rosetta) environment — see docker/bootstrap.Dockerfile for
   # why this is a bootstrap/correctness check, not a performance baseline.
   docker-bootstrap:
+    needs: changes
+    if: needs.changes.outputs.docker_bootstrap == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

@@ -21,6 +21,13 @@ nimcache/
 # laminaria-planner binary, rebuilt by stage0/CI, never committed.
 nim-planner/bin/
 
+# `nim c -r tests/test_*.nim` (scripts/local-ci.sh and CI's own
+# nim-planner unit test step both run this) compiles a same-named
+# binary next to the source file by default -- harmless on an ephemeral
+# CI runner, but stray local dirt otherwise.
+nim-planner/tests/test_planning_kernel
+nim-planner/tests/test_incremental_kernel
+
 # Fixture build outputs (fixtures/nim-heavy-workspace)
 fixture_out
 
