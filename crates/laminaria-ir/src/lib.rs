@@ -46,6 +46,7 @@
 //! `laminaria-run`, or `laminaria-cli`; that is Task 2's own scope.
 
 pub mod c_header_discover;
+pub mod cfg_predicate;
 pub mod diagnostics;
 pub mod discover;
 pub mod foreign_discover;

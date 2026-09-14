@@ -5,7 +5,12 @@
 //! never invokes the Nim compiler and never inspects a compiled
 //! archive -- it turns real `.nim` source text into a small, typed
 //! fact list, over the same "best-effort, never a correctness gate"
-//! discipline the other two discovery modules use. It is not
+//! discipline the other two discovery modules use for everything
+//! *except* one real, checkable structural fact: a parenthesized
+//! parameter list that never closes is reported as a genuine
+//! [`NimSignatureError`], not silently skipped -- Checkpoint A of issue
+//! #48's own follow-up requires that a source failing a real
+//! lowering/capability check must not silently resolve. It is not
 //! `nim_frontend` (this crate's owned Nim-subset lowering): it never
 //! builds an IR and knows nothing about this project's declared Nim
 //! subset -- it only looks for the one real, exported-symbol-bearing
@@ -22,7 +27,33 @@
 pub struct NimExportedProc {
     pub declared_name: String,
     pub exported_symbol: String,
+    /// The real declared parameter count, from the proc's own `(...)`
+    /// parameter list (`0` for an empty or absent list).
+    pub param_count: usize,
+    /// The real declared return type text after `:` (e.g. `"cint"`),
+    /// or `""` when the proc declares no return type at all (Nim's own
+    /// `void`-equivalent) -- never invented.
+    pub return_type: String,
 }
+
+/// A genuine structural defect in a proc's own signature -- e.g. a
+/// parameter list whose `(` never closes. This is the real,
+/// observable failure mode Checkpoint A's own "lowering/capability"
+/// evidence requires: a source that does not satisfy it must not
+/// resolve to a fact silently.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NimSignatureError {
+    pub proc_name: String,
+    pub detail: String,
+}
+
+impl std::fmt::Display for NimSignatureError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "proc '{}': {}", self.proc_name, self.detail)
+    }
+}
+
+impl std::error::Error for NimSignatureError {}
 
 fn is_ident_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
@@ -69,6 +100,81 @@ fn parse_identifier(text: &str, from: usize) -> Option<(String, usize)> {
     Some((after_ws[..end].to_string(), from + start + end))
 }
 
+fn count_nim_params(inner: &str) -> usize {
+    let trimmed = inner.trim();
+    if trimmed.is_empty() {
+        return 0;
+    }
+    let mut depth: i32 = 0;
+    let mut count = 1usize;
+    for c in trimmed.chars() {
+        match c {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth -= 1,
+            ',' | ';' if depth == 0 => count += 1,
+            _ => {}
+        }
+    }
+    count
+}
+
+/// Parses a real proc signature starting right after its name: an
+/// optional `(...)` parameter list, then an optional `: ReturnType`.
+/// Returns `(param_count, return_type, offset_just_past_the_signature)`.
+/// The one genuine failure mode: a `(` that never finds its matching
+/// `)` within the source text -- a real structural defect, not a shape
+/// this best-effort scanner merely doesn't recognize.
+fn parse_proc_signature(
+    text: &str,
+    from: usize,
+    proc_name: &str,
+) -> Result<(usize, String, usize), NimSignatureError> {
+    let bytes = text.as_bytes();
+    let mut i = from;
+    while i < bytes.len() && (bytes[i] as char).is_whitespace() {
+        i += 1;
+    }
+    let mut param_count = 0usize;
+    if i < bytes.len() && bytes[i] as char == '(' {
+        let start = i;
+        let mut depth: i32 = 0;
+        let mut j = i;
+        loop {
+            if j >= bytes.len() {
+                return Err(NimSignatureError {
+                    proc_name: proc_name.to_string(),
+                    detail: format!("unbalanced '(' in parameter list starting at byte {start}"),
+                });
+            }
+            match bytes[j] as char {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            j += 1;
+        }
+        param_count = count_nim_params(&text[start + 1..j]);
+        i = j + 1;
+    }
+    while i < bytes.len() && (bytes[i] as char).is_whitespace() {
+        i += 1;
+    }
+    let mut return_type = String::new();
+    if i < bytes.len() && bytes[i] as char == ':' {
+        i += 1;
+        let rest = &text[i..];
+        let end = rest.find(['{', '=', '\n']).unwrap_or(rest.len());
+        return_type = rest[..end].trim().to_string();
+        i += end;
+    }
+    Ok((param_count, return_type, i))
+}
+
 /// Extracts the pragma text between the next `{.` and its matching
 /// `.}` at or after `from`, bounded so an unrelated later proc's own
 /// pragma is never picked up: the search stops at the first `=` or
@@ -109,9 +215,14 @@ fn exportc_argument(pragma_text: &str) -> Option<Option<String>> {
 /// Scans real Nim source text for every `proc`/`func` declaration
 /// carrying an `{.exportc.}` pragma, in file order. A `proc` with no
 /// `exportc` pragma at all is not C-ABI-exported and is silently
-/// skipped -- it is a fact about this source, not an error. Never
-/// hard-codes a proc or package name; every fact comes from the text.
-pub fn discover_exportc_declarations(source_text: &str) -> Vec<NimExportedProc> {
+/// skipped -- it is a fact about this source, not an error. A
+/// genuinely malformed parameter list (an unbalanced `(`) on a proc
+/// this scanner has already committed to describing is reported as
+/// [`NimSignatureError`] instead. Never hard-codes a proc or package
+/// name; every fact comes from the text.
+pub fn discover_exportc_declarations(
+    source_text: &str,
+) -> Result<Vec<NimExportedProc>, NimSignatureError> {
     let mut found = Vec::new();
     let mut cursor = 0usize;
     while let Some(after_keyword) = find_next_proc_keyword(source_text, cursor) {
@@ -119,18 +230,22 @@ pub fn discover_exportc_declarations(source_text: &str) -> Vec<NimExportedProc> 
         let Some((name, after_name)) = parse_identifier(source_text, after_keyword) else {
             continue;
         };
-        cursor = after_name;
-        if let Some(pragma_text) = extract_pragma_text(source_text, after_name) {
+        let (param_count, return_type, after_signature) =
+            parse_proc_signature(source_text, after_name, &name)?;
+        cursor = after_signature;
+        if let Some(pragma_text) = extract_pragma_text(source_text, after_signature) {
             if let Some(explicit) = exportc_argument(&pragma_text) {
                 let exported_symbol = explicit.unwrap_or_else(|| name.clone());
                 found.push(NimExportedProc {
                     declared_name: name,
                     exported_symbol,
+                    param_count,
+                    return_type,
                 });
             }
         }
     }
-    found
+    Ok(found)
 }
 
 #[cfg(test)]
@@ -142,12 +257,14 @@ mod tests {
         let source = r#"proc nim_double(x: cint): cint {.exportc: "nim_double", cdecl.} =
   x * 2
 "#;
-        let found = discover_exportc_declarations(source);
+        let found = discover_exportc_declarations(source).expect("must parse");
         assert_eq!(
             found,
             vec![NimExportedProc {
                 declared_name: "nim_double".to_string(),
                 exported_symbol: "nim_double".to_string(),
+                param_count: 1,
+                return_type: "cint".to_string(),
             }]
         );
     }
@@ -155,14 +272,14 @@ mod tests {
     #[test]
     fn a_bare_exportc_pragma_defaults_to_the_declared_name() {
         let source = "proc doIt(x: cint): cint {.exportc.} =\n  x\n";
-        let found = discover_exportc_declarations(source);
+        let found = discover_exportc_declarations(source).expect("must parse");
         assert_eq!(found[0].exported_symbol, "doIt");
     }
 
     #[test]
     fn a_proc_with_no_exportc_pragma_is_not_reported() {
         let source = "proc helper(x: int): int =\n  x + 1\n";
-        let found = discover_exportc_declarations(source);
+        let found = discover_exportc_declarations(source).expect("must parse");
         assert!(found.is_empty());
     }
 
@@ -171,9 +288,10 @@ mod tests {
         let source = r#"proc internalName(a: cint, b: cint): cint {.exportc: "c_add_v2".} =
   a + b
 "#;
-        let found = discover_exportc_declarations(source);
+        let found = discover_exportc_declarations(source).expect("must parse");
         assert_eq!(found[0].declared_name, "internalName");
         assert_eq!(found[0].exported_symbol, "c_add_v2");
+        assert_eq!(found[0].param_count, 2);
     }
 
     #[test]
@@ -184,9 +302,31 @@ proc a(x: cint): cint {.exportc: "sym_a".} =
 proc b(x: cint): cint {.exportc: "sym_b".} =
   x
 "#;
-        let found = discover_exportc_declarations(source);
+        let found = discover_exportc_declarations(source).expect("must parse");
         assert_eq!(found.len(), 2);
         assert_eq!(found[0].exported_symbol, "sym_a");
         assert_eq!(found[1].exported_symbol, "sym_b");
+    }
+
+    #[test]
+    fn a_parameterless_proc_reports_zero_params() {
+        let source = "proc greet(): cstring {.exportc: \"greet\".} =\n  \"hi\"\n";
+        let found = discover_exportc_declarations(source).expect("must parse");
+        assert_eq!(found[0].param_count, 0);
+    }
+
+    #[test]
+    fn a_proc_with_no_return_type_reports_an_empty_return_type() {
+        let source = "proc log(x: cint) {.exportc: \"log\".} =\n  discard\n";
+        let found = discover_exportc_declarations(source).expect("must parse");
+        assert_eq!(found[0].return_type, "");
+    }
+
+    #[test]
+    fn an_unbalanced_parameter_list_is_a_genuine_signature_error() {
+        let source = "proc broken(x: cint {.exportc: \"broken\".} =\n  x\n";
+        let result = discover_exportc_declarations(source);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().proc_name, "broken");
     }
 }

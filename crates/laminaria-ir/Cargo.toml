@@ -10,6 +10,7 @@ description = "Source-derived owned IR for a declared Rust/Nim subset (issues #2
 [dependencies]
 syn = { version = "2", features = ["full", "extra-traits", "visit"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
+quote = "1"
 
 [dev-dependencies]
 # Execution-only, per docs/03-work-items/design/issue-5-t0-target-generation-spec.md

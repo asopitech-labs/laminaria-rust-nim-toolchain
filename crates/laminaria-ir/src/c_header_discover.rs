@@ -27,6 +27,9 @@
 pub struct CDeclaredFunction {
     pub name: String,
     pub param_count: usize,
+    /// The declared return type text (e.g. `"int"`), a direct
+    /// substring of the real declaration -- never invented.
+    pub return_type: String,
 }
 
 /// Strips `/* ... */` and `// ...` comments from real C/C++ source
@@ -75,26 +78,84 @@ fn is_ident_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
 }
 
-/// The last maximal identifier run in `declarator_text` -- for
-/// `extern "C" {\nint c_add`, that is `c_add` (the return type, any
-/// `extern`/`static`/linkage-string tokens, and any wrapping `extern
-/// "C" {` are all *earlier* identifier runs, so taking the *last* one
-/// is what makes this immune to that wrapper without special-casing
-/// it).
-fn last_identifier(declarator_text: &str) -> Option<String> {
-    let mut best: Option<String> = None;
+/// The last maximal identifier run in `declarator_text`, and its start
+/// byte offset -- for `extern "C" {\nint c_add`, that is `c_add` (the
+/// return type, any `extern`/`static`/linkage-string tokens, and any
+/// wrapping `extern "C" {` are all *earlier* identifier runs, so taking
+/// the *last* one is what makes this immune to that wrapper without
+/// special-casing it). The start offset lets a caller recover
+/// everything *before* the name as the declared return type.
+fn last_identifier_with_start(declarator_text: &str) -> Option<(String, usize)> {
+    let mut best: Option<(String, usize)> = None;
     let mut current = String::new();
-    for c in declarator_text.chars() {
+    let mut current_start = 0usize;
+    for (idx, c) in declarator_text.char_indices() {
         if is_ident_char(c) {
+            if current.is_empty() {
+                current_start = idx;
+            }
             current.push(c);
         } else if !current.is_empty() {
-            best = Some(std::mem::take(&mut current));
+            best = Some((std::mem::take(&mut current), current_start));
         }
     }
     if !current.is_empty() {
-        best = Some(current);
+        best = Some((current, current_start));
     }
     best
+}
+
+/// The declared return type text: `declarator_text` with the trailing
+/// name occurrence removed, whitespace-collapsed and trimmed. Never
+/// invented -- a direct substring of the real declaration.
+fn return_type_text(declarator_text: &str, name_start: usize) -> String {
+    declarator_text[..name_start]
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Replaces every real `extern "C" {`/`extern "C++" {` opener with
+/// equal-length whitespace (preserving every other byte's position, so
+/// line/column bookkeeping stays aligned) -- pure noise-removal, never
+/// a structural C++ parse.
+fn strip_extern_block_openers(text: &str) -> String {
+    const PATTERNS: [&str; 2] = ["extern \"C++\"", "extern \"C\""];
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    loop {
+        let mut best: Option<(usize, usize)> = None; // (pos, total_len_including_brace)
+        for pattern in PATTERNS {
+            let Some(pos) = rest.find(pattern) else {
+                continue;
+            };
+            let after = &rest[pos + pattern.len()..];
+            let ws_len = after.len() - after.trim_start().len();
+            if !after[ws_len..].starts_with('{') {
+                continue;
+            }
+            let total_len = pattern.len() + ws_len + 1;
+            let is_better = match best {
+                None => true,
+                Some((best_pos, _)) => pos < best_pos,
+            };
+            if is_better {
+                best = Some((pos, total_len));
+            }
+        }
+        match best {
+            Some((pos, total_len)) => {
+                out.push_str(&rest[..pos]);
+                out.push_str(&" ".repeat(total_len));
+                rest = &rest[pos + total_len..];
+            }
+            None => {
+                out.push_str(rest);
+                break;
+            }
+        }
+    }
+    out
 }
 
 fn count_params(params_text: &str) -> usize {
@@ -141,8 +202,15 @@ pub fn discover_c_declared_functions(source_text: &str) -> Vec<CDeclaredFunction
         })
         .collect::<Vec<_>>()
         .join("\n");
+    // An `extern "C" {`/`extern "C++" {` wrapper opener doesn't affect
+    // *name* extraction (the name is always the last identifier before
+    // `(`), but it would otherwise contaminate the *return-type* text
+    // of the first declaration inside the block with its own leftover
+    // tokens -- stripped here, once, rather than special-cased per
+    // declaration.
+    let without_extern_openers = strip_extern_block_openers(&without_directives);
     let mut found = Vec::new();
-    for statement in without_directives.split(';') {
+    for statement in without_extern_openers.split(';') {
         let statement = statement.trim();
         if statement.is_empty() {
             continue;
@@ -166,10 +234,11 @@ pub fn discover_c_declared_functions(source_text: &str) -> Vec<CDeclaredFunction
         // project, where a body would be unusual; a stray body is
         // simply reported as a declaration too, which is harmless
         // (headers this project reads only ever declare, never define).
-        let Some(name) = last_identifier(declarator) else {
+        let Some((name, name_start)) = last_identifier_with_start(declarator) else {
             continue;
         };
         found.push(CDeclaredFunction {
+            return_type: return_type_text(declarator, name_start),
             name,
             param_count: count_params(params),
         });
@@ -190,6 +259,7 @@ mod tests {
             vec![CDeclaredFunction {
                 name: "c_add".to_string(),
                 param_count: 2,
+                return_type: "int".to_string(),
             }]
         );
     }
@@ -210,6 +280,7 @@ mod tests {
             vec![CDeclaredFunction {
                 name: "c_add".to_string(),
                 param_count: 2,
+                return_type: "int".to_string(),
             }]
         );
     }
@@ -243,5 +314,23 @@ mod tests {
         assert_eq!(found.len(), 2);
         assert_eq!(found[0].name, "c_add_v2");
         assert_eq!(found[1].name, "other");
+    }
+
+    #[test]
+    fn extern_c_wrapping_does_not_contaminate_the_return_type() {
+        let source = r#"
+            extern "C" {
+            int c_add(int a, int b);
+            }
+        "#;
+        let found = discover_c_declared_functions(source);
+        assert_eq!(found[0].return_type, "int");
+    }
+
+    #[test]
+    fn a_multi_word_return_type_is_captured() {
+        let source = "unsigned long compute(int a);";
+        let found = discover_c_declared_functions(source);
+        assert_eq!(found[0].return_type, "unsigned long");
     }
 }
