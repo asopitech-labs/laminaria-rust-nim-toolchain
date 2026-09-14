@@ -27,6 +27,38 @@ Prefer eliminating work over making unnecessary work faster:
 
 Parallelizing work that should not have run is not considered a sufficient optimization.
 
+## Whole-system decision boundary
+
+Metrics diagnose and discriminate project decisions; they do not become the
+project goal. Evaluate an optimization at the boundary of the requested
+artifact and its production, verification, and maintenance path. A faster
+resolver, compiler action, cache lookup, test, or measurement collector is not
+an accepted improvement when it increases total completion time, peak or
+retained memory, I/O, recomputation, artifact size, runtime cost, failure risk,
+operator burden, or maintenance elsewhere without an explicit project-level
+trade-off.
+
+Every optimization decision records:
+
+- the parent project outcome and requested artifact;
+- the local metric that changed;
+- the end-to-end metrics and correctness/quality properties that could be
+  affected;
+- costs displaced across phases, components, platforms, and research lanes;
+- regressions, uncertainty, and future options affected;
+- the comparison boundary and the reason the overall trade-off is accepted.
+
+Prefer a Pareto comparison over an invented universal score. A scalar objective
+is valid only when its weights and tolerances are part of the experiment's
+declared decision contract.
+
+Measurement depth also has a budget. Stop adding instrumentation, benchmark
+dimensions, repetitions, or precision when the evidence is sufficient to
+choose, reject, or reformulate the active hypothesis. Record uncertainty that
+does not change the decision instead of indefinitely optimizing the
+measurement system. Instrumentation overhead and analysis/maintenance effort
+belong in the cost side of the decision.
+
 ## Backend checkpoint economics
 
 Backend white-boxing does not imply that every logical pass boundary becomes a process or cache artifact.

@@ -36,6 +36,7 @@ Goalには次をすべて含める。
 - 外部から観測できるbehavior。
 - そのbehaviorが成立すべきdependency、environment、identity境界。
 - 進めるparent capabilityまたはresearch decision。
+- 許容するmeaningful trade-off、他laneへの影響、project全体outcome。
 - 結果を誤りと判定できるevidence。
 
 「要求したnative artifactがclean environmentで起動し、保持された全dependency obligationに
@@ -113,7 +114,12 @@ Verification gateのresult
 4. 各checkpointについて、弱いtestを通る誤結果を一つ想定し、それが失敗するようresultまたは
    oracleを強化する。
 5. final handoffだけで次checkpointを開始でき、記録外で生成したstateへ依存しないことを確認する。
-6. contract維持に必要でないimplementation prescriptionを削除する。
+6. checkpointの局所改善が、別checkpoint、component、lane、platform、後続milestoneへwork、resource
+   cost、complexity、risk、maintenanceを移していないか確認し、parent goalのboundaryでtrade-offを
+   記録・評価する。
+7. evidence budgetとstop conditionを定める。追加metricは、生きている選択肢を識別するかgoalを
+   反証できる間だけ要求する。
+8. contract維持に必要でないimplementation prescriptionを削除する。
 
 完全なpositive checkpoint pathを書けない場合、その作業はassignment可能ではない。先に不足する
 decisionを作るか解決する。
@@ -129,6 +135,11 @@ Verificationはcode形状のchecklistではなく、checkpoint pathに沿って�
 - 観測したresult。
 - 独立relationまたはoracle。
 - そのresultによって開始可能になったdownstream checkpoint。
+
+Verification gateではend-to-end effectとcheckpoint外へ移されたcostも記録する。局所metricが
+改善していても、whole-path latency、memory、I/O、recomputation、artifact quality、reliability、
+operability、maintenance、または別laneが重大に悪化し、project-level trade-offとして採用されて
+いなければ、goal成立の証拠にはならない。
 
 CI成功、test件数、source-text検索、enumの存在、graph nodeの存在、既知command一つの不在は
 補助観測にすぎない。checkpoint resultそのものを直接構成する場合を除き、completion evidenceには

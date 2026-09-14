@@ -18,6 +18,15 @@ Central rule:
 
 A Run should cover the real path from workspace preparation through frontend, codegen, backend, link, post-link, and final requested artifact instead of beginning with isolated LLVM microbenchmarks.
 
+The [metrics-first policy](../../01-foundations/metrics-policy.md) fixes the
+decision boundary: optimize the requested artifact and whole project path, not
+the measurement subsystem or one measured stage. A local metric is diagnostic
+evidence. Adoption additionally requires the end-to-end effect, costs displaced
+to other components or research lanes, regressions, opportunity cost, and the
+accepted trade-off. Stop increasing measurement depth once the active
+architecture choices can be distinguished or the hypothesis can be falsified;
+instrumentation and analysis cost are part of the measured decision.
+
 ## 1. First things to stabilize
 
 The initial plan began with a document-centric repository. The repository now contains lock/fingerprint, Run, CI, planner and delegated-build baseline code. The list below defines measurement responsibilities, not a requirement to finish all measurement before implementing the owned compiler.

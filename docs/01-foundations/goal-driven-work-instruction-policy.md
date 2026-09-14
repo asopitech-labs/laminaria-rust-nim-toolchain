@@ -43,6 +43,8 @@ A goal states all of the following:
 - its externally observable behavior;
 - the dependency, environment, and identity boundary in which it must hold;
 - the parent capability or research decision it advances;
+- the whole-project outcome, cross-lane effects, and meaningful trade-offs it
+  is allowed to make;
 - the evidence that would prove the result wrong.
 
 Use outcome language such as “the requested native artifact runs in a clean
@@ -131,7 +133,13 @@ preflight:
    weak test, then strengthen the result or oracle so that it fails.
 5. Confirm that the final handoff contains everything the next checkpoint needs;
    it must not rely on state produced outside the recorded path.
-6. Remove implementation prescriptions that are not necessary to preserve a
+6. Check whether a checkpoint improves its local subject by transferring work,
+   resource cost, complexity, risk, or maintenance to another checkpoint,
+   component, lane, platform, or later milestone. Record and evaluate that
+   trade-off at the parent-goal boundary.
+7. Set an evidence budget and stop condition. Additional metrics are required
+   only while they can distinguish live choices or falsify the goal.
+8. Remove implementation prescriptions that are not necessary to preserve a
    contract.
 
 If the instruction author cannot state a complete positive checkpoint path,
@@ -148,6 +156,12 @@ For each checkpoint, record:
 - the observed result;
 - the independent relation or oracle;
 - the downstream checkpoint enabled by that result.
+
+The verification gate also records the end-to-end effect and any cost displaced
+outside the checkpoint. A local metric improvement cannot establish the goal
+when whole-path latency, memory, I/O, recomputation, artifact quality,
+reliability, operability, maintenance, or a different lane materially regresses
+without an accepted project-level trade-off.
 
 CI success, test counts, source-text searches, enum presence, graph-node
 presence, or absence of one known command are supporting observations only.

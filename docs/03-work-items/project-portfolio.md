@@ -32,6 +32,7 @@ Work is managed at every level of this chain. An issue checklist, design documen
 7. Reassess the portfolio whenever an experiment changes the graph model, compiler boundary, artifact contract, or project goal.
 8. Bind test results to the exact subject artifact, harness, environment, and raw evidence. An instrumented or test-profile artifact cannot silently certify a different production artifact.
 9. Author implementation and experiment work through the [goal-driven work-instruction policy](../01-foundations/goal-driven-work-instruction-policy.md): fix the observable goal first, then bind the route with causally ordered checkpoint results rather than an open-ended anti-pattern list.
+10. Evaluate optimization at the requested-artifact and whole-project boundary. A local metric improvement does not advance the portfolio until its end-to-end effect, cross-lane and displaced costs, regressions, opportunity cost, and accepted trade-off are known. Stop measurement work when it can decide the active hypothesis; telemetry completeness is not a portfolio outcome.
 
 ## Three research lanes
 

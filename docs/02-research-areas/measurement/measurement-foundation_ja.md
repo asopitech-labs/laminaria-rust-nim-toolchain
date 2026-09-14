@@ -18,6 +18,13 @@ LAMINARIAがcompiler pipeline、backend、LTO、linker、WebAssembly target pipe
 
 最初からLLVM pass単体のmicrobenchmarkだけを見るのではなく、workspace preparationからfrontend、codegen、backend、link、post-link、final artifactまで、requested artifactへ到達する実際の処理を一つのRunとして記録する。
 
+[Metrics-First Research Policy](../../01-foundations/metrics-policy.md)がdecision boundaryを定める。
+最適化対象はmeasurement subsystemや一つのstageではなく、requested artifactとproject全体の経路である。
+局所metricはdiagnostic evidenceであり、それだけで採用を決めない。end-to-end effect、他component／laneへ
+移されたcost、regression、opportunity cost、採用するtrade-offまで評価する。active architecture候補を
+識別するかhypothesisを反証できた時点で計測の精緻化を止め、instrumentationとanalysis自体のcostも
+decisionへ含める。
+
 ## 1. 現状と優先順位
 
 当初は研究文書中心であり計測基盤を最初のコードとして計画した。現在はlock、fingerprint、Run、CI、plannerと外部委譲build baselineが存在する。以下は計測trackの責務であり、独自compilerの実装より先に全計測を完成させるという順序ではない。

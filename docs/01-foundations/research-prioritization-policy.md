@@ -17,6 +17,45 @@ Evaluate candidate work in this order:
 5. **Leverage**: does it settle assumptions shared by multiple later issues?
 6. **Engineering cost**: when the above are equal, prefer the shorter, reversible experiment that reuses existing assets.
 
+## Whole-project optimization constraint
+
+The unit of optimization is the requested artifact and the project progression
+needed to produce, verify, and evolve it. A component, pass, cache, scheduler,
+resolver, test harness, or measurement subsystem is never the objective by
+itself.
+
+Before adopting a locally improved result, evaluate it against the whole
+decision boundary:
+
+1. **Parent outcome**: identify the project outcome and active milestone that
+   the change advances.
+2. **End-to-end effect**: measure or reason about the requested artifact's
+   correctness, completion latency, peak and retained resources, output
+   quality, reproducibility, and operability—not only the edited component.
+3. **Displaced cost**: include work, memory, I/O, complexity, failure risk, and
+   maintenance transferred upstream, downstream, or into another research
+   lane.
+4. **Opportunity cost**: record which higher-leverage experiment is delayed and
+   whether the decision narrows a later architecture or target without
+   evidence.
+5. **Trade-off position**: compare alternatives over the same boundary and
+   state the accepted trade-off. Do not collapse incomparable correctness,
+   time, memory, artifact quality, and maintainability effects into one scalar
+   unless the project has explicitly adopted that utility function.
+
+A better local metric is an observation, not a project conclusion. It may be
+accepted when it improves the whole outcome, is neutral outside its boundary,
+or makes a deliberate project-level trade-off whose costs are recorded. It is
+rejected or reformulated when it merely moves cost elsewhere or consumes more
+project effort than the uncertainty it resolves.
+
+Measurement is subject to the same rule. Increase measurement precision only
+until the evidence can distinguish the live architecture choices or falsify
+the active hypothesis. Measurement infrastructure, benchmark coverage, and
+telemetry detail have explicit implementation, runtime, storage, analysis, and
+maintenance costs; optimizing them beyond the decision need is local
+optimization of the evidence system.
+
 ## Priority classes
 
 ### P0 — LAMINARIA-specific hypotheses
@@ -58,6 +97,8 @@ A review finding blocks the current experiment only when:
 - a correctness, identity, provenance, or comparison defect could change the conclusion;
 - the work violates research ownership, such as hidden fallback to an existing compiler; or
 - success is vacuous because the required counterexample is absent.
+- a reported local improvement transfers material cost or risk elsewhere in
+  the project and the end-to-end trade-off has not been evaluated.
 
 Generality, completeness, extensibility, tuning, API polish, and additional platform support are non-blocking unless the current hypothesis requires them. Record them as later candidates instead of silently adding them to the issue.
 

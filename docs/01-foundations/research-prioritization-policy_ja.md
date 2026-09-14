@@ -17,6 +17,36 @@ Issueのcloseは、その領域の実装が完成したことを意味しない�
 5. **波及性**: 後続の複数Issueの前提を決めるか。
 6. **工学コスト**: 上記が同等なら、短く、可逆で、既存資産を再利用できる実験を先にする。
 
+## プロジェクト全体最適の拘束条件
+
+最適化の単位は、要求されたartifactと、それを生成・検証・発展させるproject progressionである。
+個別component、pass、cache、scheduler、resolver、test harness、measurement subsystemを
+それ自体で目的にしない。
+
+局所的に改善した結果を採用する前に、次の全体decision boundaryで評価する。
+
+1. **Parent outcome**: その変更が進めるproject outcomeとactive milestoneを特定する。
+2. **End-to-end effect**: 編集したcomponentだけでなく、requested artifactのcorrectness、
+   completion latency、peak／retained resource、output quality、reproducibility、operabilityへの
+   影響を測定または説明する。
+3. **Displaced cost**: upstream、downstream、または別research laneへ移されたwork、memory、I/O、
+   complexity、failure risk、maintenanceを含める。
+4. **Opportunity cost**: 遅延する高leverageな実験と、証拠なしに狭める将来architecture／targetの
+   選択肢を記録する。
+5. **Trade-off position**: 同じboundaryでalternativeを比較し、採用するtrade-offを明示する。
+   correctness、time、memory、artifact quality、maintainabilityの比較不能な影響を、projectが
+   utility functionを明示していない状態で一つのscalarへ潰さない。
+
+局所metricの改善は観測であってproject上の結論ではない。全体outcomeを改善する、境界外に
+中立である、またはcostを記録したproject-level trade-offを成立させる場合に採用できる。
+costを別の場所へ移しただけの場合や、解消する不確実性より多くのproject effortを消費する場合は、
+棄却または再定式化する。
+
+Measurementにも同じ規則を適用する。計測精度は、現在生きているarchitecture候補を識別するか、
+active hypothesisを反証できる地点まで高めればよい。measurement infrastructure、benchmark coverage、
+telemetry detailにはimplementation、runtime、storage、analysis、maintenance costがある。判断に不要な
+精緻化は、evidence system自体の局所最適化として扱う。
+
 ## 優先度
 
 ### P0 — LAMINARIA固有仮説
@@ -58,6 +88,8 @@ identity、最小計測、planner/runtime接続、diagnostic、runtime/ABI contr
 - correctness、identity、provenance、比較条件の欠陥により結論が変わり得る。
 - 既存compilerへのhidden fallbackなど、研究責務を破っている。
 - negative caseがなく、成功がvacuousである。
+- 報告された局所改善がproject内の別領域へ重大なcostまたはriskを移しているのに、end-to-endの
+  trade-offが評価されていない。
 
 汎用性、完全性、拡張性、性能調整、API polish、追加platform対応は、現在の仮説判定に必要でなければblockerにしない。後続候補として記録し、同じIssueへ無断で追加しない。
 
