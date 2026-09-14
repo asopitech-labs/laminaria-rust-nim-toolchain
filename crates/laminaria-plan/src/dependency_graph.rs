@@ -293,6 +293,10 @@ pub struct FfiRequirementFacts {
     pub symbol: String,
     pub abi: String,
     pub param_count: usize,
+    /// The real declared return type text (e.g. `"i32"`, `"()"`) --
+    /// part of the real signature a candidate's declared export must
+    /// match, not merely its symbol name.
+    pub return_type: String,
     /// Which logical package is expected to provide this symbol (e.g.
     /// from a real `#[link(name = "cadd")]` hint).
     pub expected_provider_package: String,
@@ -308,6 +312,48 @@ pub struct FfiExportFacts {
     pub declaring_source: String,
     pub symbol: String,
     pub abi: String,
+    pub param_count: usize,
+    /// The real declared return type text -- see
+    /// [`FfiRequirementFacts::return_type`].
+    pub return_type: String,
+}
+
+/// Canonicalizes a small, explicit set of primitive C-ABI type
+/// spellings that differ only by which language's reader produced them
+/// (Rust's `i32`, C's `int`, Nim's `cint` are the exact same 32-bit C
+/// ABI integer; Rust's `()`, C's `void`, and Nim's absent return type
+/// are the exact same "returns nothing"). Deliberately narrow: this is
+/// not a general Rust/C/Nim type-system unification, only the handful
+/// of primitive spellings this fixture's own real cross-language
+/// boundary actually uses. An unrecognized spelling is returned
+/// unchanged (compared as exact text), so an unknown type can never be
+/// silently treated as equivalent to something it wasn't verified
+/// against.
+fn canonical_c_abi_type(raw: &str) -> &str {
+    match raw.trim() {
+        "i32" | "int" | "cint" | "c_int" => "i32",
+        "()" | "void" | "" => "void",
+        "i8" | "int8_t" | "cchar" | "char" => "i8",
+        "i64" | "long long" | "clonglong" | "int64_t" => "i64",
+        "f32" | "float" | "cfloat" => "f32",
+        "f64" | "double" | "cdouble" => "f64",
+        other => other,
+    }
+}
+
+/// Whether a real declared export actually satisfies a real required
+/// import -- symbol name alone is not enough: arity, return type, and
+/// ABI must all match, so a same-named provider with an incompatible
+/// signature is never silently accepted (issue #48's own G1 follow-up,
+/// Checkpoint A/B: "同名symbolでも引数、戻り値、ABIが異なるproviderは拒否される").
+/// Return-type comparison goes through [`canonical_c_abi_type`] since
+/// the required side and the declared side are read by different
+/// language-specific readers that spell the same ABI type differently.
+fn export_satisfies_requirement(export: &FfiExportFacts, req: &FfiRequirementFacts) -> bool {
+    export.symbol == req.symbol
+        && export.param_count == req.param_count
+        && canonical_c_abi_type(&export.return_type) == canonical_c_abi_type(&req.return_type)
+        && export.abi == req.abi
 }
 
 /// One real package candidate: sources and declared outputs only --
@@ -684,8 +730,14 @@ fn resolve_provider_for_requirement(
             .flat_map(|c| {
                 c.declared_exports.iter().map(move |e| {
                     format!(
-                        "{}@{} declares '{}' (source: {})",
-                        c.package_id, c.version, e.symbol, e.declaring_source
+                        "{}@{} declares '{}' (params={}, returns={:?}, abi={}, source: {})",
+                        c.package_id,
+                        c.version,
+                        e.symbol,
+                        e.param_count,
+                        e.return_type,
+                        e.abi,
+                        e.declaring_source
                     )
                 })
             })
@@ -717,14 +769,20 @@ fn resolve_provider_for_requirement(
     let target_matching: Vec<&PackageCandidateFacts> = candidates
         .iter()
         .filter(|c| {
-            c.role == Role::Target && c.declared_exports.iter().any(|e| e.symbol == req.symbol)
+            c.role == Role::Target
+                && c.declared_exports
+                    .iter()
+                    .any(|e| export_satisfies_requirement(e, req))
         })
         .copied()
         .collect();
     let host_matching: Vec<&PackageCandidateFacts> = candidates
         .iter()
         .filter(|c| {
-            c.role == Role::Host && c.declared_exports.iter().any(|e| e.symbol == req.symbol)
+            c.role == Role::Host
+                && c.declared_exports
+                    .iter()
+                    .any(|e| export_satisfies_requirement(e, req))
         })
         .copied()
         .collect();
@@ -762,10 +820,49 @@ fn resolve_provider_for_requirement(
     match target_matching.as_slice() {
         [] => {
             let symbol_id = format!("Symbol:{}", req.symbol);
+            // Distinguish "no candidate declares this symbol name at
+            // all" from "a candidate declares the right name but an
+            // incompatible signature" -- same-named-but-mismatched is
+            // exactly the "同名symbolでも引数、戻り値、ABIが異なるproviderは
+            //拒否される" case the G1 follow-up requires be diagnosed,
+            // not conflated with a bare missing-symbol report.
+            let same_name_mismatches: Vec<String> = candidates
+                .iter()
+                .flat_map(|c| {
+                    c.declared_exports
+                        .iter()
+                        .filter(|e| e.symbol == req.symbol)
+                        .map(move |e| {
+                            format!(
+                                "{}@{} declares '{}' with params={} (required {}), returns={:?} (required {:?}), abi={} (required {})",
+                                c.package_id, c.version, e.symbol, e.param_count, req.param_count,
+                                e.return_type, req.return_type, e.abi, req.abi
+                            )
+                        })
+                })
+                .collect();
             let declared: Vec<String> = candidates
                 .iter()
                 .flat_map(|c| c.declared_exports.iter().map(|e| e.symbol.clone()))
                 .collect();
+            let (reason, detail) = if same_name_mismatches.is_empty() {
+                (
+                    RejectionReason::MissingSymbol,
+                    format!(
+                        "required symbol '{}' has no matching declared export among '{package_id}' candidates (declared instead: {declared:?})",
+                        req.symbol
+                    ),
+                )
+            } else {
+                (
+                    RejectionReason::IncompatibleAbi,
+                    format!(
+                        "required symbol '{}' (params={}, returns={:?}, abi={}) has no candidate declaring a matching signature: {}",
+                        req.symbol, req.param_count, req.return_type, req.abi,
+                        same_name_mismatches.join("; ")
+                    ),
+                )
+            };
             let mut symbol_obligation = Obligation::unresolved(
                 &symbol_id,
                 ObligationKind::Symbol,
@@ -773,15 +870,11 @@ fn resolve_provider_for_requirement(
                 Role::Target,
                 vec![ffi_id],
             );
-            let detail = format!(
-                "required symbol '{}' has no matching declared export among '{package_id}' candidates (declared instead: {declared:?})",
-                req.symbol
-            );
-            symbol_obligation.reject(RejectionReason::MissingSymbol, detail.clone());
+            symbol_obligation.reject(reason, detail.clone());
             obligations.insert(symbol_id.clone(), symbol_obligation);
             Err(GraphRejection {
                 obligation_id: symbol_id,
-                reason: RejectionReason::MissingSymbol,
+                reason,
                 detail,
                 demand_entry_point: input.demand_entry_point.clone(),
                 considered_candidates: considered_candidates(),
@@ -851,17 +944,29 @@ fn resolve_provider_for_requirement(
                     other.role,
                     other_sources,
                 );
-                let detail = format!(
-                    "'{}@{}' does not declare required symbol '{}' (declares: {:?})",
-                    other.package_id,
-                    other.version,
-                    req.symbol,
-                    other
-                        .declared_exports
-                        .iter()
-                        .map(|e| &e.symbol)
-                        .collect::<Vec<_>>()
-                );
+                let same_name_export = other
+                    .declared_exports
+                    .iter()
+                    .find(|e| e.symbol == req.symbol);
+                let detail = match same_name_export {
+                    Some(e) => format!(
+                        "'{}@{}' declares '{}' but with an incompatible signature (params={}, returns={:?}, abi={} vs required params={}, returns={:?}, abi={})",
+                        other.package_id, other.version, req.symbol,
+                        e.param_count, e.return_type, e.abi,
+                        req.param_count, req.return_type, req.abi
+                    ),
+                    None => format!(
+                        "'{}@{}' does not declare required symbol '{}' (declares: {:?})",
+                        other.package_id,
+                        other.version,
+                        req.symbol,
+                        other
+                            .declared_exports
+                            .iter()
+                            .map(|e| &e.symbol)
+                            .collect::<Vec<_>>()
+                    ),
+                };
                 other_obligation.reject(RejectionReason::MissingSymbol, detail.clone());
                 obligations.insert(other_id, other_obligation);
                 rejected_alternatives
@@ -1537,6 +1642,8 @@ mod tests {
                     declaring_source: "nimble/doubler/src/doubler.nim".to_string(),
                     symbol: "nim_double".to_string(),
                     abi: "C".to_string(),
+                    param_count: 1,
+                    return_type: "cint".to_string(),
                 }],
                 declared_constraints: vec!["requires:nim >= 2.0.0".to_string()],
             },
@@ -1576,6 +1683,7 @@ mod tests {
                     symbol: "nim_double".to_string(),
                     abi: "C".to_string(),
                     param_count: 1,
+                    return_type: "i32".to_string(),
                     expected_provider_package: "doubler".to_string(),
                 },
                 FfiRequirementFacts {
@@ -1583,6 +1691,7 @@ mod tests {
                     symbol: "c_add".to_string(),
                     abi: "C".to_string(),
                     param_count: 2,
+                    return_type: "i32".to_string(),
                     expected_provider_package: "cadd".to_string(),
                 },
             ],
@@ -1653,6 +1762,8 @@ mod tests {
                 declaring_source: "c/cadd/v1/cadd.h".to_string(),
                 symbol: symbol.to_string(),
                 abi: "C".to_string(),
+                param_count: 2,
+                return_type: "i32".to_string(),
             }],
             declared_constraints: vec![],
         }
@@ -1687,6 +1798,29 @@ mod tests {
         assert_eq!(rejection.reason, RejectionReason::MissingSymbol);
         assert_eq!(rejection.obligation_id, "Symbol:c_add");
         assert!(rejection.detail.contains("c_add"));
+    }
+
+    #[test]
+    fn a_same_named_candidate_with_a_different_arity_is_rejected_not_silently_accepted() {
+        let mut mismatched =
+            cadd_candidate("1.0.0", "c_add", "x86_64-unknown-linux-gnu", Role::Target);
+        mismatched.declared_exports[0].param_count = 3;
+        let input = minimal_input(vec![mismatched]);
+        let rejection =
+            resolve(&input).expect_err("a same-named but wrong-arity provider must be rejected");
+        assert_eq!(rejection.reason, RejectionReason::IncompatibleAbi);
+        assert!(rejection.detail.contains("params=3"));
+    }
+
+    #[test]
+    fn a_same_named_candidate_with_a_different_return_type_is_rejected_not_silently_accepted() {
+        let mut mismatched =
+            cadd_candidate("1.0.0", "c_add", "x86_64-unknown-linux-gnu", Role::Target);
+        mismatched.declared_exports[0].return_type = "void".to_string();
+        let input = minimal_input(vec![mismatched]);
+        let rejection = resolve(&input)
+            .expect_err("a same-named but wrong-return-type provider must be rejected");
+        assert_eq!(rejection.reason, RejectionReason::IncompatibleAbi);
     }
 
     #[test]

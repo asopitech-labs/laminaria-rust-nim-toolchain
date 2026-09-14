@@ -33,9 +33,11 @@
 //! is where a [`laminaria_plan::dependency_graph::RequiredAction`] is
 //! actually executed.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use laminaria_ir::c_header_discover::discover_c_declared_functions;
+use laminaria_ir::cfg_predicate::CfgContext;
 use laminaria_ir::foreign_discover::discover_foreign_function_requirements;
 use laminaria_ir::nim_export_discover::discover_exportc_declarations;
 use laminaria_plan::dependency_graph::{
@@ -69,6 +71,37 @@ pub struct CargoManifestFacts {
     pub package_name: String,
     pub version: String,
     pub features: Vec<String>,
+    /// The real, transitively-resolved default-activation feature set
+    /// (starting from `cargo metadata`'s own `"default"` feature entry
+    /// and following each feature's own declared implications) -- this
+    /// is what a plain `cargo build` (no `--features`/
+    /// `--no-default-features`) actually activates, used to evaluate
+    /// which `#[cfg(feature = "...")]`-gated FFI declarations are
+    /// really in force for this build, rather than treating every
+    /// declaration a source file's syntax contains as unconditionally
+    /// required.
+    pub active_features: BTreeSet<String>,
+}
+
+/// Transitively expands the real default-activation closure from
+/// `cargo metadata`'s own `features` map (`name -> implied features`),
+/// starting at `"default"` -- the exact feature set a plain `cargo
+/// build` activates. Never invented: every entry comes from the real
+/// manifest's own declared implications.
+fn resolve_default_active_features(
+    features_map: &BTreeMap<String, Vec<String>>,
+) -> BTreeSet<String> {
+    let mut active = BTreeSet::new();
+    let mut frontier = vec!["default".to_string()];
+    while let Some(feature) = frontier.pop() {
+        if !active.insert(feature.clone()) {
+            continue;
+        }
+        if let Some(implied) = features_map.get(&feature) {
+            frontier.extend(implied.iter().cloned());
+        }
+    }
+    active
 }
 
 pub fn ingest_cargo_metadata(
@@ -100,15 +133,32 @@ pub fn ingest_cargo_metadata(
         .ok_or_else(|| IngestError::Parse("package has no name".to_string()))?
         .to_string();
     let version = package["version"].as_str().unwrap_or_default().to_string();
-    let mut features: Vec<String> = package["features"]
+    let features_map: BTreeMap<String, Vec<String>> = package["features"]
         .as_object()
-        .map(|m| m.keys().cloned().collect())
+        .map(|m| {
+            m.iter()
+                .map(|(name, implied)| {
+                    let implied: Vec<String> = implied
+                        .as_array()
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(str::to_string))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    (name.clone(), implied)
+                })
+                .collect()
+        })
         .unwrap_or_default();
+    let mut features: Vec<String> = features_map.keys().cloned().collect();
     features.sort();
+    let active_features = resolve_default_active_features(&features_map);
     Ok(CargoManifestFacts {
         package_name,
         version,
         features,
+        active_features,
     })
 }
 
@@ -175,10 +225,17 @@ pub fn ingest_nimble_package(
 /// source text (`laminaria_ir::foreign_discover`) -- never a fabricated
 /// requirement list. `source_id` is the stable identity to record as
 /// `declaring_source` (e.g. `"app/src/main.rs"`), never the filesystem
-/// path itself.
+/// path itself. `cfg_context` is the real, already-determined
+/// target/feature activation facts (see [`CargoManifestFacts::active_features`]) --
+/// a declaration whose own real `#[cfg(...)]` predicate evaluates false
+/// against it is not returned at all, since it is not actually part of
+/// this build's own active closure (issue #48's G1 follow-up,
+/// Checkpoint A: "Cargo featureまたはtargetを変えるとactive FFI
+/// requirementsが変化する").
 pub fn discover_ffi_requirements(
     source_path: &Path,
     source_id: &str,
+    cfg_context: &CfgContext,
 ) -> Result<Vec<FfiRequirementFacts>, IngestError> {
     let source =
         std::fs::read_to_string(source_path).map_err(|e| IngestError::Io(e.to_string()))?;
@@ -186,6 +243,12 @@ pub fn discover_ffi_requirements(
         .map_err(|diags| IngestError::Parse(format!("{diags:?}")))?;
     Ok(found
         .into_iter()
+        .filter(|r| {
+            r.cfg_predicate
+                .as_ref()
+                .map(|p| p.evaluate(cfg_context))
+                .unwrap_or(true)
+        })
         .map(|r| {
             let expected_provider_package = r
                 .link_hint
@@ -197,6 +260,7 @@ pub fn discover_ffi_requirements(
                 symbol: r.name,
                 abi: r.abi,
                 param_count: r.param_count,
+                return_type: r.return_type,
                 expected_provider_package,
             }
         })
@@ -217,25 +281,36 @@ pub fn discover_c_declared_exports(
             declaring_source: source_id.to_string(),
             symbol: f.name,
             abi: "C".to_string(),
+            param_count: f.param_count,
+            return_type: f.return_type,
         })
         .collect())
 }
 
 /// Real, text-only Nim `{.exportc.}` discovery
 /// (`laminaria_ir::nim_export_discover`) -- never a compiled-artifact
-/// symbol table.
+/// symbol table. A genuinely malformed proc signature (e.g. an
+/// unbalanced parameter list) is a real
+/// `laminaria_ir::nim_export_discover::NimSignatureError`, propagated
+/// here rather than silently skipped -- issue #48's G1 follow-up,
+/// Checkpoint A: "Rust/Nim sourceが要求されたlowering/capabilityを
+/// 満たさなければ...".
 pub fn discover_nim_declared_exports(
     nim_source_path: &Path,
     source_id: &str,
 ) -> Result<Vec<FfiExportFacts>, IngestError> {
     let text =
         std::fs::read_to_string(nim_source_path).map_err(|e| IngestError::Io(e.to_string()))?;
-    Ok(discover_exportc_declarations(&text)
+    let found = discover_exportc_declarations(&text)
+        .map_err(|e| IngestError::Parse(format!("Nim signature error: {e}")))?;
+    Ok(found
         .into_iter()
         .map(|p| FfiExportFacts {
             declaring_source: source_id.to_string(),
             symbol: p.exported_symbol,
             abi: "C".to_string(),
+            param_count: p.param_count,
+            return_type: p.return_type,
         })
         .collect())
 }
@@ -301,9 +376,27 @@ impl FixtureLayout {
     }
 }
 
+/// Verifies a real retained source/implementation file actually exists
+/// and is readable as UTF-8 text -- never compiled, never scanned for
+/// exports (a `.c`/`.cpp` implementation's own header is the
+/// authoritative declared-export source), but a `SourceModule`
+/// obligation's own `Satisfied` evidence must not claim a file was
+/// read when it never was. A missing or unreadable retained
+/// implementation source fails ingestion outright (issue #48's G1
+/// follow-up, Checkpoint A: "retained C/C++ implementation sourceが
+/// 欠落または読取不能なら入力確定に失敗する").
+fn verify_source_readable(path: &Path) -> Result<(), IngestError> {
+    std::fs::read_to_string(path)
+        .map(|_| ())
+        .map_err(|e| IngestError::Io(format!("{}: {e}", path.display())))
+}
+
 /// Builds one C-family candidate's `PackageCandidateFacts` from its
 /// real source+header pair, reading declared exports from the header
-/// text only -- never compiling either file.
+/// text only -- never compiling either file. The `.c`/`.cpp`
+/// implementation file's own existence and readability is still
+/// verified directly, so a retained source this candidate depends on
+/// can never be silently missing.
 fn ingest_c_candidate(
     source_id_prefix: &str,
     c_path: &Path,
@@ -315,7 +408,7 @@ fn ingest_c_candidate(
     let c_id = format!("{source_id_prefix}.c");
     let h_id = format!("{source_id_prefix}.h");
     let declared_exports = discover_c_declared_exports(h_path, &h_id)?;
-    let _ = c_path; // the .c file is a real source obligation, never scanned for exports (its header is authoritative)
+    verify_source_readable(c_path)?;
     let sources = vec![
         SourceModuleFacts {
             id: c_id.clone(),
@@ -360,7 +453,23 @@ pub fn ingest_fixture_input(
     let app_source_id = "app/src/main.rs".to_string();
     let doubler_source_id = "nimble/doubler/src/doubler.nim".to_string();
 
-    let ffi_requirements = discover_ffi_requirements(&layout.app_main_rs(), &app_source_id)?;
+    // The real activation facts this exact ingestion run observed:
+    // `unix` reflects the real current process's own OS family (valid
+    // since this fixture is never cross-compiled -- the demanded
+    // target and the ingesting host are the same real platform), and
+    // `active_features` is `cargo`'s own real default-activation
+    // closure. Changing either changes which FFI declarations below
+    // are considered active.
+    let cfg_context = CfgContext {
+        true_idents: if cfg!(unix) {
+            BTreeSet::from(["unix".to_string()])
+        } else {
+            BTreeSet::new()
+        },
+        active_features: cargo.active_features.clone(),
+    };
+    let ffi_requirements =
+        discover_ffi_requirements(&layout.app_main_rs(), &app_source_id, &cfg_context)?;
 
     let mut sources = vec![
         SourceModuleFacts {
@@ -439,6 +548,7 @@ pub fn ingest_fixture_input(
 
     let cppmax_c_id = "cpp/cppmax/cppmax.cpp".to_string();
     let cppmax_h_id = "cpp/cppmax/cppmax.h".to_string();
+    verify_source_readable(&layout.cppmax_cpp())?;
     sources.push(SourceModuleFacts {
         id: cppmax_c_id.clone(),
         ecosystem: Ecosystem::Cpp,
@@ -564,6 +674,33 @@ mod tests {
     struct BothIngestions {
         positive: FixtureIngestion,
         negative: FixtureIngestion,
+        /// Whether the fixture directory's own file listing (path +
+        /// size) was identical before and after both real ingestions
+        /// ran -- computed once, here, rather than by a separate test
+        /// running its own extra real ingestion outside this shared
+        /// lock (which would reintroduce the exact concurrent-nimble
+        /// race this lock exists to prevent).
+        fixture_directory_unchanged: bool,
+    }
+
+    fn snapshot_fixture_directory(root: &Path) -> Vec<(PathBuf, u64)> {
+        let mut entries = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let Ok(read_dir) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in read_dir.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if let Ok(metadata) = entry.metadata() {
+                    entries.push((path, metadata.len()));
+                }
+            }
+        }
+        entries.sort();
+        entries
     }
 
     /// Ingests both fixture variants' real `cargo metadata`/`nimble
@@ -590,6 +727,7 @@ mod tests {
         static CACHE: OnceLock<BothIngestions> = OnceLock::new();
         CACHE.get_or_init(|| {
             let layout = FixtureLayout::discover();
+            let before = snapshot_fixture_directory(&layout.root);
 
             let positive_runner = RecordingCommandRunner::new();
             let positive_input = ingest_fixture_input(&positive_runner, &layout, &["1.0.0"])
@@ -598,6 +736,8 @@ mod tests {
             let negative_runner = RecordingCommandRunner::new();
             let negative_input = ingest_fixture_input(&negative_runner, &layout, &["2.0.0"])
                 .expect("must ingest negative fixture input");
+
+            let after = snapshot_fixture_directory(&layout.root);
 
             BothIngestions {
                 positive: FixtureIngestion {
@@ -608,6 +748,7 @@ mod tests {
                     input: negative_input,
                     recorded_commands: negative_runner.recorded_commands(),
                 },
+                fixture_directory_unchanged: before == after,
             }
         })
     }
@@ -844,6 +985,151 @@ mod tests {
         assert!(
             result.is_err(),
             "removing the cppmax provider must prevent plan publication"
+        );
+    }
+
+    // --- G1 follow-up (Checkpoint A): verified authoritative input ---------
+
+    fn unique_temp_dir(label: &str) -> PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "laminaria-g1-checkpoint-a-{label}-{}-{n}",
+            std::process::id()
+        ))
+    }
+
+    /// Checkpoint A, evidence 1: a retained C implementation source
+    /// that is missing must fail input construction outright -- via
+    /// the real production entry point (`ingest_c_candidate`), not a
+    /// synthetic stand-in.
+    #[test]
+    fn a_missing_retained_c_implementation_source_fails_ingestion() {
+        let layout = FixtureLayout::discover();
+        let dir = unique_temp_dir("missing-c-source");
+        std::fs::create_dir_all(&dir).expect("must create temp dir");
+        let header_copy = dir.join("cadd.h");
+        std::fs::copy(layout.cadd_v1_h(), &header_copy).expect("must copy real header");
+        let missing_c_path = dir.join("cadd.c"); // deliberately never created
+
+        let result = ingest_c_candidate(
+            "temp/cadd",
+            &missing_c_path,
+            &header_copy,
+            "cadd",
+            "1.0.0",
+            "x86_64-unknown-linux-gnu",
+        );
+        assert!(
+            result.is_err(),
+            "ingestion must fail when the retained .c implementation file is missing"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Checkpoint A, evidence 2: changing the active Cargo feature
+    /// configuration changes which FFI requirements are active --
+    /// exercised directly against the real `app/src/main.rs`, which
+    /// gates its `nim_double` import on `feature = "use_nim_double"`.
+    #[test]
+    fn changing_the_active_feature_set_changes_active_ffi_requirements() {
+        let layout = FixtureLayout::discover();
+        let with_feature = CfgContext {
+            true_idents: BTreeSet::from(["unix".to_string()]),
+            active_features: BTreeSet::from(["use_nim_double".to_string()]),
+        };
+        let without_feature = CfgContext {
+            true_idents: BTreeSet::from(["unix".to_string()]),
+            active_features: BTreeSet::new(),
+        };
+        let with =
+            discover_ffi_requirements(&layout.app_main_rs(), "app/src/main.rs", &with_feature)
+                .expect("must discover with the feature active");
+        let without =
+            discover_ffi_requirements(&layout.app_main_rs(), "app/src/main.rs", &without_feature)
+                .expect("must discover with the feature inactive");
+        assert!(with.iter().any(|r| r.symbol == "nim_double"));
+        assert!(
+            !without.iter().any(|r| r.symbol == "nim_double"),
+            "nim_double must not be reported as an active requirement once its gating feature is off"
+        );
+        // c_add/cpp_max_i32 are gated only on `unix`, not on the
+        // feature, so they stay active in both configurations.
+        assert!(with.iter().any(|r| r.symbol == "c_add"));
+        assert!(without.iter().any(|r| r.symbol == "c_add"));
+    }
+
+    /// Checkpoint A, evidence 3 (Rust half): a Rust source that fails
+    /// to parse at all must fail ingestion, never silently resolve to
+    /// an empty or partial requirement list.
+    #[test]
+    fn a_rust_source_that_fails_to_parse_fails_ingestion() {
+        let dir = unique_temp_dir("bad-rust");
+        std::fs::create_dir_all(&dir).expect("must create temp dir");
+        let bad_rs = dir.join("main.rs");
+        std::fs::write(&bad_rs, "extern \"C\" { fn f(").expect("must write temp file");
+        let cfg_context = CfgContext::default();
+        let result = discover_ffi_requirements(&bad_rs, "main.rs", &cfg_context);
+        assert!(
+            result.is_err(),
+            "an unparseable Rust source must fail ingestion"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Checkpoint A, evidence 3 (Nim half): a Nim source with a
+    /// genuinely malformed exported-proc signature must fail
+    /// ingestion, never silently resolve to a partial export list.
+    #[test]
+    fn a_nim_source_with_a_malformed_signature_fails_ingestion() {
+        let dir = unique_temp_dir("bad-nim");
+        std::fs::create_dir_all(&dir).expect("must create temp dir");
+        let bad_nim = dir.join("broken.nim");
+        std::fs::write(
+            &bad_nim,
+            "proc broken(x: cint {.exportc: \"broken\".} =\n  x\n",
+        )
+        .expect("must write temp file");
+        let result = discover_nim_declared_exports(&bad_nim, "broken.nim");
+        assert!(
+            result.is_err(),
+            "a Nim proc with an unbalanced parameter list must fail ingestion"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Checkpoint A/B, evidence 4 (end-to-end): mutating a real
+    /// ingested candidate's declared signature so it no longer matches
+    /// the real required import must be rejected by production
+    /// resolution, even though the symbol name still matches.
+    #[test]
+    fn an_ingested_candidate_with_a_mutated_signature_is_rejected_end_to_end() {
+        let mut input = positive_ingestion().input.clone();
+        for candidate in input.package_candidates.iter_mut() {
+            if candidate.package_id == "cadd" {
+                for export in candidate.declared_exports.iter_mut() {
+                    if export.symbol == "c_add" {
+                        export.param_count = 99;
+                    }
+                }
+            }
+        }
+        let rejection =
+            resolve(&input).expect_err("a mutated, incompatible signature must be rejected");
+        assert_eq!(rejection.reason, RejectionReason::IncompatibleAbi);
+    }
+
+    /// Checkpoint A, evidence 5: real production ingestion never
+    /// writes to, or otherwise changes, the fixture directory it reads
+    /// from -- a direct filesystem-side-effect observation (computed
+    /// once around both shared real ingestions in `both_ingestions()`,
+    /// never by a separate test running its own extra real ingestion
+    /// outside that shared lock).
+    #[test]
+    fn ingestion_leaves_the_fixture_directory_unchanged() {
+        assert!(
+            both_ingestions().fixture_directory_unchanged,
+            "ingestion must never create, delete, or modify any file under the fixture directory"
         );
     }
 }
