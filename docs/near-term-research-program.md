@@ -83,7 +83,7 @@ The current next task is therefore G1's cross-ecosystem dependency-graph experim
 
 ## Documents for the current decision
 
-- Governing constraints: [compiler ownership contract](01-foundations/compiler-ownership-contract.md), [research prioritization policy](01-foundations/research-prioritization-policy.md), and [fixture policy](01-foundations/fixture-policy.md)
+- Governing constraints: [compiler ownership contract](01-foundations/compiler-ownership-contract.md), [research prioritization policy](01-foundations/research-prioritization-policy.md), [goal-driven work-instruction policy](01-foundations/goal-driven-work-instruction-policy.md), and [fixture policy](01-foundations/fixture-policy.md)
 - Three-lane foundation research: [Lane A — Semantic and Artifact Closure](02-research-areas/toolchains/lane-a-semantic-artifact-closure-foundations_ja.md), [Lane B — Efficient Compiler Computation](02-research-areas/execution/lane-b-efficient-compiler-computation-foundations_ja.md), and [Lane C — Executable Verification and Testability](02-research-areas/toolchains/lane-c-executable-verification-foundations_ja.md)
 - Core research: [cross-ecosystem dependency graph research](02-research-areas/toolchains/cross-ecosystem-dependency-graph.md)
 - Prior art and research gap: [cross-ecosystem dependency and compiler-IR resolution survey](02-research-areas/toolchains/cross-ecosystem-dependency-and-ir-resolution-landscape_ja.md)

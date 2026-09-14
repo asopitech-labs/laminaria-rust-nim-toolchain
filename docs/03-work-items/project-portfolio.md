@@ -31,6 +31,7 @@ Work is managed at every level of this chain. An issue checklist, design documen
 6. Use direct executable tests against production paths as verification authority. YAML catalogs, fixture-only validators, and validator tests may organize evidence but cannot be the source of truth.
 7. Reassess the portfolio whenever an experiment changes the graph model, compiler boundary, artifact contract, or project goal.
 8. Bind test results to the exact subject artifact, harness, environment, and raw evidence. An instrumented or test-profile artifact cannot silently certify a different production artifact.
+9. Author implementation and experiment work through the [goal-driven work-instruction policy](../01-foundations/goal-driven-work-instruction-policy.md): fix the observable goal first, then bind the route with causally ordered checkpoint results rather than an open-ended anti-pattern list.
 
 ## Three research lanes
 
@@ -201,6 +202,8 @@ M1 evidence selects the next work in both lanes; issue age does not.
 
 ## Issue lifecycle
 
+Issue assignment follows the [goal-driven work-instruction policy](../01-foundations/goal-driven-work-instruction-policy.md). The issue body must state the goal and a causally complete `Checkpoint A -> Checkpoint B -> Verification gate -> Handoff` path. File lists, prohibited techniques, and test lists may support that path but cannot replace it.
+
 An issue may be created when all of the following are known:
 
 - the parent outcome and capability gap;
@@ -208,6 +211,7 @@ An issue may be created when all of the following are known:
 - required production evidence;
 - dependencies and non-goals;
 - a stop condition that does not require completing an entire subsystem.
+- the ordered checkpoint results and the downstream result each checkpoint enables.
 
 An issue is closed only when its bounded decision is made or its implementation evidence exists. The capability row remains open in this portfolio until the project outcome is satisfied. Superseded issues are closed with a pointer to the replacing decision; they are not silently reinterpreted.
 

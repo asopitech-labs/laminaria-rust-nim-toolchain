@@ -1,5 +1,27 @@
 # Repository development rules
 
+## Goal-driven work instructions
+
+The canonical instruction-authoring rules are
+[docs/01-foundations/goal-driven-work-instruction-policy.md](docs/01-foundations/goal-driven-work-instruction-policy.md).
+
+- Lead with an externally observable project goal, then define an ordered path
+  of checkpoint results that causally reaches it.
+- Define each checkpoint by `Result`, `Consumes`, `Must preserve`, `Evidence`,
+  and `Enables`. Bind work by required outcomes and relations, not primarily by
+  enumerating anticipated anti-patterns.
+- The instruction author owns project, semantic, evidence, authority, and
+  completion decisions. The implementer owns engineering choices between fixed
+  checkpoints. If a new owner-level decision is required, stop and return it;
+  do not silently reinterpret the checkpoint.
+- Commands, modules, API names, and test names are prescribed only when they are
+  already contracts. CI success, test counts, source-text searches, and the
+  presence or absence of one implementation shape are not substitutes for a
+  checkpoint result.
+- Before requesting rework, audit whether the original goal and checkpoint
+  chain admitted the submitted but incorrect result. Correct the instruction
+  contract first.
+
 ## Single-source executable verification
 
 The canonical fixture rules are [docs/01-foundations/fixture-policy.md](docs/01-foundations/fixture-policy.md).

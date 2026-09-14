@@ -17,11 +17,12 @@ near-term-research-program.md     current goal and progression (start here)
 
 1. Read the [near-term program](near-term-research-program.md) to identify the active goal and stopping condition.
 2. Use [compiler ownership](01-foundations/compiler-ownership-contract.md) and [research prioritization](01-foundations/research-prioritization-policy.md) to constrain what counts as evidence and how the next experiment is selected.
-3. Open only the relevant research-area document for the active decision.
-4. Use the [project work portfolio](03-work-items/project-portfolio.md) to see outcomes, capabilities, unissued gaps, and horizons; then use the [issue plan](03-work-items/issue-plan.md) only for the GitHub-tracked projection.
-5. Consult guides for commands and history for provenance; neither overrides the current program.
+3. Use the [goal-driven work-instruction policy](01-foundations/goal-driven-work-instruction-policy.md) to turn that decision into an ordered checkpoint path before assigning implementation.
+4. Open only the relevant research-area document for the active decision.
+5. Use the [project work portfolio](03-work-items/project-portfolio.md) to see outcomes, capabilities, unissued gaps, and horizons; then use the [issue plan](03-work-items/issue-plan.md) only for the GitHub-tracked projection.
+6. Consult guides for commands and history for provenance; neither overrides the current program.
 
-Japanese entry points are [当面の研究ゴール](near-term-research-program_ja.md), [独自コンパイラ責務契約](01-foundations/compiler-ownership-contract_ja.md), and [研究優先順位ポリシー](01-foundations/research-prioritization-policy_ja.md).
+Japanese entry points are [当面の研究ゴール](near-term-research-program_ja.md), [独自コンパイラ責務契約](01-foundations/compiler-ownership-contract_ja.md), [研究優先順位ポリシー](01-foundations/research-prioritization-policy_ja.md), and [ゴール駆動の作業指示ポリシー](01-foundations/goal-driven-work-instruction-policy_ja.md).
 
 ## 01 — Foundations
 
@@ -30,6 +31,7 @@ Japanese entry points are [当面の研究ゴール](near-term-research-program_
 - [Research foundations](01-foundations/research-foundations.md) / [日本語](01-foundations/research-foundations_ja.md)
 - [Research program and evidence policy](01-foundations/research-program.md) / [日本語](01-foundations/research-program_ja.md)
 - [Fixture policy](01-foundations/fixture-policy.md) / [日本語](01-foundations/fixture-policy_ja.md)
+- [Goal-driven work-instruction policy](01-foundations/goal-driven-work-instruction-policy.md) / [日本語](01-foundations/goal-driven-work-instruction-policy_ja.md)
 - [Project proposal](01-foundations/project-proposal.md) / [日本語](01-foundations/project-proposal_ja.md)
 - [Metrics-first policy](01-foundations/metrics-policy.md)
 
