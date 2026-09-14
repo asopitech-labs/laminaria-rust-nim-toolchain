@@ -1903,9 +1903,10 @@ mod tests {
             if !reached.insert(id.clone()) {
                 continue;
             }
-            if let Some(obligation) = closure.obligations.get(&id) {
-                frontier.extend(obligation.depends_on.iter().cloned());
-            }
+            let obligation = closure.obligations.get(&id).unwrap_or_else(|| {
+                panic!("depends_on names '{id}', which does not exist as a real obligation")
+            });
+            frontier.extend(obligation.depends_on.iter().cloned());
         }
         for (id, obligation) in &closure.obligations {
             if obligation.state.is_rejected() {

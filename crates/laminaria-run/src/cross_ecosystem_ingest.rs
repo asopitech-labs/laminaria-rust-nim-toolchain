@@ -659,6 +659,7 @@ mod tests {
     use laminaria_plan::dependency_graph::{
         resolve, ObligationKind, ObligationState, RejectionReason, RequiredActionKind, Role,
     };
+    use laminaria_plan::plan_integrity::verify_plan_integrity;
     use std::collections::BTreeSet;
     use std::sync::OnceLock;
 
@@ -870,9 +871,15 @@ mod tests {
             if !reached.insert(id.clone()) {
                 continue;
             }
-            if let Some(obligation) = closure.obligations.get(&id) {
-                frontier.extend(obligation.depends_on.iter().cloned());
-            }
+            // A `depends_on` id that resolves to nothing real is a
+            // dangling edge, never silently treated as "reached" --
+            // required test 3's own "must not infer reachability from
+            // presence in the complete map" applies just as much to a
+            // reference that isn't present in it at all.
+            let obligation = closure.obligations.get(&id).unwrap_or_else(|| {
+                panic!("depends_on names '{id}', which does not exist as a real obligation")
+            });
+            frontier.extend(obligation.depends_on.iter().cloned());
         }
 
         for (id, obligation) in &closure.obligations {
@@ -1130,6 +1137,21 @@ mod tests {
         assert!(
             both_ingestions().fixture_directory_unchanged,
             "ingestion must never create, delete, or modify any file under the fixture directory"
+        );
+    }
+
+    /// Checkpoint C: the real fixture's own positive closure, produced
+    /// end-to-end by production ingestion + resolution, has zero
+    /// plan-integrity violations under the generic verifier -- applied
+    /// to the exact production plan, not a hand-constructed stand-in.
+    #[test]
+    fn the_real_positive_plan_has_no_integrity_violations() {
+        let ingestion = positive_ingestion();
+        let closure = resolve(&ingestion.input).expect("must resolve");
+        let violations = verify_plan_integrity(&ingestion.input, &closure);
+        assert!(
+            violations.is_empty(),
+            "unexpected violations: {violations:#?}"
         );
     }
 }
