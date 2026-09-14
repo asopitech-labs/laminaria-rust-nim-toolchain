@@ -1,12 +1,32 @@
-# Rust build path（Cargo/rustc/LLVM置換）の省資源研究ロードマップ
+# Rust build pathの代替不可能なコア価値：省資源研究ロードマップ
 
 ## 目的・現在地・次の判断
 
-**目的**は、LAMINARIA自身がCargo、rustc、LLVMのRust buildにおける責務を段階的に置換し、正しいnative artifactを作るためのwork、CPU時間、peak RSS、disk、I/O、そして測定可能な場合のenergyを最小化することである。外部Cargo/rustc/LLVMは、意味・資源・生成artifactを比較するreference/bootstrapping oracleであって、完成経路のprofile候補ではない。
+**目的**は、LAMINARIA自身がCargo、rustc、LLVMのRust buildにおける責務を置換する最終目標へ向け、既存systemを組み合わせても代替できない最小コア価値を先に反証することである。その価値は、要求native artifactからpackage/unit、Rust semantics、IR、symbol/linkまでを一つの需要駆動typed graphで閉じ、下流で得た事実を上流へ戻して**実行前に不要workを消せるか**にある。CPU時間、peak RSS、disk、I/O、測定可能なenergyは、この因果が正しいかを判定する成果指標である。
 
-**現在地**では、Cargo/Nimble/C/C++のclosureを同じtyped graphで解き、LAMINARIAのsource/IR/planner/target pathからnative executableへ至るM1が主gateである。Rustに限る本trackはその縮小版ではない。Cargoのwork discovery、rustcのsemantic incremental computation、LLVMのoptimization/target computationを、Rust-only workloadで最初に再発見し、省資源設計を後からのtuningではなく各責務のacceptance conditionにする。
+**現在地**では、Cargo/Nimble/C/C++のclosureを同じtyped graphで解き、LAMINARIAのsource/IR/planner/target pathからnative executableへ至るM1が主gateである。Rustに限る本trackはその縮小版ではない。Cargoのwork discovery、rustcのsemantic incremental computation、LLVMのoptimization/target computationを横断して結ぶ仮説を、Rust-only workloadで最初に検証する。
 
-**次の判断**は、Cargo互換inputを受け取るLAMINARIAのRust pathが、どの最小semantic contractまでを外部processなしで所有すれば、同じrequested artifactをより少ない計算で成立させられるか、である。まずexternal baselineを測ってcostの所在を明らかにし、その後はCargo/rustc/LLVMの候補を比較するのではなく、LAMINARIAの候補設計を実装・反証する。
+**次の判断**は、Cargo互換inputを受け取るLAMINARIAのRust pathが、どの最小semantic contractまでを所有すれば、下流のsemantic/ABI/symbol/liveness事実によって上流のpackage/unit/source/IR workを安全に変えられるか、である。外部Cargo/rustc/LLVMはreference oracleであり、外部toolの候補比較や一般的な再実装のfeasibilityを本研究のゴールにしない。
+
+## P0：代替不可能な最小コア
+
+Cargo resolver、rustc query、LLVM analysis/LTO、Bazel/Buck2のaction graph、generic cache/schedulerは、それぞれの層では既に強い先行実装がある。したがって「resolverを実装できる」「queryをcacheできる」「native objectを作れる」「memory budgetを設ける」だけでは、LAMINARIA固有の研究仮説を支持しない。
+
+```text
+requested native artifact
+  <-> package / version / feature / build unit
+  <-> Rust source semantics / macro effect / generic reachability
+  <-> LAMINARIA IR / lowering capability
+  <-> object / symbol / link / runtime closure
+```
+
+P0で問うのは、上の閉ループを一つのtyped graphとして解き、**source semanticsまたはlink livenessで初めて得た事実が、package candidateまたはbuild unitの選択・棄却を変え、parse/typecheck/IR/codegenの実行前にworkを消すか**である。Cargo→rustc→LLVMを直列に走らせ、最後にcacheやlinker GCをかける方式ではこの因果を示せない。
+
+| 優先度 | 検証対象 | 完了と数えないもの |
+| --- | --- | --- |
+| P0 | cross-layer feedbackでのearly pruning、compile前reject、同じgraphでの正しさと資源因果 | Cargo/rustc/LLVM相当の単体機能、cache hit、link成功 |
+| P1 | P0を成立させる最小Rust parse/semantic IR、unit model、target lowering、identity、direct executable test | 全Rust互換、全platform、汎用memory/disk管理 |
+| P2 | spill/remote/cache service、全macro/build-script、独自linker、広いtoolchain/OS matrix | P0の代わりとなる「完成度」 |
 
 ## 置換の境界
 
@@ -33,10 +53,10 @@ Cargo-compatible manifest / lock / source closure
 
 ## 最小仮説検証契約
 
-- **優先度:** P0/P1。Rust-onlyのowned pathをM1 mixed closureと同じ原則で前進させる。外部toolの運用改善は成果物ではない。
-- **最小仮説:** Rust buildのpackage選択、semantic computation、target computationを一つのdemand-driven graphとして所有すれば、同じ正しいnative artifactに必要なworkを早期に除去・再利用・限定再計算でき、external Cargo/rustc/LLVM baselineより少ない資源で成立するsliceを一つ示せる。
-- **最小実験:** 一つのlock済みRust-only workloadで、positive artifactとcompile前rejectを各一つ用意する。cold、true no-op、leaf semantic edit、root/feature/target changeを同じEnvironmentFingerprintで測る。
-- **停止条件:** 各段で、採用するgraph/IR/invalidation/retention設計、または不成立理由を、direct executable testと資源証拠で決める。外部compilerを呼ばなければ成立しない要求は対応範囲外として構造化rejectする。
+- **優先度:** P0。Rust-onlyのowned pathをM1 mixed closureと同じ原則で反証する。外部toolの運用改善は成果物ではない。
+- **最小仮説:** 一つのRust workloadで、source semanticsまたはlink livenessから得た事実をpackage/unit選択へfeedbackすれば、外部compile前に一つ以上のcandidate/unit/source/IR/codegen workを安全に省略しつつ、同じnative artifact behaviorまたは構造化rejectを得られる。
+- **最小実験:** 一つのlock済みRust-only workloadに、到達不能または意味/ABI上不適格なcandidateを一つだけ含める。positive artifact、compile前reject、そしてfeedbackを切ったeager baselineとの実行集合比較を同じEnvironmentFingerprintで行う。
+- **停止条件:** feedbackが選択・棄却・実行集合を実際に変え、direct executable testとraw resource evidenceがその正しさとcostを支持する、または変えられない理由を得た時点。外部compilerを呼ばなければ成立しない要求は対応範囲外として構造化rejectする。
 - **非ゴール:** Cargo/rustc/LLVMの全互換性、全macro/build-scriptの実装、全target/OS、最初からの独自linker、または一指標だけの最速化。
 
 ## 資源を減らす設計順序
@@ -54,7 +74,11 @@ Cargo-compatible manifest / lock / source closure
 
 energyはwall-clockやCPU時間から自動的には結論しない。[Linux powercap/RAPLの`energy_uj`のような信頼できるenergy counter](https://docs.kernel.org/power/powercap/powercap.html)が同一EnvironmentFingerprintで取れる場合だけjouleを記録する。取れない環境ではCPU時間、RSS、I/Oをenergy proxyと明記し、energy削減と断定しない。
 
-## Cargo置換：必要workを構成する前に減らす
+## Cargo/rustc/LLVM責務はP0の従属enabler
+
+次の三節は完了順序ではない。P0のfeedback loopを成立させる最小範囲だけを実装し、どの責務を広げるかはP0の反例が決める。
+
+## Cargo責務：必要workを構成する前に減らす
 
 Cargo resolverは[version/backtracking、feature、target、normal/build/dev dependencyを扱い](https://doc.rust-lang.org/cargo/reference/resolver.html)、[unit graphはcompiler実行単位までspecializeする](https://doc.rust-lang.org/cargo/reference/unstable.html#unit-graph)。LAMINARIAはこの意味をpackage名の平坦なDAGへ落とさず、少なくとも次をtyped node/edgeとして保持する。
 
@@ -73,7 +97,7 @@ RequestedArtifact -> demanded units -> semantic and artifact obligations
 
 **測定:** explored/pruned/merged package/feature/unit state、metadata/source bytes、実行を避けたbuild/proc-macro action、resolver CPU/RSS、negative rejectionがcompile開始前だったこと。
 
-## rustc置換：semantic computationを需要駆動・増分にする
+## rustc責務：semantic computationを需要駆動・増分にする
 
 [rustcのquery/red-green model](https://rustc-dev-guide.rust-lang.org/queries/incremental-compilation.html)は、依存を持つ純粋計算をDAGとして記録し、入力がgreenなら値をloadせず再実行を避けることを示す。LAMINARIAはquery名やrustc内部IRを模倣せず、Rust意味に必要な独自queryとsource-derived IRを定義する。
 
@@ -92,7 +116,7 @@ source / tokens / syntax
 
 **測定:** parse/expand/resolve/typecheck/lower query数、red/green/loaded/recomputed数と理由、semantic/IR bytes、peak live value bytes、clean rebuildとのartifact/behavior同値性、誤reuse/hidden external compilerがないこと。
 
-## LLVM置換：analysis、変換、target生成をbodyの前に制御する
+## LLVM責務：analysis、変換、target生成をbodyの前に制御する
 
 [LLVM New Pass Manager](https://llvm.org/docs/NewPassManager.html)と[ThinLTO](https://clang.llvm.org/docs/ThinLTO.html)は、analysisの保持/無効化、module summary、whole-program判断とparallel backendの分離を示す重要なreferenceである。LAMINARIAが採用するのは原理であり、LLVM pass pipelineやbitcodeを本経路へ持ち込むことではない。
 
@@ -113,17 +137,17 @@ LAMINARIA semantic IR
 
 **測定:** analysis reuse/invalidation、summary/body bytes、materialized checkpoint数とserialization I/O、executed/skipped transform/codegen action、target object/final artifact size、link liveness、CPU/RSS/I/O、checkpoint benefit対cost、生成artifactの実行結果。
 
-## 段階的ロードマップ
+## P0から始める段階的ロードマップ
 
-| 段階 | owned slice | 資源判断 | 完了の証拠 |
+| 段階 | 最小作業 | P0への寄与 | 完了の証拠 |
 | --- | --- | --- | --- |
-| R0 — contract and oracle | Rust workload、requested artifact、対応するmanifest/lock input、semantic/artifact/reject contractを固定する | 測定対象とcache pre-state、external baselineとの差分、energy計測可否を固定する | exact fingerprints、direct test、observer overhead、external reference trace |
-| R1 — Cargo responsibility | LAMINARIA resolverがpackage/feature/target/unit graphを構成し、一つのconflictをcompile前にrejectする | candidate/unit展開をいつ止めればmetadata/source/build workを避けられるか | Cargo processなしのowned graph、選択/棄却理由、避けたworkの測定 |
-| R2 — rustc responsibility | Rust syntaxからsemantic factsと独自IRを導き、demand-driven query/invalidationを実装する | no-opとleaf editでどのsemantic workをgreen/reuse/dropできるか | rustc processなしのpositive artifactまたは明示reject、query/action資源証拠 |
-| R3 — LLVM responsibility | 独自IRのanalysis/transform/summary/target loweringでnative objectとlink planを作る | summary、checkpoint、retention、bounded parallelismのどれがCPU/RSS/disk/I/Oを下げるか | LLVM backendなしのnative object/closure、direct executable test、採否判断 |
-| R4 — end-to-end evidence | R1–R3を同一Rust workloadで結合し、cold/no-op/edit/root changeを反復する | external Cargo/rustc/LLVM baselineとのresource frontier、および残るcost center | no-fallback trace、raw samples、correctness-equivalent behavior、次の設計決定 |
+| R0 — oracle固定 | 一つのRust workload、artifact/reject contract、eager reference execution集合、EnvironmentFingerprintを固定する | 何をfeedbackが変えるべきかを曖昧にしない | direct test、external reference trace、observer overhead |
+| R1 — closed-loop proof | requested artifact→unit→semantic/IR→symbol/liveness→unitのfeedbackを一つ実装する | 代替不可能な中心仮説を直接反証する | positive artifact、compile前reject、feedback有無で異なる選択/実行集合 |
+| R2 — causality and cost | eager baselineと同じbehaviorを確認し、避けたworkとCPU/RSS/disk/I/Oを対応付ける | 「速そう」ではなく、feedbackが資源差を生んだ因果を示す | raw samples、avoided node/action理由、correctness-equivalent behavior |
+| R3 — controlled edit | leaf editまたはroot/feature変更で、semantic projectionが変わらない範囲をgreenに保つ | cross-layer identity/invalidationが一過性のpruningでないかを検証する | clean rebuild比較、recomputed/loaded/dropped理由、no stale reuse |
+| R4 — evidence-triggered expansion | R1–R3を壊した最小反例だけをCargo/rustc/LLVM責務へ戻して広げる | 汎用再実装を避け、次の非代替gapだけへ投資する | 反例、追加contract、採用/棄却判断 |
 
-R1–R3は直列の完成品フェーズではない。R2/R3が必要とする最小contractをR1へfeedbackし、R4で同じtyped graph上の因果を検証する。外部baselineはR0/R4だけに置き、PFE、Cranelift、sccache、mold、Bazel等をLAMINARIAの候補実装として列挙しない。
+Cargo/rustc/LLVMの個別sliceはR1を成立させるために必要な範囲だけを取る。外部baselineはR0/R2に置き、PFE、Cranelift、sccache、mold、Bazel等をLAMINARIAの候補実装として列挙しない。
 
 ## 最小workloadと拒否ケース
 
@@ -150,7 +174,7 @@ R1–R3は直列の完成品フェーズではない。R2/R3が必要とする�
 
 ## Issueと参照
 
-この研究は[#50](https://github.com/asopitech-labs/laminaria-rust-nim-toolchain/issues/50)で追跡する。#50はCargo/rustc/LLVMの全置換を一括で完了するissueではなく、上記R0–R4から次の一つのowned sliceと資源判断を選ぶ台帳である。M1のmixed Cargo/Nimble/C/C++ closure、Lane Bの効率研究、Lane Cのartifact qualificationを置き換えず、Rust専用の反証と設計判断をそこへ戻す。
+この研究は[#50](https://github.com/asopitech-labs/laminaria-rust-nim-toolchain/issues/50)で追跡する。#50はCargo/rustc/LLVMの全置換を一括で完了するissueではなく、R1のclosed-loop proofを最初のclose conditionとする。M1のmixed Cargo/Nimble/C/C++ closure、Lane Bの効率研究、Lane Cのartifact qualificationを置き換えず、Rust専用の反証と設計判断をそこへ戻す。
 
 ## 参考資料
 

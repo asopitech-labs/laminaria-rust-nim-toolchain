@@ -37,7 +37,7 @@ The detailed designs are documented in:
 - `docs/02-research-areas/toolchains/agent-oriented-toolchain-ux.md`
 - `docs/02-research-areas/toolchains/agent-oriented-toolchain-ux_ja.md`
 
-The [Rust build-path resource roadmap](rust-reference-build-footprint-roadmap_ja.md) is the bounded P0/P1 decision in [#50](https://github.com/asopitech-labs/laminaria-rust-nim-toolchain/issues/50): it replaces Cargo responsibility for Rust package/unit computation, rustc responsibility for semantic incremental computation, and LLVM responsibility for optimization/target computation on an owned path, while minimizing required work, CPU, memory, disk, I/O, and measurable energy. Existing Cargo/rustc/LLVM execution is reference/bootstrapping evidence only; it is not the candidate implementation.
+The [Rust build-path resource roadmap](rust-reference-build-footprint-roadmap_ja.md) is the bounded P0 decision in [#50](https://github.com/asopitech-labs/laminaria-rust-nim-toolchain/issues/50): it first proves or rejects a cross-layer feedback loop from Rust semantics/IR/link liveness to Cargo-compatible package/unit choice, with pre-execution work elimination and direct resource evidence. Cargo/rustc/LLVM replacement slices are only evidence-triggered enablers; existing execution is reference/bootstrapping evidence only.
 
 ## Horizontal distribution research
 
