@@ -302,6 +302,36 @@ requires "nim >= 2.0.0"
         assert_eq!(facts.requires[0].version.as_deref(), Some("2.0.0"));
     }
 
+    /// Checkpoint D evidence: the manifest text is the actual authority
+    /// for the derived result, not a value the test happens to
+    /// duplicate -- two independently varied manifests (differing
+    /// `version`, `srcDir`, and `requires` count) each produce the
+    /// derived facts their own input, and only their own input,
+    /// specifies.
+    #[test]
+    fn varying_the_manifest_s_authoritative_values_varies_the_derived_facts() {
+        let a = parse_nimble_manifest(
+            "version = \"1.2.3\"\nsrcDir = \"lib_a\"\nrequires \"nim >= 1.0.0\"\n",
+        )
+        .expect("must parse manifest a");
+        let b = parse_nimble_manifest(
+            "version = \"9.9.9\"\nsrcDir = \"lib_b\"\nrequires \"nim >= 1.0.0\", \"extra >= 2.0.0\"\n",
+        )
+        .expect("must parse manifest b");
+
+        assert_eq!(a.version.as_deref(), Some("1.2.3"));
+        assert_eq!(b.version.as_deref(), Some("9.9.9"));
+        assert_ne!(a.version, b.version);
+
+        assert_eq!(a.src_dir.as_deref(), Some("lib_a"));
+        assert_eq!(b.src_dir.as_deref(), Some("lib_b"));
+        assert_ne!(a.src_dir, b.src_dir);
+
+        assert_eq!(a.requires.len(), 1);
+        assert_eq!(b.requires.len(), 2);
+        assert_eq!(b.requires[1].name, "extra");
+    }
+
     #[test]
     fn a_comment_line_and_trailing_comment_are_ignored() {
         let text = "# a real comment\nversion = \"1.0.0\" # trailing note\n";

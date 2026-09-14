@@ -224,6 +224,67 @@ mod tests {
         }
     }
 
+    /// Checkpoint D evidence: G1's two permitted commands succeed even
+    /// when `HOME`/`USERPROFILE`/`CARGO_HOME` are pointed at a freshly
+    /// created, empty directory -- proving `cargo metadata --no-deps`
+    /// and `rustc -vV` do not implicitly depend on any pre-existing
+    /// ambient toolchain/cache state (a real registry index, a warm
+    /// `CARGO_HOME`, or any Nimble cache -- G1 never invokes `nimble`
+    /// at all, so there is no Nimble-side ambient state to isolate).
+    /// Run against the real fixture's own `app/Cargo.toml`, the same
+    /// manifest production ingestion actually reads.
+    #[test]
+    fn the_two_permitted_commands_succeed_under_an_isolated_home_and_cargo_home() {
+        let isolated_home = std::env::temp_dir().join(format!(
+            "laminaria-g1-checkpoint-d-isolated-home-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&isolated_home).expect("must create isolated HOME");
+        let isolated_cargo_home = isolated_home.join("cargo-home");
+        std::fs::create_dir_all(&isolated_cargo_home).expect("must create isolated CARGO_HOME");
+
+        let fixture_manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("workspace root must exist")
+            .join("fixtures/cross-ecosystem-native-executable/app/Cargo.toml");
+
+        let mut rustc_cmd = Command::new("rustc");
+        rustc_cmd.args(["-vV"]);
+        with_forced_offline_environment(&mut rustc_cmd);
+        rustc_cmd.env("HOME", &isolated_home);
+        rustc_cmd.env("USERPROFILE", &isolated_home);
+        rustc_cmd.env("CARGO_HOME", &isolated_cargo_home);
+        let rustc_output = rustc_cmd.output().expect("failed to spawn rustc");
+        assert!(
+            rustc_output.status.success(),
+            "rustc -vV must succeed under an isolated HOME/CARGO_HOME: {}",
+            String::from_utf8_lossy(&rustc_output.stderr)
+        );
+
+        let mut cargo_cmd = Command::new("cargo");
+        cargo_cmd.args([
+            "metadata",
+            "--no-deps",
+            "--format-version",
+            "1",
+            "--manifest-path",
+        ]);
+        cargo_cmd.arg(&fixture_manifest);
+        with_forced_offline_environment(&mut cargo_cmd);
+        cargo_cmd.env("HOME", &isolated_home);
+        cargo_cmd.env("USERPROFILE", &isolated_home);
+        cargo_cmd.env("CARGO_HOME", &isolated_cargo_home);
+        let cargo_output = cargo_cmd.output().expect("failed to spawn cargo");
+        assert!(
+            cargo_output.status.success(),
+            "cargo metadata --no-deps must succeed under an isolated HOME/CARGO_HOME: {}",
+            String::from_utf8_lossy(&cargo_output.stderr)
+        );
+
+        let _ = std::fs::remove_dir_all(&isolated_home);
+    }
+
     #[test]
     fn the_two_permitted_commands_are_recognized() {
         assert!(is_permitted(

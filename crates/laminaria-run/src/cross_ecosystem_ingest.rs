@@ -1252,6 +1252,24 @@ mod tests {
         assert_eq!(rejection.reason, RejectionReason::IncompatibleAbi);
     }
 
+    /// Checkpoint D, evidence 5 (Nim source half): a missing `.nim`
+    /// source file fails ingestion outright, matching the existing
+    /// missing-C-source/missing-manifest/missing-lock/missing-package-dir
+    /// coverage above for the one retained-source case they did not
+    /// cover.
+    #[test]
+    fn a_missing_nim_source_file_fails_ingestion() {
+        let dir = unique_temp_dir("missing-nim-source");
+        std::fs::create_dir_all(&dir).expect("must create temp dir");
+        let missing_nim = dir.join("doubler.nim"); // deliberately never created
+        let result = discover_nim_declared_exports(&missing_nim, "nimble/doubler/src/doubler.nim");
+        assert!(
+            result.is_err(),
+            "ingestion must fail when the Nim source file is missing"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Checkpoint A, evidence 5: real production ingestion never
     /// writes to, or otherwise changes, the fixture directory it reads
     /// from -- a direct filesystem-side-effect observation (computed
@@ -1264,6 +1282,44 @@ mod tests {
             both_ingestions().fixture_directory_unchanged,
             "ingestion must never create, delete, or modify any file under the fixture directory"
         );
+    }
+
+    /// Checkpoint D, verification gate item 3: active feature/target
+    /// selection is reflected in the *resolved closure* itself, not
+    /// merely in the intermediate FFI-requirement list
+    /// (`changing_the_active_feature_set_changes_active_ffi_requirements`
+    /// above already covers that intermediate step). Deactivating
+    /// `use_nim_double` removes `Symbol:nim_double` from the resolved
+    /// obligations entirely, while the `unix`-gated (not
+    /// feature-gated) `c_add`/`cpp_max_i32` symbols stay resolved in
+    /// both closures.
+    #[test]
+    fn deactivating_a_feature_removes_its_symbol_from_the_resolved_closure() {
+        let with_feature = &positive_ingestion().input;
+        let with_closure = resolve(with_feature).expect("must resolve with the feature active");
+        assert!(with_closure.obligations.contains_key("Symbol:nim_double"));
+        assert!(with_closure.obligations.contains_key("Symbol:c_add"));
+        assert!(with_closure.obligations.contains_key("Symbol:cpp_max_i32"));
+
+        let mut without_feature = with_feature.clone();
+        without_feature
+            .ffi_requirements
+            .retain(|r| r.symbol != "nim_double");
+        without_feature
+            .abi_constraints
+            .retain(|c| c.boundary_symbol != "nim_double");
+        let without_closure =
+            resolve(&without_feature).expect("must still resolve with the feature inactive");
+        assert!(
+            !without_closure
+                .obligations
+                .contains_key("Symbol:nim_double"),
+            "Symbol:nim_double must not appear in the closure once its gating feature is off"
+        );
+        assert!(without_closure.obligations.contains_key("Symbol:c_add"));
+        assert!(without_closure
+            .obligations
+            .contains_key("Symbol:cpp_max_i32"));
     }
 
     /// Checkpoint C: the real fixture's own positive closure, produced
@@ -1283,39 +1339,61 @@ mod tests {
 
     // --- G1 final follow-up (Checkpoint D): hermetic Nimble ingestion -------
 
-    /// Checkpoint D, evidence 8/9: positive and negative ingestion,
-    /// each run completely fresh (no shared cache, no lock of any
-    /// kind), succeed when run concurrently on real OS threads and
-    /// produce the same package identity/version/requires every time
-    /// -- proven directly, not merely asserted, since `nimble` is no
-    /// longer invoked at all and a data race would show up as an
-    /// actual panic or inconsistent result here.
+    /// Checkpoint D, evidence 8/9 (verification gate item 9, full
+    /// form): positive and negative ingestion, each run completely
+    /// fresh (no shared cache, no lock of any kind), succeed when run
+    /// concurrently on real OS threads and produce a byte-identical
+    /// serialized `DependencyResolutionInput` every time -- not merely
+    /// a matching `demand_entry_point` field, which could stay equal
+    /// even if some other field diverged under a real race. Proven
+    /// directly: since `nimble` is no longer invoked at all, a data
+    /// race would show up as an actual panic or a diverging JSON string
+    /// here.
     #[test]
     fn positive_and_negative_ingestion_succeed_when_run_concurrently() {
         let layout = std::sync::Arc::new(FixtureLayout::discover());
-        let mut handles = Vec::new();
+        let mut positive_handles = Vec::new();
+        let mut negative_handles = Vec::new();
         for _ in 0..4 {
             let layout_pos = layout.clone();
-            handles.push(std::thread::spawn(move || {
+            positive_handles.push(std::thread::spawn(move || {
                 let runner = RecordingCommandRunner::new();
                 ingest_fixture_input(&runner, &layout_pos, &["1.0.0"])
                     .expect("positive ingestion must succeed")
             }));
             let layout_neg = layout.clone();
-            handles.push(std::thread::spawn(move || {
+            negative_handles.push(std::thread::spawn(move || {
                 let runner = RecordingCommandRunner::new();
                 ingest_fixture_input(&runner, &layout_neg, &["2.0.0"])
                     .expect("negative ingestion must succeed")
             }));
         }
-        let results: Vec<DependencyResolutionInput> = handles
+        let positive_results: Vec<String> = positive_handles
             .into_iter()
             .map(|h| h.join().expect("thread must not panic"))
+            .map(|input| serde_json::to_string(&input).expect("serialize"))
             .collect();
-        let first_demand = results[0].demand_entry_point.clone();
-        for result in &results {
-            assert_eq!(result.demand_entry_point, first_demand);
+        let negative_results: Vec<String> = negative_handles
+            .into_iter()
+            .map(|h| h.join().expect("thread must not panic"))
+            .map(|input| serde_json::to_string(&input).expect("serialize"))
+            .collect();
+        for result in &positive_results {
+            assert_eq!(
+                result, &positive_results[0],
+                "every concurrently-run positive ingestion must serialize identically"
+            );
         }
+        for result in &negative_results {
+            assert_eq!(
+                result, &negative_results[0],
+                "every concurrently-run negative ingestion must serialize identically"
+            );
+        }
+        assert_ne!(
+            positive_results[0], negative_results[0],
+            "positive and negative ingestion must actually differ (cadd@1.0.0 vs cadd@2.0.0)"
+        );
     }
 
     fn write_fixture_nimble_dir(
@@ -1444,6 +1522,14 @@ mod tests {
             "a nonexistent package directory must fail ingestion"
         );
     }
+
+    // Checkpoint D, verification gate item 6 (process-tree
+    // observation): see `tests/nimble_shadow_probe_test.rs` (an
+    // integration test, not a unit test here, because
+    // `CARGO_BIN_EXE_*` -- needed to locate the compiled
+    // `laminaria-nimble-shadow-probe` binary -- is only defined for
+    // integration test targets, not for this crate's own `src/`
+    // unit-test binary).
 
     /// Checkpoint D, evidence 1: the real fixture's own manifest/lock
     /// still produce the same package/version/requirement identity as

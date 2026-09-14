@@ -15,6 +15,10 @@ path = "src/bin/rustc_wrapper.rs"
 name = "laminaria-cc-wrapper"
 path = "src/bin/cc_wrapper.rs"
 
+[[bin]]
+name = "laminaria-nimble-shadow-probe"
+path = "src/bin/nimble_shadow_probe.rs"
+
 [dependencies]
 laminaria-fingerprint = { path = "../laminaria-fingerprint" }
 laminaria-ir = { path = "../laminaria-ir" }
