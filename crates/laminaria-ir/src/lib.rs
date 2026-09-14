@@ -53,6 +53,8 @@ pub mod foreign_discover;
 pub mod interpreter;
 pub mod nim_export_discover;
 pub mod nim_frontend;
+pub mod nimble_lock_discover;
+pub mod nimble_manifest_discover;
 pub mod rust_dependency_discover;
 pub mod rust_frontend;
 pub mod transform;

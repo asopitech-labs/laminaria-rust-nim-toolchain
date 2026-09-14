@@ -1,14 +1,24 @@
 //! Issue #48 (G1): the one seam through which G1's own ecosystem-fact
 //! ingestion (`cross_ecosystem_ingest`) ever spawns a process. G1's own
-//! fixed decision permits exactly three read-only metadata/version
+//! fixed decision permits exactly two read-only metadata/version
 //! queries and forbids every compiler, archiver, linker, package
-//! build, package install, or build-script invocation -- see this
-//! module's own [`is_permitted`], the single place that boundary is
-//! enforced, and `crates/laminaria-run/src/cross_ecosystem_ingest.rs`'s
-//! own top-of-file doc comment for why no other subprocess exists in
-//! G1 at all (declared-export facts come from pure text scanning in
-//! `laminaria-ir`, never from compiling a candidate and inspecting the
-//! result).
+//! build, package install, build-script, or package-manager
+//! invocation -- see this module's own [`is_permitted`], the single
+//! place that boundary is enforced, and
+//! `crates/laminaria-run/src/cross_ecosystem_ingest.rs`'s own
+//! top-of-file doc comment for why no other subprocess exists in G1 at
+//! all (declared-export facts, and now Nimble manifest/lock facts too,
+//! come from pure text scanning in `laminaria-ir`, never from a
+//! subprocess or from compiling a candidate and inspecting the
+//! result). `nimble` itself is not on the permitted list at all
+//! (Checkpoint D correction, this module's own G1 follow-up history):
+//! a real `nimble dump --json` invocation was found, even with a
+//! `nimble.lock` file present, to still attempt a network connection
+//! for its own internal toolchain resolution and to fail hard when
+//! that connection was genuinely unavailable -- a resolver that runs
+//! any `nimble` binary at all can never structurally guarantee G1's
+//! offline boundary, so the fix was to stop running one, not to harden
+//! the invocation further.
 //!
 //! [`RealCommandRunner`] is what production ingestion uses; it refuses
 //! (returns [`IngestError::ForbiddenCommand`] for) anything outside the
@@ -45,26 +55,14 @@ impl std::fmt::Display for IngestError {
 
 impl std::error::Error for IngestError {}
 
-/// The permitted-command allowlist issue #48 fixes: `cargo metadata
-/// --no-deps ...`, `nimble dump --json`, and `rustc -vV`. Anything else
-/// -- `cargo build`/`cargo run`, `nimble build`/`nimble install`,
+/// The permitted-command allowlist, Checkpoint D revision: `cargo
+/// metadata --no-deps ...` and `rustc -vV` only. Anything else --
+/// `cargo build`/`cargo run`, any `nimble` invocation at all (`dump`
+/// included -- Nimble facts now come from reading the real `.nimble`
+/// manifest and `nimble.lock` directly, never from running `nimble`),
 /// `rustc` with any other flags, `nim c`/`nim cpp`/`nlvm`,
 /// `cc`/`clang`/`gcc`/`c++ -c` or equivalent, `ar`, a linker, or `nm` --
 /// is forbidden.
-///
-/// `nimble dump --json` is exactly the command issue #48 names --
-/// see `fixtures/cross-ecosystem-native-executable/nimble/doubler/nimble.lock`'s
-/// own doc comment (in this repo's fixture README) for why a real
-/// `nimble.lock` file is required alongside it: recent nimble
-/// ("vnext") versions have `dump` itself perform an implicit
-/// "resolve/manage a matching nim toolchain" step to populate its own
-/// `nimDir` field. Without a lock file pinning an exact revision, that
-/// step can crash (`--offline`/`--disableNimBinaries` were tried and
-/// made this *worse*, not better -- they disable the very
-/// lock-file-aware resolution path that succeeds); with the lock file
-/// present, plain `nimble dump --json` resolves it correctly and
-/// reports unchanged manifest fields (verified against real CI
-/// output).
 pub(crate) fn is_permitted(program: &str, args: &[&str]) -> bool {
     match program {
         "cargo" => {
@@ -72,7 +70,6 @@ pub(crate) fn is_permitted(program: &str, args: &[&str]) -> bool {
                 && args.contains(&"--no-deps")
                 && args.windows(2).any(|w| w == ["--format-version", "1"])
         }
-        "nimble" => args == ["dump", "--json"],
         "rustc" => args == ["-vV"],
         _ => false,
     }
@@ -89,6 +86,41 @@ pub trait CommandRunner {
 #[derive(Debug, Default)]
 pub struct RealCommandRunner;
 
+/// Forces every spawned child process's own view of the standard proxy
+/// environment variables to an address nothing listens on, so any tool
+/// that opportunistically tries the network fails fast instead of
+/// silently succeeding over a real connection or hanging on one. A
+/// per-child-process override via `Command::env`, never a process-wide
+/// `std::env::set_var` -- the latter is unsound to call while other
+/// threads (other `cargo test` tests, in particular) might read the
+/// current process's own environment concurrently. Applied
+/// unconditionally in production, not only under test: a structural
+/// guarantee G1 ingestion needs no network, not a hope backed by
+/// convention. Now that `nimble` (which was observed attempting a
+/// network connection for its own internal toolchain resolution even
+/// with a lock file present, and failing hard once one was genuinely
+/// unavailable) is no longer invoked at all, the two remaining
+/// permitted commands (`cargo metadata --no-deps`, `rustc -vV`) are
+/// both genuinely network-independent for this fixture (no external
+/// crate dependencies to resolve), so this guarantee is safe to make
+/// unconditional.
+const UNREACHABLE_PROXY: &str = "http://127.0.0.1:1";
+
+fn with_forced_offline_environment(cmd: &mut Command) {
+    for var in [
+        "http_proxy",
+        "https_proxy",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "all_proxy",
+    ] {
+        cmd.env(var, UNREACHABLE_PROXY);
+    }
+    cmd.env("NO_PROXY", "");
+    cmd.env("no_proxy", "");
+}
+
 impl CommandRunner for RealCommandRunner {
     fn run(&self, program: &str, args: &[&str], cwd: Option<&Path>) -> Result<String, IngestError> {
         if !is_permitted(program, args) {
@@ -96,6 +128,7 @@ impl CommandRunner for RealCommandRunner {
         }
         let mut cmd = Command::new(program);
         cmd.args(args);
+        with_forced_offline_environment(&mut cmd);
         if let Some(dir) = cwd {
             cmd.current_dir(dir);
         }
@@ -118,8 +151,8 @@ impl CommandRunner for RealCommandRunner {
 /// is ever requested, rather than only failing a later assertion.
 /// Permitted commands are still delegated to a real
 /// [`RealCommandRunner`], so a test using this runner still exercises
-/// production ingestion against real `cargo metadata`/`nimble dump
-/// --json`/`rustc -vV` output.
+/// production ingestion against real `cargo metadata`/`rustc -vV`
+/// output.
 #[derive(Debug, Default)]
 pub struct RecordingCommandRunner {
     inner: RealCommandRunner,
@@ -160,8 +193,39 @@ impl CommandRunner for RecordingCommandRunner {
 mod tests {
     use super::*;
 
+    /// Verification gate item 8 (offline execution): every real child
+    /// process this crate spawns must be forced offline. Checked via
+    /// `Command::get_envs()` case-insensitively -- environment variable
+    /// names are case-folded on Windows, so asserting each of
+    /// `http_proxy`/`HTTP_PROXY` as two *separate* exact-case entries
+    /// (an earlier version of this test did) is itself platform-unsafe;
+    /// what actually matters is that *some* casing of each proxy
+    /// variable resolves to the unreachable address.
     #[test]
-    fn the_three_permitted_commands_are_recognized() {
+    fn real_commands_are_spawned_with_a_forced_offline_environment() {
+        let mut cmd = Command::new("rustc");
+        with_forced_offline_environment(&mut cmd);
+        let envs: Vec<(String, Option<String>)> = cmd
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().to_lowercase(),
+                    v.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        for var in ["http_proxy", "https_proxy"] {
+            let found = envs.iter().find(|(k, _)| k == var);
+            assert_eq!(
+                found.and_then(|(_, v)| v.as_deref()),
+                Some(UNREACHABLE_PROXY),
+                "{var} must be forced to an unreachable address"
+            );
+        }
+    }
+
+    #[test]
+    fn the_two_permitted_commands_are_recognized() {
         assert!(is_permitted(
             "cargo",
             &[
@@ -173,7 +237,6 @@ mod tests {
                 "x"
             ]
         ));
-        assert!(is_permitted("nimble", &["dump", "--json"]));
         assert!(is_permitted("rustc", &["-vV"]));
     }
 
@@ -184,6 +247,7 @@ mod tests {
             ("cargo", vec!["run"]),
             ("nimble", vec!["build"]),
             ("nimble", vec!["install"]),
+            ("nimble", vec!["dump", "--json"]),
             ("rustc", vec!["main.rs"]),
             ("nim", vec!["c", "main.nim"]),
             ("nim", vec!["cpp", "main.nim"]),

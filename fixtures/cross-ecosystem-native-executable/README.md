@@ -8,11 +8,11 @@ as an **input** to LAMINARIA's own dependency-obligation resolver
 `crates/laminaria-run/src/cross_ecosystem_ingest.rs`'s real ingestion
 functions). This directory is never itself the source of expected
 values -- the resolver's own typed obligations, and the real `cargo
-metadata`/`nimble dump`/header/`exportc` facts gathered from this
-project, are what the direct tests in `cross_ecosystem_ingest.rs`
-assert against. No separate YAML catalog, fixture-only validator, or
-validator test exists or should be added for this fixture
-(fixture-policy §4.8).
+metadata`/`.nimble`-manifest/`nimble.lock`/header/`exportc` facts
+gathered from this project, are what the direct tests in
+`cross_ecosystem_ingest.rs` assert against. No separate YAML catalog,
+fixture-only validator, or validator test exists or should be added for
+this fixture (fixture-policy §4.8).
 
 ## What is fixed here
 
@@ -22,16 +22,19 @@ validator test exists or should be added for this fixture
 - **`nimble/doubler/`** -- one real Nimble package, consumed by `app`'s
   `use_nim_double` feature. `doubler.nim`'s own `{.exportc: "nim_double".}`
   pragma is read directly (`laminaria_ir::nim_export_discover`), never
-  inferred from a compiled archive. `nimble.lock` pins the package's
-  own `requires "nim >= 2.0.0"` to the exact nim `2.2.10` this repo
-  already pins elsewhere (`toolchains.lock.toml`'s `nim2_pinned`) -- a
-  real nimble artifact (`nimble lock`'s own output), not a G1 code
-  workaround, and required so `nimble dump --json`'s own
-  `nimDir`-reporting toolchain lookup resolves against this lock
-  file's exact pinned revision on a fresh CI runner instead of
-  crashing
+  inferred from a compiled archive. The package's own `.nimble`
+  manifest and `nimble.lock` (`nimble lock`'s own real output, pinning
+  the manifest's `requires "nim >= 2.0.0"` to the exact nim `2.2.10`
+  this repo already pins elsewhere -- `toolchains.lock.toml`'s
+  `nim2_pinned`) are read directly as production input
+  (`laminaria_ir::nimble_manifest_discover`,
+  `laminaria_ir::nimble_lock_discover`) -- no `nimble` subprocess is
+  ever invoked; the manifest's own `requires` entries are cross-checked
+  against the lock's pinned versions in-process instead
   (see `crates/laminaria-run/src/command_runner.rs`'s own doc comment
-  for the real CI failure this fixes).
+  for the real CI failure -- `nimble dump --json` reaching for the
+  network even with a lock file present -- that led to removing the
+  `nimble` invocation entirely).
 - **`c/cadd/v1/`** -- one C library exporting `c_add`: `cadd.c` includes
   `cadd.h`, and `cadd.h`'s own prototype (`int c_add(int a, int b);`) is
   the correct provider for `app`'s `extern "C" { fn c_add(...) }`
@@ -66,10 +69,12 @@ v2, not a version-only package choice made in advance.
 ## G1's own boundary (read, normalize, resolve, plan -- never build)
 
 G1 (this fixture's own ingestion + resolution) never invokes a
-compiler, archiver, linker, package build, package install, or build
-script, in either the positive or the negative case. It reads real
-source/header text and real `cargo metadata`/`nimble dump --json`
-output, and emits a typed action *plan* for issue #46 (G2) to execute.
+compiler, archiver, linker, package build, package install, package
+manager, or build script, in either the positive or the negative case.
+It reads real source/header text, real `cargo metadata` output, and
+real `.nimble`/`nimble.lock` file text directly (no `nimble`
+subprocess at all), and emits a typed action *plan* for issue #46 (G2)
+to execute.
 Actually compiling and linking the four archives into one running
 `app` executable, running it, and testing it end to end are G2's own
 scope (and issue #49/Lane C's), not this fixture's tests.
@@ -97,20 +102,27 @@ scope (and issue #49/Lane C's), not this fixture's tests.
 ## Real toolchain commands this fixture's own ingestion uses
 
 - `cargo metadata --no-deps --format-version 1 --manifest-path app/Cargo.toml`
-- `nimble dump --json` (run inside `nimble/doubler/`; `nimble.lock`
-  in that same directory is what makes this resolve correctly against
-  real CI's nimble, not an added flag -- see this file's own note
-  above)
 - `rustc -vV` (real host target triple)
 
-That is the complete list. `crates/laminaria-run/src/command_runner.rs`
+That is the complete list -- exactly two subprocesses, both read-only
+metadata/version queries. `crates/laminaria-run/src/command_runner.rs`
 enforces this exact allowlist structurally (`RealCommandRunner` refuses
 anything else; the required tests inject a `RecordingCommandRunner`
 that panics immediately on a forbidden command). No compiler, archiver,
-linker, `nm`, `cargo build`/`cargo run`, or `nimble build`/`nimble
-install` is ever invoked by G1 -- declared-export facts come from
-reading `c/cadd/{v1,v2}/cadd.h`, `cpp/cppmax/cppmax.h`, and
-`nimble/doubler/src/doubler.nim` as plain text.
+linker, `nm`, `cargo build`/`cargo run`, or `nimble` invocation of any
+kind (including `nimble dump --json`) is ever invoked by G1 --
+declared-export facts come from reading `c/cadd/{v1,v2}/cadd.h`,
+`cpp/cppmax/cppmax.h`, and `nimble/doubler/src/doubler.nim` as plain
+text, and Nimble package facts come from reading
+`nimble/doubler/doubler.nimble` and `nimble/doubler/nimble.lock`
+directly as plain text/JSON
+(`laminaria_ir::nimble_manifest_discover`,
+`laminaria_ir::nimble_lock_discover`). The `.nimble` manifest is parsed
+against an explicit, bounded declared subset (top-level `key = "value"`
+assignments and `requires "..."` lines); any construct outside that
+subset -- a `task` block, a `when` conditional, an `import` statement,
+or any other dynamic NimScript -- is a structured
+`UnsupportedManifestConstruct` rejection, never guessed past.
 
 ## Non-goals (explicitly out of scope for this fixture)
 
