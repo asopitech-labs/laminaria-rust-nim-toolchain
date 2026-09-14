@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# Enforces a `Tests-Run:` trailer on every commit to this repo, and
+# actually executes what it names before letting the commit land --
+# not just checking the trailer's presence as a formality. Rationale:
+# pushing straight to `origin main` with no PR gate means a broken or
+# untested commit is live on the trunk the instant it's pushed; "I'll
+# let GitHub Actions find out" is not an acceptable substitute for
+# running the relevant tests locally first (see the commit that added
+# this hook for the full reasoning).
+#
+# Required trailer, one line anywhere in the commit message body:
+#   Tests-Run: workspace
+#     -> runs `cargo test --workspace` (the full suite) before allowing
+#        the commit. Use for anything with non-trivially-local blast
+#        radius.
+#   Tests-Run: <filter> [<filter> ...]
+#     -> runs `cargo test <filter>` once per whitespace-separated
+#        filter (cargo's own substring test-name filter, matched across
+#        the whole workspace). Use for a narrowly-scoped change where
+#        naming the exact test(s) it must satisfy is more honest than
+#        claiming the whole suite was re-verified for this one commit
+#        (it usually still should have been run at least once locally
+#        via `scripts/local-ci.sh`, just not necessarily re-run here).
+#   Tests-Run: none (<reason>)
+#     -> skips test execution. Only for changes with no test surface at
+#        all (pure documentation/comment/memory-file changes). The
+#        reason is mandatory and must be non-empty.
+#
+# A commit lacking this trailer, or whose named tests fail, is
+# rejected. Bypass with `git commit --no-verify` only when you have a
+# specific, deliberate reason -- not as a routine workaround.
+
+set -euo pipefail
+
+MSG_FILE="$1"
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+MERGE_HEAD_PATH="$(git rev-parse --git-path MERGE_HEAD 2>/dev/null || true)"
+if [[ -n "$MERGE_HEAD_PATH" && -f "$MERGE_HEAD_PATH" ]]; then
+  echo "commit-msg: merge commit detected, skipping Tests-Run enforcement."
+  exit 0
+fi
+
+TRAILER_LINE="$(grep -E '^Tests-Run:[[:space:]]*.+' "$MSG_FILE" | tail -n1 || true)"
+
+if [[ -z "$TRAILER_LINE" ]]; then
+  cat >&2 <<'EOF'
+commit-msg: rejected -- no "Tests-Run:" trailer found in the commit message.
+
+Every commit must say which tests validate it. Add a line such as:
+
+  Tests-Run: workspace
+  Tests-Run: nimble_manifest_discover
+  Tests-Run: none (docs-only change, no code touched)
+
+See .githooks/commit-msg's own header comment for the full convention.
+EOF
+  exit 1
+fi
+
+VALUE="$(echo "$TRAILER_LINE" | sed -E 's/^Tests-Run:[[:space:]]*//')"
+
+# Handled as its own case, distinct from the generic filter branch
+# below, specifically so a malformed "none" attempt (missing/empty
+# parens) is rejected outright rather than silently falling through to
+# being treated as filter tokens -- `cargo test none` and
+# `cargo test '()'` both trivially "pass" (a filter matching zero
+# tests still exits 0), which would make a malformed skip attempt a
+# silent false accept instead of a rejection.
+if [[ "$VALUE" == none* ]]; then
+  if [[ "$VALUE" =~ ^none[[:space:]]*\((.+)\)[[:space:]]*$ ]]; then
+    REASON="${BASH_REMATCH[1]}"
+    if [[ -z "${REASON// /}" ]]; then
+      echo "commit-msg: rejected -- 'Tests-Run: none (...)' requires a non-empty reason." >&2
+      exit 1
+    fi
+    echo "commit-msg: Tests-Run: none -- reason: $REASON. Skipping test execution."
+    exit 0
+  fi
+  echo "commit-msg: rejected -- 'Tests-Run: none' requires a reason in parentheses, e.g. 'Tests-Run: none (docs-only change)'." >&2
+  exit 1
+fi
+
+if [[ "$VALUE" == "workspace" ]]; then
+  echo "commit-msg: Tests-Run: workspace -- running cargo test --workspace ..."
+  if ! cargo test --workspace; then
+    echo "commit-msg: rejected -- cargo test --workspace failed." >&2
+    exit 1
+  fi
+  exit 0
+fi
+
+FAILED=0
+for FILTER in $VALUE; do
+  echo "commit-msg: Tests-Run filter '$FILTER' -- running cargo test '$FILTER' ..."
+  OUTPUT_FILE="$(mktemp)"
+  if ! cargo test "$FILTER" 2>&1 | tee "$OUTPUT_FILE"; then
+    echo "commit-msg: cargo test '$FILTER' failed." >&2
+    FAILED=1
+  # A filter matching zero tests anywhere in the workspace still exits
+  # 0 (cargo has no separate "no tests matched" error) -- checked
+  # explicitly here so a typo'd filter is rejected as a mistake rather
+  # than silently accepted as "passing".
+  elif ! grep -qE '[1-9][0-9]* passed' "$OUTPUT_FILE"; then
+    echo "commit-msg: rejected -- filter '$FILTER' matched zero tests anywhere in the workspace (likely a typo)." >&2
+    FAILED=1
+  fi
+  rm -f "$OUTPUT_FILE"
+done
+
+if [[ "$FAILED" != "0" ]]; then
+  echo "commit-msg: rejected -- one or more named Tests-Run filters failed." >&2
+  exit 1
+fi
+
+exit 0

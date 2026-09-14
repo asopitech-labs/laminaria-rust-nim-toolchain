@@ -172,9 +172,14 @@ PY
 )
 echo
 
+echo "Git hooks (local fmt/clippy gate + Tests-Run commit-message enforcement)"
+"$REPO_ROOT/scripts/install-git-hooks.sh" | sed 's/^/  /'
+echo
+
 if [[ "$missing" == "1" && "$INSTALL" == "0" ]]; then
   echo "Some tools are missing. Re-run with --install to install them, or run the hints above yourself."
   exit 1
 fi
 
 echo "Run 'cargo run -p laminaria-cli -- doctor' for the full machine-readable environment/toolchain fingerprint."
+echo "Run 'scripts/local-ci.sh' before pushing -- see that script's own header for exactly what it covers."

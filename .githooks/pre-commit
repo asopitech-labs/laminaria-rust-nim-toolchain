@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Fast structural gate, run on every commit before the message is even
+# written: `cargo fmt --check` and `cargo clippy`. Cheap (seconds) and
+# catches the large majority of what would otherwise only surface on
+# GitHub Actions minutes later. The heavier, test-execution half of
+# this repo's local verification lives in the `commit-msg` hook (it
+# needs the commit message's own `Tests-Run:` trailer to know what to
+# run) -- see `.githooks/commit-msg`'s own header.
+#
+# Skips itself only for a merge commit in progress (same rationale as
+# commit-msg's own skip).
+
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+MERGE_HEAD_PATH="$(git rev-parse --git-path MERGE_HEAD 2>/dev/null || true)"
+if [[ -n "$MERGE_HEAD_PATH" && -f "$MERGE_HEAD_PATH" ]]; then
+  echo "pre-commit: merge commit detected, skipping fmt/clippy gate."
+  exit 0
+fi
+
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "pre-commit: cargo not on PATH, skipping fmt/clippy gate (nothing Rust-related to check here)." >&2
+  exit 0
+fi
+
+echo "pre-commit: cargo fmt --all -- --check ..."
+if ! cargo fmt --all -- --check; then
+  echo "pre-commit: rejected -- cargo fmt --all -- --check failed. Run 'cargo fmt --all' and re-stage." >&2
+  exit 1
+fi
+
+echo "pre-commit: cargo clippy --workspace --all-targets -- -D warnings ..."
+if ! cargo clippy --workspace --all-targets -- -D warnings; then
+  echo "pre-commit: rejected -- cargo clippy failed." >&2
+  exit 1
+fi
+
+exit 0

@@ -21,6 +21,11 @@ The canonical instruction-authoring rules are
 - Before requesting rework, audit whether the original goal and checkpoint
   chain admitted the submitted but incorrect result. Correct the instruction
   contract first.
+- Optimize for the requested artifact and the whole project progression, not
+  for an isolated component or metric. A local improvement is accepted only
+  after its end-to-end effect, cross-lane costs, displaced work, regressions,
+  and effect on later options are evaluated. Measurement depth has its own
+  cost and stop condition; collecting more telemetry is not a project outcome.
 
 ## Single-source executable verification
 
@@ -48,6 +53,38 @@ as a second implementation of a configuration, document, or production algorithm
   standard, a documented manual derivation, an independent reference, a semantic
   relation, or a reduced real failure. Output captured from the implementation
   under test is not an independent expected result.
+
+## Local verification before pushing
+
+This repo pushes straight to `origin main` with no PR gate, so a commit
+is live on the trunk the instant it is pushed. Discovering a break only
+from a red GitHub Actions run is a self-inflicted delay, not a normal
+step of the workflow — push only what has already been verified
+locally, and always push with `local-ci.sh` (or a test-declaring commit)
+in the history, not GitHub Actions as the first check.
+
+- Run `scripts/install-git-hooks.sh` once per checkout (`scripts/bootstrap.sh`
+  does this automatically). This activates two tracked hooks
+  (`.githooks/pre-commit`, `.githooks/commit-msg`):
+  - `pre-commit` runs `cargo fmt --all -- --check` and
+    `cargo clippy --workspace --all-targets -- -D warnings` on every
+    commit, rejecting it on failure.
+  - `commit-msg` requires a `Tests-Run:` trailer on every commit message
+    and executes what it names, rejecting the commit if the trailer is
+    missing or the named tests fail. See `.githooks/commit-msg`'s own
+    header comment for the exact convention
+    (`Tests-Run: workspace` / `Tests-Run: <filter> [<filter> ...]` /
+    `Tests-Run: none (<reason>)`).
+- Run `scripts/local-ci.sh` before pushing a commit or series of commits
+  with any meaningful blast radius — it mirrors the `rust` CI job's
+  early, always-run gate (`cargo fmt --check`, `cargo clippy`,
+  `cargo test --workspace`, the nim-planner unit tests). It is not a
+  full CI mirror (no Windows job, no Docker job, no fixture-build
+  steps) — that script's own header says exactly what it does and does
+  not cover.
+- Bypass a hook (`git commit --no-verify`) only for a specific,
+  deliberate reason, never as a routine workaround for an inconvenient
+  failure.
 
 ## Windows build execution
 
