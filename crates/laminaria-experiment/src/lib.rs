@@ -11,6 +11,7 @@ pub mod m3_baseline;
 pub mod m8_baseline;
 pub mod owned_identity;
 pub mod planner_binary;
+pub mod rust_cross_layer_baseline;
 
 /// `laminaria_run::generate_run_id()` (`<unix_ns>-<pid>`) alone collided
 /// in practice: this crate's own tests call `m3_baseline::run`/

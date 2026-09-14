@@ -23,8 +23,13 @@ path = "src/bin/d1b1_reference_cases_runner.rs"
 name = "laminaria-d1b2-new-fixtures"
 path = "src/bin/d1b2_new_fixtures_runner.rs"
 
+[[bin]]
+name = "laminaria-issue50-rust-cross-layer-baseline"
+path = "src/bin/rust_cross_layer_baseline.rs"
+
 [dependencies]
 laminaria-fingerprint = { path = "../laminaria-fingerprint" }
+laminaria-ir = { path = "../laminaria-ir" }
 laminaria-plan = { path = "../laminaria-plan" }
 laminaria-run = { path = "../laminaria-run" }
 serde = { version = "1", features = ["derive"] }

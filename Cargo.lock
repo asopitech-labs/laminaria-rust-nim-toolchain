@@ -464,6 +464,7 @@ name = "laminaria-experiment"
 version = "0.1.0"
 dependencies = [
  "laminaria-fingerprint",
+ "laminaria-ir",
  "laminaria-plan",
  "laminaria-run",
  "serde",
