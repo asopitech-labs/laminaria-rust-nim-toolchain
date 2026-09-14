@@ -34,7 +34,9 @@ fn main() {
             .unwrap_or_else(|| "none".to_string());
         println!(
             "{}: wall_seconds(mean={:.4}s stddev={:.4}s) cpu_seconds({cpu}) peak_rss({rss})",
-            outcome.scenario_id, outcome.scenario_report.wall_seconds.mean, outcome.scenario_report.wall_seconds.stddev
+            outcome.scenario_id,
+            outcome.scenario_report.wall_seconds.mean,
+            outcome.scenario_report.wall_seconds.stddev
         );
     }
     match &report.wall_time_comparison {

@@ -86,7 +86,10 @@ fn declared_dependencies(manifest: &Path) -> Result<BTreeSet<String>, String> {
                 return None;
             }
             in_dependencies
-                .then(|| line.split_once('=').map(|(name, _)| name.trim().to_string()))
+                .then(|| {
+                    line.split_once('=')
+                        .map(|(name, _)| name.trim().to_string())
+                })
                 .flatten()
         })
         .collect())
@@ -117,7 +120,12 @@ fn compute_plan() -> Result<RustCrossLayerPlan, String> {
     .map_err(|e| format!("plan_rust_cross_layer rejected the fixture's own real source: {e:?}"))
 }
 
-fn cargo_scenario(id: &str, target_dir: &Path, manifest_path: &Path, package_args: &[String]) -> Scenario {
+fn cargo_scenario(
+    id: &str,
+    target_dir: &Path,
+    manifest_path: &Path,
+    package_args: &[String],
+) -> Scenario {
     let mut args = vec![
         "build".to_string(),
         "--manifest-path".to_string(),
@@ -166,13 +174,22 @@ fn eager_scenario(target_dir: &Path, manifest_path: &Path) -> Scenario {
 /// told about the packages LAMINARIA's own owned planner already decided
 /// are needed; the pruned candidates are never named on this command
 /// line at all.
-fn feedback_scenario(target_dir: &Path, manifest_path: &Path, selected: &BTreeSet<String>) -> Scenario {
+fn feedback_scenario(
+    target_dir: &Path,
+    manifest_path: &Path,
+    selected: &BTreeSet<String>,
+) -> Scenario {
     let mut package_args = Vec::with_capacity(selected.len() * 2);
     for package in selected {
         package_args.push("-p".to_string());
         package_args.push(package.clone());
     }
-    cargo_scenario(FEEDBACK_SCENARIO_ID, target_dir, manifest_path, &package_args)
+    cargo_scenario(
+        FEEDBACK_SCENARIO_ID,
+        target_dir,
+        manifest_path,
+        &package_args,
+    )
 }
 
 /// Cargo's real `--message-format=json` `package_id` field, verified
@@ -246,7 +263,12 @@ fn build_resource_outcome(
 ) -> Result<ScenarioResourceOutcome, String> {
     let run_ids: Vec<String> = runs.iter().map(|r| r.run_id.clone()).collect();
     let scenario_report = scenario::regenerate_report_from_disk(runs_root, &scenario.id, &run_ids)
-        .map_err(|e| format!("failed to build a ScenarioReport for {:?}: {e}", scenario.id))?;
+        .map_err(|e| {
+            format!(
+                "failed to build a ScenarioReport for {:?}: {e}",
+                scenario.id
+            )
+        })?;
 
     let mut repetitions = Vec::with_capacity(runs.len());
     let mut cpu_samples = Vec::new();
@@ -376,7 +398,11 @@ pub fn run(warmup: usize, repetitions: usize) -> Result<RustCrossLayerBaselineRe
     let feedback_target_dir = fixture.join("target/issue50-feedback");
 
     let eager = eager_scenario(&eager_target_dir, &manifest_path);
-    let feedback = feedback_scenario(&feedback_target_dir, &manifest_path, &plan.selected_packages);
+    let feedback = feedback_scenario(
+        &feedback_target_dir,
+        &manifest_path,
+        &plan.selected_packages,
+    );
 
     for _ in 0..warmup {
         scenario::run_scenario_once(&eager, &runs_root, &lock_path, &repo_root)
@@ -389,7 +415,14 @@ pub fn run(warmup: usize, repetitions: usize) -> Result<RustCrossLayerBaselineRe
     let feedback_runs =
         run_scenario_n_times(&feedback, repetitions, &runs_root, &lock_path, &repo_root)?;
 
-    build_report(plan, &runs_root, &eager, &eager_runs, &feedback, &feedback_runs)
+    build_report(
+        plan,
+        &runs_root,
+        &eager,
+        &eager_runs,
+        &feedback,
+        &feedback_runs,
+    )
 }
 
 fn build_report(
@@ -414,7 +447,8 @@ fn build_report(
             .all(|name| !plan.pruned_packages.contains(name))
     });
 
-    let wall_time_comparison = scenario::compare_reports(&eager.scenario_report, &feedback.scenario_report);
+    let wall_time_comparison =
+        scenario::compare_reports(&eager.scenario_report, &feedback.scenario_report);
 
     Ok(RustCrossLayerBaselineReport {
         schema_version: SCHEMA_VERSION.to_string(),
@@ -461,7 +495,12 @@ pub fn regenerate(
             .collect()
     };
 
-    let eager_run_ids: Vec<String> = report.eager.repetitions.iter().map(|r| r.run_id.clone()).collect();
+    let eager_run_ids: Vec<String> = report
+        .eager
+        .repetitions
+        .iter()
+        .map(|r| r.run_id.clone())
+        .collect();
     let feedback_run_ids: Vec<String> = report
         .feedback
         .repetitions
