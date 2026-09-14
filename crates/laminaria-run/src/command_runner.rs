@@ -89,6 +89,35 @@ pub trait CommandRunner {
 #[derive(Debug, Default)]
 pub struct RealCommandRunner;
 
+/// Forces every spawned child process's own view of the standard proxy
+/// environment variables to an address nothing listens on, so any
+/// network attempt that consults them (as real nimble builds have been
+/// observed to do -- see `is_permitted`'s own doc comment) fails fast
+/// instead of silently succeeding over a real connection or hanging on
+/// one. This is a per-child-process override via `Command::env`, never
+/// a process-wide `std::env::set_var` -- the latter is unsound to call
+/// while other threads (other `cargo test` tests, in particular) might
+/// read the current process's own environment concurrently. Applied
+/// unconditionally in production, not only under test: it is a
+/// structural guarantee that G1 ingestion needs no network, not merely
+/// a hope backed by convention.
+const UNREACHABLE_PROXY: &str = "http://127.0.0.1:1";
+
+fn with_forced_offline_environment(cmd: &mut Command) {
+    for var in [
+        "http_proxy",
+        "https_proxy",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "all_proxy",
+    ] {
+        cmd.env(var, UNREACHABLE_PROXY);
+    }
+    cmd.env("NO_PROXY", "");
+    cmd.env("no_proxy", "");
+}
+
 impl CommandRunner for RealCommandRunner {
     fn run(&self, program: &str, args: &[&str], cwd: Option<&Path>) -> Result<String, IngestError> {
         if !is_permitted(program, args) {
@@ -96,6 +125,7 @@ impl CommandRunner for RealCommandRunner {
         }
         let mut cmd = Command::new(program);
         cmd.args(args);
+        with_forced_offline_environment(&mut cmd);
         if let Some(dir) = cwd {
             cmd.current_dir(dir);
         }
@@ -159,6 +189,25 @@ impl CommandRunner for RecordingCommandRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #48 G1 follow-up, Verification gate item 8: every real
+    /// child process this crate spawns must be forced offline, so a
+    /// tool that opportunistically tries the network (as real nimble
+    /// builds have been observed to do) fails fast on any real attempt
+    /// instead of silently succeeding over one.
+    #[test]
+    fn real_commands_are_spawned_with_a_forced_offline_environment() {
+        let mut cmd = Command::new("rustc");
+        with_forced_offline_environment(&mut cmd);
+        let envs: std::collections::BTreeMap<_, _> = cmd.get_envs().collect();
+        for var in ["http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"] {
+            assert_eq!(
+                envs.get(std::ffi::OsStr::new(var)),
+                Some(&Some(std::ffi::OsStr::new(UNREACHABLE_PROXY))),
+                "{var} must be forced to an unreachable address"
+            );
+        }
+    }
 
     #[test]
     fn the_three_permitted_commands_are_recognized() {
