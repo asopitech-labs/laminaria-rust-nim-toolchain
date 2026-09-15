@@ -1,0 +1,584 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>alopex ビルド系統図</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Spline+Sans+Mono:wght@400;500;600;700&family=Zen+Kaku+Gothic+New:wght@400;500;700;900&display=swap" rel="stylesheet">
+<style>
+  :root {
+    color-scheme: light dark;
+    --ground: #f4f2ec;
+    --surface: #ffffff;
+    --surface-2: #eae6d9;
+    --ink: #201c14;
+    --ink-dim: #5c5648;
+    --line: #d8d2c0;
+    --accent: #b5471f;      /* 焼成レンガ色 — コンパイル/焼結の比喩 */
+    --accent-ink: #ffffff;
+    --accent-soft: #f0d9cc;
+    --node-cargo: #1f3a5f;   /* Cargo = 全体を知る層 */
+    --node-cargo-soft: #dce6f2;
+    --node-rustc: #6b4a1f;   /* rustc = クレート単位の層 */
+    --node-rustc-soft: #ede1cc;
+    --node-llvm: #3f5e3a;    /* LLVM = CGU単位の層 */
+    --node-llvm-soft: #dde8da;
+    --node-nim: #5a3466;     /* Nim = 別エコシステム */
+    --node-nim-soft: #e7dcee;
+    --node-linker: var(--accent);
+    --node-linker-soft: var(--accent-soft);
+    --shadow: 0 1px 2px rgba(32,28,20,.06), 0 8px 24px rgba(32,28,20,.06);
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #171512;
+      --surface: #211e19;
+      --surface-2: #2a261f;
+      --ink: #f2ede1;
+      --ink-dim: #b8b09d;
+      --line: #3a352b;
+      --accent: #e8875a;
+      --accent-ink: #201408;
+      --accent-soft: #4a2c1c;
+      --node-cargo: #7fa8d9;
+      --node-cargo-soft: #223247;
+      --node-rustc: #d9ab6e;
+      --node-rustc-soft: #3a2f1c;
+      --node-llvm: #9bc494;
+      --node-llvm-soft: #253524;
+      --node-nim: #c9a4d9;
+      --node-nim-soft: #362a3d;
+      --node-linker: var(--accent);
+      --node-linker-soft: var(--accent-soft);
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.35);
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground: #171512;
+    --surface: #211e19;
+    --surface-2: #2a261f;
+    --ink: #f2ede1;
+    --ink-dim: #b8b09d;
+    --line: #3a352b;
+    --accent: #e8875a;
+    --accent-ink: #201408;
+    --accent-soft: #4a2c1c;
+    --node-cargo: #7fa8d9;
+    --node-cargo-soft: #223247;
+    --node-rustc: #d9ab6e;
+    --node-rustc-soft: #3a2f1c;
+    --node-llvm: #9bc494;
+    --node-llvm-soft: #253524;
+    --node-nim: #c9a4d9;
+    --node-nim-soft: #362a3d;
+    --node-linker: var(--accent);
+    --node-linker-soft: var(--accent-soft);
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.35);
+  }
+
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  img { max-width: 100%; }
+
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: "Zen Kaku Gothic New", "Hiragino Sans", sans-serif;
+    padding-inline: clamp(16px, 5vw, 56px);
+    padding-block: clamp(28px, 5vw, 64px);
+    line-height: 1.7;
+  }
+
+  .mono { font-family: "Spline Sans Mono", ui-monospace, monospace; }
+
+  header.page {
+    max-width: 980px;
+    margin: 0 auto clamp(36px, 6vw, 56px);
+  }
+  .eyebrow {
+    font-family: "Spline Sans Mono", monospace;
+    font-size: .72rem;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    font-weight: 600;
+    margin: 0 0 10px;
+  }
+  h1 {
+    font-family: "Zen Kaku Gothic New", sans-serif;
+    font-weight: 900;
+    font-size: clamp(1.7rem, 4.4vw, 2.6rem);
+    line-height: 1.28;
+    letter-spacing: -.01em;
+    margin: 0 0 14px;
+    text-wrap: balance;
+  }
+  .lede {
+    font-size: 1.02rem;
+    color: var(--ink-dim);
+    max-width: 66ch;
+    margin: 0;
+  }
+  .lede b { color: var(--ink); font-weight: 700; }
+
+  main { max-width: 980px; margin: 0 auto; display: flex; flex-direction: column; gap: clamp(40px, 6vw, 64px); }
+
+  section h2 {
+    font-size: 1.05rem;
+    font-weight: 700;
+    margin: 0 0 6px;
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+  }
+  section h2 .num {
+    font-family: "Spline Sans Mono", monospace;
+    font-size: .78rem;
+    color: var(--accent);
+    font-weight: 600;
+  }
+  section .section-note {
+    color: var(--ink-dim);
+    font-size: .92rem;
+    max-width: 68ch;
+    margin: 0 0 20px;
+  }
+
+  /* ---------- 凡例 ---------- */
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 22px;
+    padding: 14px 18px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    box-shadow: var(--shadow);
+  }
+  .legend-item { display: flex; align-items: center; gap: 8px; font-size: .82rem; color: var(--ink-dim); }
+  .legend-swatch { width: 13px; height: 13px; border-radius: 3px; flex: none; }
+
+  /* ---------- 樹形図（依存グラフ→CGU） ---------- */
+  .tree-wrap {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    box-shadow: var(--shadow);
+    padding: clamp(18px, 3vw, 30px);
+    overflow-x: auto;
+  }
+  .tree {
+    min-width: 720px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .tree-row { display: flex; align-items: stretch; }
+  .tree-indent { flex: none; position: relative; }
+  .tree-indent::before {
+    content: "";
+    position: absolute;
+    top: 0; bottom: 50%;
+    left: 50%;
+    width: 1px;
+    background: var(--line);
+  }
+  .tree-indent::after {
+    content: "";
+    position: absolute;
+    top: 50%; left: 50%;
+    width: 14px; height: 1px;
+    background: var(--line);
+  }
+  .tree-indent.first::before { top: 50%; }
+
+  .node {
+    display: inline-flex;
+    align-items: center;
+    gap: 9px;
+    padding: 7px 13px;
+    border-radius: 8px;
+    font-family: "Spline Sans Mono", monospace;
+    font-size: .84rem;
+    font-weight: 500;
+    border: 1px solid transparent;
+    margin: 3px 0;
+  }
+  .node .dim { opacity: .68; font-size: .78rem; margin-left: 2px; }
+  .node.cargo { background: var(--node-cargo-soft); color: var(--node-cargo); border-color: color-mix(in srgb, var(--node-cargo) 30%, transparent); font-weight: 700; }
+  .node.rustc { background: var(--node-rustc-soft); color: var(--node-rustc); border-color: color-mix(in srgb, var(--node-rustc) 30%, transparent); }
+  .node.llvm  { background: var(--node-llvm-soft);  color: var(--node-llvm);  border-color: color-mix(in srgb, var(--node-llvm) 30%, transparent); }
+  .node.nim   { background: var(--node-nim-soft);   color: var(--node-nim);   border-color: color-mix(in srgb, var(--node-nim) 30%, transparent); }
+  .node.linker{ background: var(--node-linker-soft);color: var(--node-linker);border-color: color-mix(in srgb, var(--node-linker) 35%, transparent); font-weight: 700; }
+
+  .tree-caption {
+    margin-top: 16px;
+    font-size: .84rem;
+    color: var(--ink-dim);
+    border-top: 1px dashed var(--line);
+    padding-top: 12px;
+  }
+
+  /* ---------- シーケンス図 ---------- */
+  .seq-wrap {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    box-shadow: var(--shadow);
+    padding: clamp(18px, 3vw, 30px);
+    overflow-x: auto;
+  }
+  .seq {
+    min-width: 760px;
+  }
+  .lanes {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 0 10px;
+    margin-bottom: 14px;
+  }
+  .lane-head {
+    text-align: center;
+    font-family: "Spline Sans Mono", monospace;
+    font-size: .78rem;
+    font-weight: 700;
+    padding: 9px 6px;
+    border-radius: 8px;
+    letter-spacing: .01em;
+  }
+  .lane-head.cargo { background: var(--node-cargo-soft); color: var(--node-cargo); }
+  .lane-head.rustc { background: var(--node-rustc-soft); color: var(--node-rustc); }
+  .lane-head.nim   { background: var(--node-nim-soft);   color: var(--node-nim); }
+  .lane-head.llvm  { background: var(--node-llvm-soft);  color: var(--node-llvm); }
+  .lane-head.linker{ background: var(--node-linker-soft);color: var(--node-linker); }
+
+  .seq-track { position: relative; }
+  .seq-track::before {
+    content: "";
+    position: absolute;
+    top: 0; bottom: 0;
+    left: 0; right: 0;
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+  }
+  .seq-row {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    align-items: center;
+    min-height: 40px;
+    position: relative;
+  }
+  .seq-row + .seq-row { border-top: 1px solid var(--line); }
+  .seq-row::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: repeating-linear-gradient(
+      to right,
+      transparent, transparent calc(20% - 1px), var(--line) calc(20% - 1px), var(--line) 20%
+    );
+    opacity: .5;
+    pointer-events: none;
+  }
+  .cell { position: relative; display: flex; justify-content: center; padding: 4px; }
+  .pulse {
+    font-family: "Spline Sans Mono", monospace;
+    font-size: .72rem;
+    font-weight: 600;
+    padding: 5px 9px;
+    border-radius: 6px;
+    text-align: center;
+    line-height: 1.3;
+    max-width: 92%;
+  }
+  .pulse.cargo { background: var(--node-cargo); color: var(--surface); }
+  .pulse.rustc { background: var(--node-rustc); color: var(--surface); }
+  .pulse.nim   { background: var(--node-nim);   color: var(--surface); }
+  .pulse.llvm  { background: var(--node-llvm);  color: var(--surface); }
+  .pulse.linker{ background: var(--node-linker);color: var(--accent-ink); }
+  .pulse.wait  { background: transparent; color: var(--ink-dim); border: 1px dashed var(--line); font-weight: 500; }
+  .pulse.block { background: transparent; color: var(--accent); border: 2px solid var(--accent); font-weight: 700; }
+
+  .seq-legend-row {
+    margin-top: 14px;
+    font-size: .78rem;
+    color: var(--ink-dim);
+    display: flex;
+    gap: 20px;
+    flex-wrap: wrap;
+  }
+  .seq-legend-row span { display: inline-flex; align-items: center; gap: 6px; }
+  .swatch-line { width: 16px; height: 2px; background: var(--ink-dim); display: inline-block; }
+
+  /* ---------- 発見ボックス ---------- */
+  .findings {
+    display: grid;
+    gap: 14px;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  }
+  .finding {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-left: 4px solid var(--accent);
+    border-radius: 10px;
+    padding: 16px 18px;
+    box-shadow: var(--shadow);
+  }
+  .finding h3 {
+    font-size: .92rem;
+    margin: 0 0 6px;
+    font-weight: 700;
+  }
+  .finding p {
+    margin: 0;
+    font-size: .86rem;
+    color: var(--ink-dim);
+  }
+  .finding .evidence {
+    display: block;
+    margin-top: 8px;
+    font-family: "Spline Sans Mono", monospace;
+    font-size: .74rem;
+    color: var(--accent);
+  }
+
+  /* ---------- フッター ---------- */
+  footer {
+    max-width: 980px;
+    margin: clamp(40px, 6vw, 64px) auto 0;
+    padding-top: 18px;
+    border-top: 1px solid var(--line);
+    font-size: .78rem;
+    color: var(--ink-dim);
+  }
+
+  @media (max-width: 640px) {
+    .lanes, .seq-row, .seq-row::before { grid-template-columns: repeat(5, minmax(64px, 1fr)); }
+    .seq { min-width: 640px; }
+  }
+</style>
+</head>
+<body>
+
+<header class="page">
+  <p class="eyebrow">Build Provenance — Worked Example</p>
+  <h1>alopex-cli の実行可能バイナリを遡る</h1>
+  <p class="lede">
+    <b>1本の ELF 実行ファイル</b>から出発し、それが実際にどの主体（Cargo / rustc / LLVM / Nim / リンカ）の、
+    どの粒度の作業を積み上げて生まれたのかを遡って可視化する。
+    このセッション中に <span class="mono">alopex-cli</span>（<a href="https://github.com/asopitech-labs/laminaria-rust-nim-toolchain">LAMINARIA</a> の参照実測対象）を実際にビルドし、
+    各主体の実コマンド出力を観測した結果にもとづく一例。
+  </p>
+</header>
+
+<main>
+
+  <section id="legend">
+    <h2><span class="num">00</span>凡例 — 誰が、何を知っているか</h2>
+    <p class="section-note">色は「主体」を表す。主体が変わるたびに、見えている情報の範囲（scope）が一段狭くなる。</p>
+    <div class="legend">
+      <span class="legend-item"><span class="legend-swatch" style="background:var(--node-cargo)"></span>Cargo — ワークスペース全クレートの依存グラフを知る唯一の主体</span>
+      <span class="legend-item"><span class="legend-swatch" style="background:var(--node-rustc)"></span>rustc — 1回の呼び出しにつき1クレートのみ</span>
+      <span class="legend-item"><span class="legend-swatch" style="background:var(--node-llvm)"></span>LLVM — 1 CGU（モジュール×ジェネリック性で分割）のみ</span>
+      <span class="legend-item"><span class="legend-swatch" style="background:var(--node-nim)"></span>Nim — 別エコシステム、独立プロセス</span>
+      <span class="legend-item"><span class="legend-swatch" style="background:var(--node-linker)"></span>リンカ／リンカドライバ — 全 .o が揃って初めて着手</span>
+    </div>
+  </section>
+
+  <section id="tree">
+    <h2><span class="num">01</span>樹形図 — 実行ファイルから素材まで遡る</h2>
+    <p class="section-note">
+      上から下へ「誰が何を分割したか」の階層。<span class="mono">alopex-cli</span> 実行ファイルは、
+      ワークスペースの5クレート（実測ビルドログで確認した依存順）が、それぞれ複数の CGU に分割され、
+      各 CGU が独立した .o になったものの集合として初めてリンクされる。
+    </p>
+    <div class="tree-wrap">
+      <div class="tree">
+
+        <div class="tree-row">
+          <span class="node linker">alopex-cli <span class="dim">実行可能ファイル（ELF）</span></span>
+        </div>
+
+        <div class="tree-row"><div class="tree-indent first" style="width:24px"></div>
+          <span class="node cargo">Cargo ワークスペース <span class="dim">— 全クレートの依存グラフを唯一把握</span></span>
+        </div>
+
+        <div class="tree-row"><div class="tree-indent" style="width:24px"></div><div class="tree-indent first" style="width:24px"></div>
+          <span class="node rustc">alopex-core <span class="dim">rustc 呼び出し #1（他クレートは不可視）</span></span>
+        </div>
+        <div class="tree-row"><div class="tree-indent" style="width:24px"></div><div class="tree-indent" style="width:24px"></div><div class="tree-indent first" style="width:24px"></div>
+          <span class="node llvm">CGU: core-mod1 (stable)</span>
+        </div>
+        <div class="tree-row"><div class="tree-indent" style="width:24px"></div><div class="tree-indent" style="width:24px"></div><div class="tree-indent" style="width:24px"></div>
+          <span class="node llvm">CGU: core-mod1 (volatile) <span class="dim">→ core-mod1.o</span></span>
+        </div>
+        <div class="tree-row"><div class="tree-indent" style="width:24px"></div><div class="tree-indent" style="width:24px"></div><div class="tree-indent" style="width:24px"></div>
+          <span class="node llvm">CGU: core-mod2 … <span class="dim">→ core-mod2.o …</span></span>
+        </div>
+
+        <div class="tree-row"><div class="tree-indent" style="width:24px"></div><div class="tree-indent first" style="width:24px"></div>
+          <span class="node rustc">alopex-sql <span class="dim">rustc 呼び出し #2</span></span>
+        </div>
+        <div class="tree-row"><div class="tree-indent" style="width:24px"></div><div class="tree-indent" style="width:24px"></div><div class="tree-indent first" style="width:24px"></div>
+          <span class="node llvm">CGU群 <span class="dim">→ sql-*.o</span></span>
+        </div>
+        <div class="tree-row"><div class="tree-indent" style="width:24px"></div><div class="tree-indent" style="width:24px"></div><div class="tree-indent" style="width:24px"></div>
+          <span class="node nim">build.rs → nim c（別プロセス） <span class="dim">実測: gcc -c を .nim.c ごとに個別実行</span></span>
+        </div>
+        <div class="tree-row"><div class="tree-indent" style="width:24px"></div><div class="tree-indent" style="width:24px"></div><div class="tree-indent" style="width:24px"></div>
+          <span class="node nim">libalopex_sql_parser.a <span class="dim">静的アーカイブ（rustc から見れば単なる外部 .a）</span></span>
+        </div>
+
+        <div class="tree-row"><div class="tree-indent" style="width:24px"></div><div class="tree-indent first" style="width:24px"></div>
+          <span class="node rustc">alopex-dataframe <span class="dim">rustc 呼び出し #3</span></span>
+        </div>
+        <div class="tree-row"><div class="tree-indent" style="width:24px"></div><div class="tree-indent" style="width:24px"></div><div class="tree-indent first" style="width:24px"></div>
+          <span class="node llvm">CGU群 <span class="dim">→ dataframe-*.o</span></span>
+        </div>
+
+        <div class="tree-row"><div class="tree-indent" style="width:24px"></div><div class="tree-indent first" style="width:24px"></div>
+          <span class="node rustc">alopex-cluster <span class="dim">rustc 呼び出し #4</span></span>
+        </div>
+        <div class="tree-row"><div class="tree-indent" style="width:24px"></div><div class="tree-indent" style="width:24px"></div><div class="tree-indent first" style="width:24px"></div>
+          <span class="node llvm">CGU群 <span class="dim">→ cluster-*.o</span></span>
+        </div>
+
+        <div class="tree-row"><div class="tree-indent" style="width:24px"></div><div class="tree-indent first" style="width:24px"></div>
+          <span class="node rustc">alopex-embedded <span class="dim">rustc 呼び出し #5</span></span>
+        </div>
+        <div class="tree-row"><div class="tree-indent" style="width:24px"></div><div class="tree-indent" style="width:24px"></div><div class="tree-indent first" style="width:24px"></div>
+          <span class="node llvm">CGU群 <span class="dim">→ embedded-*.o</span></span>
+        </div>
+
+        <div class="tree-row"><div class="tree-indent" style="width:24px"></div><div class="tree-indent first" style="width:24px"></div>
+          <span class="node rustc">alopex-cli <span class="dim">rustc 呼び出し #6（最終クレート）</span></span>
+        </div>
+        <div class="tree-row"><div class="tree-indent" style="width:24px"></div><div class="tree-indent" style="width:24px"></div><div class="tree-indent first" style="width:24px"></div>
+          <span class="node llvm">CGU群 <span class="dim">→ cli-*.o</span></span>
+        </div>
+
+        <div class="tree-row"><div class="tree-indent" style="width:24px"></div><div class="tree-indent first" style="width:24px"></div>
+          <span class="node linker">cc（リンカドライバ役） <span class="dim">実測: 全 .o + 全 .rlib を引数に受け、コンパイルは一切しない</span></span>
+        </div>
+        <div class="tree-row"><div class="tree-indent" style="width:24px"></div><div class="tree-indent" style="width:24px"></div><div class="tree-indent first" style="width:24px"></div>
+          <span class="node linker">collect2 → ld / ld.lld <span class="dim">全断片が出揃って初めて着手</span></span>
+        </div>
+
+      </div>
+
+      <p class="tree-caption">
+        枝分かれは「分割する主体」が変わる瞬間だけを表示している（rustc→CGU、Nim→gcc は分割の主体交代の一例）。
+        実際の CGU 数はクレートごとに <span class="mono">-C codegen-units</span>（既定16／インクリメンタル256）が上限で、
+        モジュール×ジェネリック性で仮分割した後インライン化重複が多い順に統合される（実装コード <span class="mono">rustc_monomorphize/src/partitioning.rs</span> で確認済み）。
+      </p>
+    </div>
+  </section>
+
+  <section id="sequence">
+    <h2><span class="num">02</span>シーケンス図 — 時間軸で見た並列と待ち</h2>
+    <p class="section-note">
+      横軸は時間、5本のレーンは主体。実線境界のブロックが「実際に動いている作業」、破線が「待機」、
+      太枠が「全断片が揃うまで動けない直列の壁」。
+    </p>
+    <div class="seq-wrap">
+      <div class="seq">
+        <div class="lanes">
+          <div class="lane-head cargo">Cargo</div>
+          <div class="lane-head rustc">rustc（フロントエンド）</div>
+          <div class="lane-head nim">Nim / gcc</div>
+          <div class="lane-head llvm">LLVM ワーカー群</div>
+          <div class="lane-head linker">リンカ</div>
+        </div>
+
+        <div class="seq-track">
+          <div class="seq-row">
+            <div class="cell"><span class="pulse cargo">依存順を確定<br>core→sql→df→cluster→<br>embedded→cli</span></div>
+            <div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div>
+          </div>
+          <div class="seq-row">
+            <div class="cell"></div>
+            <div class="cell"><span class="pulse rustc">alopex-core<br>CGUへ逐次変換</span></div>
+            <div class="cell"></div>
+            <div class="cell"><span class="pulse llvm">先行CGUから<br>即並列最適化</span></div>
+            <div class="cell"></div>
+          </div>
+          <div class="seq-row">
+            <div class="cell"></div>
+            <div class="cell"><span class="pulse rustc">alopex-sql<br>Rust側を変換</span></div>
+            <div class="cell"><span class="pulse nim">build.rs が nim c 起動<br>.nim.c ごとに gcc -c ×5</span></div>
+            <div class="cell"><span class="pulse llvm">core の CGU群<br>継続処理</span></div>
+            <div class="cell"></div>
+          </div>
+          <div class="seq-row">
+            <div class="cell"></div>
+            <div class="cell"><span class="pulse wait">キュー満杯で<br>一時ブロック</span></div>
+            <div class="cell"><span class="pulse nim">libalopex_sql_parser.a<br>完成</span></div>
+            <div class="cell"><span class="pulse llvm">バックプレッシャー<br>（メモリ上限）</span></div>
+            <div class="cell"></div>
+          </div>
+          <div class="seq-row">
+            <div class="cell"></div>
+            <div class="cell"><span class="pulse rustc">dataframe → cluster<br>→ embedded → cli<br>を順に変換</span></div>
+            <div class="cell"></div>
+            <div class="cell"><span class="pulse llvm">.o を五月雨式に<br>生成し続ける</span></div>
+            <div class="cell"></div>
+          </div>
+          <div class="seq-row">
+            <div class="cell"></div><div class="cell"></div><div class="cell"></div>
+            <div class="cell"><span class="pulse llvm">最後のCGU完了</span></div>
+            <div class="cell"><span class="pulse block">全 .o + .rlib + .a<br>が揃うまで着手不可</span></div>
+          </div>
+          <div class="seq-row">
+            <div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div>
+            <div class="cell"><span class="pulse linker">cc→collect2→ld<br>実行可能ファイル生成</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="seq-legend-row">
+        <span><span class="swatch-line" style="background:var(--ink-dim)"></span>実線ブロック＝実作業</span>
+        <span><span class="pulse wait" style="padding:2px 8px;">破線＝待機</span></span>
+        <span><span class="pulse block" style="padding:2px 8px;">太枠＝直列の壁</span></span>
+      </div>
+    </div>
+  </section>
+
+  <section id="findings">
+    <h2><span class="num">03</span>この一例から読み取れること</h2>
+    <div class="findings">
+      <div class="finding">
+        <h3>全体を知るのは Cargo だけ</h3>
+        <p>依存グラフ（どのクレートがどの順で必要か）を把握しているのは Cargo のみ。rustc は1回の呼び出しで1クレートしか見えず、他クレートが自分のシンボルをどう使うかを知る手段がない。</p>
+        <span class="evidence">実測: base.rs codegen_crate は crate 単位でしか呼ばれない</span>
+      </div>
+      <div class="finding">
+        <h3>CGU 分割も局所的</h3>
+        <p>LLVM に渡す単位（CGU）は、そのクレート自身のモジュール構造とジェネリック実体化だけで決まる。リンク時に実際どのシンボルが要るかは一切考慮されない。</p>
+        <span class="evidence">実装コード: rustc_monomorphize/src/partitioning.rs</span>
+      </div>
+      <div class="finding">
+        <h3>フロント／バックエンドは五月雨式だが無制限ではない</h3>
+        <p>CGU が1個できるたびに即座にLLVMワーカーへ渡されるが、メモリ消費を抑えるため、キューが十分溜まるとフロントエンドは意図的にブロックされる。</p>
+        <span class="evidence">実装コード: back/write.rs のコーディネータ設計コメント</span>
+      </div>
+      <div class="finding">
+        <h3>最終リンクだけは全部揃うまで動けない</h3>
+        <p>rustc も LLVM も並列化・五月雨式処理を工夫しているが、最後の1本の実行ファイルに合流する瞬間だけは、全クレートの全 .o／.rlib／外部 .a が出揃うまで待つ直列の壁が残る。</p>
+        <span class="evidence">実測: mold 差し替えでも有意な速度差なし（alopexDB 実測 122.78s→124.71s）</span>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  LAMINARIA — alopex-cli ビルド系統図（1例） · このセッション内の実測（Docker 上の <span class="mono">docker/bootstrap.Dockerfile</span> 環境）にもとづく
+</footer>
+
+</body>
+</html>
