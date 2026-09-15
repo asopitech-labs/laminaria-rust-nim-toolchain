@@ -7,6 +7,7 @@ pub mod d1b1_planner_cases;
 pub mod d1b1_preflight;
 pub mod d1b1_reference_cases;
 pub mod d1b2_new_fixtures;
+pub mod g3_e0_vs_e1;
 pub mod m3_baseline;
 pub mod m8_baseline;
 pub mod owned_identity;

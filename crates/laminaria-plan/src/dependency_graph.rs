@@ -1307,29 +1307,47 @@ pub struct ExpansionStats {
     pub package_candidates_total: usize,
 }
 
-/// The set of package ids [`resolve_demand_driven`] treats as reachable
-/// from `input.demand_entry_point`: the demand's own package, plus every
-/// [`FfiRequirementFacts::expected_provider_package`] declared by a
-/// requirement whose `declaring_source` is itself reachable. A single
-/// fixed-point pass suffices for this fixture's own graph shape (every
-/// FFI requirement's `declaring_source` is the demand package itself,
-/// never a transitive provider-of-a-provider) -- see this function's own
-/// doc comment on why a deeper transitive closure is not yet needed here.
-fn reachable_package_ids(input: &DependencyResolutionInput) -> std::collections::BTreeSet<&str> {
-    let mut reachable: std::collections::BTreeSet<&str> =
+/// The set of package ids, and the set of source ids belonging to them,
+/// [`resolve_demand_driven`] treats as reachable from
+/// `input.demand_entry_point`: the demand's own package (and its
+/// sources), plus every [`FfiRequirementFacts::expected_provider_package`]
+/// declared by a requirement whose `declaring_source` is itself
+/// reachable (and that provider's own sources). A single fixed-point
+/// pass suffices for this fixture's own graph shape (every FFI
+/// requirement's `declaring_source` is the demand package itself, never
+/// a transitive provider-of-a-provider); returning both sets (rather
+/// than recomputing `reachable_source_ids` a second time from
+/// `reachable_package_ids` at each of `resolve_demand_driven`'s several
+/// call sites) keeps the two collections guaranteed consistent with each
+/// other by construction, not just by convention.
+fn reachable_package_and_source_ids(
+    input: &DependencyResolutionInput,
+) -> (
+    std::collections::BTreeSet<&str>,
+    std::collections::BTreeSet<&str>,
+) {
+    let mut reachable_packages: std::collections::BTreeSet<&str> =
         std::collections::BTreeSet::from([input.demand_entry_point.as_str()]);
-    let reachable_source_ids: std::collections::BTreeSet<&str> = input
+    let mut reachable_sources: std::collections::BTreeSet<&str> = input
         .sources
         .iter()
-        .filter(|s| reachable.contains(s.package_id.as_str()))
+        .filter(|s| reachable_packages.contains(s.package_id.as_str()))
         .map(|s| s.id.as_str())
         .collect();
     for req in &input.ffi_requirements {
-        if reachable_source_ids.contains(req.declaring_source.as_str()) {
-            reachable.insert(req.expected_provider_package.as_str());
+        if reachable_sources.contains(req.declaring_source.as_str())
+            && reachable_packages.insert(req.expected_provider_package.as_str())
+        {
+            reachable_sources.extend(
+                input
+                    .sources
+                    .iter()
+                    .filter(|s| s.package_id == req.expected_provider_package)
+                    .map(|s| s.id.as_str()),
+            );
         }
     }
-    reachable
+    (reachable_packages, reachable_sources)
 }
 
 /// Issue #47 (G3, Lane B) E1: demand-driven candidate expansion. Filters
@@ -1350,7 +1368,7 @@ fn reachable_package_ids(input: &DependencyResolutionInput) -> std::collections:
 pub fn resolve_demand_driven(
     input: &DependencyResolutionInput,
 ) -> Result<(PositiveClosure, ExpansionStats), GraphRejection> {
-    let reachable = reachable_package_ids(input);
+    let (reachable, reachable_source_ids) = reachable_package_and_source_ids(input);
     let package_candidates_total = input.package_candidates.len();
 
     let filtered = DependencyResolutionInput {
@@ -1369,7 +1387,19 @@ pub fn resolve_demand_driven(
             .filter(|c| reachable.contains(c.package_id.as_str()))
             .cloned()
             .collect(),
-        ffi_requirements: input.ffi_requirements.clone(),
+        // Only a requirement whose *declaring* source is itself
+        // reachable is kept -- this is the same reachability test
+        // `reachable_package_and_source_ids` itself used to decide
+        // whether to admit the requirement's own
+        // `expected_provider_package` into `reachable`, so this filter
+        // and that set are always consistent with each other by
+        // construction.
+        ffi_requirements: input
+            .ffi_requirements
+            .iter()
+            .filter(|r| reachable_source_ids.contains(r.declaring_source.as_str()))
+            .cloned()
+            .collect(),
         lowering_requirements: input
             .lowering_requirements
             .iter()
