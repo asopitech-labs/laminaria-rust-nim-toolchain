@@ -174,14 +174,38 @@
 //!   findings.
 //! - `wasm32-unknown-unknown`, `wasm32-wasip1`, `wasm32-wasip2` -- WASM's
 //!   own module/import/export model is structurally unlike ELF/Mach-O/COFF
-//!   relocation at the machine-code level (no fixed-width instruction
-//!   encoding to patch bytes inside; imports/exports are named module-level
-//!   entries resolved by a wasm engine, not memory addresses patched into
-//!   code) -- **entirely unexamined by this crate so far**. This is not "an
-//!   ELF variant, minus features" the way Linux/Windows/macOS share
-//!   enough (a real CPU ISA, a linker producing a flat address space) to
-//!   compare directly; it needs its own investigation from first
-//!   principles, not an extension of `ElfX86_64PendingReloc`'s own shape.
+//!   at the machine-code level, **confirmed directly** (unlike the
+//!   Mach-O/ARM64 findings above, which are literature-only): compiled a
+//!   real Rust `extern "C"` function importing a cross-module symbol to
+//!   `wasm32-unknown-unknown` and inspected the actual binary
+//!   (`wasm-tools dump`/`print`). A *linked* module has **no
+//!   relocations left at all**: `call` (opcode `0x10`) is followed by a
+//!   plain LEB128-encoded **function index** (an integer naming a slot in
+//!   the module's own `import`/`func` index space, resolved by whichever
+//!   host or further link step supplies `cadd_module`'s own `c_add`) --
+//!   never a placeholder that needs a computed address written into it,
+//!   because WASM has no flat address space for code to begin with.
+//!
+//!   The *unlinked* WASM object file this crate did not directly produce
+//!   or inspect (`rustc`'s own `rust-lld -flavor wasm` step consumes
+//!   these, per the real linker invocation this crate's own build
+//!   surfaced) does carry something reloc-shaped, per the WebAssembly
+//!   project's own specification
+//!   (<https://github.com/WebAssembly/tool-conventions/blob/main/Linking.md>):
+//!   `R_WASM_FUNCTION_INDEX_LEB` names an `(offset, symbol-table-index)`
+//!   pair, always padded to a fixed 5 bytes ("All LEB128-encoded values
+//!   that are to be relocated must be maximally padded so that they can
+//!   be rewritten without affecting the position of any other bytes") --
+//!   but the *value* written there is never computed (no `S + A - P`
+//!   formula anywhere): it is simply the symbol's **new index** in the
+//!   linked module's own combined index space, substituted for its old
+//!   per-object index. This is a fourth, distinct relocation model
+//!   (address-computation-free index substitution), not "ELF/Mach-O/COFF
+//!   minus the address math" -- `ElfX86_64PendingReloc`'s own
+//!   `offset`/`width`/`target`/`addend` shape assumes a computed value is
+//!   always being written, which is never true for WASM. A real WASM
+//!   equivalent needs its own type built around index substitution, not
+//!   a variant of the existing one.
 //!
 //! x86_64/Intel macOS (`x86_64-apple-darwin`) and every other rustc
 //! target are explicitly out of scope, not merely undone -- this
