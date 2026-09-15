@@ -21,14 +21,25 @@
 //! - Checkpoint 2: the fixture's own root Cargo package `app` -- the
 //!   single `compile-rust-object:app` action (`rustc --emit=obj`, no
 //!   linking).
+//! - Checkpoint 3: the fixture's Nimble provider package `doubler` --
+//!   the single `compile-nim-static-library:doubler` action
+//!   (`nim c --app:staticlib`).
+//!
+//! Checkpoints 2 and 3 resolve `rustc`/`nim` through issue #18's own
+//! verified-toolchain mechanism (`toolchain_resolve::resolve_rustc`/
+//! `resolve_nim`, backed by `toolchains.lock.toml`), not a bare `PATH`
+//! lookup -- this development machine has more than one Rust and Nim
+//! install, and plain `PATH` resolution can silently pick a
+//! wrong-architecture one, which is harmless for a checkpoint that only
+//! compiles in isolation but would break `LinkNativeExecutable` once it
+//! actually links these objects together.
 //!
 //! The remaining `RequiredActionKind` variants this fixture's positive
-//! plan also requires (`CompileNimStaticLibrary`,
-//! `CompileCppAdapterObject`, `LinkNativeExecutable`,
-//! `PreflightRuntimeContract`, `PublishProvenance`) are real, disclosed,
-//! not-yet-implemented gaps -- the rest of issue #46's own action
-//! chain, deliberately left for following checkpoints rather than
-//! claimed here.
+//! plan also requires (`CompileCppAdapterObject`,
+//! `LinkNativeExecutable`, `PreflightRuntimeContract`,
+//! `PublishProvenance`) are real, disclosed, not-yet-implemented gaps
+//! -- the rest of issue #46's own action chain, deliberately left for
+//! following checkpoints rather than claimed here.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -39,6 +50,9 @@ use laminaria_plan::dependency_graph::{DischargeKind, LifecycleViolation, Positi
 use sha2::{Digest, Sha256};
 
 use crate::cross_ecosystem_ingest::CargoManifestFacts;
+use crate::toolchain_resolve::{
+    self, resolve_verified_nim, resolve_verified_rust, ToolchainResolutionError,
+};
 
 #[derive(Debug)]
 pub enum G2Error {
@@ -65,6 +79,17 @@ pub enum G2Error {
         path: PathBuf,
         symbol: String,
     },
+    /// The verified-toolchain resolution issue #18's own `doctor`
+    /// mechanism performs (`toolchains.lock.toml` -> exact,
+    /// selector-checked executable path) failed or refused to resolve.
+    /// G2 uses this rather than a bare `rustc`/`nim` off `PATH`: this
+    /// development machine has more than one Rust/Nim install, and
+    /// plain `PATH` resolution can silently pick a wrong-architecture
+    /// one (Homebrew's x86_64 `rustc`/`nim` ahead of the real,
+    /// arm64-native rustup/choosenim ones) -- harmless for a checkpoint
+    /// that only compiles in isolation, but fatal once a later
+    /// checkpoint actually links these objects together.
+    Toolchain(ToolchainResolutionError),
     Discharge(LifecycleViolation),
 }
 
@@ -85,6 +110,7 @@ impl std::fmt::Display for G2Error {
                 "G2 execution: real file '{}' does not reference expected undefined symbol '{symbol}'",
                 path.display()
             ),
+            G2Error::Toolchain(err) => write!(f, "G2 execution: toolchain resolution: {err}"),
             G2Error::Discharge(violation) => write!(f, "G2 execution: {violation}"),
         }
     }
@@ -96,6 +122,31 @@ impl From<LifecycleViolation> for G2Error {
     fn from(violation: LifecycleViolation) -> Self {
         G2Error::Discharge(violation)
     }
+}
+
+impl From<ToolchainResolutionError> for G2Error {
+    fn from(err: ToolchainResolutionError) -> Self {
+        G2Error::Toolchain(err)
+    }
+}
+
+/// Resolves the exact, selector-verified `rustc` executable
+/// `toolchains.lock.toml` pins (via `rustup`, never a bare `PATH`
+/// lookup) -- see [`G2Error::Toolchain`]'s own doc comment for why.
+fn resolve_rustc(repo_root: &Path) -> Result<PathBuf, G2Error> {
+    let lock_path = repo_root.join("toolchains.lock.toml");
+    let doctor_run = toolchain_resolve::run_doctor(&lock_path, repo_root, true, false)?;
+    let (_cargo, rustc) = resolve_verified_rust(&doctor_run)?;
+    Ok(rustc)
+}
+
+/// The `resolve_rustc` counterpart for the exact, selector-verified
+/// `nim` executable `toolchains.lock.toml` pins.
+fn resolve_nim(repo_root: &Path) -> Result<PathBuf, G2Error> {
+    let lock_path = repo_root.join("toolchains.lock.toml");
+    let doctor_run = toolchain_resolve::run_doctor(&lock_path, repo_root, false, true)?;
+    let nim = resolve_verified_nim(&doctor_run)?;
+    Ok(nim)
 }
 
 /// Real, observed evidence that a C source was actually compiled and
@@ -307,7 +358,9 @@ impl RustObjectEvidence {
 /// Actually executes the real `compile-rust-object:app` `RequiredAction`
 /// (`rustc --emit=obj`, using the exact edition and real default-
 /// activated feature set G1 itself observed via `cargo metadata` --
-/// never a hardcoded `--edition`/`--cfg`) against the fixture's real
+/// never a hardcoded `--edition`/`--cfg` -- and the exact, verified
+/// `rustc` `toolchains.lock.toml` pins, resolved via `resolve_rustc`,
+/// never a bare `PATH` lookup) against the fixture's real
 /// `app/src/main.rs`, verifies the real result independently (`nm`
 /// confirms the real entry point is defined and every real FFI
 /// requirement is left as an undefined reference, plus a real
@@ -321,12 +374,14 @@ impl RustObjectEvidence {
 pub fn compile_rust_object_for_app(
     closure: &mut PositiveClosure,
     fixture_root: &Path,
+    repo_root: &Path,
     cargo: &CargoManifestFacts,
     required_extern_symbols: &BTreeSet<String>,
     out_dir: &Path,
 ) -> Result<RustObjectEvidence, G2Error> {
     fs::create_dir_all(out_dir).map_err(|e| G2Error::Io(format!("{}: {e}", out_dir.display())))?;
 
+    let rustc = resolve_rustc(repo_root)?;
     let main_rs = fixture_root.join("app/src/main.rs");
     let object_path = out_dir.join(format!("{}.o", cargo.package_name));
 
@@ -349,7 +404,7 @@ pub fn compile_rust_object_for_app(
     args.push(main_rs.to_string_lossy().into_owned());
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
-    run_tool("rustc", &arg_refs)?;
+    run_tool(&rustc.to_string_lossy(), &arg_refs)?;
 
     verify_symbol_defined(&object_path, "main")?;
     for symbol in required_extern_symbols {
@@ -379,6 +434,95 @@ pub fn compile_rust_object_for_app(
     Ok(evidence)
 }
 
+/// Real, observed evidence that the Nimble provider package's own Nim
+/// source was actually compiled to a static library -- never a path
+/// string alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NimStaticLibraryEvidence {
+    pub archive_path: PathBuf,
+    pub archive_size_bytes: u64,
+    pub archive_sha256: String,
+    /// The exact exported symbol `nm` confirmed as defined in the real
+    /// archive.
+    pub confirmed_defined_symbol: String,
+}
+
+impl NimStaticLibraryEvidence {
+    fn as_discharge_evidence(&self) -> String {
+        format!(
+            "real nim c --app:staticlib: {} ({} bytes, sha256={}); nm confirms '{}' defined",
+            self.archive_path.display(),
+            self.archive_size_bytes,
+            self.archive_sha256,
+            self.confirmed_defined_symbol
+        )
+    }
+}
+
+/// Actually executes the real `compile-nim-static-library:doubler`
+/// `RequiredAction` (`nim c --app:staticlib`, using the exact,
+/// verified `nim` `toolchains.lock.toml` pins -- resolved via
+/// `resolve_nim`, never a bare `PATH` lookup, which on this class of
+/// development machine can silently resolve a wrong-architecture `nim`
+/// ahead of the pinned one) against the fixture's real
+/// `nimble/doubler/src/doubler.nim`, verifies the real result
+/// independently (`nm` confirms the real exported symbol is defined,
+/// plus a real SHA-256), and discharges the closure's
+/// `ArtifactProduction:archive:doubler` obligation through
+/// `compile-nim-static-library:doubler` -- the exact action id G1
+/// itself emitted and recorded as that obligation's `required_action`.
+/// One step, unlike the C/C++ compile-then-archive pair: Nim's own
+/// `--app:staticlib` mode compiles and archives in a single real
+/// invocation.
+pub fn compile_nim_static_library_for_doubler(
+    closure: &mut PositiveClosure,
+    fixture_root: &Path,
+    repo_root: &Path,
+    exported_symbol: &str,
+    out_dir: &Path,
+) -> Result<NimStaticLibraryEvidence, G2Error> {
+    fs::create_dir_all(out_dir).map_err(|e| G2Error::Io(format!("{}: {e}", out_dir.display())))?;
+
+    let nim = resolve_nim(repo_root)?;
+    let doubler_nim = fixture_root.join("nimble/doubler/src/doubler.nim");
+    let nimcache_dir = out_dir.join("nimcache");
+    let archive_path = out_dir.join("libdoubler.a");
+
+    run_tool(
+        &nim.to_string_lossy(),
+        &[
+            "c",
+            "--app:staticlib",
+            &format!("--nimcache:{}", nimcache_dir.to_string_lossy()),
+            &format!("-o:{}", archive_path.to_string_lossy()),
+            &doubler_nim.to_string_lossy(),
+        ],
+    )?;
+
+    verify_symbol_defined(&archive_path, exported_symbol)?;
+
+    let archive_size_bytes = fs::metadata(&archive_path)
+        .map_err(|e| G2Error::Io(format!("{}: {e}", archive_path.display())))?
+        .len();
+    let archive_sha256 = sha256_file(&archive_path)?;
+
+    let evidence = NimStaticLibraryEvidence {
+        archive_path,
+        archive_size_bytes,
+        archive_sha256,
+        confirmed_defined_symbol: exported_symbol.to_string(),
+    };
+
+    closure.discharge_obligation(
+        "ArtifactProduction:archive:doubler",
+        "compile-nim-static-library:doubler",
+        DischargeKind::Generated,
+        evidence.as_discharge_evidence(),
+    )?;
+
+    Ok(evidence)
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -387,6 +531,19 @@ mod tests {
         ingest_cargo_metadata, ingest_fixture_input, FixtureLayout,
     };
     use laminaria_plan::dependency_graph::{resolve, ObligationState};
+
+    /// Same computation `FixtureLayout::discover` uses for its own
+    /// `root`, minus the `fixtures/cross-ecosystem-native-executable`
+    /// suffix -- the repo root `toolchains.lock.toml` actually lives
+    /// in, needed for real toolchain resolution (`resolve_rustc`/
+    /// `resolve_nim`), matching `self_build.rs`'s own test helper of
+    /// the same name.
+    fn repo_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap()
+    }
 
     /// The end-to-end Checkpoint 1 case: resolve a real G1 positive
     /// closure from the real fixture, then actually execute the real
@@ -551,6 +708,7 @@ mod tests {
         let evidence = compile_rust_object_for_app(
             &mut closure,
             &layout.root,
+            &repo_root(),
             &cargo,
             &required_extern_symbols,
             &out_dir,
@@ -630,6 +788,77 @@ mod tests {
         // by the missing FFI reference above.
         verify_symbol_defined(&object_path, "main")
             .expect("a plain fn main() must still define the real entry symbol");
+
+        let _ = fs::remove_dir_all(&out_dir);
+    }
+
+    /// Checkpoint 3's end-to-end case: resolve a real G1 positive
+    /// closure, actually run `nim c --app:staticlib` against the real
+    /// `nimble/doubler/src/doubler.nim` using the exact, verified `nim`
+    /// executable `toolchains.lock.toml` pins (not a bare `PATH`
+    /// lookup, which on this development machine can silently resolve
+    /// a wrong-architecture `nim`), and discharge the resulting
+    /// `ArtifactProduction:archive:doubler` obligation with the real,
+    /// independently verified result.
+    #[test]
+    fn g2_really_compiles_doubler_to_a_nim_static_library_and_discharges_its_obligation() {
+        let layout = FixtureLayout::discover();
+        let runner = RecordingCommandRunner::new();
+        let input = ingest_fixture_input(&runner, &layout, &["1.0.0"])
+            .expect("must ingest the real positive fixture");
+        let mut closure = resolve(&input).expect("must resolve a positive closure");
+        let exported_symbol = input
+            .package_candidates
+            .iter()
+            .find(|c| c.package_id == "doubler")
+            .and_then(|c| c.declared_exports.first())
+            .map(|e| e.symbol.clone())
+            .expect("the real doubler candidate must declare at least one export");
+
+        let obligation_id = "ArtifactProduction:archive:doubler";
+        assert_eq!(
+            closure.obligations[obligation_id].state,
+            ObligationState::Satisfied,
+            "must start from G1's own terminal state"
+        );
+
+        let out_dir = std::env::temp_dir().join(format!(
+            "laminaria-g2-checkpoint-3-{}-doubler",
+            std::process::id()
+        ));
+        let evidence = compile_nim_static_library_for_doubler(
+            &mut closure,
+            &layout.root,
+            &repo_root(),
+            &exported_symbol,
+            &out_dir,
+        )
+        .expect("real nim c --app:staticlib execution and discharge must succeed");
+
+        assert!(
+            evidence.archive_path.is_file(),
+            "the real compiled static library must exist on disk"
+        );
+        assert!(evidence.archive_size_bytes > 0);
+        assert_eq!(
+            evidence.archive_sha256.len(),
+            64,
+            "must be a real hex SHA-256"
+        );
+        assert_eq!(evidence.confirmed_defined_symbol, exported_symbol);
+
+        let obligation = &closure.obligations[obligation_id];
+        assert_eq!(obligation.state, ObligationState::Discharged);
+        assert_eq!(obligation.discharge_kind, Some(DischargeKind::Generated));
+        assert_eq!(
+            obligation.required_action.as_deref(),
+            Some("compile-nim-static-library:doubler")
+        );
+        assert!(obligation
+            .evidence
+            .as_deref()
+            .unwrap()
+            .contains(&evidence.archive_sha256));
 
         let _ = fs::remove_dir_all(&out_dir);
     }
