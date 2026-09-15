@@ -285,6 +285,89 @@ mod tests {
         let _ = std::fs::remove_dir_all(&isolated_home);
     }
 
+    /// Checkpoint D verification-gate item 7 (network接続なしで完了する),
+    /// closed here directly rather than left as the disclosed gap the
+    /// original handoff reported: real, OS-level network denial for a
+    /// child process, using macOS's own Seatbelt sandbox
+    /// (`sandbox-exec`) -- not a proxy-env-var convention (already
+    /// covered by `real_commands_are_spawned_with_a_forced_offline_environment`
+    /// above) and not a claim about what the code merely does not call.
+    /// `deny network*` under this profile was confirmed independently,
+    /// outside this test, to actually block a real `curl` DNS
+    /// resolution/connection attempt -- this test only asserts that
+    /// G1's own two permitted commands still succeed under that same
+    /// real denial.
+    ///
+    /// macOS-only: `sandbox-exec`/Seatbelt is an Apple-specific
+    /// mechanism (Linux's own equivalent is a `CLONE_NEWNET` network
+    /// namespace via `unshare`, not available to build/validate in this
+    /// project's macOS development environment -- see this test's own
+    /// commit message for that disclosed limitation). Skips (does not
+    /// fail) when `sandbox-exec` itself is absent, rather than assuming
+    /// every macOS test runner has it.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn the_two_permitted_commands_succeed_under_real_os_level_network_denial() {
+        if std::process::Command::new("sandbox-exec")
+            .arg("-h")
+            .output()
+            .is_err()
+        {
+            eprintln!(
+                "sandbox-exec not available on this runner -- skipping (macOS-only mechanism)"
+            );
+            return;
+        }
+
+        let profile_path = std::env::temp_dir().join(format!(
+            "laminaria-g1-checkpoint-d-deny-network-{}.sb",
+            std::process::id()
+        ));
+        std::fs::write(
+            &profile_path,
+            "(version 1)\n(allow default)\n(deny network*)\n",
+        )
+        .expect("must write the deny-network sandbox profile");
+
+        let fixture_manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("workspace root must exist")
+            .join("fixtures/cross-ecosystem-native-executable/app/Cargo.toml");
+
+        let mut rustc_cmd = Command::new("sandbox-exec");
+        rustc_cmd.args(["-f", &profile_path.to_string_lossy(), "rustc", "-vV"]);
+        let rustc_output = rustc_cmd
+            .output()
+            .expect("failed to spawn sandbox-exec'd rustc");
+        assert!(
+            rustc_output.status.success(),
+            "rustc -vV must succeed under real network denial: {}",
+            String::from_utf8_lossy(&rustc_output.stderr)
+        );
+
+        let mut cargo_cmd = Command::new("sandbox-exec");
+        cargo_cmd.args(["-f", &profile_path.to_string_lossy(), "cargo"]);
+        cargo_cmd.args([
+            "metadata",
+            "--no-deps",
+            "--format-version",
+            "1",
+            "--manifest-path",
+        ]);
+        cargo_cmd.arg(&fixture_manifest);
+        let cargo_output = cargo_cmd
+            .output()
+            .expect("failed to spawn sandbox-exec'd cargo");
+        assert!(
+            cargo_output.status.success(),
+            "cargo metadata --no-deps must succeed under real network denial: {}",
+            String::from_utf8_lossy(&cargo_output.stderr)
+        );
+
+        let _ = std::fs::remove_file(&profile_path);
+    }
+
     #[test]
     fn the_two_permitted_commands_are_recognized() {
         assert!(is_permitted(
