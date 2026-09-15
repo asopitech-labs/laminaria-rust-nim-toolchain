@@ -120,6 +120,20 @@ alopexDB以外の実Cargoプロジェクトで仮説Aがどれだけ再現性を
 
 停止条件との照合: 「仮説Aが複数実プロジェクトでfalse negativeゼロを維持できず」という停止条件には該当しなかった(false negative率は0%を維持)。従って本P0の結果は、仮説Aを主軸から外す根拠にはならないが、false positive率のばらつき(alopexDBの2件→今回35〜44%)と表現形式依存の脆弱性は、仮説Aを「唯一の解」として採用しないための追加的な留保事項として記録する。
 
+### 仮説AのNimbleへの一般化机上調査(issue #63 P1)
+
+仮説Aが検出に使う機械的シグナル(Cargo.tomlの`links`フィールド、`cc`/`cmake`/`pkg-config`向けbuild-dependency宣言)が、Nimbleパッケージのメタデータ(`.nimble`ファイル)に同種のフィールドとして存在するかを、Nimble公式リファレンス(`nimble-reference.html`)と本リポジトリが実際に保持する4件の`.nimble`ファイル(`nim-planner/laminaria_planner.nimble`、`fixtures/nim-heavy-workspace/fixture.nimble`、`fixtures/cross-ecosystem-native-executable/nimble/doubler/doubler.nimble`、`.reference/alopex/.../nim_sql_parser.nimble`)を突き合わせて机上調査した。
+
+**`.nimble`ファイルの構造**: package sectionは`name`/`version`/`author`/`description`/`license`/`srcDir`/`binDir`/`bin`/`namedBin`/`backend`/`skipDirs`/`skipFiles`/`skipExt`/`installDirs`/`installFiles`/`installExt`/`paths`/`entryPoints`/`requires`等の宣言的(静的パース可能)フィールドを持つ。加えて`task <name>, "<description>": <nimscriptコード>`という命令的ブロックを任意個定義でき、ここでは`exec`(シェルコマンド実行)や`gorgeEx`(コマンド実行して出力取得)など、Nim言語そのものの実行能力をフルに使える。
+
+**Cargoの`links`/`cc`/`cmake`/`pkg-config`に直接対応するフィールドは存在しない**。近い候補として`foreignDep`(例: `foreignDep "openssl"`のようにシステムライブラリ名を宣言する)が公式wikiに言及されているが、これは「このパッケージが外部ライブラリを要求する」という人間向けの注記に近く、Cargoの`links`(同一ネイティブライブラリへの重複リンクを検出するビルドシステム制御用の識別子)や`cc`/`cmake`build-dependency(native toolchain呼び出しの機械的予告)が持つ「ビルドグラフ制御のための構造化契約」としての性質を持たない。`backend`フィールドは"c"/"cpp"/"js"等の値を取るが、これはNimコンパイル自体が常に経由する言語バックエンド選択であり、Cargoの`*-sys`crateが示す「追加のC/C++コンパイル・リンク作業が必要になる」という差分シグナルには対応しない(Nimコンパイルは常にC/C++コードを生成し既定でCコンパイラを呼ぶため、この選択自体はnative build costの有無を分けない)。
+
+**実例による裏付け**: 本リポジトリの`nim_sql_parser.nimble`(実際にCのvendorライブラリをビルド・静的リンクし、Rust側からFFI消費される実在パッケージ)を調べると、native連携に関する情報(`--passC:-fPIC`、`--passL:-static`、OS別出力ファイル名`libalopex_sql_parser.so`/`.dylib`/`.dll`の切り替え等)は全て`task lib`/`task staticlib`ブロック内の自由形式コマンドライン文字列として埋め込まれており、`.nimble`ファイルのトップレベルの宣言的フィールドには一切現れない。他3件の`.nimble`ファイル(`laminaria_planner`/`fixture`/`doubler`)も`foreignDep`/`passC`/`passL`を一切使用していない。`nimble dump --json`は宣言的フィールドをJSON化できるが、taskブロック内のnimscriptコードは評価対象外であり(公式issueでも指摘される既知の制限)、native build cost予告が仮にtaskへ埋め込まれていたとしても`dump --json`の出力には現れない。
+
+**結論(反例として記録)**: 仮説Aの前提である「依存解決時に取得済みのソースメタデータへ、構造化フィールドとして機械的にnative build costシグナルが宣言されている」という性質は、Cargoエコシステム固有の慣習であり、Nimbleエコシステムには同種のフィールドが存在しない。Nimbleパッケージのnative連携情報は、静的パースでは原理的に確定できない任意のnimscriptコード(`task`ブロック)の中に置かれる——これはPhase 0で扱う「静的メタデータの機械走査」という設計そのものがNimbleに対して成立しないことを意味し、仮説Aをecosystem横断の恒久解として主軸に据えることはできないという、issue #63の停止条件(「仮説AのシグナルがNimbleに存在しないことが確認された場合」)に該当する具体的根拠である。
+
+停止条件との照合: 該当。仮説Aは「静的メタデータ走査」というアプローチ自体がCargo固有であり、LAMINARIAがCargo/Nimble/C/C++を横断する以上、少なくとも仮説Aを主軸には据えられないという、適用範囲を絞った否定的証拠として記録する(非ゴール節の通り、Nimble側への新フィールド追加提案は行わない)。
+
 ## Artifact profile
 
 全platformで一律の「単一完全static binary」を要求しない。targetとdependencyに応じて、少なくとも次を明示する。
