@@ -10,14 +10,35 @@ import re
 import sys
 
 PATTERNS = [
-    ("aws-lc-sys", re.compile(r"^(AWSLC_|AWS_LC_|EVP_|SHA1_|SHA224_|SHA256_|SHA384_|SHA512_|SHA3_|FIPS202_|FIPS_|MD5_|AES_|RSA_|EC_|ECDSA_|ECDH_|BN_|X509|ASN1_|HMAC_|CRYPTO_|ERR_(?!zstd)|RAND_|OPENSSL_|bn_|aws_lc_|CBS_|CBB_|GCM_|ChaCha20_|Poly1305_|HKDF_|HRSS_|ML_KEM|ML_DSA|SLH_DSA|Kyber|kyber_|bcm_)")),
+    # AWS-LC (aws-lc-sys): classic algorithm namespaces plus the post-quantum additions
+    # (ML-KEM/ML-DSA/SLH-DSA/Kyber, FIPS-indicator plumbing) and low-level bignum/elliptic-curve
+    # internals (bn_/ec_/ecp_/sk/aead/kP/two/poly/rand/dh/dsa/md/sig/decode/init/get/parse/thread
+    # etc.) that only appear as link-time symbols inside this one vendored C library.
+    ("aws-lc-sys", re.compile(
+        r"^(AWSLC_|AWS_LC_|EVP_|SHA1_|SHA224_|SHA256_|SHA384_|SHA512_|SHA3_|FIPS202_|FIPS_|"
+        r"MD5_|AES_|RSA_|EC_|ECDSA_|ECDH_|BN_|X509|ASN1_|HMAC_|CRYPTO_|ERR_(?!zstd)|RAND_|"
+        r"OPENSSL_|bn_|aws_lc_|CBS_|CBB_|GCM_|ChaCha20_|Poly1305_|HKDF_|HRSS_|ML_KEM|ML_DSA|"
+        r"SLH_DSA|Kyber|kyber_|bcm_|mldsa|mld_|mlk_|mlkem_|pkey_|jent_|constant_time_|ec_|"
+        r"ecp_nistz|ecp_|p256_|p384_|p521_|edwards|Ed25519|ed25519|x25519|X25519|curve25519|"
+        r"aead_|kem_|dh_|dsa_|sig_|pqdsa_|boringssl_|ksecp|shake_?128|shake_?256|poly1305_|"
+        r"secp[0-9]+k1_)",
+        re.IGNORECASE,
+    )),
     ("rustc-runtime (personality/unwind, not a crate)", re.compile(r"^(DW\.ref\.|__rust_|rust_eh_personality|_Unwind_)")),
-    # Per-function exception-table/jump-table symbols the compiler/linker emits once per
-    # function regardless of which crate that function came from -- not a crate attribution
-    # signal at all, and by far the largest bucket (43859/53111 in this run). Counted
-    # separately rather than folded into "other" so the residual "other" size is honest.
-    ("compiler-generated (per-function table, not crate-attributable)", re.compile(r"^(GCC_except_table|CSWTCH\.|\.L)")),
-    ("zstd-sys", re.compile(r"^(ZSTD_|ZDICT_|HUF|FSE(v[0-9]+)?_|ZSTDMT_|COVER_|BIT(v[0-9]+)?_|POOL_|XXH)")),
+    # Per-function/per-TU compiler- or linker-generated table symbols, unrelated to which
+    # crate the enclosing function came from -- by far the largest bucket (82.6% of all
+    # non-mangled symbols in this run). Counted separately rather than folded into "other" so
+    # the residual "other" size is honest.
+    #   GCC_except_table<N>  -- one per function, LLVM's exception-handling landing-pad table
+    #   CSWTCH.<N>            -- switch-statement jump table constant
+    #   .L<...>               -- local (non-exported) assembler labels
+    #   TM__<hash>_<N>        -- LLVM CFI (control-flow-integrity) type-metadata symbols
+    #   __PRETTY_FUNCTION__.0 -- C `assert`/diagnostics function-name string literal, emitted
+    #                            once per translation unit across every C library linked in
+    ("compiler-generated (per-function/per-TU table, not crate-attributable)", re.compile(
+        r"^(GCC_except_table|CSWTCH\.|\.L|TM__|__PRETTY_FUNCTION__)"
+    )),
+    ("zstd-sys", re.compile(r"^(ZSTD|ZDICT_|HUF|FSE(v[0-9]+)?_|ZSTDMT_|COVER_|BIT(v[0-9]+)?_|POOL_|XXH|MEM_|NTIv|ZBUFFv)")),
     ("libsqlite3-sys", re.compile(r"^sqlite3")),
     ("lz4-sys", re.compile(r"^LZ4")),
     ("ring", re.compile(r"^(GFp_|ring_core_)")),
