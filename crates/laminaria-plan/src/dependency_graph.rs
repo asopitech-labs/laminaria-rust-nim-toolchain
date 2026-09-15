@@ -1290,6 +1290,113 @@ fn resolve_provider_for_requirement(
     }
 }
 
+/// Issue #47 (G3, Lane B) E0-vs-E1 comparison: how many
+/// [`PackageCandidateFacts`] entries a [`resolve`] call actually
+/// considered -- `resolve` itself has no such counter (its algorithm is
+/// unconditional iteration, so "considered" and "input length" are
+/// always the same number for it), so this is computed once, here,
+/// purely from the input `resolve` was actually given. `demand_driven`
+/// candidates already excludes unreachable entries before `resolve`
+/// ever sees them (see [`resolve_demand_driven`]); comparing this
+/// field's value between an E0 and an E1 run is exactly the
+/// "expanded/pruned node count" issue #47's direct-acceptance criteria
+/// require recording.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExpansionStats {
+    pub package_candidates_considered: usize,
+    pub package_candidates_total: usize,
+}
+
+/// The set of package ids [`resolve_demand_driven`] treats as reachable
+/// from `input.demand_entry_point`: the demand's own package, plus every
+/// [`FfiRequirementFacts::expected_provider_package`] declared by a
+/// requirement whose `declaring_source` is itself reachable. A single
+/// fixed-point pass suffices for this fixture's own graph shape (every
+/// FFI requirement's `declaring_source` is the demand package itself,
+/// never a transitive provider-of-a-provider) -- see this function's own
+/// doc comment on why a deeper transitive closure is not yet needed here.
+fn reachable_package_ids(input: &DependencyResolutionInput) -> std::collections::BTreeSet<&str> {
+    let mut reachable: std::collections::BTreeSet<&str> =
+        std::collections::BTreeSet::from([input.demand_entry_point.as_str()]);
+    let reachable_source_ids: std::collections::BTreeSet<&str> = input
+        .sources
+        .iter()
+        .filter(|s| reachable.contains(s.package_id.as_str()))
+        .map(|s| s.id.as_str())
+        .collect();
+    for req in &input.ffi_requirements {
+        if reachable_source_ids.contains(req.declaring_source.as_str()) {
+            reachable.insert(req.expected_provider_package.as_str());
+        }
+    }
+    reachable
+}
+
+/// Issue #47 (G3, Lane B) E1: demand-driven candidate expansion. Filters
+/// `input.package_candidates` (and the `sources`/`lowering_requirements`
+/// entries that only exist to describe an excluded candidate) down to
+/// exactly the packages [`reachable_package_ids`] reaches from
+/// `input.demand_entry_point`, *before* calling the same, unmodified
+/// [`resolve`] E0 uses -- this is the whole difference: E0 always hands
+/// `resolve` the complete candidate pool and lets its own unconditional
+/// iteration walk every entry; E1 pulls backward from the demand first
+/// and only ever hands `resolve` the reachable subset. Producing exactly
+/// the same [`PositiveClosure`] (byte-for-byte, once `demand_entry_point`
+/// is the only entry point and no candidate outside the reachable set was
+/// ever going to be selected anyway) is E1's own correctness requirement
+/// -- it must prune only candidates `resolve` would itself have rejected
+/// or ignored, never one it would have selected.
+#[allow(clippy::result_large_err)]
+pub fn resolve_demand_driven(
+    input: &DependencyResolutionInput,
+) -> Result<(PositiveClosure, ExpansionStats), GraphRejection> {
+    let reachable = reachable_package_ids(input);
+    let package_candidates_total = input.package_candidates.len();
+
+    let filtered = DependencyResolutionInput {
+        demand_entry_point: input.demand_entry_point.clone(),
+        target_triple: input.target_triple.clone(),
+        host_toolchain_id: input.host_toolchain_id.clone(),
+        sources: input
+            .sources
+            .iter()
+            .filter(|s| reachable.contains(s.package_id.as_str()))
+            .cloned()
+            .collect(),
+        package_candidates: input
+            .package_candidates
+            .iter()
+            .filter(|c| reachable.contains(c.package_id.as_str()))
+            .cloned()
+            .collect(),
+        ffi_requirements: input.ffi_requirements.clone(),
+        lowering_requirements: input
+            .lowering_requirements
+            .iter()
+            .filter(|l| reachable.contains(l.package_id.as_str()))
+            .cloned()
+            .collect(),
+        abi_constraints: input.abi_constraints.clone(),
+        declared_outputs: input
+            .declared_outputs
+            .iter()
+            .filter(|o| reachable.contains(o.package_id.as_str()))
+            .cloned()
+            .collect(),
+        runtime_requirements: input.runtime_requirements.clone(),
+    };
+    let package_candidates_considered = filtered.package_candidates.len();
+
+    let closure = resolve(&filtered)?;
+    Ok((
+        closure,
+        ExpansionStats {
+            package_candidates_considered,
+            package_candidates_total,
+        },
+    ))
+}
+
 /// Resolves one [`DependencyResolutionInput`] into a [`PositiveClosure`]
 /// or a [`GraphRejection`] -- pure, deterministic (no I/O, no
 /// randomness; every collection is a `BTreeMap`/sorted `Vec`), and
@@ -2370,5 +2477,116 @@ mod tests {
             result,
             Err(LifecycleViolation::UnknownObligation(_))
         ));
+    }
+
+    /// Issue #47 (G3, Lane B) E1's own correctness requirement: with no
+    /// unreachable candidates present at all, `resolve_demand_driven`
+    /// must consider every real candidate (nothing to prune) and produce
+    /// the exact same `PositiveClosure` `resolve` (E0) does, byte for
+    /// byte -- E1 must never change *what* gets resolved, only how much
+    /// of the input it actually walks to get there.
+    #[test]
+    fn demand_driven_with_no_unreachable_candidates_matches_eager_byte_for_byte() {
+        let input = minimal_input(vec![cadd_candidate(
+            "1.0.0",
+            "c_add",
+            "x86_64-unknown-linux-gnu",
+            Role::Target,
+        )]);
+        let eager = resolve(&input).expect("E0 must resolve");
+        let (demand_driven, stats) =
+            resolve_demand_driven(&input).expect("E1 must resolve the same input");
+
+        assert_eq!(
+            serde_json::to_string(&eager).unwrap(),
+            serde_json::to_string(&demand_driven).unwrap(),
+            "E0 and E1 must produce byte-identical closures when nothing is unreachable"
+        );
+        assert_eq!(stats.package_candidates_total, 3, "app + doubler + cadd");
+        assert_eq!(
+            stats.package_candidates_considered, 3,
+            "no candidate is unreachable in this input, so E1 has nothing to prune"
+        );
+    }
+
+    /// A package candidate wholly disconnected from `demand_entry_point`
+    /// -- it declares no export any real `ffi_requirements` entry names,
+    /// so `resolve` (E0) would have ignored it too (its own iteration
+    /// over `input.package_candidates` in `resolve_root_packages` would
+    /// have registered it as an *extra*, unreached root-package
+    /// candidate -- `resolve_root_packages` treats every non-provider
+    /// package id as a root, so an unrelated extra package id changes
+    /// E0's own obligation count, not just its walk cost). E1 must prune
+    /// it entirely before `resolve` ever sees it, and the resulting
+    /// closure's *retained* obligations must be identical to the case
+    /// with no unreachable candidate at all -- proving the pruned
+    /// candidate was never going to be selected by E0 either, only
+    /// walked.
+    #[test]
+    fn demand_driven_prunes_a_candidate_unreachable_from_the_demand() {
+        let mut input = minimal_input(vec![cadd_candidate(
+            "1.0.0",
+            "c_add",
+            "x86_64-unknown-linux-gnu",
+            Role::Target,
+        )]);
+        let baseline_stats_total = input.package_candidates.len();
+
+        // A package no `ffi_requirements` entry ever names as
+        // `expected_provider_package`, and not `demand_entry_point`
+        // itself -- genuinely unreachable from the demand.
+        input.package_candidates.push(PackageCandidateFacts {
+            ecosystem: Ecosystem::C,
+            package_id: "unrelated-unreached-package".to_string(),
+            version: "9.0.0".to_string(),
+            role: Role::Target,
+            target_triple: "x86_64-unknown-linux-gnu".to_string(),
+            sources: vec!["c/unrelated/unrelated.c".to_string()],
+            declared_exports: vec![FfiExportFacts {
+                declaring_source: "c/unrelated/unrelated.c".to_string(),
+                symbol: "unrelated_fn".to_string(),
+                abi: "C".to_string(),
+                param_count: 0,
+                return_type: "i32".to_string(),
+            }],
+            declared_constraints: vec![],
+        });
+        input.sources.push(SourceModuleFacts {
+            id: "c/unrelated/unrelated.c".to_string(),
+            ecosystem: Ecosystem::C,
+            package_id: "unrelated-unreached-package".to_string(),
+        });
+
+        let (demand_driven, stats) =
+            resolve_demand_driven(&input).expect("E1 must still resolve the reachable subgraph");
+
+        assert_eq!(stats.package_candidates_total, baseline_stats_total + 1);
+        assert_eq!(
+            stats.package_candidates_considered, baseline_stats_total,
+            "the unrelated package must be pruned before resolve() ever sees it"
+        );
+        assert!(
+            !demand_driven
+                .obligations
+                .keys()
+                .any(|id| id.contains("unrelated-unreached-package")),
+            "a pruned candidate must never appear in the resulting closure at all"
+        );
+
+        // The reachable subgraph's own closure is unaffected by the
+        // unreachable candidate's presence in the original input.
+        let reachable_only = minimal_input(vec![cadd_candidate(
+            "1.0.0",
+            "c_add",
+            "x86_64-unknown-linux-gnu",
+            Role::Target,
+        )]);
+        let eager_on_reachable_only =
+            resolve(&reachable_only).expect("E0 on the reachable-only input must resolve");
+        assert_eq!(
+            serde_json::to_string(&eager_on_reachable_only).unwrap(),
+            serde_json::to_string(&demand_driven).unwrap(),
+            "pruning an unreachable candidate must not change the retained closure"
+        );
     }
 }
