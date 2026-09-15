@@ -105,7 +105,53 @@
 //!   (`R_AARCH64_CALL26`/`JUMP26`), **not yet implemented** -- see this
 //!   module's own ARM64 Mach-O finding above for why `width: usize` as a
 //!   byte-count rectangle cannot represent a 26-bit sub-field; the same
-//!   problem applies here, independent of ELF vs. Mach-O.
+//!   problem applies here, independent of ELF vs. Mach-O. Literature
+//!   gathered (no development possible in this session -- no ARM64 Linux
+//!   host or working ARM64 cross-assembler/objdump available here; this
+//!   is reading, not measurement, unlike the ELF/x86_64 and COFF findings
+//!   above):
+//!   - **Primary spec**: ARM's own `abi-aa` repository, "ELF for the
+//!     Arm 64-bit Architecture (AArch64)"
+//!     (<https://github.com/ARM-software/abi-aa/blob/main/aaelf64/aaelf64.rst>).
+//!     `R_AARCH64_CALL26` (`BL`) and `R_AARCH64_JUMP26` (`B`) both
+//!     compute `S + A - P` (symbol address + addend - relocation site
+//!     address -- the same shape as `ElfX86_64PendingReloc`'s own
+//!     formula), then write bits `[27:2]` of that result into the
+//!     instruction word's own bits `[27:2]` (bits `[31:28]` are the
+//!     opcode, bits `[1:0]` are implicitly zero since AArch64
+//!     instructions are 4-byte aligned) -- **not** a standalone
+//!     byte-aligned rectangle the way `ElfX86_64PendingReloc::offset`/
+//!     `width` assume; any `AArch64PendingReloc`-equivalent type needs a
+//!     bit-range (instruction word + bit offset + bit width), not a
+//!     byte range.
+//!   - **Range limit**: valid only for `-2^27 <= X < 2^27` (26 bits of
+//!     word-granular range = ±128 MiB) -- exceeding it is an overflow a
+//!     conforming linker must diagnose, unlike `R_X86_64_PLT32`'s full
+//!     32-bit range.
+//!   - **Range-extension thunks**: LLVM lld review
+//!     (<https://reviews.llvm.org/D70637>) describes what a real linker
+//!     does when a `CALL26`/`JUMP26` target falls outside that ±128 MiB
+//!     window -- it does not fail, it **synthesizes new code**: a small
+//!     stub (e.g. `adrp x16, Dest; add x16, x16, #offset; br x16`, or an
+//!     absolute-address `ldr x16, [addr]; br x16` form) placed in a
+//!     linker-inserted "ThunkSection" within range of the original call
+//!     site, and the original `bl`/`b` instruction's own relocation is
+//!     retargeted to the thunk instead of the real destination. This is
+//!     a materially different shape from `apply_elf_x86_64_relocations`
+//!     today: that function only ever overwrites bytes already present
+//!     in a `CodeBody`, never emits new code. An AArch64 implementation
+//!     needs `apply_elf_x86_64_relocations`'s own layout/patch split to
+//!     also support inserting a synthesized `CodeBody` when a target
+//!     falls out of range -- a structural change, not just a new
+//!     relocation-formula variant.
+//!   - **Real hardware for future direct verification**: both Raspberry
+//!     Pi 4 (Broadcom BCM2711, quad-core Cortex-A72, up to 1.5GHz) and
+//!     Raspberry Pi 5 (Broadcom BCM2712, quad-core Cortex-A76, 2.4GHz)
+//!     run in 64-bit (AArch64) mode under a 64-bit OS, making either a
+//!     real, obtainable `aarch64-unknown-linux-gnu` host for the direct
+//!     `objdump`-based verification this crate's other findings all
+//!     depend on -- not yet done in this session, named here as the
+//!     concrete next step rather than a cross-compiler-only guess.
 //! - `x86_64-pc-windows-gnu` -- COFF via MinGW-w64, placeholder shape
 //!   verified directly (`inspect-mingw-coff.sh`); the patch formula
 //!   itself (`apply_*_relocations` equivalent) is **not yet
