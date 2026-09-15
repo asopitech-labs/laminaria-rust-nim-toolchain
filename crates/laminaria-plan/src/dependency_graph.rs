@@ -459,11 +459,29 @@ pub enum ArtifactOutputKind {
 /// One artifact output a real manifest/source graph declares LAMINARIA
 /// will eventually need to produce -- an identity and a kind, never an
 /// already-produced path.
+///
+/// Issue #65 (B-H3, carried-forward item 1): `source_ids` names which
+/// [`SourceModuleFacts::id`] entries this one output is compiled from.
+/// Empty means "every source belonging to `package_id`" (a whole-package
+/// unity-build output, this type's only shape before issue #65 -- every
+/// existing caller that never set this field keeps that exact behavior,
+/// verified by `find_outputs_falls_back_to_whole_package_when_source_ids_is_empty`).
+/// A non-empty `source_ids` declares a *sub-candidate* output: one
+/// [`ArtifactOutputKind::CObject`]/[`ArtifactOutputKind::CppAdapterObject`]
+/// entry per independently-compilable translation-unit member (e.g. one
+/// of `bcm.c`'s 98 independently-compilable unity-build members, issue
+/// #64) rather than one output covering the whole package's sources at
+/// once. This field only ever names *already-known* source ids an
+/// ingestion adapter declares as separately compilable -- it never
+/// triggers LAMINARIA to parse or split C/C++ source itself (this
+/// project's own non-goal: no LAMINARIA-owned C compiler/body parser).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactOutputFacts {
     pub id: String,
     pub package_id: String,
     pub kind: ArtifactOutputKind,
+    #[serde(default)]
+    pub source_ids: Vec<String>,
 }
 
 /// One real runtime contract the produced executable will need at
@@ -744,15 +762,33 @@ fn find_source<'a>(
     input.sources.iter().find(|s| s.id == source_id)
 }
 
+/// Every declared output for `(package_id, kind)`, in `declared_outputs`
+/// order. Issue #65 (B-H3): more than one entry means the package
+/// declares sub-candidate (translation-unit-granularity) outputs of this
+/// kind rather than one whole-package output -- see
+/// [`ArtifactOutputFacts::source_ids`]'s own doc comment.
+fn find_outputs<'a>(
+    input: &'a DependencyResolutionInput,
+    package_id: &str,
+    kind: ArtifactOutputKind,
+) -> Vec<&'a ArtifactOutputFacts> {
+    input
+        .declared_outputs
+        .iter()
+        .filter(|o| o.package_id == package_id && o.kind == kind)
+        .collect()
+}
+
+/// The single-output convenience wrapper every pre-issue-#65 call site
+/// used, kept so a `(package_id, kind)` pair that still only ever
+/// declares at most one output (every kind except sub-candidate-capable
+/// C/C++ object outputs) does not need to change at all.
 fn find_output<'a>(
     input: &'a DependencyResolutionInput,
     package_id: &str,
     kind: ArtifactOutputKind,
 ) -> Option<&'a ArtifactOutputFacts> {
-    input
-        .declared_outputs
-        .iter()
-        .find(|o| o.package_id == package_id && o.kind == kind)
+    find_outputs(input, package_id, kind).into_iter().next()
 }
 
 /// Maps a provider candidate's ecosystem onto the one
@@ -1649,30 +1685,84 @@ pub fn resolve(input: &DependencyResolutionInput) -> Result<PositiveClosure, Gra
                 }
             }
             Ecosystem::C => {
-                let object_output =
-                    find_output(input, &candidate.package_id, ArtifactOutputKind::CObject);
+                let object_outputs =
+                    find_outputs(input, &candidate.package_id, ArtifactOutputKind::CObject);
                 let archive_output = find_output(
                     input,
                     &candidate.package_id,
                     ArtifactOutputKind::CStaticArchive,
                 );
-                let compile_id = format!(
-                    "compile-c-object:{}@{}",
-                    candidate.package_id, candidate.version
-                );
-                required_actions.push(RequiredAction {
-                    id: compile_id.clone(),
-                    kind: RequiredActionKind::CompileCObject,
-                    target_triple: candidate.target_triple.clone(),
-                    role: Role::Target,
-                    toolchain: "cc".to_string(),
-                    inputs: source_ids,
-                    outputs: object_output
-                        .map(|o| vec![o.id.clone()])
-                        .unwrap_or_default(),
-                    discharges: vec![],
-                    depends_on: vec![],
-                });
+                let is_sub_candidate = object_outputs.len() > 1
+                    && object_outputs.iter().all(|o| !o.source_ids.is_empty());
+
+                let compile_ids: Vec<String> = if is_sub_candidate {
+                    // Issue #65 (B-H3): one CompileCObject action per
+                    // declared sub-candidate (translation-unit-granularity)
+                    // object output, each discharging its own real source's
+                    // `SourceModule` obligation -- the granularity below
+                    // "one candidate = one compile action" issue #47 left
+                    // unimplemented. Never a LAMINARIA-owned split of a
+                    // single source file: `object.source_ids` are
+                    // already-declared, already-known source ids from the
+                    // ingestion adapter, not something this function
+                    // derives from C source text.
+                    object_outputs
+                        .iter()
+                        .map(|object_output| {
+                            let compile_id = format!(
+                                "compile-c-object:{}@{}:{}",
+                                candidate.package_id, candidate.version, object_output.id
+                            );
+                            let discharges: Vec<String> = object_output
+                                .source_ids
+                                .iter()
+                                .map(|source_id| source_module_id(source_id))
+                                .collect();
+                            required_actions.push(RequiredAction {
+                                id: compile_id.clone(),
+                                kind: RequiredActionKind::CompileCObject,
+                                target_triple: candidate.target_triple.clone(),
+                                role: Role::Target,
+                                toolchain: "cc".to_string(),
+                                inputs: object_output
+                                    .source_ids
+                                    .iter()
+                                    .map(|source_id| source_module_id(source_id))
+                                    .collect(),
+                                outputs: vec![object_output.id.clone()],
+                                discharges: discharges.clone(),
+                                depends_on: vec![],
+                            });
+                            for source_module_obligation_id in &discharges {
+                                if let Some(o) = obligations.get_mut(source_module_obligation_id) {
+                                    o.required_action = Some(compile_id.clone());
+                                }
+                            }
+                            compile_id
+                        })
+                        .collect()
+                } else {
+                    let object_output = object_outputs.first().copied();
+                    let compile_id = format!(
+                        "compile-c-object:{}@{}",
+                        candidate.package_id, candidate.version
+                    );
+                    required_actions.push(RequiredAction {
+                        id: compile_id.clone(),
+                        kind: RequiredActionKind::CompileCObject,
+                        target_triple: candidate.target_triple.clone(),
+                        role: Role::Target,
+                        toolchain: "cc".to_string(),
+                        inputs: source_ids,
+                        outputs: object_output
+                            .map(|o| vec![o.id.clone()])
+                            .unwrap_or_default(),
+                        discharges: vec![],
+                        depends_on: vec![],
+                    });
+                    vec![compile_id]
+                };
+
                 let archive_id = format!(
                     "archive-static-library:{}@{}",
                     candidate.package_id, candidate.version
@@ -1683,16 +1773,14 @@ pub fn resolve(input: &DependencyResolutionInput) -> Result<PositiveClosure, Gra
                     target_triple: candidate.target_triple.clone(),
                     role: Role::Target,
                     toolchain: "ar".to_string(),
-                    inputs: object_output
-                        .map(|o| vec![o.id.clone()])
-                        .unwrap_or_default(),
+                    inputs: object_outputs.iter().map(|o| o.id.clone()).collect(),
                     outputs: archive_output
                         .map(|o| vec![o.id.clone()])
                         .unwrap_or_default(),
                     discharges: archive_output
                         .map(|o| vec![format!("ArtifactProduction:{}", o.id)])
                         .unwrap_or_default(),
-                    depends_on: vec![compile_id],
+                    depends_on: compile_ids,
                 });
                 if let Some(output) = archive_output {
                     if let Some(o) =
@@ -2063,26 +2151,31 @@ mod tests {
                     id: "object:app".to_string(),
                     package_id: "app".to_string(),
                     kind: ArtifactOutputKind::RustObject,
+                    source_ids: vec![],
                 },
                 ArtifactOutputFacts {
                     id: "archive:doubler".to_string(),
                     package_id: "doubler".to_string(),
                     kind: ArtifactOutputKind::NimStaticLibrary,
+                    source_ids: vec![],
                 },
                 ArtifactOutputFacts {
                     id: "object:cadd".to_string(),
                     package_id: "cadd".to_string(),
                     kind: ArtifactOutputKind::CObject,
+                    source_ids: vec![],
                 },
                 ArtifactOutputFacts {
                     id: "archive:cadd".to_string(),
                     package_id: "cadd".to_string(),
                     kind: ArtifactOutputKind::CStaticArchive,
+                    source_ids: vec![],
                 },
                 ArtifactOutputFacts {
                     id: "executable:app".to_string(),
                     package_id: "app".to_string(),
                     kind: ArtifactOutputKind::NativeExecutable,
+                    source_ids: vec![],
                 },
             ],
             runtime_requirements: vec![RuntimeRequirementFacts {
@@ -2134,6 +2227,197 @@ mod tests {
             .all(|o| o.state.is_g1_terminal()));
         let symbol = &closure.obligations["Symbol:c_add"];
         assert_eq!(symbol.state, ObligationState::Satisfied);
+    }
+
+    /// Issue #65 (B-H3, carried-forward item 1): a provider candidate
+    /// whose real source list is a two-translation-unit unity build
+    /// (the `bcm.c`-shape issue #64 measured, scaled down to two members
+    /// for a direct executable test) and whose `declared_outputs` names
+    /// one `CObject` output per translation unit (`source_ids` non-empty
+    /// on each) must produce one `CompileCObject` `RequiredAction` per
+    /// TU -- not one action covering both sources -- each discharging
+    /// its own real `SourceModule` obligation, with the archive step
+    /// depending on every one of them.
+    fn two_translation_unit_cadd_candidate() -> (PackageCandidateFacts, Vec<SourceModuleFacts>) {
+        let sources = vec![
+            SourceModuleFacts {
+                id: "c/cadd/v1/member_a.c".to_string(),
+                ecosystem: Ecosystem::C,
+                package_id: "cadd".to_string(),
+            },
+            SourceModuleFacts {
+                id: "c/cadd/v1/member_b.c".to_string(),
+                ecosystem: Ecosystem::C,
+                package_id: "cadd".to_string(),
+            },
+            SourceModuleFacts {
+                id: "c/cadd/v1/cadd.h".to_string(),
+                ecosystem: Ecosystem::C,
+                package_id: "cadd".to_string(),
+            },
+        ];
+        let candidate = PackageCandidateFacts {
+            ecosystem: Ecosystem::C,
+            package_id: "cadd".to_string(),
+            version: "1.0.0".to_string(),
+            role: Role::Target,
+            target_triple: "x86_64-unknown-linux-gnu".to_string(),
+            sources: sources.iter().map(|s| s.id.clone()).collect(),
+            declared_exports: vec![FfiExportFacts {
+                declaring_source: "c/cadd/v1/cadd.h".to_string(),
+                symbol: "c_add".to_string(),
+                abi: "C".to_string(),
+                param_count: 2,
+                return_type: "i32".to_string(),
+            }],
+            declared_constraints: vec![],
+        };
+        (candidate, sources)
+    }
+
+    /// Builds on `minimal_input`'s app/doubler/ffi shape but replaces
+    /// `cadd`'s sources/outputs with the two-TU sub-candidate shape --
+    /// `minimal_input` itself always wires the single-source `cadd.c`/
+    /// `cadd.h` pair into `input.sources`, so this rebuilds the relevant
+    /// parts directly rather than trying to graft sub-candidate outputs
+    /// onto that fixed shape.
+    fn sub_candidate_input() -> DependencyResolutionInput {
+        let (cadd_candidate, cadd_sources) = two_translation_unit_cadd_candidate();
+        let mut input = minimal_input(vec![cadd_candidate]);
+        input.sources.retain(|s| s.package_id != "cadd");
+        input.sources.extend(cadd_sources);
+        input
+            .declared_outputs
+            .retain(|o| !(o.package_id == "cadd" && o.kind == ArtifactOutputKind::CObject));
+        input.declared_outputs.push(ArtifactOutputFacts {
+            id: "object:cadd:member_a".to_string(),
+            package_id: "cadd".to_string(),
+            kind: ArtifactOutputKind::CObject,
+            source_ids: vec!["c/cadd/v1/member_a.c".to_string()],
+        });
+        input.declared_outputs.push(ArtifactOutputFacts {
+            id: "object:cadd:member_b".to_string(),
+            package_id: "cadd".to_string(),
+            kind: ArtifactOutputKind::CObject,
+            source_ids: vec!["c/cadd/v1/member_b.c".to_string()],
+        });
+        input
+    }
+
+    #[test]
+    fn a_two_translation_unit_provider_produces_one_compile_action_per_tu() {
+        let input = sub_candidate_input();
+        let closure = resolve(&input).expect("must resolve");
+        assert!(closure
+            .obligations
+            .values()
+            .all(|o| o.state.is_g1_terminal()));
+
+        let compile_actions: Vec<&RequiredAction> = closure
+            .required_actions
+            .iter()
+            .filter(|a| a.kind == RequiredActionKind::CompileCObject)
+            .collect();
+        assert_eq!(
+            compile_actions.len(),
+            2,
+            "expected one CompileCObject action per translation unit, got {compile_actions:#?}"
+        );
+
+        let member_a_action = compile_actions
+            .iter()
+            .find(|a| a.outputs == vec!["object:cadd:member_a".to_string()])
+            .expect("member_a's own compile action must exist");
+        assert_eq!(
+            member_a_action.inputs,
+            vec!["SourceModule:c/cadd/v1/member_a.c".to_string()]
+        );
+        assert_eq!(
+            member_a_action.discharges,
+            vec!["SourceModule:c/cadd/v1/member_a.c".to_string()]
+        );
+
+        let member_b_action = compile_actions
+            .iter()
+            .find(|a| a.outputs == vec!["object:cadd:member_b".to_string()])
+            .expect("member_b's own compile action must exist");
+        assert_eq!(
+            member_b_action.inputs,
+            vec!["SourceModule:c/cadd/v1/member_b.c".to_string()]
+        );
+
+        // Each TU's own SourceModule obligation must now carry the
+        // required_action reference naming its own compile action --
+        // the sub-candidate discharge target issue #65 item 1 asks for.
+        assert_eq!(
+            closure.obligations["SourceModule:c/cadd/v1/member_a.c"].required_action,
+            Some(member_a_action.id.clone())
+        );
+        assert_eq!(
+            closure.obligations["SourceModule:c/cadd/v1/member_b.c"].required_action,
+            Some(member_b_action.id.clone())
+        );
+
+        // The archive step must depend on both per-TU compile actions,
+        // not just one -- never silently dropping a member.
+        let archive_action = closure
+            .required_actions
+            .iter()
+            .find(|a| a.kind == RequiredActionKind::ArchiveStaticLibrary)
+            .expect("archive action must exist");
+        assert_eq!(
+            archive_action
+                .depends_on
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>(),
+            [member_a_action.id.clone(), member_b_action.id.clone()]
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+        );
+        assert_eq!(
+            archive_action
+                .inputs
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>(),
+            [
+                "object:cadd:member_a".to_string(),
+                "object:cadd:member_b".to_string()
+            ]
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+        );
+    }
+
+    /// Same demand-reachability invariant `the_demand_reaches_every_retained_obligation`
+    /// already checks for the whole-package shape, re-run against the
+    /// sub-candidate shape: every per-TU `SourceModule` obligation and
+    /// its own compile action must still be reachable from the root
+    /// demand through `depends_on`, never an orphaned sub-obligation.
+    #[test]
+    fn sub_candidate_shape_still_reaches_every_retained_obligation_from_the_demand() {
+        let input = sub_candidate_input();
+        let closure = resolve(&input).expect("must resolve");
+        let demand_id = "NativeExecutableDemand:app".to_string();
+        let mut reached: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut frontier = vec![demand_id.clone()];
+        while let Some(id) = frontier.pop() {
+            if !reached.insert(id.clone()) {
+                continue;
+            }
+            let obligation = closure.obligations.get(&id).unwrap_or_else(|| {
+                panic!("depends_on names '{id}', which does not exist as a real obligation")
+            });
+            frontier.extend(obligation.depends_on.iter().cloned());
+        }
+        for (id, obligation) in &closure.obligations {
+            if obligation.state.is_rejected() {
+                continue;
+            }
+            assert!(
+                reached.contains(id),
+                "retained obligation '{id}' is not reachable from the demand"
+            );
+        }
     }
 
     #[test]
