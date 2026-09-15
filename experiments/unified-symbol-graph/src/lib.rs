@@ -286,6 +286,44 @@
 //! is built to replace: not "the same pipeline, drawn differently," but
 //! removing the object-file/link-step boundary these four toolchains all
 //! independently reconstruct.
+//!
+//! ## The actual grain of an `rustc` -> LLVM call, verified from source
+//!
+//! Not one call per `.rs` file, and not one call per crate either.
+//! Confirmed directly against `compiler/rustc_monomorphize/src/partitioning.rs`
+//! (1398 lines, fetched from `rust-lang/rust`): `rustc` calls into LLVM
+//! once per **codegen unit (CGU)**, and a CGU's own membership is decided
+//! in two passes:
+//!
+//! 1. `place_mono_items` assigns each already-monomorphized item (a
+//!    concrete instantiation of a function/static, generics already
+//!    resolved to real types) to a CGU named after the **source-level
+//!    `mod` it belongs to** (Rust's own logical module tree, independent
+//!    of file boundaries -- one file can hold several `mod`s, one `mod`
+//!    can span several files via `#[path]`/submodule files), split into
+//!    exactly two CGUs per module: one for "stable" (non-generic) items,
+//!    one for "volatile" (monomorphized-generic) items. The module's own
+//!    doc comment states the reasoning directly: coarser (one CGU per
+//!    module) would let one new generic reference anywhere invalidate
+//!    the whole module's incremental cache; finer (one CGU per item)
+//!    would prevent LLVM's own cross-module inlining entirely.
+//! 2. `merge_codegen_units` then greedily merges CGUs down to
+//!    `-C codegen-units=N` (16 by default, 256 for incremental builds),
+//!    choosing merge pairs by **maximum inlined-item overlap** --
+//!    explicitly to keep LLVM from duplicating inlined-item machine code
+//!    across too many separate modules.
+//!
+//! **What this grain does and does not know about**: CGU membership is
+//! decided entirely from this one crate's own module structure and
+//! generic instantiation set -- it has no way to know, and does not try
+//! to know, which of its own symbols a *different* crate (or Nimble/C/
+//! C++ realm) will actually reference at link time. This is the same
+//! "the party that knows the whole graph (Cargo) never touches
+//! codegen, and the party doing codegen (rustc, once per crate) never
+//! sees the whole graph" split this module's own `SharedSymbolGraph`
+//! exists to remove -- CGU partitioning is a concrete instance of that
+//! split happening *inside* a single `rustc` invocation, not just
+//! between separate tool invocations.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
