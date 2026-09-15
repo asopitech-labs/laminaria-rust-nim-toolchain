@@ -227,6 +227,8 @@ LLVM内部を観測する目的は、LLVMをより細かく操作することだ
 
 実際の観測記録（MC層のfragment/fixup処理、ELF再配置の書き出し、rustcのCGU分割粒度、フロントエンド/バックエンド並列化、ThinLTO）は[LLVM内部の実測記録](llvm-internals-observed_ja.md)に記録する。
 
+「中間表現という概念そのものが必要か、削除可能か」の判定は[意味論から「中間表現」を削除する](removing-intermediate-representation_ja.md)に記録する。HIR/MIRの削除可否、`noalias`属性の再エンコードが実際のミスコンパイル(issue #31681/#84958/#54878)を引き起こしてきた実害証拠、TinyCC/QBE/Zig/V8という先行事例との比較を含む。
+
 ### Cross-language LLVM/LTO
 
 Rust/Nim-origin bitcodeの収束は一つのbaselineに格下げする。最終目的は「既存frontendが別々に生成したLLVM IRを何とかmergeする」ことではない。

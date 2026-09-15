@@ -136,6 +136,8 @@ LAMINARIAの成果物は「ビルドできる」だけでは不十分であり�
 
 `assign_layout`が現状、決定性のためだけに`SymbolId`のソート順で配置している(`experiments/unified-symbol-graph/src/lib.rs`の該当コード参照)のは、この2つの信号を使っていない**未解決の設計課題**として明記されている。これを両方使う配置関数を実装することが、問題B×Cを1つの問題として解く最初の具体的なステップになる。
 
+問題Dが要求する「汎用中間表現を経由しない」という制約自体の詳細な検証(Rust IR→LLVM IR→バイナリの実際の変換過程で何が削除可能で何が削除不可能かの一次資料+実装コード裏取り)は[意味論から「中間表現」を削除する](../02-research-areas/compiler/removing-intermediate-representation_ja.md)に記録する。
+
 ## 4. 現時点の仮説アーキテクチャ: `unified-symbol-graph`
 
 上記の問題A(エコシステム横断解決)に対する最小実装が、worktree `experiments/unified-symbol-graph/`に存在する。要点:
@@ -163,6 +165,7 @@ LAMINARIAの成果物は「ビルドできる」だけでは不十分であり�
 - [LLVM再発見研究](../02-research-areas/compiler/llvm-rediscovery-research_ja.md) — LLVM概念の再導出方法論
 - [LLVM内部の実測記録](../02-research-areas/compiler/llvm-internals-observed_ja.md) — MC層・CGU粒度・並列化・ThinLTOの実測
 - [Testable Native Artifactと第一級Test Harness](../02-research-areas/toolchains/testable-native-artifact-harness_ja.md) — target execution capability、Lane Cの責務
+- [意味論から「中間表現」を削除する](../02-research-areas/compiler/removing-intermediate-representation_ja.md) — Rust IR→LLVM IR→バイナリの詳細検証、削除可能/不可能の判定
 - issue #48 — Cargo/Nimble/C/C++の協調解決、CGU粒度、LLVM処理速度、Cranelift実測
 - issue #59 — クリティカルパス実測とmakespan/bin-packingの独立性、スケジュール×配置の同時最適化課題
 - issue #66 — mold設計哲学の評価、プラットフォーム別再配置モデルの実測
