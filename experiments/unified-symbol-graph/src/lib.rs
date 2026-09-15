@@ -92,6 +92,54 @@
 //! one `(cpu-arch, os/abi)` pair, matching rustc's own real granularity,
 //! not one dimension alone (an "ARM64 variant" or an "ELF variant" in
 //! isolation would each still conflate two independent axes).
+//!
+//! ## Declared target scope (explicit, not "all 330")
+//!
+//! This project's own stated support scope is eight of rustc's 330
+//! triples -- Linux (x86_64, ARM64), Windows (x86_64, both ABIs), macOS
+//! (ARM64 only, no x86_64/Intel), and WASM (all three current variants):
+//!
+//! - `x86_64-unknown-linux-gnu` -- ELF, verified directly in this crate
+//!   (`ElfX86_64PendingReloc`/`apply_elf_x86_64_relocations`).
+//! - `aarch64-unknown-linux-gnu` -- ELF, but AArch64 relocation fields
+//!   (`R_AARCH64_CALL26`/`JUMP26`), **not yet implemented** -- see this
+//!   module's own ARM64 Mach-O finding above for why `width: usize` as a
+//!   byte-count rectangle cannot represent a 26-bit sub-field; the same
+//!   problem applies here, independent of ELF vs. Mach-O.
+//! - `x86_64-pc-windows-gnu` -- COFF via MinGW-w64, placeholder shape
+//!   verified directly (`inspect-mingw-coff.sh`); the patch formula
+//!   itself (`apply_*_relocations` equivalent) is **not yet
+//!   implemented**, and the addend representation for
+//!   `IMAGE_REL_AMD64_REL32` still needs PE/COFF spec confirmation (see
+//!   `ElfX86_64PendingReloc`'s own doc comment).
+//! - `x86_64-pc-windows-msvc` -- COFF via the MSVC ABI specifically;
+//!   **not yet verified at all** -- this WSL2 environment's own Windows
+//!   side was checked directly and has no `cl.exe`/`link.exe` installed,
+//!   so no real `cl`-produced object has been inspected here. MinGW-w64's
+//!   own COFF output is evidence for the *object format*, not for
+//!   MSVC-specific ABI/name-mangling differences from the GNU-ABI COFF
+//!   already measured.
+//! - `aarch64-apple-darwin` -- Mach-O/ARM64, the platform this module's
+//!   own Chained Fixups/`__stubs` findings above describe; **no real
+//!   object has been compiled or inspected** (no macOS host or
+//!   Mach-O-capable cross toolchain available in this session) --
+//!   everything stated about it above is from Apple/LLVM documentation,
+//!   not this crate's own direct measurement, unlike the ELF and COFF
+//!   findings.
+//! - `wasm32-unknown-unknown`, `wasm32-wasip1`, `wasm32-wasip2` -- WASM's
+//!   own module/import/export model is structurally unlike ELF/Mach-O/COFF
+//!   relocation at the machine-code level (no fixed-width instruction
+//!   encoding to patch bytes inside; imports/exports are named module-level
+//!   entries resolved by a wasm engine, not memory addresses patched into
+//!   code) -- **entirely unexamined by this crate so far**. This is not "an
+//!   ELF variant, minus features" the way Linux/Windows/macOS share
+//!   enough (a real CPU ISA, a linker producing a flat address space) to
+//!   compare directly; it needs its own investigation from first
+//!   principles, not an extension of `ElfX86_64PendingReloc`'s own shape.
+//!
+//! x86_64/Intel macOS (`x86_64-apple-darwin`) and every other rustc
+//! target are explicitly out of scope, not merely undone -- this
+//! project does not intend to support them.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
