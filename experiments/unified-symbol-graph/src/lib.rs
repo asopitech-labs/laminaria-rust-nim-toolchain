@@ -22,6 +22,60 @@
 //! separate, independent pass), but applied one layer upstream of object
 //! files: this graph exists *instead of* one, not to describe one after
 //! the fact.
+//!
+//! ## Scope correction: no cross-platform `ElfX86_64PendingReloc`, ever
+//!
+//! An earlier version of this crate treated `ElfX86_64PendingReloc`/
+//! `apply_relocations` as if they were a platform-agnostic abstraction
+//! with an ELF-shaped implementation filled in first and a Windows/COFF
+//! variant to follow later. Direct instruction against that: generalizing
+//! the *shape* of the code-patching step before more than one real
+//! platform's own requirements are known is exactly the mistake this
+//! whole hypothesis exists to avoid repeating (GNU ld's own single-pass
+//! design became "the" abstraction other linkers inherited, long after
+//! the actual constraint that produced it -- 1970s I/O/memory limits --
+//! stopped applying). Verified directly why a shared abstraction is
+//! premature here, not merely asserted:
+//!
+//! - x86_64 ELF (Linux) and x86_64 COFF (Windows, via MinGW-w64 cross
+//!   compilation) both place a zeroed 4-byte placeholder immediately
+//!   after a `call` opcode -- similar only because both targets share
+//!   the *same CPU instruction set* (x86_64), not because object formats
+//!   converge. Relocation type names still differ
+//!   (`R_X86_64_PLT32` vs. `IMAGE_REL_AMD64_REL32`) and so does whether
+//!   an addend is explicit or implicit (unconfirmed for COFF -- see
+//!   `ElfX86_64PendingReloc`'s own doc comment).
+//! - ARM64 Mach-O (macOS on Apple Silicon) is not "ELF/COFF but
+//!   different": AArch64's own `bl`/`b` instructions encode a 26-bit
+//!   *field inside* a fixed 32-bit instruction word
+//!   (`R_AARCH64_CALL26`/`R_AARCH64_JUMP26`), not a standalone
+//!   byte-aligned 4-byte placeholder -- `ElfX86_64PendingReloc::width: usize`
+//!   (a whole-byte-count rectangle) cannot represent this at all.
+//!   Mach-O's own external-call convention additionally goes through a
+//!   `__stubs`/`__la_symbol_ptr` indirection (PLT-style) rather than a
+//!   direct placeholder in most cases, and modern macOS (12+) replaces
+//!   lazy binding with Chained Fixups (`LC_DYLD_CHAINED_FIXUPS`): dyld
+//!   walks per-segment pointer chains at process start and rewrites
+//!   pointer *table entries*, not instruction bytes -- a structurally
+//!   different repair mechanism, not a variant relocation formula.
+//! - Universal/fat Mach-O binaries are not even Mach-O objects
+//!   themselves -- Apple defines them as a thin archive format wrapping
+//!   one complete, independent Mach-O per architecture (PowerPC, x86,
+//!   x86_64, ARM64 across macOS's own multiple CPU transitions). There
+//!   is no shared "multi-architecture relocation" to model; each
+//!   architecture's own Mach-O is produced, resolved, and patched
+//!   entirely independently, then archived together as a separate,
+//!   later step outside this graph's own scope.
+//!
+//! The conclusion this crate now follows: **`ElfX86_64PendingReloc` and
+//! `apply_elf_x86_64_relocations` are named, scoped, and documented as
+//! ELF/x86_64 only** (not "the general case, ELF-flavored for now"). A Windows/COFF
+//! or macOS/Mach-O-ARM64 target needs its *own* independently-designed
+//! patching type and apply function, built from that platform's own
+//! real constraints first -- not retrofitted into this one. Only the
+//! *principle* this crate tests (a shared graph replaces a separate
+//! object-file/link pass) is meant to generalize; no single Rust type
+//! is.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -62,7 +116,7 @@ pub struct SymbolId {
 /// hypothesis has no sections to begin with.
 ///
 /// **Platform scope, verified not assumed**: this shape (offset/width/
-/// target/addend, `apply_relocations`'s own PC-relative formula) is
+/// target/addend, `apply_elf_x86_64_relocations`'s own PC-relative formula) is
 /// ELF/x86_64-specific -- confirmed by checking what `cc` actually is on
 /// each of the four real ecosystems' target platforms. On Linux, `cc`
 /// (gcc or clang) and Nim's `c`/`cpp` backends both emit ELF objects;
@@ -77,7 +131,7 @@ pub struct SymbolId {
 /// compiled by the same platform Clang -- so it is the *same* platform
 /// divergence as the C/C++ backends, not a fourth, separate case. The
 /// principle this hypothesis tests (shared graph, no separate object-file/
-/// link pass) is platform-independent; this concrete `PendingReloc`
+/// link pass) is platform-independent; this concrete `ElfX86_64PendingReloc`
 /// encoding is not, and a macOS/Mach-O (or Windows/COFF) port needs its
 /// own relocation-shape verification against real `clang`/`cl.exe`
 /// output before this crate's claims can be said to hold there.
@@ -93,15 +147,15 @@ pub struct SymbolId {
 /// addend at all, suggesting `IMAGE_REL_AMD64_REL32`'s own -4 offset is
 /// implicit in the relocation type itself rather than a caller-supplied
 /// value -- this needs confirming against the PE/COFF spec before an
-/// `apply_relocations` variant for this target is written, not assumed
+/// `apply_elf_x86_64_relocations` variant for this target is written, not assumed
 /// from this one observation. Calling convention also differs (Windows
 /// x64 passes the first two integer arguments in `edx`/`ecx`; the real
 /// System V/ELF disassembly used `edi`/`esi`) but that is a
 /// frontend-local concern (which registers a realm's own code generator
-/// emits), not something `PendingReloc`/`apply_relocations` need to
+/// emits), not something `ElfX86_64PendingReloc`/`apply_elf_x86_64_relocations` need to
 /// know about.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PendingReloc {
+pub struct ElfX86_64PendingReloc {
     /// Byte offset into `code` where the placeholder begins.
     pub offset: usize,
     /// How many bytes the placeholder occupies (4 for the 32-bit
@@ -128,7 +182,7 @@ pub struct PendingReloc {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodeBody {
     pub code: Vec<u8>,
-    pub relocations: Vec<PendingReloc>,
+    pub relocations: Vec<ElfX86_64PendingReloc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,7 +192,7 @@ pub enum AddressState {
     Unresolved,
     /// This realm's own frontend has finished this symbol's own machine
     /// code (`CodeBody`), but that code may still contain unresolved
-    /// `PendingReloc` entries referencing other boundary symbols -- this
+    /// `ElfX86_64PendingReloc` entries referencing other boundary symbols -- this
     /// state says "the bytes are ready," not "this symbol's own address
     /// is final," since final placement (where in the eventual image
     /// this code body lands) is a separate concern this hypothesis does
@@ -328,7 +382,7 @@ impl SharedSymbolGraph {
 
     /// The step that replaces a traditional linker's "apply relocations"
     /// phase: for every declared symbol's own `CodeBody`, overwrite each
-    /// `PendingReloc`'s placeholder bytes with `layout`'s resolved
+    /// `ElfX86_64PendingReloc`'s placeholder bytes with `layout`'s resolved
     /// address for that relocation's `target`, computed the same way the
     /// real `R_X86_64_PLT32` records verified against `cadd`/`app`-shaped
     /// code do (`target_address + addend - reloc_site_address`, i.e.
@@ -337,7 +391,10 @@ impl SharedSymbolGraph {
     /// resolved rather than silently leaving a placeholder unpatched --
     /// a patched-looking binary with a live zero placeholder is a
     /// miscompile, never an acceptable partial result.
-    pub fn apply_relocations(&self, layout: &LayoutAssignment) -> Result<PatchedImage, LinkError> {
+    pub fn apply_elf_x86_64_relocations(
+        &self,
+        layout: &LayoutAssignment,
+    ) -> Result<PatchedImage, LinkError> {
         let nodes = self.nodes.read().expect("nodes lock poisoned");
         let mut entries: Vec<(&SymbolId, &SymbolNode)> = nodes.iter().collect();
         entries.sort_by(|a, b| a.0.cmp(b.0));
@@ -391,9 +448,9 @@ pub struct LayoutAssignment {
 
 #[derive(Debug, Clone)]
 pub struct PatchedImage {
-    /// Each symbol's own code, with every `PendingReloc` placeholder
+    /// Each symbol's own code, with every `ElfX86_64PendingReloc` placeholder
     /// already overwritten by its resolved value. Never contains an
-    /// un-patched all-zero placeholder for a relocation `apply_relocations`
+    /// un-patched all-zero placeholder for a relocation `apply_elf_x86_64_relocations`
     /// itself reported success for.
     pub code: HashMap<SymbolId, Vec<u8>>,
 }
@@ -418,7 +475,7 @@ pub enum LinkError {
     /// relocation verified against real `cc -c` output; any other width
     /// is refused rather than silently truncated/extended.
     UnsupportedRelocationWidth { in_symbol: SymbolId, width: usize },
-    /// A `PendingReloc`'s offset+width falls outside its own `CodeBody`'s
+    /// A `ElfX86_64PendingReloc`'s offset+width falls outside its own `CodeBody`'s
     /// actual byte length -- a producer bug, never patched around.
     RelocationOutOfBounds { in_symbol: SymbolId, offset: usize },
 }
@@ -460,14 +517,14 @@ mod tests {
     /// `R_X86_64_PLT32` relocations reproduced exactly as `objdump -r`
     /// reported them (offset 0xf -> cpp_max_i32-0x4, offset 0x1b ->
     /// c_add-0x4). See `inspect-caller.sh`.
-    fn real_compute_code_and_relocs() -> (Vec<u8>, Vec<PendingReloc>) {
+    fn real_compute_code_and_relocs() -> (Vec<u8>, Vec<ElfX86_64PendingReloc>) {
         let code = vec![
             0x55, 0x48, 0x89, 0xe5, 0xbe, 0x04, 0x00, 0x00, 0x00, 0xbf, 0x03, 0x00, 0x00, 0x00,
             0xe8, 0x00, 0x00, 0x00, 0x00, 0xbe, 0x01, 0x00, 0x00, 0x00, 0x89, 0xc7, 0xe8, 0x00,
             0x00, 0x00, 0x00, 0x5d, 0xc3,
         ];
         let relocs = vec![
-            PendingReloc {
+            ElfX86_64PendingReloc {
                 offset: 0xf,
                 width: 4,
                 target: SymbolId {
@@ -476,7 +533,7 @@ mod tests {
                 },
                 addend: -4,
             },
-            PendingReloc {
+            ElfX86_64PendingReloc {
                 offset: 0x1b,
                 width: 4,
                 target: SymbolId {
@@ -675,7 +732,7 @@ mod tests {
     /// The real end-to-end case this crate's whole hypothesis exists to
     /// prove: `app`'s `compute` function -- with its two real, unresolved
     /// `call` placeholders -- gets its final machine code produced by
-    /// `assign_layout` + `apply_relocations` alone, no object file and no
+    /// `assign_layout` + `apply_elf_x86_64_relocations` alone, no object file and no
     /// separate linker invocation. Every provider symbol's real machine
     /// code (`c_add`, plus stand-in bodies for `cpp_max_i32`/
     /// `nim_double`) is declared first; `compute` (owned by `Cargo`,
@@ -684,7 +741,8 @@ mod tests {
     /// bytes that satisfy the exact formula a real ELF loader/linker
     /// would use.
     #[test]
-    fn apply_relocations_patches_real_call_placeholders_to_the_correct_pc_relative_values() {
+    fn apply_elf_x86_64_relocations_patches_real_call_placeholders_to_the_correct_pc_relative_values(
+    ) {
         let graph = SharedSymbolGraph::new();
         graph
             .declare_symbol(
@@ -735,7 +793,7 @@ mod tests {
 
         let layout = graph.assign_layout();
         let patched = graph
-            .apply_relocations(&layout)
+            .apply_elf_x86_64_relocations(&layout)
             .expect("every relocation target was declared");
 
         let compute_id = SymbolId {
@@ -745,7 +803,7 @@ mod tests {
         let patched_compute = &patched.code[&compute_id];
 
         // Manually recompute what the real linker formula must produce,
-        // independent of apply_relocations's own implementation, so this
+        // independent of apply_elf_x86_64_relocations's own implementation, so this
         // assertion cannot pass merely by mirroring a bug.
         let compute_addr = layout.addresses[&compute_id];
         let cpp_addr = layout.addresses[&SymbolId {
@@ -783,7 +841,7 @@ mod tests {
     /// silently leave the placeholder's all-zero bytes in place, which
     /// would look like a successfully patched (but wrong) binary.
     #[test]
-    fn apply_relocations_refuses_to_silently_leave_an_undefined_reference_unpatched() {
+    fn apply_elf_x86_64_relocations_refuses_to_silently_leave_an_undefined_reference_unpatched() {
         let graph = SharedSymbolGraph::new();
         let (compute_code, compute_relocs) = real_compute_code_and_relocs();
         graph
@@ -804,7 +862,7 @@ mod tests {
         // cpp_max_i32 and c_add are deliberately never declared.
 
         let layout = graph.assign_layout();
-        let result = graph.apply_relocations(&layout);
+        let result = graph.apply_elf_x86_64_relocations(&layout);
         assert!(matches!(
             result,
             Err(LinkError::UnresolvedRelocationTarget { .. })
