@@ -2,7 +2,7 @@
 
 ## 位置づけ
 
-本書は[当面の研究ゴール](../../near-term-research-program_ja.md)から派生するLane Bの基礎研究である。調査日は2026-09-13。Lane Bの問いは「並列buildを作ること」ではない。Lane Aが定義した正しいartifact closureを得るために、どの計算を発見し、避け、再利用し、再計算し、どの順序と場所で実行し、どの中間値を保持・破棄するかを、時間・CPU・peak memory・I/O・転送量の制約下で決めることである。
+本書は[当面の研究ゴール](../../near-term-research-program_ja.md)から派生するLane Bの基礎研究である。調査日は2026-09-13。§2の先行研究地図を、型システム／静的解析による早期到達不能判定とパッケージ解決レベルの早期枝刈り実装限界の観点から補強する調査は[上流早期枝刈りの先行研究調査](upstream-early-pruning-landscape_ja.md)にある。Lane Bの問いは「並列buildを作ること」ではない。Lane Aが定義した正しいartifact closureを得るために、どの計算を発見し、避け、再利用し、再計算し、どの順序と場所で実行し、どの中間値を保持・破棄するかを、時間・CPU・peak memory・I/O・転送量の制約下で決めることである。
 
 最重要の区別は、依存関係の意味と、依存関係を評価する算法を混同しないことである。Cargo/Nimble/C/C++の関係を一つのgraphへ載せても、それだけでは高速でも省メモリでもない。逆に高速なaction schedulerを持っても、graphがpackage/source/IR/ABIの真の依存を欠けば誤った結果を速く作るだけである。
 
