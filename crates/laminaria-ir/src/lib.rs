@@ -49,6 +49,7 @@ pub mod c_header_discover;
 pub mod cfg_predicate;
 pub mod diagnostics;
 pub mod discover;
+pub mod ffi_reachability;
 pub mod foreign_discover;
 pub mod interpreter;
 pub mod nim_export_discover;
