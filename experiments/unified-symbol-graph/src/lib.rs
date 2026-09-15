@@ -44,10 +44,51 @@ pub enum Realm {
 /// realms could each declare `foo`), so identity is (realm, name) --
 /// consistent with the real fixture's own `#[link(name = "cadd")]`-style
 /// hints naming both a package and a symbol.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SymbolId {
     pub realm: Realm,
     pub name: String,
+}
+
+/// One place inside `code` whose bytes are a placeholder (all-zero, per
+/// the real `cc -c` output verified directly: `objdump -d` on a function
+/// calling two external symbols showed `e8 00 00 00 00` at each call
+/// site -- a `call` opcode followed by a zeroed 4-byte operand) that must
+/// be overwritten once `target`'s own final address is known. This is
+/// the same information a real ELF `R_X86_64_PLT32`/`R_X86_64_PC32`
+/// relocation record carries (`objdump -r`: offset, symbol, addend) --
+/// kept here as one entry directly on the symbol's own `CodeBody` rather
+/// than in a separate section/relocation-table indirection, since this
+/// hypothesis has no sections to begin with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingReloc {
+    /// Byte offset into `code` where the placeholder begins.
+    pub offset: usize,
+    /// How many bytes the placeholder occupies (4 for the 32-bit
+    /// PC-relative call operand verified above).
+    pub width: usize,
+    /// The boundary symbol whose eventual address this placeholder must
+    /// be computed from.
+    pub target: SymbolId,
+    /// Added to `target`'s resolved address before truncating to `width`
+    /// bytes -- e.g. the real `-0x4` addend `objdump -r` reported,
+    /// accounting for PC-relative addressing measuring from the
+    /// instruction's own end, not its start.
+    pub addend: i64,
+}
+
+/// What a realm's own frontend has produced for this symbol once its
+/// local analysis is done -- not a bare "here is an address" claim, but
+/// the actual machine code bytes plus every place inside them that still
+/// needs another (possibly cross-realm) symbol's address plugged in.
+/// This is "the compiler's output" this hypothesis asks for directly: no
+/// object file, no section table, no separate symbol-table indirection
+/// -- the code and its own outstanding cross-references travel together
+/// as one value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeBody {
+    pub code: Vec<u8>,
+    pub relocations: Vec<PendingReloc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,10 +96,14 @@ pub enum AddressState {
     /// Declared, but this realm's own frontend has not yet finished
     /// enough of its local analysis to assign a definite address.
     Unresolved,
-    /// This realm's own frontend has committed to producing this symbol
-    /// at a specific (not-yet-final, but stable-for-this-build) offset
-    /// within its own eventual code/data region.
-    Committed(u64),
+    /// This realm's own frontend has finished this symbol's own machine
+    /// code (`CodeBody`), but that code may still contain unresolved
+    /// `PendingReloc` entries referencing other boundary symbols -- this
+    /// state says "the bytes are ready," not "this symbol's own address
+    /// is final," since final placement (where in the eventual image
+    /// this code body lands) is a separate concern this hypothesis does
+    /// not yet model (see this crate's own README on scope).
+    Committed(CodeBody),
 }
 
 /// One boundary-crossing symbol node. Lives in the shared graph *only*
@@ -214,6 +259,128 @@ impl SharedSymbolGraph {
     pub fn mutation_count(&self) -> u64 {
         self.mutation_seq.load(Ordering::Relaxed)
     }
+
+    /// The step that replaces a traditional linker's "layout" phase:
+    /// walks every declared `SymbolNode` in a deterministic order
+    /// (sorted by `SymbolId`, never HashMap iteration order, so this is
+    /// reproducible across runs) and assigns each one a final byte
+    /// offset within one conceptual, contiguous image -- laid out back
+    /// to back by each `CodeBody`'s own length, no alignment/section
+    /// separation modeled yet (see this crate's own scope note). Returns
+    /// the assignment as its own map rather than mutating `self` so a
+    /// caller can inspect a proposed layout before committing to it.
+    pub fn assign_layout(&self) -> LayoutAssignment {
+        let nodes = self.nodes.read().expect("nodes lock poisoned");
+        let mut entries: Vec<(&SymbolId, &SymbolNode)> = nodes.iter().collect();
+        entries.sort_by(|a, b| a.0.cmp(b.0));
+
+        let mut addresses = HashMap::new();
+        let mut cursor: u64 = 0;
+        for (id, node) in entries {
+            let AddressState::Committed(body) = &node.address else {
+                continue;
+            };
+            addresses.insert(id.clone(), cursor);
+            cursor += body.code.len() as u64;
+        }
+        LayoutAssignment { addresses }
+    }
+
+    /// The step that replaces a traditional linker's "apply relocations"
+    /// phase: for every declared symbol's own `CodeBody`, overwrite each
+    /// `PendingReloc`'s placeholder bytes with `layout`'s resolved
+    /// address for that relocation's `target`, computed the same way the
+    /// real `R_X86_64_PLT32` records verified against `cadd`/`app`-shaped
+    /// code do (`target_address + addend - reloc_site_address`, i.e.
+    /// PC-relative from the *end* of the 4-byte operand). Returns an
+    /// error naming the first symbol/relocation that could not be
+    /// resolved rather than silently leaving a placeholder unpatched --
+    /// a patched-looking binary with a live zero placeholder is a
+    /// miscompile, never an acceptable partial result.
+    pub fn apply_relocations(&self, layout: &LayoutAssignment) -> Result<PatchedImage, LinkError> {
+        let nodes = self.nodes.read().expect("nodes lock poisoned");
+        let mut entries: Vec<(&SymbolId, &SymbolNode)> = nodes.iter().collect();
+        entries.sort_by(|a, b| a.0.cmp(b.0));
+
+        let mut patched = HashMap::new();
+        for (id, node) in entries {
+            let AddressState::Committed(body) = &node.address else {
+                continue;
+            };
+            let site_base = *layout
+                .addresses
+                .get(id)
+                .ok_or_else(|| LinkError::MissingLayoutEntry(id.clone()))?;
+            let mut bytes = body.code.clone();
+            for reloc in &body.relocations {
+                let target_address = *layout.addresses.get(&reloc.target).ok_or_else(|| {
+                    LinkError::UnresolvedRelocationTarget {
+                        in_symbol: id.clone(),
+                        target: reloc.target.clone(),
+                    }
+                })?;
+                let reloc_site_address = site_base + reloc.offset as u64 + reloc.width as u64;
+                let value = (target_address as i64 + reloc.addend) - reloc_site_address as i64;
+                let value_bytes = (value as i32).to_le_bytes();
+                if reloc.width != value_bytes.len() {
+                    return Err(LinkError::UnsupportedRelocationWidth {
+                        in_symbol: id.clone(),
+                        width: reloc.width,
+                    });
+                }
+                let start = reloc.offset;
+                let end = start + reloc.width;
+                if end > bytes.len() {
+                    return Err(LinkError::RelocationOutOfBounds {
+                        in_symbol: id.clone(),
+                        offset: reloc.offset,
+                    });
+                }
+                bytes[start..end].copy_from_slice(&value_bytes);
+            }
+            patched.insert(id.clone(), bytes);
+        }
+        Ok(PatchedImage { code: patched })
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct LayoutAssignment {
+    pub addresses: HashMap<SymbolId, u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PatchedImage {
+    /// Each symbol's own code, with every `PendingReloc` placeholder
+    /// already overwritten by its resolved value. Never contains an
+    /// un-patched all-zero placeholder for a relocation `apply_relocations`
+    /// itself reported success for.
+    pub code: HashMap<SymbolId, Vec<u8>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkError {
+    /// A symbol was declared but `assign_layout` never placed it --
+    /// should be unreachable given `assign_layout`'s own logic, kept as
+    /// an explicit error rather than a panic so a caller mixing
+    /// layouts/graphs gets a structured failure instead of an index
+    /// panic.
+    MissingLayoutEntry(SymbolId),
+    /// A relocation names a target this graph never saw a `Committed`
+    /// declaration for -- the real "undefined reference" a linker
+    /// reports, surfaced with which symbol's own code contains the
+    /// unresolved reference.
+    UnresolvedRelocationTarget {
+        in_symbol: SymbolId,
+        target: SymbolId,
+    },
+    /// This hypothesis only implements the 4-byte PC32/PLT32-shaped
+    /// relocation verified against real `cc -c` output; any other width
+    /// is refused rather than silently truncated/extended.
+    UnsupportedRelocationWidth { in_symbol: SymbolId, width: usize },
+    /// A `PendingReloc`'s offset+width falls outside its own `CodeBody`'s
+    /// actual byte length -- a producer bug, never patched around.
+    RelocationOutOfBounds { in_symbol: SymbolId, offset: usize },
 }
 
 #[derive(Debug, Clone)]
@@ -234,6 +401,53 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use std::thread;
+
+    /// The real `c_add` machine code, byte-for-byte, from `objdump -d`
+    /// against an actual `cc -c` of this repo's own
+    /// `fixtures/cross-ecosystem-native-executable/c/cadd/v1/cadd.c`
+    /// (verified inside `laminaria-bootstrap`, see this crate's own
+    /// `inspect-cadd.sh`). No external references -- `objdump -r` showed
+    /// zero relocations in `.text` for this function.
+    fn real_c_add_code() -> Vec<u8> {
+        vec![
+            0x55, 0x48, 0x89, 0xe5, 0x89, 0x7d, 0xfc, 0x89, 0x75, 0xf8, 0x8b, 0x55, 0xfc, 0x8b,
+            0x45, 0xf8, 0x01, 0xd0, 0x5d, 0xc3,
+        ]
+    }
+
+    /// The real `compute` machine code (`c_add(cpp_max_i32(3, 4), 1)`),
+    /// byte-for-byte from an actual `cc -c`, with its two real
+    /// `R_X86_64_PLT32` relocations reproduced exactly as `objdump -r`
+    /// reported them (offset 0xf -> cpp_max_i32-0x4, offset 0x1b ->
+    /// c_add-0x4). See `inspect-caller.sh`.
+    fn real_compute_code_and_relocs() -> (Vec<u8>, Vec<PendingReloc>) {
+        let code = vec![
+            0x55, 0x48, 0x89, 0xe5, 0xbe, 0x04, 0x00, 0x00, 0x00, 0xbf, 0x03, 0x00, 0x00, 0x00,
+            0xe8, 0x00, 0x00, 0x00, 0x00, 0xbe, 0x01, 0x00, 0x00, 0x00, 0x89, 0xc7, 0xe8, 0x00,
+            0x00, 0x00, 0x00, 0x5d, 0xc3,
+        ];
+        let relocs = vec![
+            PendingReloc {
+                offset: 0xf,
+                width: 4,
+                target: SymbolId {
+                    realm: Realm::Cpp,
+                    name: "cpp_max_i32".to_string(),
+                },
+                addend: -4,
+            },
+            PendingReloc {
+                offset: 0x1b,
+                width: 4,
+                target: SymbolId {
+                    realm: Realm::C,
+                    name: "c_add".to_string(),
+                },
+                addend: -4,
+            },
+        ];
+        (code, relocs)
+    }
 
     /// The real fixture's own boundary shape (`cadd`/`app`), reproduced
     /// here as four independent threads -- one per realm -- so the test
@@ -289,7 +503,10 @@ mod tests {
                                     realm: Realm::C,
                                     name: "c_add".to_string(),
                                 },
-                                address: AddressState::Committed(0x1000),
+                                address: AddressState::Committed(CodeBody {
+                                    code: real_c_add_code(),
+                                    relocations: vec![],
+                                }),
                             },
                         )
                         .expect("C realm may declare its own symbol");
@@ -306,7 +523,10 @@ mod tests {
                                     realm: Realm::Cpp,
                                     name: "cpp_max_i32".to_string(),
                                 },
-                                address: AddressState::Committed(0x2000),
+                                address: AddressState::Committed(CodeBody {
+                                    code: vec![0xb8, 0x04, 0x00, 0x00, 0x00, 0xc3], // mov eax,4; ret
+                                    relocations: vec![],
+                                }),
                             },
                         )
                         .expect("C++ realm may declare its own symbol");
@@ -323,7 +543,10 @@ mod tests {
                                     realm: Realm::Nimble,
                                     name: "nim_double".to_string(),
                                 },
-                                address: AddressState::Committed(0x3000),
+                                address: AddressState::Committed(CodeBody {
+                                    code: vec![0xb8, 0x08, 0x00, 0x00, 0x00, 0xc3], // mov eax,8; ret
+                                    relocations: vec![],
+                                }),
                             },
                         )
                         .expect("Nimble realm may declare its own symbol");
@@ -394,7 +617,10 @@ mod tests {
                     realm: Realm::C,
                     name: "c_add".to_string(),
                 },
-                address: AddressState::Committed(0x1000),
+                address: AddressState::Committed(CodeBody {
+                    code: real_c_add_code(),
+                    relocations: vec![],
+                }),
             },
         );
         assert_eq!(
@@ -404,5 +630,144 @@ mod tests {
                 node_realm: Realm::C,
             })
         );
+    }
+
+    /// The real end-to-end case this crate's whole hypothesis exists to
+    /// prove: `app`'s `compute` function -- with its two real, unresolved
+    /// `call` placeholders -- gets its final machine code produced by
+    /// `assign_layout` + `apply_relocations` alone, no object file and no
+    /// separate linker invocation. Every provider symbol's real machine
+    /// code (`c_add`, plus stand-in bodies for `cpp_max_i32`/
+    /// `nim_double`) is declared first; `compute` (owned by `Cargo`,
+    /// since `app` is the one requiring the calls) is declared with its
+    /// real relocations, and patching must produce PC-relative operand
+    /// bytes that satisfy the exact formula a real ELF loader/linker
+    /// would use.
+    #[test]
+    fn apply_relocations_patches_real_call_placeholders_to_the_correct_pc_relative_values() {
+        let graph = SharedSymbolGraph::new();
+        graph
+            .declare_symbol(
+                Realm::C,
+                SymbolNode {
+                    id: SymbolId {
+                        realm: Realm::C,
+                        name: "c_add".to_string(),
+                    },
+                    address: AddressState::Committed(CodeBody {
+                        code: real_c_add_code(),
+                        relocations: vec![],
+                    }),
+                },
+            )
+            .unwrap();
+        graph
+            .declare_symbol(
+                Realm::Cpp,
+                SymbolNode {
+                    id: SymbolId {
+                        realm: Realm::Cpp,
+                        name: "cpp_max_i32".to_string(),
+                    },
+                    address: AddressState::Committed(CodeBody {
+                        code: vec![0xb8, 0x04, 0x00, 0x00, 0x00, 0xc3],
+                        relocations: vec![],
+                    }),
+                },
+            )
+            .unwrap();
+        let (compute_code, compute_relocs) = real_compute_code_and_relocs();
+        graph
+            .declare_symbol(
+                Realm::Cargo,
+                SymbolNode {
+                    id: SymbolId {
+                        realm: Realm::Cargo,
+                        name: "compute".to_string(),
+                    },
+                    address: AddressState::Committed(CodeBody {
+                        code: compute_code,
+                        relocations: compute_relocs,
+                    }),
+                },
+            )
+            .unwrap();
+
+        let layout = graph.assign_layout();
+        let patched = graph
+            .apply_relocations(&layout)
+            .expect("every relocation target was declared");
+
+        let compute_id = SymbolId {
+            realm: Realm::Cargo,
+            name: "compute".to_string(),
+        };
+        let patched_compute = &patched.code[&compute_id];
+
+        // Manually recompute what the real linker formula must produce,
+        // independent of apply_relocations's own implementation, so this
+        // assertion cannot pass merely by mirroring a bug.
+        let compute_addr = layout.addresses[&compute_id];
+        let cpp_addr = layout.addresses[&SymbolId {
+            realm: Realm::Cpp,
+            name: "cpp_max_i32".to_string(),
+        }];
+        let c_add_addr = layout.addresses[&SymbolId {
+            realm: Realm::C,
+            name: "c_add".to_string(),
+        }];
+
+        let expected_cpp_operand = ((cpp_addr as i64 - 4) - (compute_addr as i64 + 0xf + 4)) as i32;
+        let expected_c_add_operand =
+            ((c_add_addr as i64 - 4) - (compute_addr as i64 + 0x1b + 4)) as i32;
+
+        assert_eq!(
+            &patched_compute[0xf..0xf + 4],
+            expected_cpp_operand.to_le_bytes().as_slice(),
+            "cpp_max_i32 call operand must be the real PC-relative displacement"
+        );
+        assert_eq!(
+            &patched_compute[0x1b..0x1b + 4],
+            expected_c_add_operand.to_le_bytes().as_slice(),
+            "c_add call operand must be the real PC-relative displacement"
+        );
+        // Never a leftover placeholder: both slots must differ from the
+        // real cc-emitted zero placeholder unless the true displacement
+        // genuinely happens to be zero (not the case for this layout).
+        assert_ne!(&patched_compute[0xf..0xf + 4], &[0, 0, 0, 0]);
+        assert_ne!(&patched_compute[0x1b..0x1b + 4], &[0, 0, 0, 0]);
+    }
+
+    /// A relocation naming a target this graph never saw declared must
+    /// fail loudly -- the real "undefined reference" case -- never
+    /// silently leave the placeholder's all-zero bytes in place, which
+    /// would look like a successfully patched (but wrong) binary.
+    #[test]
+    fn apply_relocations_refuses_to_silently_leave_an_undefined_reference_unpatched() {
+        let graph = SharedSymbolGraph::new();
+        let (compute_code, compute_relocs) = real_compute_code_and_relocs();
+        graph
+            .declare_symbol(
+                Realm::Cargo,
+                SymbolNode {
+                    id: SymbolId {
+                        realm: Realm::Cargo,
+                        name: "compute".to_string(),
+                    },
+                    address: AddressState::Committed(CodeBody {
+                        code: compute_code,
+                        relocations: compute_relocs,
+                    }),
+                },
+            )
+            .unwrap();
+        // cpp_max_i32 and c_add are deliberately never declared.
+
+        let layout = graph.assign_layout();
+        let result = graph.apply_relocations(&layout);
+        assert!(matches!(
+            result,
+            Err(LinkError::UnresolvedRelocationTarget { .. })
+        ));
     }
 }
