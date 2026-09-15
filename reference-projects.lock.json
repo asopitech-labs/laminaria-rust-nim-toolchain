@@ -20,6 +20,7 @@
     {"name": "nx", "url": "https://github.com/nrwl/nx.git", "revision": "9e9dbb256b7ad774fc58b22b991fc785ae03fd9e"},
     {"name": "pants", "url": "https://github.com/pantsbuild/pants.git", "revision": "b04b46fa03f331d4eecb0297643284811babdf79"},
     {"name": "rust", "url": "https://github.com/rust-lang/rust.git", "revision": "55c4dfed758e741620e3320ed472ff5c4140856a"},
-    {"name": "rustc-perf", "url": "https://github.com/rust-lang/rustc-perf.git", "revision": "9fab1ec75a348ee9cd503d4d1de0011248ea3443"}
+    {"name": "rustc-perf", "url": "https://github.com/rust-lang/rustc-perf.git", "revision": "9fab1ec75a348ee9cd503d4d1de0011248ea3443"},
+    {"name": "rustc_codegen_cranelift", "url": "https://github.com/rust-lang/rustc_codegen_cranelift.git", "revision": "69ff191437d6f6c1ed94d4dc63b8d13b80380a37"}
   ]
 }
