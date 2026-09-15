@@ -1348,14 +1348,25 @@ pub struct ExpansionStats {
 /// `input.demand_entry_point`: the demand's own package (and its
 /// sources), plus every [`FfiRequirementFacts::expected_provider_package`]
 /// declared by a requirement whose `declaring_source` is itself
-/// reachable (and that provider's own sources). A single fixed-point
-/// pass suffices for this fixture's own graph shape (every FFI
-/// requirement's `declaring_source` is the demand package itself, never
-/// a transitive provider-of-a-provider); returning both sets (rather
-/// than recomputing `reachable_source_ids` a second time from
-/// `reachable_package_ids` at each of `resolve_demand_driven`'s several
-/// call sites) keeps the two collections guaranteed consistent with each
-/// other by construction, not just by convention.
+/// reachable (and that provider's own sources) -- transitively: issue
+/// #65's carried-forward item 5, a provider whose own FFI requirements
+/// pull in a further, not-yet-considered provider
+/// (provider-of-a-provider), needs more than one pass over
+/// `input.ffi_requirements` when that requirement is not the first one
+/// visited whose `declaring_source` happens to already be reachable
+/// (`demand_driven_reaches_a_provider_of_a_provider` is the direct
+/// executable evidence: a single forward pass over `ffi_requirements`
+/// misses `cadd-helper` when the `cadd -> cadd-helper` requirement
+/// sorts before the `app -> cadd` requirement that first makes `cadd`'s
+/// own source reachable). This loops over `input.ffi_requirements`
+/// until one full pass adds nothing new to either set -- true
+/// fixed-point reachability, not the single-pass approximation that
+/// only happened to suffice for this fixture's own graph shape before
+/// issue #65. Returning both sets (rather than recomputing
+/// `reachable_source_ids` a second time from `reachable_package_ids` at
+/// each of `resolve_demand_driven`'s several call sites) keeps the two
+/// collections guaranteed consistent with each other by construction,
+/// not just by convention.
 fn reachable_package_and_source_ids(
     input: &DependencyResolutionInput,
 ) -> (
@@ -1370,17 +1381,24 @@ fn reachable_package_and_source_ids(
         .filter(|s| reachable_packages.contains(s.package_id.as_str()))
         .map(|s| s.id.as_str())
         .collect();
-    for req in &input.ffi_requirements {
-        if reachable_sources.contains(req.declaring_source.as_str())
-            && reachable_packages.insert(req.expected_provider_package.as_str())
-        {
-            reachable_sources.extend(
-                input
-                    .sources
-                    .iter()
-                    .filter(|s| s.package_id == req.expected_provider_package)
-                    .map(|s| s.id.as_str()),
-            );
+    loop {
+        let mut changed = false;
+        for req in &input.ffi_requirements {
+            if reachable_sources.contains(req.declaring_source.as_str())
+                && reachable_packages.insert(req.expected_provider_package.as_str())
+            {
+                reachable_sources.extend(
+                    input
+                        .sources
+                        .iter()
+                        .filter(|s| s.package_id == req.expected_provider_package)
+                        .map(|s| s.id.as_str()),
+                );
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
         }
     }
     (reachable_packages, reachable_sources)
@@ -2901,6 +2919,92 @@ mod tests {
             serde_json::to_string(&eager_on_reachable_only).unwrap(),
             serde_json::to_string(&demand_driven).unwrap(),
             "pruning an unreachable candidate must not change the retained closure"
+        );
+    }
+
+    /// Issue #65 (carried-forward item 5): a provider-of-provider chain
+    /// -- `cadd` (a real provider, selected because `app` requires
+    /// `c_add`) itself declares a real FFI requirement for `helper_fn`,
+    /// satisfied only by a second, not-otherwise-reachable provider
+    /// package (`cadd-helper`). `reachable_package_and_source_ids` must
+    /// still admit `cadd-helper` into the reachable set even though its
+    /// own requirement's `declaring_source` (one of `cadd`'s own source
+    /// files) only becomes reachable *during* the same pass that walks
+    /// `input.ffi_requirements` -- this is exactly the "reachability
+    /// beyond one fixed-point pass" issue #65 names, reproduced by
+    /// deliberately placing the `cadd -> cadd-helper` requirement
+    /// *before* the `app -> cadd` requirement in `ffi_requirements`, so
+    /// a single forward pass over the vector (rather than a real
+    /// fixed-point loop) would visit the `cadd`-declared requirement
+    /// while `cadd`'s own source is not yet reachable and never revisit
+    /// it afterward.
+    #[test]
+    fn demand_driven_reaches_a_provider_of_a_provider() {
+        let mut input = minimal_input(vec![cadd_candidate(
+            "1.0.0",
+            "c_add",
+            "x86_64-unknown-linux-gnu",
+            Role::Target,
+        )]);
+
+        input.sources.push(SourceModuleFacts {
+            id: "c/cadd-helper/v1/helper.c".to_string(),
+            ecosystem: Ecosystem::C,
+            package_id: "cadd-helper".to_string(),
+        });
+        input.package_candidates.push(PackageCandidateFacts {
+            ecosystem: Ecosystem::C,
+            package_id: "cadd-helper".to_string(),
+            version: "1.0.0".to_string(),
+            role: Role::Target,
+            target_triple: "x86_64-unknown-linux-gnu".to_string(),
+            sources: vec!["c/cadd-helper/v1/helper.c".to_string()],
+            declared_exports: vec![FfiExportFacts {
+                declaring_source: "c/cadd-helper/v1/helper.c".to_string(),
+                symbol: "helper_fn".to_string(),
+                abi: "C".to_string(),
+                param_count: 0,
+                return_type: "i32".to_string(),
+            }],
+            declared_constraints: vec![],
+        });
+
+        // Deliberately inserted at the *front* of ffi_requirements: a
+        // single forward pass reaches this entry before `cadd`'s own
+        // source (`c/cadd/v1/cadd.c`, declared reachable only once the
+        // `app -> cadd` requirement further down the vector is
+        // processed) is in `reachable_sources` yet.
+        input.ffi_requirements.insert(
+            0,
+            FfiRequirementFacts {
+                declaring_source: "c/cadd/v1/cadd.c".to_string(),
+                symbol: "helper_fn".to_string(),
+                abi: "C".to_string(),
+                param_count: 0,
+                return_type: "i32".to_string(),
+                expected_provider_package: "cadd-helper".to_string(),
+            },
+        );
+
+        let (demand_driven, stats) =
+            resolve_demand_driven(&input).expect("E1 must reach the provider-of-provider");
+        assert_eq!(
+            stats.package_candidates_considered, stats.package_candidates_total,
+            "cadd-helper is reachable through cadd, not unreachable -- nothing should be pruned"
+        );
+        assert!(
+            demand_driven
+                .obligations
+                .keys()
+                .any(|id| id.contains("cadd-helper")),
+            "the provider-of-provider (cadd-helper) must be reachable and appear in the closure"
+        );
+
+        let eager = resolve(&input).expect("E0 must resolve the same input");
+        assert_eq!(
+            serde_json::to_string(&eager).unwrap(),
+            serde_json::to_string(&demand_driven).unwrap(),
+            "E1 must reach exactly what E0 reaches for a provider-of-provider chain"
         );
     }
 }
