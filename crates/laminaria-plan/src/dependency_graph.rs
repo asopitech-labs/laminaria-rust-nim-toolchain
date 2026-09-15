@@ -3163,4 +3163,60 @@ mod tests {
         // not a placeholder zero.
         assert_eq!(stats.sub_candidate_prunable_sources, 1);
     }
+
+    /// Issue #65 (carried-forward item 4, B-H4 obligation-aware
+    /// scheduling) reconnaissance: when two independent obligations
+    /// (`doubler`'s `nim_double` requirement and `cadd`'s `c_add`
+    /// requirement) would *both* fail, `resolve` reports only whichever
+    /// one its own fixed, undocumented `input.ffi_requirements` order
+    /// happens to reach first (`resolve_provider_for_requirement`'s
+    /// `?`-propagation aborts the whole function on the first
+    /// `GraphRejection`, never continuing to check the remaining
+    /// requirements). Issue #65's own B-H4 framing -- "order obligation
+    /// resolution to maximize information gained toward resolving
+    /// still-`Unresolved` obligations, not to minimize critical-path
+    /// wall time in isolation" -- names exactly this gap: `resolve`
+    /// today has no ordering *choice* at all (it is a fixed input-order
+    /// walk, real fail-fast, not fail-fast-by-design), so there is
+    /// nothing yet to schedule for information value. Reordering
+    /// `input.ffi_requirements` (`doubler`'s failing requirement moved
+    /// after `cadd`'s) flips which single failure is reported -- direct,
+    /// measured evidence that today's `resolve` output depends on input
+    /// order for which failure a caller learns about, not on any
+    /// information-maximizing choice.
+    #[test]
+    fn resolve_reports_only_the_first_of_two_simultaneously_failing_requirements() {
+        let mut input = minimal_input(vec![cadd_candidate(
+            "2.0.0",
+            "c_add_v2", // wrong symbol name -> cadd's own requirement fails too
+            "x86_64-unknown-linux-gnu",
+            Role::Target,
+        )]);
+        // Break doubler's own declared export so its requirement fails
+        // as well -- both `nim_double` and `c_add` are now genuinely
+        // unsatisfiable in this single input.
+        for candidate in &mut input.package_candidates {
+            if candidate.package_id == "doubler" {
+                candidate.declared_exports[0].symbol = "nim_double_v2".to_string();
+            }
+        }
+
+        let doubler_first = resolve(&input).expect_err("both requirements must fail");
+        assert_eq!(
+            doubler_first.obligation_id, "Symbol:nim_double",
+            "with doubler's requirement first in ffi_requirements, resolve reports only it, \
+             even though cadd's own requirement is simultaneously unsatisfiable too"
+        );
+
+        // Swap the two requirements' order in the input -- everything
+        // else about the input (both real failures) is unchanged.
+        input.ffi_requirements.swap(0, 1);
+        let cadd_first = resolve(&input).expect_err("both requirements must still fail");
+        assert_eq!(
+            cadd_first.obligation_id, "Symbol:c_add",
+            "reordering ffi_requirements alone flips which single failure resolve reports -- \
+             proving today's fail-fast is an artifact of input order, not a deliberate choice \
+             of which failure carries the most information"
+        );
+    }
 }
