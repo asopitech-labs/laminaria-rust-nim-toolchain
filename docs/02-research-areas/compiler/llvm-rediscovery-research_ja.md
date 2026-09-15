@@ -225,6 +225,8 @@ LAMINARIA独自の最適化・target生成を本経路として実行し、既�
 
 LLVM内部を観測する目的は、LLVMをより細かく操作することだけではない。LLVMが必要としているanalysis、transformation、summary、partitioning、target contractを再発見するためのprior-art studyとする。
 
+実際の観測記録（MC層のfragment/fixup処理、ELF再配置の書き出し、rustcのCGU分割粒度、フロントエンド/バックエンド並列化、ThinLTO）は[LLVM内部の実測記録](llvm-internals-observed_ja.md)に記録する。
+
 ### Cross-language LLVM/LTO
 
 Rust/Nim-origin bitcodeの収束は一つのbaselineに格下げする。最終目的は「既存frontendが別々に生成したLLVM IRを何とかmergeする」ことではない。
