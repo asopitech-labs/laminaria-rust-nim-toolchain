@@ -92,6 +92,19 @@ alopex-cliの実測で、クリティカルパス上の全ノード(TLS依存連
 
 Phase 0の情報源自体が誤っている場合、この段階の確定は無効になる。alopexDBの`alopex-sql`が依存するNim SQLパーサーのvendor manifest(`contract_version: 0.4.0`)は、実際にRust側が要求する`REQUIRED_CONTRACT_VERSION`(`0.25.0`)と不整合であり、静的な宣言だけでは義務がdischarge可能かどうか判定できない状態だった([issue #62 P0](https://github.com/asopitech-labs/laminaria-rust-nim-toolchain/issues/62)実測時に発覚)。Phase 0による早期確定は、その情報源自体の正しさを別途検証する仕組みを要求する。
 
+### Phase 0内部の粒度：到達可能性と質的コスト予見は別問題
+
+Phase 0を「package lockfileのみ」と定義すると、義務が到達可能かどうかは判定できても、その義務が`Satisfied -> Discharged`でどの種類のコスト(source言語のsemantic処理コストか、外部native toolchain実行コストか)を要求するかまでは読み取れない。alopex-cliの実測([issue #62 P1/P2](https://github.com/asopitech-labs/laminaria-rust-nim-toolchain/issues/62))では、`aws-lc-sys`/`zstd-sys`という2 crateが、Cargo.lockには存在しない`links`フィールドや`cc`/`cmake`/`pkg-config`向けbuild-dependency宣言を、依存解決時に取得済みのCargo.tomlに持っており、これを機械的シグナルとして走査すると、実際にnative build costが支配的な義務をfalse negativeゼロで(ただしfalse positiveありで)絞り込めた。この走査自体は351ファイルで0.032秒であり、native build本体(45.73秒)に対して無視できるコストで、かつcargoが依存解決のために既に行うfetch/展開のI/Oに相乗りでき、実際のCPU集約的コンパイル開始前という手薄な区間に収まることを確認した。
+
+これは**Phase 0がPull-Determinable(到達可能性)とCost-Determinable(質的コスト予見)という異なる問いを一つの箱に押し込めていた**ことを示す。ただし今回確認した「fetch直後の隙間に相乗りする」という設計は、Cargoという既存エコシステムが偶然この情報をこの形で保持していたことに依存した、**複数ありうる設計仮説のうちの一つ**にすぎない。少なくとも次の代替案が考えられ、いずれも未検証である。
+
+- **仮説A(実測済み): 既存メタデータの走査への相乗り** — 依存解決時に取得済みのソースメタデータ(Cargo.tomlのbuild-dependency宣言等)を、fetch直後のCPU/I/O手薄区間で走査する。追加コストは最小だが、走査対象のシグナル(`links`等)が「native実行コストの重さ」まで表現する保証はなく、false positiveを許容する必要がある。またCargo以外のecosystem(Nimble/C/C++)に同種のシグナルが存在するとは限らない。
+- **仮説B: 過去実行の計測結果をprovenance付きでキャッシュする** — LAMINARIA自身が一度そのcrate/versionをビルドした際の実測コスト(wall-clock、CPU、I/O)を`resolution_certificate`相当の構造へ記録し、同一obligationの再要求時にキャッシュを引く。初回コストは避けられないが、2回目以降は実測ベースの正確な見積もりになる。ecosystem横断で一様に適用できる利点があるが、初回実行前(cold start)には無力で、環境依存の計測値がどこまで別環境へ転用可能かという妥当性問題が残る。
+- **仮説C: LAMINARIA独自のcost contractフィールドを定義し、crate作者ではなくLAMINARIA側のprovenance DBへ外部から充填する** — crate作者に新しい登録義務を課さず(ユーザーオペレーション不変の制約を満たす)、LAMINARIAまたはコミュニティが観測データを蓄積してcontract化する。仮説Bのキャッシュを恒久化・共有可能にした形だが、DBの整備・配布・信頼性検証という新たな運用コストを持ち込む。
+- **仮説D: 質的分類を諦め、保守的に「未知の義務は重いかもしれない」と仮定してスケジューリングだけで対処する** — [Lane B](../execution/lane-b-efficient-compiler-computation-foundations_ja.md)のB-H4(obligation-aware scheduling)が扱う領域で、コストの事前予見自体を放棄し、代わりに「未確定な義務を優先的に早く着手する」というスケジューリング側の保守化で全体最適を狙う。予見精度に依存しない代わりに、並列度に余裕がない環境では効果が薄い。
+
+いずれの仮説も、[cross-layer枝刈り](cross-layer-reachability-pruning_ja.md)の原則(「静的に精密なtarget setが得られない場合は、対象集合をover-approximateして保持する」)に従い、コスト予見の失敗を安全側(悲観的スケジューリング)に倒す必要がある。どの仮説を採るか、または組み合わせるかは、対象ecosystemの多様性(仮説Aはecosystem固有のメタデータ形式に依存)と、M1で扱う実際のmixed workloadでの反証実験を経て判断する。
+
 ## Artifact profile
 
 全platformで一律の「単一完全static binary」を要求しない。targetとdependencyに応じて、少なくとも次を明示する。
