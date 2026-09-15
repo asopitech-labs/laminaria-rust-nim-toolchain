@@ -143,6 +143,20 @@ impl ObligationState {
     pub fn is_rejected(self) -> bool {
         matches!(self, ObligationState::Rejected)
     }
+
+    /// Whether an obligation currently in this state is eligible for
+    /// issue #46 (G2)'s own lifecycle transition
+    /// ([`PositiveClosure::discharge_obligation`]/
+    /// [`PositiveClosure::externalize_obligation`]): a chosen candidate
+    /// (`Selected`) or a verified fact/plan-only obligation
+    /// (`Satisfied`) may still be discharged or externalized once real
+    /// production evidence exists. `Unresolved` (a G1 defect),
+    /// `Rejected` (a permanently closed alternative), and an
+    /// already-`Discharged`/`Externalized` obligation (no
+    /// re-discharge) are not.
+    pub fn is_g2_dischargeable(self) -> bool {
+        matches!(self, ObligationState::Selected | ObligationState::Satisfied)
+    }
 }
 
 /// The reason a `Discharged`/`Externalized` obligation reached that
@@ -270,6 +284,36 @@ impl Obligation {
             reason,
             detail: detail.into(),
         });
+    }
+
+    /// Issue #46 (G2)'s own shared lifecycle transition: real
+    /// production evidence, tied to the exact [`RequiredAction`] that
+    /// produced it, moves this obligation to `Discharged`. `pub(crate)`
+    /// only -- outside callers must go through
+    /// [`PositiveClosure::discharge_obligation`], which validates the
+    /// action actually names this obligation and is structurally
+    /// allowed to discharge its kind before ever calling this.
+    pub(crate) fn discharge(
+        &mut self,
+        action_id: impl Into<String>,
+        kind: DischargeKind,
+        evidence: impl Into<String>,
+    ) {
+        self.state = ObligationState::Discharged;
+        self.required_action = Some(action_id.into());
+        self.discharge_kind = Some(kind);
+        self.evidence = Some(evidence.into());
+    }
+
+    /// Issue #46 (G2)'s own shared lifecycle transition for an
+    /// obligation satisfied by something outside LAMINARIA's own
+    /// executed action chain (an OS/library/driver runtime contract G2
+    /// verifies but never itself produces) -- `pub(crate)` only, see
+    /// [`discharge`](Self::discharge)'s own doc comment for why.
+    pub(crate) fn externalize(&mut self, kind: DischargeKind, evidence: impl Into<String>) {
+        self.state = ObligationState::Externalized;
+        self.discharge_kind = Some(kind);
+        self.evidence = Some(evidence.into());
     }
 }
 
@@ -497,6 +541,175 @@ pub struct PositiveClosure {
     /// Selected package id -> the alternative candidates considered and
     /// rejected for it, with typed reasons.
     pub rejected_alternatives: BTreeMap<String, Vec<RejectionDetail>>,
+}
+
+/// Which [`ObligationKind`]s a given [`RequiredActionKind`] is actually
+/// allowed to discharge -- a structural constraint, not a per-fixture
+/// rule (e.g. a compile action can never legitimately discharge a
+/// `Runtime` obligation). The canonical home for this mapping: both
+/// `plan_integrity`'s structural closure verification and this
+/// module's own [`PositiveClosure::discharge_obligation`] enforce it,
+/// so it is defined exactly once.
+pub(crate) fn discharge_kind_allowed(
+    action_kind: RequiredActionKind,
+    obligation_kind: ObligationKind,
+) -> bool {
+    use ObligationKind::*;
+    use RequiredActionKind::*;
+    match action_kind {
+        CompileRustObject | CompileNimStaticLibrary | CompileCObject | CompileCppAdapterObject => {
+            matches!(obligation_kind, ArtifactProduction)
+        }
+        ArchiveStaticLibrary => matches!(obligation_kind, ArtifactProduction),
+        LinkNativeExecutable => {
+            matches!(obligation_kind, FinalLink | LinkOrder | ArtifactProduction)
+        }
+        PreflightRuntimeContract => matches!(obligation_kind, Runtime),
+        PublishProvenance => matches!(obligation_kind, Provenance),
+    }
+}
+
+/// Why [`PositiveClosure::discharge_obligation`] or
+/// [`PositiveClosure::externalize_obligation`] refused a transition --
+/// never a bare `Err(())`, always the exact obligation/action identity
+/// and the concrete rule it violates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LifecycleViolation {
+    UnknownObligation(String),
+    UnknownAction(String),
+    ActionDoesNotDischargeThisObligation {
+        action_id: String,
+        obligation_id: String,
+    },
+    ActionKindCannotDischargeObligationKind {
+        action_kind: RequiredActionKind,
+        obligation_kind: ObligationKind,
+    },
+    ObligationNotDischargeable {
+        obligation_id: String,
+        state: ObligationState,
+    },
+}
+
+impl std::fmt::Display for LifecycleViolation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LifecycleViolation::UnknownObligation(id) => {
+                write!(f, "unknown obligation '{id}'")
+            }
+            LifecycleViolation::UnknownAction(id) => {
+                write!(f, "unknown required action '{id}'")
+            }
+            LifecycleViolation::ActionDoesNotDischargeThisObligation {
+                action_id,
+                obligation_id,
+            } => write!(
+                f,
+                "action '{action_id}' does not name obligation '{obligation_id}' in its own discharges list"
+            ),
+            LifecycleViolation::ActionKindCannotDischargeObligationKind {
+                action_kind,
+                obligation_kind,
+            } => write!(
+                f,
+                "action kind {action_kind:?} cannot discharge obligation kind {obligation_kind:?}"
+            ),
+            LifecycleViolation::ObligationNotDischargeable { obligation_id, state } => write!(
+                f,
+                "obligation '{obligation_id}' is in state {state:?}, not Selected/Satisfied -- not eligible for discharge/externalization"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for LifecycleViolation {}
+
+impl PositiveClosure {
+    /// Issue #46 (G2)'s own shared obligation-lifecycle transition:
+    /// moves a `Selected`/`Satisfied` obligation to `Discharged`,
+    /// justified by a real, already-included [`RequiredAction`] that
+    /// names this exact obligation in its own `discharges` list.
+    /// Refuses structurally (never silently) when: the obligation or
+    /// action id is unknown, the action does not actually discharge
+    /// this obligation, the action's kind is not one
+    /// [`discharge_kind_allowed`] permits for this obligation's kind,
+    /// or the obligation is not currently `Selected`/`Satisfied`
+    /// (already `Discharged`/`Externalized`, still `Unresolved`, or
+    /// `Rejected`). Generating a `RequiredAction` is not itself
+    /// discharge evidence -- the caller must supply real evidence from
+    /// having actually executed that action.
+    pub fn discharge_obligation(
+        &mut self,
+        obligation_id: &str,
+        action_id: &str,
+        kind: DischargeKind,
+        evidence: impl Into<String>,
+    ) -> Result<(), LifecycleViolation> {
+        let obligation_kind = self
+            .obligations
+            .get(obligation_id)
+            .ok_or_else(|| LifecycleViolation::UnknownObligation(obligation_id.to_string()))?
+            .kind;
+        let action = self
+            .required_actions
+            .iter()
+            .find(|a| a.id == action_id)
+            .ok_or_else(|| LifecycleViolation::UnknownAction(action_id.to_string()))?;
+        if !action.discharges.iter().any(|d| d == obligation_id) {
+            return Err(LifecycleViolation::ActionDoesNotDischargeThisObligation {
+                action_id: action_id.to_string(),
+                obligation_id: obligation_id.to_string(),
+            });
+        }
+        if !discharge_kind_allowed(action.kind, obligation_kind) {
+            return Err(
+                LifecycleViolation::ActionKindCannotDischargeObligationKind {
+                    action_kind: action.kind,
+                    obligation_kind,
+                },
+            );
+        }
+        let obligation = self
+            .obligations
+            .get_mut(obligation_id)
+            .expect("presence already checked above");
+        if !obligation.state.is_g2_dischargeable() {
+            return Err(LifecycleViolation::ObligationNotDischargeable {
+                obligation_id: obligation_id.to_string(),
+                state: obligation.state,
+            });
+        }
+        obligation.discharge(action_id, kind, evidence);
+        Ok(())
+    }
+
+    /// Issue #46 (G2)'s own shared obligation-lifecycle transition for
+    /// an obligation satisfied by something outside LAMINARIA's own
+    /// executed action chain (an OS/library/driver runtime contract G2
+    /// verifies but never itself produces) -- always
+    /// `DischargeKind::ExternalRuntimeContract`, and never tied to a
+    /// `RequiredAction` (there may be none: G2 does not execute an
+    /// action to make the platform's own dynamic loader exist). Same
+    /// `Selected`/`Satisfied`-only precondition as
+    /// [`discharge_obligation`](Self::discharge_obligation).
+    pub fn externalize_obligation(
+        &mut self,
+        obligation_id: &str,
+        evidence: impl Into<String>,
+    ) -> Result<(), LifecycleViolation> {
+        let obligation = self
+            .obligations
+            .get_mut(obligation_id)
+            .ok_or_else(|| LifecycleViolation::UnknownObligation(obligation_id.to_string()))?;
+        if !obligation.state.is_g2_dischargeable() {
+            return Err(LifecycleViolation::ObligationNotDischargeable {
+                obligation_id: obligation_id.to_string(),
+                state: obligation.state,
+            });
+        }
+        obligation.externalize(DischargeKind::ExternalRuntimeContract, evidence);
+        Ok(())
+    }
 }
 
 /// The graph-level rejection [`resolve`] returns before ever generating
@@ -1917,5 +2130,245 @@ mod tests {
                 "retained obligation '{id}' is not reachable from the demand"
             );
         }
+    }
+
+    /// Issue #46 (G2) Checkpoint 1: the shared obligation-lifecycle
+    /// transition, exercised against a real G1 closure. Discharging the
+    /// `cadd` archive's `ArtifactProduction` obligation through its own
+    /// named `RequiredAction` (`archive-static-library:cadd@1.0.0`,
+    /// kind `ArchiveStaticLibrary` -- structurally allowed to discharge
+    /// `ArtifactProduction` per `discharge_kind_allowed`) must succeed
+    /// and leave the obligation `Discharged` with the exact evidence
+    /// and action id supplied.
+    #[test]
+    fn discharging_an_obligation_through_its_own_named_action_succeeds() {
+        let input = minimal_input(vec![cadd_candidate(
+            "1.0.0",
+            "c_add",
+            "x86_64-unknown-linux-gnu",
+            Role::Target,
+        )]);
+        let mut closure = resolve(&input).expect("must resolve");
+        let obligation_id = "ArtifactProduction:archive:cadd";
+        let action_id = "archive-static-library:cadd@1.0.0";
+        assert_eq!(
+            closure.obligations[obligation_id].state,
+            ObligationState::Satisfied,
+            "must start from G1's own terminal state before discharge"
+        );
+
+        closure
+            .discharge_obligation(
+                obligation_id,
+                action_id,
+                DischargeKind::StaticallyLinked,
+                "ar rcs archive:cadd object:cadd -- real cc+ar evidence",
+            )
+            .expect("a real named action discharging its own obligation must succeed");
+
+        let obligation = &closure.obligations[obligation_id];
+        assert_eq!(obligation.state, ObligationState::Discharged);
+        assert_eq!(
+            obligation.discharge_kind,
+            Some(DischargeKind::StaticallyLinked)
+        );
+        assert_eq!(obligation.required_action.as_deref(), Some(action_id));
+        assert_eq!(
+            obligation.evidence.as_deref(),
+            Some("ar rcs archive:cadd object:cadd -- real cc+ar evidence")
+        );
+    }
+
+    /// An action may only discharge an obligation it actually names in
+    /// its own `discharges` list -- using a real, existing action that
+    /// discharges a *different* obligation must be refused, not
+    /// silently accepted.
+    #[test]
+    fn discharging_via_an_action_that_does_not_name_this_obligation_is_refused() {
+        let input = minimal_input(vec![cadd_candidate(
+            "1.0.0",
+            "c_add",
+            "x86_64-unknown-linux-gnu",
+            Role::Target,
+        )]);
+        let mut closure = resolve(&input).expect("must resolve");
+        let wrong_action_id = closure
+            .required_actions
+            .iter()
+            .find(|a| a.kind == RequiredActionKind::CompileRustObject)
+            .expect("must have a compile-rust-object action")
+            .id
+            .clone();
+        let result = closure.discharge_obligation(
+            "ArtifactProduction:archive:cadd",
+            &wrong_action_id,
+            DischargeKind::StaticallyLinked,
+            "bogus evidence",
+        );
+        assert!(matches!(
+            result,
+            Err(LifecycleViolation::ActionDoesNotDischargeThisObligation { .. })
+        ));
+        assert_eq!(
+            closure.obligations["ArtifactProduction:archive:cadd"].state,
+            ObligationState::Satisfied,
+            "a refused discharge must never mutate the obligation"
+        );
+    }
+
+    /// Re-discharging an already-`Discharged` obligation, or
+    /// discharging a `Rejected` one, must be refused -- the lifecycle
+    /// has no re-entrant or resurrection transition.
+    #[test]
+    fn discharging_an_already_terminal_obligation_is_refused() {
+        let input = minimal_input(vec![cadd_candidate(
+            "1.0.0",
+            "c_add",
+            "x86_64-unknown-linux-gnu",
+            Role::Target,
+        )]);
+        let mut closure = resolve(&input).expect("must resolve");
+        let obligation_id = "ArtifactProduction:archive:cadd";
+        let action_id = "archive-static-library:cadd@1.0.0";
+        closure
+            .discharge_obligation(
+                obligation_id,
+                action_id,
+                DischargeKind::StaticallyLinked,
+                "first discharge",
+            )
+            .expect("first discharge must succeed");
+
+        let result = closure.discharge_obligation(
+            obligation_id,
+            action_id,
+            DischargeKind::StaticallyLinked,
+            "second discharge attempt",
+        );
+        assert!(matches!(
+            result,
+            Err(LifecycleViolation::ObligationNotDischargeable {
+                state: ObligationState::Discharged,
+                ..
+            })
+        ));
+
+        let rejected_input = minimal_input(vec![cadd_candidate(
+            "2.0.0",
+            "c_add_v2",
+            "x86_64-unknown-linux-gnu",
+            Role::Target,
+        )]);
+        let rejected_closure = resolve(&rejected_input);
+        assert!(
+            rejected_closure.is_err(),
+            "a lone incompatible candidate must reject at the graph level, not just the obligation"
+        );
+    }
+
+    /// An action structurally forbidden from discharging a given
+    /// obligation kind (a compile action can never discharge `Runtime`
+    /// -- `discharge_kind_allowed(CompileCObject, ..)` only ever
+    /// permits `ArtifactProduction`) must be refused even if the
+    /// caller supplies a fabricated `discharges` entry -- exercised
+    /// directly against a mutated closure, mirroring `plan_integrity`'s
+    /// own `DischargeKindMismatch` check.
+    #[test]
+    fn discharging_with_a_structurally_disallowed_action_kind_is_refused() {
+        let input = minimal_input(vec![cadd_candidate(
+            "1.0.0",
+            "c_add",
+            "x86_64-unknown-linux-gnu",
+            Role::Target,
+        )]);
+        let mut closure = resolve(&input).expect("must resolve");
+        let compile_action_id = closure
+            .required_actions
+            .iter()
+            .find(|a| a.kind == RequiredActionKind::CompileCObject)
+            .expect("must have a compile-c-object action")
+            .id
+            .clone();
+        let runtime_id = closure
+            .obligations
+            .values()
+            .find(|o| o.kind == ObligationKind::Runtime)
+            .expect("must have a runtime obligation")
+            .id
+            .clone();
+        closure
+            .required_actions
+            .iter_mut()
+            .find(|a| a.id == compile_action_id)
+            .unwrap()
+            .discharges
+            .push(runtime_id.clone());
+
+        let result = closure.discharge_obligation(
+            &runtime_id,
+            &compile_action_id,
+            DischargeKind::Generated,
+            "a compile action cannot discharge a runtime obligation",
+        );
+        assert!(matches!(
+            result,
+            Err(LifecycleViolation::ActionKindCannotDischargeObligationKind { .. })
+        ));
+    }
+
+    /// Externalizing a `Runtime` obligation (an OS/dynamic-loader
+    /// contract G2 verifies but never produces) succeeds without any
+    /// named action and always records `ExternalRuntimeContract`.
+    #[test]
+    fn externalizing_a_runtime_obligation_succeeds_without_a_named_action() {
+        let input = minimal_input(vec![cadd_candidate(
+            "1.0.0",
+            "c_add",
+            "x86_64-unknown-linux-gnu",
+            Role::Target,
+        )]);
+        let mut closure = resolve(&input).expect("must resolve");
+        let runtime_id = closure
+            .obligations
+            .values()
+            .find(|o| o.kind == ObligationKind::Runtime)
+            .expect("must have a runtime obligation")
+            .id
+            .clone();
+        closure
+            .externalize_obligation(
+                &runtime_id,
+                "verified real dynamic loader present at preflight for x86_64-unknown-linux-gnu",
+            )
+            .expect("externalizing a Satisfied runtime obligation must succeed");
+
+        let obligation = &closure.obligations[&runtime_id];
+        assert_eq!(obligation.state, ObligationState::Externalized);
+        assert_eq!(
+            obligation.discharge_kind,
+            Some(DischargeKind::ExternalRuntimeContract)
+        );
+    }
+
+    /// An unknown obligation id is refused, not silently ignored.
+    #[test]
+    fn discharging_an_unknown_obligation_id_is_refused() {
+        let input = minimal_input(vec![cadd_candidate(
+            "1.0.0",
+            "c_add",
+            "x86_64-unknown-linux-gnu",
+            Role::Target,
+        )]);
+        let mut closure = resolve(&input).expect("must resolve");
+        let result = closure.discharge_obligation(
+            "ArtifactProduction:does-not-exist",
+            "archive-static-library:cadd@1.0.0",
+            DischargeKind::StaticallyLinked,
+            "evidence",
+        );
+        assert!(matches!(
+            result,
+            Err(LifecycleViolation::UnknownObligation(_))
+        ));
     }
 }

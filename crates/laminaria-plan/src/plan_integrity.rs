@@ -26,8 +26,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::dependency_graph::{
-    ArtifactOutputKind, DependencyResolutionInput, ObligationKind, PositiveClosure, RequiredAction,
-    RequiredActionKind,
+    discharge_kind_allowed, ArtifactOutputKind, DependencyResolutionInput, ObligationKind,
+    PositiveClosure, RequiredAction, RequiredActionKind,
 };
 
 /// One concrete way a plan can fail integrity -- always named with the
@@ -71,29 +71,6 @@ pub enum PlanIntegrityViolation {
         missing: Vec<String>,
         unexpected: Vec<String>,
     },
-}
-
-/// Which [`ObligationKind`]s a given [`RequiredActionKind`] is actually
-/// allowed to discharge -- a structural constraint, not a per-fixture
-/// rule (e.g. a compile action can never legitimately discharge a
-/// `Runtime` obligation).
-fn discharge_kind_allowed(
-    action_kind: RequiredActionKind,
-    obligation_kind: ObligationKind,
-) -> bool {
-    use ObligationKind::*;
-    use RequiredActionKind::*;
-    match action_kind {
-        CompileRustObject | CompileNimStaticLibrary | CompileCObject | CompileCppAdapterObject => {
-            matches!(obligation_kind, ArtifactProduction)
-        }
-        ArchiveStaticLibrary => matches!(obligation_kind, ArtifactProduction),
-        LinkNativeExecutable => {
-            matches!(obligation_kind, FinalLink | LinkOrder | ArtifactProduction)
-        }
-        PreflightRuntimeContract => matches!(obligation_kind, Runtime),
-        PublishProvenance => matches!(obligation_kind, Provenance),
-    }
 }
 
 /// Every action id transitively reachable from `start` by following

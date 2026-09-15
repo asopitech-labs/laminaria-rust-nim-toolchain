@@ -55,6 +55,7 @@ pub mod clock;
 pub mod command_runner;
 pub mod compiler_work_executor;
 pub mod cross_ecosystem_ingest;
+pub mod g2_execute;
 pub mod incremental_executor;
 pub mod incremental_session_client;
 pub mod nim_telemetry;
