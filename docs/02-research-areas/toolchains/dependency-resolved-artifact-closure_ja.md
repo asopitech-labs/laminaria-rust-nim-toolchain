@@ -278,6 +278,20 @@ post-quantumコードの除去でコンパイル時間は**12.30秒→10.34秒�
 
 詳細な計測スクリプトは`scripts/research/measure-bcm-unity-build-cost.sh`に記録した(ローカルの`cc`とCargoレジストリキャッシュ済みのaws-lc-sysソースツリーを使用、Docker不要——`bcm.c`単体のプリプロセス/コンパイルはAWS-LCのビルド設定に依存しない標準Cコンパイルであるため)。
 
+### `bcm.c`の分解可能性実測：issue #47 B-H3定式化の問い1(issue #64/#47共同記録)
+
+issue #47でB-H3(summary/body分離)を`aws-lc-sys`/`bcm.c`に対する計算問題として定式化した際、3つの具体的な問い(1: 分解可能性、2: root集合確定コスト、3: 分解の利得)を立てた。本節は問い1(118個のunity-buildメンバーのうち何個が独立翻訳単位として分解可能か)を実測した結果を記録する。
+
+**方法**: `bcm.c`が`#include`する118個のメンバー`.c`ファイルそれぞれを、`bcm.c`を経由せず単独で`cc -c`コンパイルし、成功/失敗を機械的に判定した(`scripts/research/measure-bcm-decomposability.sh`)。当初の素朴な単独コンパイルでは、`bcm.c`自身が118メンバーの37個目以降でのみ`cpucap/internal.h`(`SET_DIT_AUTO_RESET`マクロ等の定義元)を`#include`する構造になっているため、26個が見かけ上失敗した——これは真の構造的結合ではなく、単独コンパイル時に`bcm.c`と同じマクロ可視性を再現していなかったテストハーネス側の不備だったため、`cpucap/internal.h`を`-include`で強制的に先読みするよう補正し、再測定した。
+
+**結果**: 117個中98個(83.8%)が単独翻訳単位として分解可能(標準的な`#include`パス・マクロ定義の可視性さえ揃えれば`bcm.c`を経由する必要がない)。残り19個(16.2%)は真に構造的結合がある——原因を追跡すると、AWS-LCの`fipsmodule/delocate.h`が定義する`DEFINE_METHOD_FUNCTION`/`DEFINE_LOCAL_DATA`等のマクロが、`BORINGSSL_FIPS`ビルドでは`static`スコープの関数・変数を生成する設計であり(非FIPSビルドでも同様に`static`)、これらのシンボルはunity build(=同一翻訳単位)内でしか他メンバーから参照できない。加えて`aes/mode_wrappers.c`の`aes_hw_encrypt_wrapper`のような`static inline`ヘルパーも同種の結合を生む。
+
+**post-quantumコードとの関係**: 前節(仮説β)で除去した`ml_dsa.c`/`ml_kem.c`自体は、この分解可能性テストで**単独コンパイル可能(OK)** と判定された——つまり「post-quantumを除去して16%短縮できる」という前節の実測は、構造的結合を回避したのではなく、単に`bcm.c`から対応する`#include`行を削っただけで達成できていた。一方で分解不能な19個(`self_check.c`、`evp/p_ec.c`等のFIPS関連メソッドディスパッチ層)は、post-quantumとは別の理由(delocate.hのstatic化設計)で真に不可分である。**「分解可能か」と「除去して利得があるか」は独立した軸であり、post-quantumはこの実測で両方を偶然満たしていたに過ぎない**。
+
+**問い1への回答**: `bcm.c`の118メンバーのうち、Phase 1(到達可能性が意味的に確定した)情報だけをもとに個別に materialize/非materializeを判断できる対象は**最大でも83.8%**であり、残り16.2%はAWS-LC自身のFIPS境界設計(`delocate.h`)により、到達可能性の判定結果によらず常に`bcm.c`全体と一緒にコンパイルせざるを得ない。B-H3(summary/body分離)がこの具体例で実現しうる理論上の上限は、この83.8%という分解可能な部分集合に制約される。
+
+詳細な計測スクリプトは`scripts/research/measure-bcm-decomposability.sh`に記録した(118メンバー全件を機械的に判定、CSV形式で結果を出力)。
+
 ## Artifact profile
 
 全platformで一律の「単一完全static binary」を要求しない。targetとdependencyに応じて、少なくとも次を明示する。
