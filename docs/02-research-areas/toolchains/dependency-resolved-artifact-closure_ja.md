@@ -152,6 +152,60 @@ P0/P1で仮説Aが「false negativeゼロを維持するが、false positive率�
 
 両仮説はcold/warmで相補的な強みを持つ——**仮説A(cold-start即応、warm精度は頭打ち)と仮説B(cold-start無力、warm精度は実測ベースへ向上)は排他的選択肢ではなく、仮説Aをcold-start時のフォールバック予見、仮説Bをwarm-cache-hit時の精密値として層状に組み合わせる設計が、`resolution_certificate`の両フィールド(`native_build_signal`と`measured_cost`)を共存させることで机上では矛盾なく成立する**、という組み合わせ仮説が本P2で新たに浮かび上がった。これはissue #63の4仮説のいずれか単独を採用する二者択一ではなく、M1での反証実験に先立つ設計上の選択肢として記録する。
 
+### P0/P1/P2の自己批判：問いの立て方自体がプッシュ型だった
+
+上記P0/P1/P2は、いずれも**「Cargo/Nimbleというpackage managerが何を宣言しているか」(push側)を比較する**という共通の構造を持っていた——P0は「`links`フィールドをcrate作者が書いたか」、P1は「Nimbleに同種フィールドがあるか」、P2は「その宣言をどう`resolution_certificate`へ記録するか」を問うており、いずれも「最終的に要求されるnative artifactが、その義務を実際にどれだけ必要とするか」(pull側)を一度も実測していなかった。
+
+これはissue #62が名指しした失敗——「これまでの調査が繰り返してきた『プッシュ型の分析』(プロデューサー側が今何をしているかを観察し、そこに非効率を見つける)」——を、issue #63自身がPhase 0のコスト予見という別の切り口で再演していたことを意味する。加えて、P0のground truth判定(`ring`/`cxx`/`aws-lc-sys`等を「native build costが重い」と分類した基準)自体も、build.rsが`cc`/`cmake`を呼ぶかどうかというpush側の記述を見ていただけであり、「その義務が最終的に生成する成果物(リンク後バイナリのどのシンボル)にどれだけ帰着するか」というpull側の事実を一度も検証していなかった。
+
+### pull駆動の反証実験：alopex-cliの最終シンボルにaws-lc-sys/zstd-sysがどれだけ帰着するか(issue #63 P0再構成)
+
+**新しい問い**: alopex-cliのエントリポイントから到達可能な最終リンク後バイナリにおいて、issue #59がクリティカルパス上で最もビルド時間を要すると特定した`aws-lc-sys`(45.73秒相当)/`zstd-sys`(23.56秒相当)が、実際に何個のシンボルとしてバイナリに寄与しているかを、Cargo.tomlの`links`宣言(push側)を一切参照せず、**バイナリの中身(`nm`実測)だけから先に確定する**。push側シグナルとの相関は、この実測の後に検証する。
+
+**実測方法**: `.reference/alopex/Dockerfile.issue62-monoitems`(issue #62 P0で作成済みの使い捨て計測用コンテナ)を再利用し、手順として確立した。
+
+```bash
+cd .reference/alopex
+docker build -f Dockerfile.issue62-monoitems -t laminaria-issue62-monoitems .
+docker run --rm -d --name <container> laminaria-issue62-monoitems sleep infinity
+# alopexDB自体のバグ(後述)を回避するため、Nim SQLパーサーをコンテナ内でローカルビルド
+docker exec <container> bash -c '
+  curl -sSf https://nim-lang.org/choosenim/init.sh | sh -s -- -y
+  /root/.nimble/bin/choosenim 2.2.10 --yes
+  export PATH=/root/.choosenim/toolchains/nim-2.2.10/bin:/root/.nimble/bin:$PATH
+  cd /work/crates/alopex-sql/nim-sql-parser
+  nimble install -y npeg@1.3.0 msgpack4nim@0.4.4
+  nimble lib && nimble staticlib
+  mkdir -p /work/local-nim-parser
+  cp libalopex_sql_parser.so libalopex_sql_parser.a /work/local-nim-parser/
+  printf "0.25.0\n" > /work/local-nim-parser/CONTRACT_VERSION
+  cd /work/local-nim-parser && sha256sum libalopex_sql_parser.so libalopex_sql_parser.a > SHA256SUMS
+'
+docker exec <container> bash -c '
+  cd /work
+  ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD=1 NIM_SQL_PARSER_LIB_DIR=/work/local-nim-parser \
+    cargo build -p alopex-cli --bin alopex
+'
+# scripts/research/pull-symbol-attribution.sh と classify-c-abi-symbols.py で
+# 最終バイナリのnm --defined-onlyシンボルをcrate起源へ帰属させる
+```
+
+**ビルド障害と回避(記録)**: 素の`cargo build -p alopex-cli`はvendor済みNim SQLパーサーの`CONTRACT_VERSION`(`0.4.0`)がbuild.rsの要求(`0.25.0`)と不整合で失敗した。これはissue #62で既に発見済みの、alopexDB側の既知バグ(`docs/.../dependency-resolved-artifact-closure_ja.md`「Phase 0の情報源自体が誤っている場合」節に既述)である。`ALOPEX_NIM_PARSER_ALLOW_LOCAL_BUILD=1`+`NIM_SQL_PARSER_LIB_DIR`によるローカルビルドフォールバック(alopex-sql側に実装済みの回避経路)で、Nim 2.2.10を`choosenim`でコンテナに導入し、`nim_sql_parser.nimble`の`task lib`/`task staticlib`を直接実行して回避した。この回避のコストと手順自体を、今後同種の実測をやり直す際の固定手順として本節に記録する。
+
+**実測結果**: ビルドされたバイナリは513,711,880 bytes(issue #62実測の514.5MBとほぼ一致)、`nm --defined-only`で244,595個の定義済みシンボル(issue #62実測245,058とほぼ一致)を確認した。シンボルをRust v0マングル形式(`rustfilt`でデマングル、191,484個)とC ABI形式(裸の関数名、53,111個)に分け、それぞれをcrate/ライブラリ起源へ帰属させた。
+
+| 起源 | Rust側(demangle後`crate::path`) | C側(裸のABI名、プレフィックス規則で分類) | 合計 |
+| --- | --- | --- | --- |
+| `aws-lc-sys`/`aws-lc-rs`(TLS暗号、issue #59クリティカルパス45.73秒相当) | `aws_lc_rs`: 489 | `aws-lc-sys`: 1,682 | 2,171 |
+| `zstd-sys`/`zstd`(圧縮、issue #59クリティカルパス23.56秒相当) | `zstd`: 93、`zstd_safe`: 62 | `zstd-sys`: 1,242 | 1,397 |
+| 全体(`nm --defined-only`) | 191,484 | 53,111 | **244,595** |
+
+**帰結**: `aws-lc-sys`+`aws-lc-rs`は最終シンボルの**2,171/244,595 ≈ 0.89%**、`zstd-sys`+`zstd`は**1,397/244,595 ≈ 0.57%**しか占めない。issue #59の実測でこの2 crateはビルド時間のクリティカルパス上で最大級(合計69.29秒、総wall time215.4秒の32%)を占めていたにもかかわらず、**最終成果物(pull側)への寄与はシンボル数で見て1%未満**である。これは「ビルド時間が重い義務」と「最終成果物への寄与が大きい義務」が全く別の量であることを、push側シグナル(`links`)を一切参照せずに実測で直接示した——issue #62が「245,058個の内部シンボルのうち、実際にそこへ到達可能性を持つものはどれだけあるか」として提起した問いに対する、具体的な内訳の第一歩である。
+
+**push側シグナルとの相関(事後検証)**: 上記実測を先に確定した上で、これがP0のpush側シグナル(Cargo.tomlの`links`宣言)とどう対応するかを見ると、`aws-lc-sys`/`zstd-sys`はいずれも`links`フィールドを持ち(P0で確認済み)、P0のground truthでも「native build costが重い」と正しく分類されていた。**push側シグナルは「ビルド時間が重くなりうる」ことの予告としては機能したが、「最終成果物への寄与がわずか1%未満である」ことは一切示していなかった**——シグナルの有無と、実際にpull側で確定すべき量(最終成果物への寄与)は、独立した別の軸であることが実測で確認できた。この意味で、P0/P1/P2で検証した仮説A/Bは、いずれも「ビルド時間という一つの側面」だけを予見対象にしており、「最終成果物に何が実際に必要か」という、issue #62が本来確立しようとしていたpull駆動モデルの核心的な問い(バイナリが何を要求するかについての一次知識)には未着手のままだったことが、本節の実測で明らかになった。
+
+**次に必要な作業(未着手)**: 244,595個中191,484個(Rust側)の帰属は分類できたが、53,111個中43,862個(82.6%)は`GCC_except_table*`等のコンパイラ生成物(関数ごとに1個生成される例外テーブルで、crate起源に帰属しない)であり、残る約5,700個の完全な帰属、および`到達可能性`(#62の`-Z print-mono-items`が示す「実際にmonomorphizeされた」集合)との突き合わせは本反証実験のスコープ外として残した。詳細な抽出スクリプトは`scripts/research/pull-symbol-attribution.sh`/`scripts/research/classify-c-abi-symbols.py`に記録した。
+
 ## Artifact profile
 
 全platformで一律の「単一完全static binary」を要求しない。targetとdependencyに応じて、少なくとも次を明示する。
