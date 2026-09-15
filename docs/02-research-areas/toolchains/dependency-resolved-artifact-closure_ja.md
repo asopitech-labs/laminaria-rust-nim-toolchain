@@ -241,6 +241,43 @@ crate別mono-item数: `aws_lc_sys`(C FFIバインディング側)371個——**i
 
 詳細な計測スクリプトは`scripts/research/measure-aws-lc-sys-feature-cost.sh`に記録した(使い捨てDocker隔離環境、実行のたびに一時ディレクトリへcrateを生成しビルド後は自動削除)。
 
+### `bcm.c` unity buildの構造分析：post-quantumコードの無条件混入(issue #64 仮説β)
+
+仮説α棄却(feature flagで無効化可能な過剰機能は存在しない)を受け、停止条件に従い仮説β(到達可能だが、コンパイル自体のコストがsource行数/複雑度に対して不釣り合いに重い)を検証する。
+
+**構造分析**: `aws-lc-sys`のビルダー選択ロジック(`builder/main.rs`)は、FIPSビルドでない限り`CcBuilder`(個別`cc`呼び出し、CMakeを経由しない)を優先する。事前生成済みバインディング(`src/x86_64_unknown_linux_gnu_crypto.rs`等、プラットフォームごとに同梱)が存在するため、`is_bindgen_required()`は`false`を返しbindgenは実行されない——仮説βが当初着目していた「bindgen生成コード量」はそもそも実行されていない工程であり的外れだった。
+
+`CcBuilder`のソースリスト(`builder/cc_builder/universal.rs`)には253個の`.c`翻訳単位が並ぶが、その1つ`crypto/fipsmodule/bcm.c`(BoringCrypto Module)は**unity build方式**で118個の内部`.c`ファイルを`#include`によって単一翻訳単位に集約しており、その中に以下がある。
+
+```c
+#include "ml_dsa/ml_dsa.c"   // ML-DSA (post-quantum署名)
+#include "ml_kem/ml_kem.c"   // ML-KEM (post-quantum鍵カプセル化)
+#include "pqdsa/pqdsa.c"
+#include "evp/p_kem.c"
+#include "evp/p_pqdsa.c"
+```
+
+これらの`#include`は**feature flagやプリプロセッサ条件分岐で保護されていない**——`bcm.c`をコンパイルする限り、ML-DSA/ML-KEMは常にコンパイルされる。これは仮説αの枠組み(「無効化可能な過剰機能」の有無)では捉えられない構造的事実であり、仮説αとは独立に検証が必要だった理由でもある。
+
+**実測**: `bcm.c`をAWS-LCビルドシステムから切り離して単体で`cc -c -O2`コンパイルし、(a)無改変版と(b)上記5つの`#include`行を削除した版を比較した(`scripts/research/measure-bcm-unity-build-cost.sh`で再現可能、リンクは行わずオブジェクト生成のみで比較、3回試行)。
+
+| 構成 | プリプロセス後行数(コメント/空行除く) | コンパイル時間(3回平均) |
+| --- | --- | --- |
+| bcm.c(無改変、post-quantum込み) | 76,897行 | 12.30秒 |
+| bcm.c(post-quantum `#include` 5行削除) | (未計測、差分は約21,139行相当) | 10.34秒 |
+| ML-DSA単体(`ml_dsa.c`、再帰include込み) | 12,821行 | (bcm.c内に混入のため単独計測不可) |
+| ML-KEM単体(`ml_kem.c`、再帰include込み) | 8,318行 | (同上) |
+
+post-quantumコードの除去でコンパイル時間は**12.30秒→10.34秒、1.96秒(約16.0%)削減**。3回試行(12.33/12.26/12.32秒 vs 10.20/10.48/10.34秒)で安定して再現し、初回試行(12.60秒 vs 10.58秒、16.08%)とも一致する。post-quantumコードは全体行数の約25%(21,139/83,955行、初回プリプロセス計測)を占めるが、コンパイル時間への寄与は16%とやや小さい——行数比率とコンパイル時間比率が完全一致しないこと自体も、仮説β「コンパイルコストがsource行数に単純比例しない」ことの部分的な裏付けである。
+
+`aws-lc-sys`全体のビルド時間はissue #59実測で45.73秒(pkg全体、bcm.c以外の252翻訳単位のコンパイル+リンク等を含む)であり、今回計測した`bcm.c`単体12.30秒はその一部にすぎない。従って**post-quantumコード(1.96秒)がaws-lc-sys全体ビルド時間に占める割合は45.73秒に対し約4.3%**——issue #63が特定した「最終成果物寄与2%未満」ほど無視できる量ではないが、45.73秒の主因でもない。
+
+**結論(仮説β部分支持)**: `bcm.c`のunity build構造は、post-quantumコードをfeature flagで一切保護せず常時コンパイルする——これは仮説αが前提とした「feature flagで無効化可能」という枠組みの外側にある構造的コストであり、仮説αとβが指す原因は独立に存在することが確認された。ただしpost-quantumコード単独(1.96秒)はaws-lc-sys全体45.73秒の主要因(過半)ではなく、**bcm.c自体(12.30秒、全体の約27%)が単一の重い翻訳単位であること**、および残り252翻訳単位の合計(45.73秒 - 12.30秒 ≈ 33秒相当)がより大きい割合を占めることが今回の計測で新たに判明した。post-quantumコード除去は「無視できない改善(4.3%)だが単独では45.73秒の大半を説明しない」ため、仮説βは部分的に支持されるが、残り33秒相当の内訳(他の251翻訳単位、リンク工程、ビルドスクリプト自体のオーバーヘッド)は未検証のまま残る。
+
+**次の検証対象**: bcm.c以外の252翻訳単位のうちどれが重いか(cURVE25519/RSA/EC等、上位候補は`self_check.c`3,042行/`curve25519_nohw.c`2,080行/`e_aes.c`1,672行/`rsa.c`1,548行等、preprocessed行数上位で確認済み)、および仮説γ(プロセス起動・I/Oオーバーヘッド、253個の`cc`プロセス起動コストの合計)の検証は後続issueで扱う。
+
+詳細な計測スクリプトは`scripts/research/measure-bcm-unity-build-cost.sh`に記録した(ローカルの`cc`とCargoレジストリキャッシュ済みのaws-lc-sysソースツリーを使用、Docker不要——`bcm.c`単体のプリプロセス/コンパイルはAWS-LCのビルド設定に依存しない標準Cコンパイルであるため)。
+
 ## Artifact profile
 
 全platformで一律の「単一完全static binary」を要求しない。targetとdependencyに応じて、少なくとも次を明示する。
