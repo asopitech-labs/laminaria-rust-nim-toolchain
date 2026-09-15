@@ -222,6 +222,25 @@ crate別mono-item数: `aws_lc_sys`(C FFIバインディング側)371個——**i
 
 詳細な抽出スクリプトは`scripts/research/pull-symbol-attribution.sh`/`scripts/research/classify-c-abi-symbols.py`/`scripts/research/classify-mono-items.py`に記録した。
 
+### `aws-lc-sys`のfeature構成調査：到達不能コード仮説の棄却(issue #64 P0)
+
+**issue #63自身の前提不備**: 上記のP0〜P2はいずれも「native build costが重い義務を、いつ・どう早期に見分けてスケジューリングするか」という、issue #59が定義した2つの全体最適目的関数のうち「クリティカルパス長の最小化」にしか向いておらず、もう一つの目的関数「要求されるnative artifactにとって本質的な計算量の最小化」には一度も触れていなかった。`aws-lc-sys`が最終成果物に2%程度しか寄与しないのに45.73秒を要求する原因そのもの(なぜ重いか)は未検証のまま残されていた。issue #64はこの前提不備を指摘し、3仮説(α: 到達不能コードの過剰コンパイル、β: コンパイル自体の構造的コスト、γ: プロセス起動/I/Oオーバーヘッド)のうち仮説αをP0で検証する。
+
+**静的feature解析**: alopex-cli(pinned commit `06cd95941857ea44e657de57289bcff41a3645e2`)の依存グラフを`cargo tree -e features`で解決すると、`aws-lc-sys`は`rustls`→`aws-lc-rs`経由(TLS)と`object_store`→`aws-lc-rs`経由(S3ストレージ、`alopex-cli`の`s3` feature)の2系統から到達する。`aws-lc-rs`は`aws-lc-sys`に対し`default-features = false`で依存しており、`aws-lc-sys`自身の`default = ["all-bindings"]`は既に無効化されている。実際に有効化されるのは`rustls`が要求する`aws-lc-rs/prebuilt-nasm`経由の`aws-lc-sys/prebuilt-nasm`のみである。FIPS実装(`aws-lc-fips-sys`、別クレート、Go toolchain必須)は`aws-lc-rs`のoptional dependencyで、`fips` featureは`aws-lc-rs`のdefaultに含まれず、依存グラフのどこからも有効化されていない——**post-quantum/FIPS検証機構はそもそも最初からデフォルト無効**であり、仮説αが前提していた「無効化可能な過剰機能」は依存グラフ上に存在しなかった。
+
+**実測による確認**: 単一依存(`aws-lc-sys = "=0.42.0"`)のみの隔離crateをDocker(`rust:1.96-bookworm`、alopex-cli pin済みツールチェーンと同一)でビルドし、(A) alopex-cliの実際の解決結果を再現した構成(`default-features = false, features = ["prebuilt-nasm"]`)と、(B) `all-bindings`を含む完全デフォルト構成を比較した(`scripts/research/measure-aws-lc-sys-feature-cost.sh`で再現可能)。
+
+| 構成 | ビルド時間(壁時計、2回試行) | 静的ライブラリサイズ | エクスポートされたtext シンボル数 | 静的ライブラリSHA256 |
+| --- | --- | --- | --- | --- |
+| A: 解決済み構成(prebuilt-nasmのみ) | 53.94秒 / 29秒 | 7,050,908 bytes | 3,686 | `b0f2aabb...` |
+| B: 完全デフォルト(all-bindings込み) | 51.56秒 / 32秒 | 7,050,908 bytes | 3,686 | `b0f2aabb...`(A と完全一致) |
+
+2回の独立試行で、構成A/Bのビルドが生成する`libaws_lc_0_42_0_crypto.a`は**バイト単位・SHA256ハッシュまで完全に同一**だった。ビルド時間差(1回目53.94秒 vs 51.56秒、2回目29秒 vs 32秒)はDockerレイヤーキャッシュ状態に起因するノイズであり、構成間の系統的な差ではない。`all-bindings` featureは実際にはRust側のbindgenバインディング生成範囲(どのC関数をRustから呼べるようにするか)にのみ影響し、AWS-LC本体のCソースがコンパイルされる範囲(=native build costの実体)には一切影響しない。
+
+**結論(仮説α棄却)**: `aws-lc-sys`のビルド時間45.73秒は、feature flagで無効化可能な「到達不能コード」(FIPS/post-quantum/未使用バインディング)によるものではない。これらは依存グラフ上で最初からデフォルト無効であり(FIPS/post-quantum)、有効なfeature(`all-bindings`)を切り替えてもコンパイル対象のCソース量はビットレベルで変化しない(未使用バインディング)。issue #62が提起した「到達可能性による枝刈り」は、この45.73秒に対しては効果を持たない——枝刈りで削れる「到達不能なコード」がそもそも存在しないため。停止条件に従い、焦点は仮説β(コンパイル自体の構造的コスト)/仮説γ(プロセス起動・I/Oオーバーヘッド)、すなわちAWS-LC本体のCソース行数・最適化パス自体の重さへ移す。
+
+詳細な計測スクリプトは`scripts/research/measure-aws-lc-sys-feature-cost.sh`に記録した(使い捨てDocker隔離環境、実行のたびに一時ディレクトリへcrateを生成しビルド後は自動削除)。
+
 ## Artifact profile
 
 全platformで一律の「単一完全static binary」を要求しない。targetとdependencyに応じて、少なくとも次を明示する。
