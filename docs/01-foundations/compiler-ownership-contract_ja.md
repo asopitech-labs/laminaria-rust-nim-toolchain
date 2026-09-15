@@ -4,6 +4,8 @@
 
 LAMINARIAは、**RustとNimを対象とした独自コンパイラ、独自の中間表現、独自スケジューラを研究・開発するプロジェクト**である。Cargo/rustc、Nim compilerや既存backendを上手に運用することが目的ではない。[2026-09-10の監査](../05-history/research-intent-audit-2026-09-10.md)で判明した曖昧さを訂正し、研究目的・Issueの依存関係・完了条件をこの契約で統一する。現在の実装が達成済みという意味ではない。
 
+なぜこの所有が既存ツールチェーンの構成では実現できないかの実測・裏取りは[全体設計 — なぜ「一つの計算システム」でなければならないか](joint-symbol-schedule-layout-design_ja.md)を参照。
+
 LAMINARIA自身をRustとNimで実装し、最終的には同じ独自コンパイル経路で自身をコンパイルする。実装言語の分担は、Rust用ツールチェーンとNim用ツールチェーンを別々に動かす分担ではない。
 
 現在の成果物ゴールは、一般的なOSが直接起動できるnative executableである。WebAssemblyは任意targetであり、この契約の既定target、現在のmilestone、またはnative経路の代替ではない。
