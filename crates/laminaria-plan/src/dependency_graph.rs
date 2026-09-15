@@ -1341,6 +1341,72 @@ fn resolve_provider_for_requirement(
 pub struct ExpansionStats {
     pub package_candidates_considered: usize,
     pub package_candidates_total: usize,
+    /// Issue #65 (carried-forward item 3, E2 cross-layer pruning
+    /// reconnaissance): how many of `package_candidates_total`'s real
+    /// sources belong to a reachable package but are *not* the
+    /// `declaring_source` of any of that package's own
+    /// [`FfiExportFacts`] -- i.e. sources that would be additionally
+    /// prunable if reachability were computed at translation-unit
+    /// granularity (issue #65's item 1, sub-candidate outputs) instead
+    /// of today's whole-package granularity (E1 currently keeps every
+    /// source of a reachable package, package-candidate layer only, per
+    /// `docs/02-research-areas/toolchains/cross-layer-reachability-pruning_ja.md`'s
+    /// layer table). This is observation-only: `resolve_demand_driven`
+    /// does not act on this count -- pruning a source without also
+    /// updating every `declared_outputs` entry that still names it
+    /// (e.g. `ArtifactOutputFacts::source_ids`) would produce a
+    /// `RequiredAction` referencing a source no longer present. This
+    /// field exists to measure the real, if not yet acted-on, upper
+    /// bound on what a future source/module-layer pruning pass could
+    /// additionally prune, against the real `cadd`/`app` fixture --
+    /// exactly the "measured against the real production path" item 3
+    /// asks for before any adopt/reject/reformulate decision.
+    pub sub_candidate_prunable_sources: usize,
+}
+
+/// Issue #65 item 3 reconnaissance: among `reachable_sources` (already
+/// computed by [`reachable_package_and_source_ids`] at whole-package
+/// granularity), how many belong to a reachable package that itself
+/// declares a real FFI export (making translation-unit-granularity
+/// pruning meaningful for it) but are not that export's own
+/// `declaring_source`. A source belonging to a package with **no**
+/// declared export at all (a root/consumer package, or a provider with
+/// nothing exported yet) is never counted -- this only measures the
+/// specific sub-candidate opportunity item 1 introduced: a provider
+/// candidate whose `declared_exports` names a strict subset of its own
+/// `sources`.
+fn count_sub_candidate_prunable_sources(
+    input: &DependencyResolutionInput,
+    reachable_packages: &std::collections::BTreeSet<&str>,
+    reachable_sources: &std::collections::BTreeSet<&str>,
+) -> usize {
+    let mut exporting_source_ids: std::collections::BTreeSet<&str> =
+        std::collections::BTreeSet::new();
+    let mut packages_with_exports: std::collections::BTreeSet<&str> =
+        std::collections::BTreeSet::new();
+    for candidate in &input.package_candidates {
+        if !reachable_packages.contains(candidate.package_id.as_str())
+            || candidate.declared_exports.is_empty()
+        {
+            continue;
+        }
+        packages_with_exports.insert(candidate.package_id.as_str());
+        exporting_source_ids.extend(
+            candidate
+                .declared_exports
+                .iter()
+                .map(|e| e.declaring_source.as_str()),
+        );
+    }
+    input
+        .sources
+        .iter()
+        .filter(|s| {
+            reachable_sources.contains(s.id.as_str())
+                && packages_with_exports.contains(s.package_id.as_str())
+                && !exporting_source_ids.contains(s.id.as_str())
+        })
+        .count()
 }
 
 /// The set of package ids, and the set of source ids belonging to them,
@@ -1470,6 +1536,8 @@ pub fn resolve_demand_driven(
         runtime_requirements: input.runtime_requirements.clone(),
     };
     let package_candidates_considered = filtered.package_candidates.len();
+    let sub_candidate_prunable_sources =
+        count_sub_candidate_prunable_sources(input, &reachable, &reachable_source_ids);
 
     let closure = resolve(&filtered)?;
     Ok((
@@ -1477,6 +1545,7 @@ pub fn resolve_demand_driven(
         ExpansionStats {
             package_candidates_considered,
             package_candidates_total,
+            sub_candidate_prunable_sources,
         },
     ))
 }
@@ -3006,5 +3075,92 @@ mod tests {
             serde_json::to_string(&demand_driven).unwrap(),
             "E1 must reach exactly what E0 reaches for a provider-of-provider chain"
         );
+    }
+
+    /// Issue #65 (carried-forward item 3, E2 cross-layer pruning
+    /// reconnaissance): a provider whose `declared_exports` names one of
+    /// its own two translation units directly (unlike
+    /// `two_translation_unit_cadd_candidate`, where the header is the
+    /// declaring source) -- `member_a.c` declares `c_add` itself,
+    /// `member_b.c` is an unrelated internal implementation file no
+    /// export or FFI requirement ever names. Today's whole-package-layer
+    /// E1 reachability keeps both once `cadd` itself is reachable
+    /// (`reachable_package_and_source_ids` adds every source of a
+    /// reachable package, per-TU granularity is not yet a pruning
+    /// input); `count_sub_candidate_prunable_sources` measures that
+    /// `member_b.c` is real reconnaissance evidence for the additional
+    /// pruning opportunity item 3 asks to be measured against the real
+    /// production path -- without actually pruning it (this is
+    /// observation only, see `ExpansionStats::sub_candidate_prunable_sources`'s
+    /// own doc comment on why acting on it is not yet safe).
+    #[test]
+    fn sub_candidate_prunable_sources_measures_a_real_tu_granularity_opportunity() {
+        let sources = vec![
+            SourceModuleFacts {
+                id: "c/cadd/v1/member_a.c".to_string(),
+                ecosystem: Ecosystem::C,
+                package_id: "cadd".to_string(),
+            },
+            SourceModuleFacts {
+                id: "c/cadd/v1/member_b.c".to_string(),
+                ecosystem: Ecosystem::C,
+                package_id: "cadd".to_string(),
+            },
+        ];
+        let candidate = PackageCandidateFacts {
+            ecosystem: Ecosystem::C,
+            package_id: "cadd".to_string(),
+            version: "1.0.0".to_string(),
+            role: Role::Target,
+            target_triple: "x86_64-unknown-linux-gnu".to_string(),
+            sources: sources.iter().map(|s| s.id.clone()).collect(),
+            declared_exports: vec![FfiExportFacts {
+                declaring_source: "c/cadd/v1/member_a.c".to_string(),
+                symbol: "c_add".to_string(),
+                abi: "C".to_string(),
+                param_count: 2,
+                return_type: "i32".to_string(),
+            }],
+            declared_constraints: vec![],
+        };
+        let mut input = minimal_input(vec![candidate]);
+        input.sources.retain(|s| s.package_id != "cadd");
+        input.sources.extend(sources);
+
+        let (_, stats) = resolve_demand_driven(&input).expect("must resolve");
+        assert_eq!(
+            stats.sub_candidate_prunable_sources, 1,
+            "member_b.c is a real, measured TU-granularity pruning opportunity; member_a.c \
+             (the export's own declaring_source) must never be counted"
+        );
+
+        // Observation-only: the actually-filtered closure still keeps
+        // both cadd sources -- reachability is unaffected at today's
+        // whole-package granularity.
+        let (closure, _) = resolve_demand_driven(&input).expect("must resolve");
+        assert!(closure
+            .obligations
+            .contains_key("SourceModule:c/cadd/v1/member_b.c"));
+    }
+
+    /// A package with no declared exports at all (the `app` root itself,
+    /// or a provider with none of its own) must never contribute to
+    /// `sub_candidate_prunable_sources` -- there is no sub-candidate
+    /// opportunity to measure when nothing is exported.
+    #[test]
+    fn sub_candidate_prunable_sources_ignores_packages_with_no_declared_exports() {
+        let input = minimal_input(vec![cadd_candidate(
+            "1.0.0",
+            "c_add",
+            "x86_64-unknown-linux-gnu",
+            Role::Target,
+        )]);
+        let (_, stats) = resolve_demand_driven(&input).expect("must resolve");
+        // cadd_candidate's own declared_exports names cadd.h as the
+        // declaring_source, and cadd.h is one of cadd's own sources, so
+        // only cadd.c (not the header) is prunable here -- confirming
+        // the count is exactly what the fixture's own shape predicts,
+        // not a placeholder zero.
+        assert_eq!(stats.sub_candidate_prunable_sources, 1);
     }
 }
