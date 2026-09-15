@@ -98,12 +98,27 @@ Phase 0を「package lockfileのみ」と定義すると、義務が到達可能
 
 これは**Phase 0がPull-Determinable(到達可能性)とCost-Determinable(質的コスト予見)という異なる問いを一つの箱に押し込めていた**ことを示す。ただし今回確認した「fetch直後の隙間に相乗りする」という設計は、Cargoという既存エコシステムが偶然この情報をこの形で保持していたことに依存した、**複数ありうる設計仮説のうちの一つ**にすぎない。少なくとも次の代替案が考えられ、いずれも未検証である。
 
-- **仮説A(実測済み): 既存メタデータの走査への相乗り** — 依存解決時に取得済みのソースメタデータ(Cargo.tomlのbuild-dependency宣言等)を、fetch直後のCPU/I/O手薄区間で走査する。追加コストは最小だが、走査対象のシグナル(`links`等)が「native実行コストの重さ」まで表現する保証はなく、false positiveを許容する必要がある。またCargo以外のecosystem(Nimble/C/C++)に同種のシグナルが存在するとは限らない。
+- **仮説A(複数実プロジェクトで再現検証済み、[issue #63 P0](https://github.com/asopitech-labs/laminaria-rust-nim-toolchain/issues/63)): 既存メタデータの走査への相乗り** — 依存解決時に取得済みのソースメタデータ(Cargo.tomlのbuild-dependency宣言等)を、fetch直後のCPU/I/O手薄区間で走査する。追加コストは最小だが、走査対象のシグナル(`links`等)が「native実行コストの重さ」まで表現する保証はなく、false positiveを許容する必要がある。またCargo以外のecosystem(Nimble/C/C++)に同種のシグナルが存在するとは限らない。alopexDB以外の2つの実Cargoプロジェクト(cargo本体・rust本体、`scripts/research/scan-native-build-signals.py`で再現)でもfalse negative率0%を維持できたが、false positive率は35〜44%(alopexDBの実測より悪化)だった。加えて、`cargo vendor`/`cargo publish`が正規化する`[build-dependencies.<name>]`ヘッダ形式(単一`[build-dependencies]`テーブル内`name = "..."`とは別の表現)を当初のスキャン正規表現が見落とし、`ring`/`cxx`/`link-cplusplus`等の真陽性を取りこぼす具体的な実装上の脆弱性が判明した(修正後は0件)。この見落としパターン自体が「シグナルの表現形式がエコシステムのツール側の正規化規則に依存し、単純な文字列走査では網羅できない」という、仮説Aの脆弱性の実例である。詳細は次節「仮説A実測記録(issue #63 P0)」を参照。
 - **仮説B: 過去実行の計測結果をprovenance付きでキャッシュする** — LAMINARIA自身が一度そのcrate/versionをビルドした際の実測コスト(wall-clock、CPU、I/O)を`resolution_certificate`相当の構造へ記録し、同一obligationの再要求時にキャッシュを引く。初回コストは避けられないが、2回目以降は実測ベースの正確な見積もりになる。ecosystem横断で一様に適用できる利点があるが、初回実行前(cold start)には無力で、環境依存の計測値がどこまで別環境へ転用可能かという妥当性問題が残る。
 - **仮説C: LAMINARIA独自のcost contractフィールドを定義し、crate作者ではなくLAMINARIA側のprovenance DBへ外部から充填する** — crate作者に新しい登録義務を課さず(ユーザーオペレーション不変の制約を満たす)、LAMINARIAまたはコミュニティが観測データを蓄積してcontract化する。仮説Bのキャッシュを恒久化・共有可能にした形だが、DBの整備・配布・信頼性検証という新たな運用コストを持ち込む。
 - **仮説D: 質的分類を諦め、保守的に「未知の義務は重いかもしれない」と仮定してスケジューリングだけで対処する** — [Lane B](../execution/lane-b-efficient-compiler-computation-foundations_ja.md)のB-H4(obligation-aware scheduling)が扱う領域で、コストの事前予見自体を放棄し、代わりに「未確定な義務を優先的に早く着手する」というスケジューリング側の保守化で全体最適を狙う。予見精度に依存しない代わりに、並列度に余裕がない環境では効果が薄い。
 
 いずれの仮説も、[cross-layer枝刈り](cross-layer-reachability-pruning_ja.md)の原則(「静的に精密なtarget setが得られない場合は、対象集合をover-approximateして保持する」)に従い、コスト予見の失敗を安全側(悲観的スケジューリング)に倒す必要がある。どの仮説を採るか、または組み合わせるかは、対象ecosystemの多様性(仮説Aはecosystem固有のメタデータ形式に依存)と、M1で扱う実際のmixed workloadでの反証実験を経て判断する。
+
+### 仮説A実測記録(issue #63 P0)
+
+alopexDB以外の実Cargoプロジェクトで仮説Aがどれだけ再現性を持つかを検証するため、`scripts/research/scan-native-build-signals.py`で`.reference/cargo`(cargo本体、コミット`e7506208`)と`.reference/rust`(rust本体、コミット`55c4dfed`)のCargo.lock全登録パッケージを対象に、`links`フィールドおよび`cc`/`cmake`/`pkg-config`向けbuild-dependency宣言を機械的シグナルとして走査した。ground truthは各パッケージのbuild.rsを直接確認し、実際にネイティブCコンパイラ/cmake/pkg-configを起動するものを手動で判定した(スクリプト内`GROUND_TRUTH`に記録)。
+
+| 対象 | 登録パッケージ数 | ground truth数 | 予測陽性数 | false negative率 | false positive率 | 走査時間 |
+| --- | --- | --- | --- | --- | --- | --- |
+| cargo本体 | 524 | 9 | 14 | 0% | 35.7%(5/14) | 0.048秒 |
+| rust本体 | 524 | 9 | 16 | 0% | 43.75%(7/16) | 0.039秒 |
+
+**false negative率0%は両プロジェクトで維持された**が、**false positive率はalopexDBの実測(2 crate中0件、ただし「false positiveあり」とのみ記載され具体数値は未記録)より明確に高い**。false positiveの内訳は、`links`フィールドを持つがbuild.rsが実際にはnativeコンパイラを呼ばない用途(モジュール分割目的のリンクユニーク化等、例: `rayon-core`/`wasm-bindgen-shared`/`defmt`)、および`links`はあるがbuild.rs自体を持たないケース(例: `blake3`のfeature構成)だった。
+
+**実装上の重要な発見**: 初回実装では正規表現が単一`[build-dependencies]`テーブル内`cc = "1.0"`形式のみを検出しており、`cargo vendor`/`cargo publish`が正規化する`[build-dependencies.cc]`ヘッダ形式(依存ごとに個別テーブルへ分解される表現)を見落としていた。この結果、実際にnative build costを要求する`ring`/`cxx`/`link-cplusplus`が誤ってfalse negativeとして扱われるところだった。両形式を検出するよう修正後、false negativeは0件を維持した。この見落とし自体が、「Cargo.tomlのシグナル表現形式はツール(cargo自身)の正規化規則に依存し、単純な文字列走査は表現形式のバリエーションを列挙し尽くす必要がある」という、仮説Aの脆弱性の具体例である——crates.io配布物(=依存解決時に実際に取得されるCargo.toml)は`cargo publish`によって`[build-dependencies.<name>]`形式に正規化されるため、この見落としは実運用でも起こり得る。
+
+停止条件との照合: 「仮説Aが複数実プロジェクトでfalse negativeゼロを維持できず」という停止条件には該当しなかった(false negative率は0%を維持)。従って本P0の結果は、仮説Aを主軸から外す根拠にはならないが、false positive率のばらつき(alopexDBの2件→今回35〜44%)と表現形式依存の脆弱性は、仮説Aを「唯一の解」として採用しないための追加的な留保事項として記録する。
 
 ## Artifact profile
 
