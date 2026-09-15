@@ -90,6 +90,11 @@ pub struct CargoManifestFacts {
     /// declaration a source file's syntax contains as unconditionally
     /// required.
     pub active_features: BTreeSet<String>,
+    /// The real `edition` field `cargo metadata` reported for this
+    /// package -- issue #46 (G2)'s own `rustc` invocations need this to
+    /// compile the exact same way `cargo build` would, never a
+    /// hardcoded guess.
+    pub edition: String,
 }
 
 /// Transitively expands the real default-activation closure from
@@ -142,6 +147,10 @@ pub fn ingest_cargo_metadata(
         .ok_or_else(|| IngestError::Parse("package has no name".to_string()))?
         .to_string();
     let version = package["version"].as_str().unwrap_or_default().to_string();
+    let edition = package["edition"]
+        .as_str()
+        .ok_or_else(|| IngestError::Parse("package has no edition".to_string()))?
+        .to_string();
     let features_map: BTreeMap<String, Vec<String>> = package["features"]
         .as_object()
         .map(|m| {
@@ -168,6 +177,7 @@ pub fn ingest_cargo_metadata(
         version,
         features,
         active_features,
+        edition,
     })
 }
 
