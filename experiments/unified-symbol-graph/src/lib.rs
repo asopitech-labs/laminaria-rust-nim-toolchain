@@ -210,6 +210,82 @@
 //! x86_64/Intel macOS (`x86_64-apple-darwin`) and every other rustc
 //! target are explicitly out of scope, not merely undone -- this
 //! project does not intend to support them.
+//!
+//! ## Every real toolchain invocation this crate has measured: input and output
+//!
+//! Gathered because a command name (`cc`) is not evidence of what it is
+//! *doing* -- the same `cc` binary is a real C compiler in one call and
+//! nothing but a linker-invoking driver, never touching a `.c` file, in
+//! another. Every row below was observed directly (`--print link-args`,
+//! `--listCmd`, `-###`, `objdump`), never assumed from the command name.
+//!
+//! - **`rustc` (frontend + LLVM backend)**: input a `.rs` source file
+//!   plus flags (`--edition`, `--crate-type`, `-C link-args`, `-l
+//!   static=...` naming already-built external archives); output with
+//!   `--emit=obj` a real ELF object (verified: same format `cc -c`
+//!   produces). `rustc` never emits C source at any point -- LLVM is its
+//!   only backend, feeding directly to codegen, never through a
+//!   generated `.c` file the way Nim does.
+//! - **`rustc`'s own final link step**: `rustc --print link-args`'s own
+//!   output starts with `"cc"`, but the arguments that follow are never
+//!   a `.c` file -- they are the `.o` files `rustc`'s own LLVM backend
+//!   already produced (one per codegen unit, `*.rcgu.o`) plus `.rlib`
+//!   archives (Rust's own static-library format, themselves containing
+//!   already-compiled objects). **`cc` here compiles nothing**: it is
+//!   invoked purely as a linker-invocation driver, passing its argument
+//!   list through to `collect2` (verified via `cc -###`) and from there
+//!   to the real linker (`ld`/`ld.lld`). The same command name, a wholly
+//!   different role from the paragraph above.
+//! - **`nim c` (Nim's C backend)**: input a `.nim` source file; output is
+//!   **not** a single artifact -- Nim's own compiler transforms it into
+//!   one or more real `.c` files (module-by-module, e.g.
+//!   `system.nim.c`), then genuinely invokes `gcc -c <module>.nim.c -o
+//!   <module>.nim.c.o` **once per generated `.c` file** (verified: `nim
+//!   c --listCmd` showed five separate `gcc -c` invocations, one per
+//!   `.nim.c` file, for a five-line "hello world"). Here `gcc` really is
+//!   a C compiler, reading real C source it did not have a hand in
+//!   writing until Nim generated it.
+//! - **`nim c`'s own final link step**: after every `.nim.c.o` exists,
+//!   Nim invokes `gcc` *again*, this time without `-c` and with every
+//!   `.o` file from the previous step as input, producing the linked
+//!   executable -- the same "compiler binary reused purely as a linker
+//!   driver" role `rustc`'s own final step uses, confirmed by the
+//!   absence of any `.c`/`.nim.c` file in this second invocation's own
+//!   argument list.
+//! - **`cc -c`/`c++ -c` on this project's own real C/C++ fixture
+//!   sources** (`cadd.c`, `cppmax.cpp`): input the `.c`/`.cpp` file
+//!   directly (no intermediate generation step -- these are the
+//!   ecosystem's own real source, not compiler output); output a real
+//!   ELF object, verified byte-for-byte with `objdump -d`/`-r`
+//!   (`real_c_add_code`/`real_compute_code_and_relocs` in this crate's
+//!   own tests are these exact bytes).
+//! - **`x86_64-w64-mingw32-gcc -c`** (MinGW-w64 cross compiler): same
+//!   role as plain `cc -c` above (a real C compiler, `.c` in, object
+//!   out), but the object format is COFF (`pe-x86-64`), not ELF --
+//!   confirmed by `objdump -f` reporting `file format pe-x86-64` on the
+//!   identical source used for the ELF measurement.
+//! - **`rustc --target wasm32-unknown-unknown`**: input a `.rs` file;
+//!   output (with a full build, not `--emit=obj` alone) a linked `.wasm`
+//!   module, produced via `rustc`'s own internal `rust-lld -flavor wasm`
+//!   step (named directly in a real link failure's own error output --
+//!   no external `cc`/linker driver is invoked at all for this target,
+//!   unlike every ELF/COFF case above).
+//!
+//! **The pattern this crate's own measurements converge on**: every
+//! frontend (`rustc`, `nim`, `cc`, `c++`) only ever transforms its own
+//! source language into *either* a native object file *or* another
+//! language's source file (Nim's `.c`/`.cpp`/`.m` generation) -- never
+//! into a final linked executable by itself. The step that combines
+//! independently-produced objects/archives into one executable is
+//! always a separate invocation, sometimes of a *different* binary
+//! (`ld`/`ld.lld` directly) and sometimes of the *same* compiler binary
+//! reused purely as a driver for that separate linker (`cc`/`gcc` with
+//! no `-c` and no source files in its argument list) -- the two roles
+//! share a command name but never share what they actually read or
+//! produce. This is the exact split this crate's own `SharedSymbolGraph`
+//! is built to replace: not "the same pipeline, drawn differently," but
+//! removing the object-file/link-step boundary these four toolchains all
+//! independently reconstruct.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
