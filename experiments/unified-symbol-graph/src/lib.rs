@@ -60,6 +60,27 @@ pub struct SymbolId {
 /// kept here as one entry directly on the symbol's own `CodeBody` rather
 /// than in a separate section/relocation-table indirection, since this
 /// hypothesis has no sections to begin with.
+///
+/// **Platform scope, verified not assumed**: this shape (offset/width/
+/// target/addend, `apply_relocations`'s own PC-relative formula) is
+/// ELF/x86_64-specific -- confirmed by checking what `cc` actually is on
+/// each of the four real ecosystems' target platforms. On Linux, `cc`
+/// (gcc or clang) and Nim's `c`/`cpp` backends both emit ELF objects;
+/// the same `cc` command name on macOS is Apple's Clang, which emits
+/// **Mach-O**, a structurally different object format with its own
+/// relocation type set and its own linker identity (`ld64`, not GNU
+/// ld/lld) -- LLVM's own Mach-O port confirms this is a distinct linker
+/// mode, not just a different flag to the same ELF logic
+/// (<https://lld.llvm.org/MachO/index.html>). Nim's third native
+/// backend, `nim objc`, generates Objective-C (`.m`) source specifically
+/// because macOS's own toolchain expects it, and that source is in turn
+/// compiled by the same platform Clang -- so it is the *same* platform
+/// divergence as the C/C++ backends, not a fourth, separate case. The
+/// principle this hypothesis tests (shared graph, no separate object-file/
+/// link pass) is platform-independent; this concrete `PendingReloc`
+/// encoding is not, and a macOS/Mach-O (or Windows/COFF) port needs its
+/// own relocation-shape verification against real `clang`/`cl.exe`
+/// output before this crate's claims can be said to hold there.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingReloc {
     /// Byte offset into `code` where the placeholder begins.
