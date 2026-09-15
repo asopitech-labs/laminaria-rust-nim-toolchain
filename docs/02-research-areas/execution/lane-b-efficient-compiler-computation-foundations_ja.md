@@ -142,6 +142,8 @@ final artifact/test rootからpackage/source/IR/artifactへ需要を伝えるこ
 
 text/file digestが変わっても、canonical semantic summaryが同じなら下流package/lowering/link/test invalidationを止められる。
 
+alopexDBの実測([issue #62](https://github.com/asopitech-labs/laminaria-rust-nim-toolchain/issues/62))は、B-H1が対象とする「早期に需要を伝える」余地が義務の種類によって異なることを示した。[dependency-resolved-artifact-closure_ja.mdの確定可能性フェーズ](../toolchains/dependency-resolved-artifact-closure_ja.md#いつどの情報源で確定できるか確定可能性フェーズ)で定義したPhase 0(package lockfileのみで確定)はB-H1が直接適用できる層である一方、Phase 1(semantic item)・Phase 2(native実行コスト)はB-H1のいう「事前展開の削減」ではなく、B-H4(obligation-aware scheduling、後述)が扱う「早期着手」の問題になる。
+
 ### B-H3 — summary/body分離
 
 常駐するsmall summary graphと、必要時だけmaterializeするsource/IR/object bodyを分けることで、探索能力を保ったままpeak RSSを抑えられる。

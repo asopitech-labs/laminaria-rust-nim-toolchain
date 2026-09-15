@@ -64,6 +64,34 @@ DischargeKind = Specialized | Lowered | Generated | Inlined
 
 例えばCargo featureは選択されるだけでなく、それによるsemantic/IR差分が最終codeへ反映された時点でdischargeされる。Nim module要求は必要itemがloweringされた時点、C/C++ library要求は必要symbolがstatic linkされるか明示runtime contractへ移された時点でdischargeされる。この結果、元のecosystem edgeは配備時の未解決問題としては残らない。
 
+### いつ・どの情報源で確定できるか(確定可能性フェーズ)
+
+`ObligationState`の遷移(`Unresolved -> Selected -> Satisfied -> Discharged`)は、義務の種類によって全く異なる段階でしか確定できない。これはCargo/rustc/linkerの実行フェーズ(parse→typecheck→monomorphize→codegen→link)という**プロデューサー側の時系列**とは別の軸であり、alopexDBの実測([issue #62](https://github.com/asopitech-labs/laminaria-rust-nim-toolchain/issues/62))で3段階に区別できることが確認された。
+
+```text
+Phase 0: Pull-Determinable（要求から静的に確定可能）
+  情報源: package lockfile等の宣言的メタデータのみ
+  実行: 不要（ビルドを一切走らせない）
+  ObligationState対応: Unresolved -> Selected がこの段階で完結しうる
+
+Phase 1: Semantic-Determinable（意味解析後にのみ確定可能）
+  情報源: source/module/type/FFI事実、monomorphization対象
+  実行: parse・型検査・monomorphization collectionが必要
+  ObligationState対応: Selected -> Satisfied はこの段階でしか判定できない
+
+Phase 2: Execution-Cost-Opaque（package/semantic情報からコストが不透明）
+  情報源: 実行環境依存の計算コスト（native compiler呼び出し、link処理等）
+  実行: 実際にnative build・linkを実行しないとコストの大きさが分からない
+  ObligationState対応: Satisfied -> Discharged のコストが、義務の種類によって
+    全く異なる尺度（source言語の意味解析コスト vs 外部native toolchain実行コスト）になる
+```
+
+alopex-cliの実測で、クリティカルパス上の全ノード(TLS依存連鎖を含む12 crate)はCargo.lockの静的解析だけで100%到達可能と判定でき(Phase 0)、alopex-cli自身が生成するmonomorphized itemの個数(29,129個)は実際にコンパイルするまで確定できず(Phase 1)、そのうちクリティカルパス最長区間を占めた`aws-lc-sys`(C言語のAWS-LC暗号ライブラリをbindgen経由で使うcrate)はmonomorphized item数(371個)がごく少数であるにもかかわらずビルド時間はクリティカルパス上最大だった(Phase 2)。`cargo build --timings`のunit別section分解(frontend/codegen区分)は、native compiler呼び出し区間には適用されない(`sections: None`として現れる)——これはCargo/rustcの既存フェーズへ全ての義務を一様にマッピングすることが構造的に不可能であることの直接証拠である。
+
+このフェーズ区分が示す帰結は、**プル駆動の枝刈り設計はPhase 0/1/2を区別しなければならない**ということである。Phase 0の義務は静的な事前枝刈りを追求できるが、Phase 1/2の義務はプル側から早期に「不要」と判定する余地が原理的に限られ、代わりに「早期に着手を開始する」スケジューリング上の工夫（[Lane B](../execution/lane-b-efficient-compiler-computation-foundations_ja.md)が扱う領域）に軸足を移す必要がある。
+
+Phase 0の情報源自体が誤っている場合、この段階の確定は無効になる。alopexDBの`alopex-sql`が依存するNim SQLパーサーのvendor manifest(`contract_version: 0.4.0`)は、実際にRust側が要求する`REQUIRED_CONTRACT_VERSION`(`0.25.0`)と不整合であり、静的な宣言だけでは義務がdischarge可能かどうか判定できない状態だった([issue #62 P0](https://github.com/asopitech-labs/laminaria-rust-nim-toolchain/issues/62)実測時に発覚)。Phase 0による早期確定は、その情報源自体の正しさを別途検証する仕組みを要求する。
+
 ## Artifact profile
 
 全platformで一律の「単一完全static binary」を要求しない。targetとdependencyに応じて、少なくとも次を明示する。
