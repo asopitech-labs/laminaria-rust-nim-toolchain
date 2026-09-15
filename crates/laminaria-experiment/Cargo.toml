@@ -27,6 +27,10 @@ path = "src/bin/d1b2_new_fixtures_runner.rs"
 name = "laminaria-issue50-rust-cross-layer-baseline"
 path = "src/bin/rust_cross_layer_baseline.rs"
 
+[[bin]]
+name = "laminaria-issue47-g3-e0-vs-e1"
+path = "src/bin/g3_e0_vs_e1_runner.rs"
+
 [dependencies]
 laminaria-fingerprint = { path = "../laminaria-fingerprint" }
 laminaria-ir = { path = "../laminaria-ir" }

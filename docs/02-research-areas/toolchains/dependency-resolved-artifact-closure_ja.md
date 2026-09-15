@@ -306,6 +306,32 @@ issue #47でB-H3(summary/body分離)を`aws-lc-sys`/`bcm.c`に対する計算問
 
 詳細な計測スクリプトは`scripts/research/measure-phase1-root-set-cost.sh`に記録した。
 
+### E0(eager) vs E1(demand-driven)実測：production pathでの決定(issue #47 M1)
+
+issue #47の直接受入基準が要求する「同一production resolver/planner/compiler/linker pathでのE0/E1比較」を、実際のLAMINARIA実装(`laminaria_plan::dependency_graph`)とG2実行経路(`laminaria_run::g2_execute::compile_and_archive_cadd_v1`、実際の`cc -c`+`ar rcs`+`nm`検証)を使って実施した。
+
+**実装**: `laminaria_plan::dependency_graph`に、既存の`resolve()`(E0、`Obligation.depends_on`エッジを無視して全候補/全FFI要求を無条件走査)と並置する形で`resolve_demand_driven()`(E1)を新規実装した(`crates/laminaria-plan/src/dependency_graph.rs`)。E1は`demand_entry_point`から到達する パッケージID集合(demandの自パッケージ + 到達可能な`ffi_requirements`の`expected_provider_package`、1段の不動点計算)を先に確定し、`package_candidates`/`sources`/`ffi_requirements`/`lowering_requirements`/`declared_outputs`をその到達可能集合でフィルタしてから、既存の`resolve()`をそのまま呼び出す。E1はE0のロジックを一切変更しない(同じ`resolve()`をラップするのみ)ため、正しさの証明はE1固有の新規コードパス(フィルタリング)に限定される。
+
+**実測(`crates/laminaria-experiment/src/g3_e0_vs_e1.rs`、実行: `cargo run -p laminaria-experiment --bin laminaria-issue47-g3-e0-vs-e1 --release`)**: 実際のG1/G2 `cadd`/`app`fixtureの実データ(`ingest_fixture_input`)に、`demand_entry_point`から到達不可能な合成provider候補(実際のFFI要求元を持たない、到達不可能な`declaring_source`から発行される合成`FfiRequirementFacts`とペアの`PackageCandidateFacts`)を0〜10,000個注入し、E0/E1それぞれでresolveした後、両方のclosureに対して実際に`compile_and_archive_cadd_v1`(`cc -c`+`ar rcs`+`nm`検証)を実行して比較した。
+
+| 注入した到達不能候補数 | E0(eager) wall time | E1(demand-driven) wall time | E0 obligation数 | E1 obligation数 | E1が実際に評価した候補数 |
+| --- | --- | --- | --- | --- | --- |
+| 0 | 0.000057秒 | 0.000040秒 | 33 | 33 | 4(到達可能な全て) |
+| 10 | 0.000084秒 | 0.000041秒 | 83 | 33 | 4 |
+| 100 | 0.000550秒 | 0.000052秒 | 533 | 33 | 4 |
+| 1,000 | 0.012284秒 | 0.000205秒 | 5,033 | 33 | 4 |
+| 10,000 | 1.206093秒 | 0.003402秒 | 50,033 | 33 | 4 |
+
+**成果物同一性**: E0とE1がそれぞれ生成したclosureに対し、実際の`cc -c`+`ar rcs`を実行して得た`libcadd.a`のSHA-256は、全試行を通じて完全一致(`33ef0b94571528f330696e1f536af5610b0763004b5ce15e8ea9d1da863a7259`)——issue #47の直接受入基準「observable native executable behavior and obligation outcomes are identical before performance comparison」を満たす。
+
+**観察**: E0のwall timeとobligation数は注入した到達不能候補数に線形比例して増加する(候補が「未選択のRejected Symbol obligation」として必ずclosureに残るため)。E1のwall time・obligation数・評価候補数は、注入数に関わらず一定(常に到達可能な4候補のみを評価)——scale 10,000で**約355倍**(1.206秒→0.003秒)の差になった。
+
+**結論(B-H1/B-H4支持、アルゴリズム採用)**: 「`Obligation.depends_on`エッジと`demand_entry_point`を使い、resolve前に到達不可能な候補を除去する」という設計(B-H1、cross-layer demand)は、この具体例(cadd/app fixture、合成候補による規模変化)において、resolve自体の計算コストをobligation数に対して線形→定数に改善することを実測で確認した。structurally同一のPositiveClosureを生成し(byte-identical archive)、かつ計算コストを大幅に削減するため、**`resolve_demand_driven`をE1のアルゴリズムとして採用する**——ただしこれは現在の`resolve()`が持つ「無条件全走査」という設計上の弱点(未選択候補も必ずobligationとして残ってしまう)を、事前フィルタという外付けの形で補う実装であり、`resolve()`自体の内部ロジック(`resolve_root_packages`/`resolve_provider_for_requirement`の各forループ)を書き換えるものではない。より深い統合(`resolve()`自体をdemand-driven化する、`depends_on`エッジを辿る汎用グラフ探索に置き換える等)は、B-H4(obligation-aware scheduling)・E2(cross-layer pruning)の後続実験の対象として残される。
+
+**限界**: (1) 本実測は`resolve()`自体の計算コストのみを対象とし、Phase 2(native実行コスト、issue #64の`bcm.c`)を含む比較はまだ実施していない——合成候補は宣言のみで実ソースを持たないため、E0でも実際に`cc`は起動されない。(2) 到達可能性計算は1段の不動点(providerのproviderという多段連鎖は扱わない)であり、実際のfixtureの構造(全FFI要求のdeclaring_sourceがdemand自身)には十分だが、より深いFFI連鎖への一般化は未検証。(3) 測定はwall time(`Instant`)のみで、`laminaria_run::tracer`のpeak RSS計測はin-process呼び出しには不向き(プロセス全体のRSSを見ることになり、resolve単体のメモリコストを分離できない)ため未実施。
+
+詳細な実装は`crates/laminaria-plan/src/dependency_graph.rs`の`resolve_demand_driven`/`reachable_package_and_source_ids`、比較ランナーは`crates/laminaria-experiment/src/g3_e0_vs_e1.rs`、実行コマンドは`crates/laminaria-experiment/src/bin/g3_e0_vs_e1_runner.rs`に記録した。
+
 ## Artifact profile
 
 全platformで一律の「単一完全static binary」を要求しない。targetとdependencyに応じて、少なくとも次を明示する。
