@@ -31,6 +31,14 @@ path = "src/bin/rust_cross_layer_baseline.rs"
 name = "laminaria-issue47-g3-e0-vs-e1"
 path = "src/bin/g3_e0_vs_e1_runner.rs"
 
+[[bin]]
+name = "laminaria-g3-e0-or-e1-child"
+path = "src/bin/g3_e0_or_e1_child.rs"
+
+[[bin]]
+name = "laminaria-issue65-g3-peak-memory"
+path = "src/bin/g3_peak_memory_runner.rs"
+
 [dependencies]
 laminaria-fingerprint = { path = "../laminaria-fingerprint" }
 laminaria-ir = { path = "../laminaria-ir" }
