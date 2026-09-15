@@ -324,6 +324,77 @@
 //! exists to remove -- CGU partitioning is a concrete instance of that
 //! split happening *inside* a single `rustc` invocation, not just
 //! between separate tool invocations.
+//!
+//! ## `assign_layout` must not stay a scheduling-blind ordering function
+//!
+//! Direct correction: `assign_layout` (below) currently assigns final
+//! addresses by a single, fixed criterion -- sorted `SymbolId` order,
+//! chosen only for determinism -- and has no notion of *when* each
+//! symbol's own compilation finished or *how expensive* it was to
+//! produce. Verified against two real, independent build-tool
+//! implementations that this split (schedule now, lay out later, with
+//! each step blind to the other) is exactly what both Cargo and lld
+//! already do, and that treating them as one problem rather than two is
+//! not a novel proposal but a known-hard combined-optimization class:
+//!
+//! - **Cargo's own build scheduler is not "whatever is ready, in
+//!   discovery order"** -- confirmed directly against
+//!   `src/util/dependency_queue.rs` (`rust-lang/cargo`, fetched and
+//!   read this session). `DependencyQueue::queue_finished` computes, for
+//!   every node, `cost[n] + sum(cost[d] for d in transitive dependents
+//!   of n)` -- i.e. a node's priority is its own cost plus every
+//!   downstream node's cost, a direct analog of "how much of the
+//!   critical path depends on this finishing." `dequeue` always picks
+//!   the ready node (zero unbuilt dependencies) with the **highest**
+//!   such priority, confirmed by the crate's own `sort_by_highest_cost`
+//!   test (a cost-4 leaf is dequeued before a cost-1 leaf that becomes
+//!   ready at the same time). This is a real, working critical-path-
+//!   aware scheduler, not the "just parallelize, whichever finishes
+//!   first wins" assumption issue #59 originally set out to falsify.
+//! - **lld's own final-layout optimizer is a separate, later, and
+//!   blind pass** -- confirmed directly against `lld/ELF/Writer.cpp`
+//!   and `lld/ELF/CallGraphSort.cpp` (`llvm/llvm-project`, fetched and
+//!   read this session). `sortSection`/`buildSectionOrder` reorder
+//!   input sections in the *already-linked* output using
+//!   `--symbol-ordering-file` or a call-graph profile
+//!   (`computeCallGraphProfileOrder`, implementing Call-Chain
+//!   Clustering / Cache-Directed-Sort from real published research on
+//!   data-center function placement). Its own module doc states the
+//!   goal directly: "reduce i-TLB misses and i-cache misses" -- a
+//!   **runtime** locality objective, fed by a **runtime execution
+//!   profile**, with zero input from what Cargo's own scheduler knew
+//!   about build-time cost or critical-path membership. Sections that
+//!   were on the critical path to *build* and sections that are hot at
+//!   *runtime* are, in this pipeline, two unrelated orderings computed
+//!   from two disjoint data sources at two different times by two
+//!   different tools.
+//! - **Treating scheduling and placement as one problem, not two, is a
+//!   recognized hard class, not a fresh idea**: joint task-
+//!   scheduling-and-data-placement optimization (minimizing makespan
+//!   *and* locality together, rather than sequentially) is established
+//!   in the scheduling-theory literature as NP-hard -- the same
+//!   makespan-vs-bin-packing independence issue #59 cites for its own
+//!   "local optimization contradicts global optimization" hypothesis.
+//!   Solving schedule and layout as two independent passes (as both
+//!   Cargo and lld do today, each well-engineered on its own terms)
+//!   is a real, named simplification of a provably harder joint
+//!   problem, not an oversight unique to this repository's own G1.
+//!
+//! **What this implies for `assign_layout` specifically**: an address
+//! assignment that only encodes "deterministic order" throws away two
+//! real signals this graph's own `SymbolNode`/`CodeBody` already carry
+//! or could carry -- (1) which symbols sat on the longest dependency
+//! chain during resolution (this graph's own `mutation_seq` records
+//! *when* each declaration arrived, a cheap proxy for build-time
+//! critical-path position), and (2) which symbols reference each other
+//! most (`RequiresEdge` already records every cross-realm call
+//! relationship, the same shape a call-graph profile encodes). A
+//! layout function that used both would be attempting the joint
+//! problem directly, in one pass, instead of reproducing Cargo's
+//! schedule-only pass followed by lld's placement-only pass. This is
+//! not yet implemented -- flagged here as the concrete next design
+//! question, not a design already answered by `assign_layout`'s current
+//! sorted-`SymbolId` body.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
