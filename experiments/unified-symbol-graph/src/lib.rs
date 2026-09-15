@@ -76,6 +76,22 @@
 //! *principle* this crate tests (a shared graph replaces a separate
 //! object-file/link pass) is meant to generalize; no single Rust type
 //! is.
+//!
+//! **The actual split unit, confirmed against rustc's own target list**
+//! (`rustc --print target-list`, not assumed): 330 distinct triples, each
+//! `<cpu-arch>-<vendor>-<os>-<abi/env>` (e.g. `aarch64-apple-darwin`,
+//! `aarch64-unknown-linux-gnu`, `aarch64-pc-windows-msvc` -- the same
+//! `aarch64` CPU architecture paired with three different OS/ABI
+//! combinations), 83 distinct CPU-architecture prefixes. This is the
+//! same axis this crate's own findings above independently converged on
+//! from the object-format/relocation side (CPU instruction set decides
+//! relocation *field* shape -- 32-bit-aligned vs. a 26-bit sub-field;
+//! OS/ABI decides object *format* and repair mechanism -- ELF static
+//! relocations vs. Mach-O Chained Fixups vs. COFF). Any future
+//! `PendingReloc`-equivalent type for a new platform should be scoped to
+//! one `(cpu-arch, os/abi)` pair, matching rustc's own real granularity,
+//! not one dimension alone (an "ARM64 variant" or an "ELF variant" in
+//! isolation would each still conflate two independent axes).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
