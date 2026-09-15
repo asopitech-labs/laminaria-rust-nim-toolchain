@@ -134,6 +134,24 @@ alopexDB以外の実Cargoプロジェクトで仮説Aがどれだけ再現性を
 
 停止条件との照合: 該当。仮説Aは「静的メタデータ走査」というアプローチ自体がCargo固有であり、LAMINARIAがCargo/Nimble/C/C++を横断する以上、少なくとも仮説Aを主軸には据えられないという、適用範囲を絞った否定的証拠として記録する(非ゴール節の通り、Nimble側への新フィールド追加提案は行わない)。
 
+### 仮説A/Bのcold/warm比較と`resolution_certificate`組み込み評価(issue #63 P2)
+
+P0/P1で仮説Aが「false negativeゼロを維持するが、false positive率が案件依存で悪化しうる」「Cargo固有でNimbleへ一般化できない」ことが判明した。P2は、仮説Aの代替である仮説B(実行時キャッシュ)を、実装せずに机上・既存実測データの引用で評価し、`resolution_certificate`(前掲「Artifactが持つ証拠」節)への組み込みやすさを比較する。実際のcache層の実装は本P2の完了条件に含めない(issue #63非ゴール)。
+
+**現行`resolution_certificate`のスキーマ**は`selected package/version/feature/provider/toolchain`と`rejected alternatives and reasons`のみを持ち、コスト予見に使えるフィールドを一切持たない。仮説A/Bのどちらを採るにせよ、新規フィールドの追加が必要である。
+
+| 観点 | 仮説A(静的メタデータ走査) | 仮説B(実行時キャッシュ) |
+| --- | --- | --- |
+| cold start(初回) | 即座に使える(P0実測: cargo本体0.048秒、rust本体0.039秒、524パッケージ走査)。義務充足前に予見できる。 | **無力**。初回はキャッシュが空で予見できず、フォールバック(仮説D的な保守的スケジューリングか、実測完了を待つ同期実行)が別途必要。 |
+| warm(2回目以降) | **精度が変わらない**。何度実行してもP0で確認したfalse positive率(35.7%/43.75%)はそのまま——シグナルの表現(`links`等)自体は同じ情報しか持たないため、繰り返しによる改善余地がない。 | **精度が実測値に置き換わる**。2回目以降はwall-clock/CPU/I/Oの実測値を直接使え、false positive/negativeという概念自体が消える(「重い」か「軽い」かの二値予測ではなく連続値の実測)。 |
+| `resolution_certificate`への追加フィールド | `native_build_signal: bool`(またはシグナル種別の列挙)程度で足りる。既存のselected package/version情報から独立して計算でき、他フィールドとの依存関係が薄い。 | `measured_cost { wall_clock, cpu_time, io_bytes, environment_fingerprint_digest }`のような複合フィールドが必要。**`environment_fingerprint_digest`は本リポジトリ既存の`EnvironmentFingerprint`/`environments_comparable()`(`crates/laminaria-fingerprint/src/comparability.rs`)と自然に接続でき、実測値の転用可否を機械的に判定する足場が既にある**。ただし`environments_comparable`はOS/architecture/environment_class/os_version/cpu_model/filesystem_type等の一致を要求する「同一性判定」であり、「多少違う環境でも近似的に転用可能」という妥当性判定までは提供しない——仮説Bが残す「環境依存の計測値がどこまで別環境へ転用可能か」という妥当性問題(`dependency-resolved-artifact-closure_ja.md`仮説B項目で既述)は、比較不可の判定はできても、"どこまでなら近似可能か"には未対応のまま残る。 |
+| 環境非依存性 | 高い(Cargo.tomlの文字列走査のみで、実行環境のCPU/OS等に依存しない)。 | 低い。同一crateでもビルド環境(CPUコア数、I/Oデバイス種別、既存キャッシュ状態)により実測コストが大きく変動しうる——alopexDBの実測でも`aws-lc-sys`が45.73秒だったのは特定のCI/開発環境下の一点計測であり、他環境での再現性は未検証。 |
+| ecosystem横断性 | Cargo固有(P1で確認)。Nimble/C/C++には同種のメタデータシグナルが存在しない。 | ecosystem非依存。ビルド自体を実行して計測するため、Cargo/Nimble/C/C++のどのビルドシステムでも同じ計測手順(wall-clock計測)が適用できる——ただし「計測しやすさ」が均一というだけで、計測タイミング(ビルド開始前に予見できない)という制約は仮説Aより弱い。 |
+
+**評価**: `resolution_certificate`への組み込みやすさという狭い観点では、仮説Aは既存スキーマに軽量な追加で済み、仮説Bは`EnvironmentFingerprint`という既存インフラと自然に接続できる分だけ「妥当性検証つきキャッシュ」の土台は本リポジトリに部分的に存在する。しかし`environments_comparable()`は同一性判定であり近似的転用可能性の判定ではないため、仮説Bのcold start弱点(初回無力)と環境転用問題は依然未解決のまま残る。
+
+両仮説はcold/warmで相補的な強みを持つ——**仮説A(cold-start即応、warm精度は頭打ち)と仮説B(cold-start無力、warm精度は実測ベースへ向上)は排他的選択肢ではなく、仮説Aをcold-start時のフォールバック予見、仮説Bをwarm-cache-hit時の精密値として層状に組み合わせる設計が、`resolution_certificate`の両フィールド(`native_build_signal`と`measured_cost`)を共存させることで机上では矛盾なく成立する**、という組み合わせ仮説が本P2で新たに浮かび上がった。これはissue #63の4仮説のいずれか単独を採用する二者択一ではなく、M1での反証実験に先立つ設計上の選択肢として記録する。
+
 ## Artifact profile
 
 全platformで一律の「単一完全static binary」を要求しない。targetとdependencyに応じて、少なくとも次を明示する。
