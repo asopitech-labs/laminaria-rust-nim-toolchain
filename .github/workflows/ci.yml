@@ -1,9 +1,17 @@
 name: CI
 
+# Automatic CI/CD is suspended for the current research phase (owner
+# decision, 2026-09-15): verification during this phase happens locally
+# (scripts/local-ci.sh, .githooks/pre-commit + commit-msg's Tests-Run
+# enforcement -- see AGENTS.md's "Local verification before pushing"),
+# not by pushing and waiting minutes for a remote run. `workflow_dispatch`
+# is kept so this workflow can still be run manually (e.g. to check a
+# specific commit, or once formal CI/CD resumes for a later phase) --
+# this is a suspension, not a deletion; every job/step below is
+# unchanged. Re-add `push`/`pull_request` triggers to resume automatic
+# CI/CD.
 on:
-  push:
-    branches: [main]
-  pull_request:
+  workflow_dispatch:
 
 jobs:
   # Path-based gating for the two jobs below whose own real dependency

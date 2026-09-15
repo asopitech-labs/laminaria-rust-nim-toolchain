@@ -1,19 +1,9 @@
 name: Reference project setup
 
+# Automatic CI/CD is suspended for the current research phase (owner
+# decision, 2026-09-15) -- see ci.yml's own header for the full
+# rationale. `workflow_dispatch` is kept for manual runs.
 on:
-  push:
-    branches: [main]
-    paths:
-      - reference-projects.lock.json
-      - scripts/reference_projects.py
-      - scripts/tests/**
-      - .github/workflows/reference-projects.yml
-  pull_request:
-    paths:
-      - reference-projects.lock.json
-      - scripts/reference_projects.py
-      - scripts/tests/**
-      - .github/workflows/reference-projects.yml
   workflow_dispatch:
 
 jobs:
