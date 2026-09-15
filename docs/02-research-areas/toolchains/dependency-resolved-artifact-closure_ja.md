@@ -292,6 +292,20 @@ issue #47でB-H3(summary/body分離)を`aws-lc-sys`/`bcm.c`に対する計算問
 
 詳細な計測スクリプトは`scripts/research/measure-bcm-decomposability.sh`に記録した(118メンバー全件を機械的に判定、CSV形式で結果を出力)。
 
+### root集合確定コストの実測：issue #47 B-H3定式化の問い2(issue #64/#47共同記録)
+
+問い2「$E_{call}$(rustls→aws-lc-rs→bcm.cメンバーの呼び出し関係)をPhase 1情報だけで確定するコストは、$C_{body}(b_{bcm})$=12.30秒に対してどれだけ小さいか」を実測した(`scripts/research/measure-phase1-root-set-cost.sh`)。
+
+**方法**: alopex-cliが解決する`aws-lc-rs`のfeature構成(`default-features = false` + `prebuilt-nasm`、issue #64 P0で確認済み)に一致させた隔離crateを作り、`cargo check --verbose`(型チェックのみ、コード生成なし=Phase 1相当の作業)をクリーン状態から実行し、`aws-lc-sys`の`build.rs`(`build-script-main`、`bcm.c`を`cc`でコンパイルする本体)が実際に実行されるかをverboseログで確認した。
+
+**結果**: `cargo check`は**必ず`aws-lc-sys`の`build-script-main`を実行する**(`Running .../aws-lc-sys-<hash>/build-script-main`が観測される)。この実行こそが`bcm.c`を含むAWS-LC全体のコンパイルそのものであり、`aws_lc_sys`クレート自体のRust側メタデータ生成(`--emit=dep-info,metadata`、コード生成なし)ですら、生成済みの静的ライブラリ(`-l static=aws_lc_0_42_0_crypto`)へのリンク指定を要求する——つまりCargoのRust側コンパイル単位は、native部分の`build.rs`が生成した成果物の**存在**を前提としており、型チェックだけを得ようとしても`build.rs`の実行(=Phase 2の実行コスト)を回避する経路が存在しない。
+
+**問い2への回答(想定と異なる形で確定)**: 当初の問い2は「root集合確定コストは12.30秒よりどれだけ小さいか」という比較を想定していたが、実測結果はそれ以前の、より根本的な障壁を示した——**現行のCargo/build.rs設計では、Phase 1(型チェックによる到達可能性確定)とPhase 2(native実行コスト)が、原理的に分離不可能である**。`cargo check`(Phase 1を得る最も軽い手段のはずの操作)自体が、必ず`build.rs`実行(Phase 2の主要コスト源)を通過する。これはissue #64が確認した「`bcm.c`のunity build構造がPhase 1とPhase 2を1つの翻訳単位へ結合している」という事実(仮説β)と同型だが、より上位のレイヤ(Cargoのビルドグラフそのもの)で起きている——**LAMINARIA自身のビルドグラフでこの分離を実現するには、Cargoのbuild-dependency解決モデル自体を経由しない、独自のPhase 1確定経路(root集合を先に確定してからのみnative buildをスケジューリングする経路)が必要である**、という設計上の要請が本実測で具体化された。
+
+**B-H3への影響**: 問い1(分解可能性、83.8%)と問い2(root集合確定コスト)を合わせると、B-H3(summary/body分離)がこの具体例で機能するためには、(a) 分解可能な98/117メンバーへのアクセスと、(b) `cargo check`を経由しないroot集合確定手段の両方が必要であり、**いずれもCargoの既存ビルドモデルの外側にLAMINARIA自身が持つ必要がある**ことが確認された。これは`docs/near-term-research-program.md`の「Package resolution must not be confused with opaque build scripts, compilers, or linkers launched by a package manager」という原則が、この具体例で機能するために構造的に必要とされることを示す実測的裏付けである。
+
+詳細な計測スクリプトは`scripts/research/measure-phase1-root-set-cost.sh`に記録した。
+
 ## Artifact profile
 
 全platformで一律の「単一完全static binary」を要求しない。targetとdependencyに応じて、少なくとも次を明示する。
