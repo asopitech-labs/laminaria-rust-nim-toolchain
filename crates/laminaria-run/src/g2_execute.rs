@@ -24,6 +24,11 @@
 //! - Checkpoint 3: the fixture's Nimble provider package `doubler` --
 //!   the single `compile-nim-static-library:doubler` action
 //!   (`nim c --app:staticlib`).
+//! - Checkpoint 4: the fixture's C++ provider package `cppmax` -- the
+//!   `compile-cpp-adapter-object:cppmax@1.0.0` ->
+//!   `archive-static-library:cppmax@1.0.0` action pair (`c++ -c` then
+//!   `ar rcs`, sharing `compile_and_archive_native_source` with
+//!   Checkpoint 1's structurally identical C case).
 //!
 //! Checkpoints 2 and 3 resolve `rustc`/`nim` through issue #18's own
 //! verified-toolchain mechanism (`toolchain_resolve::resolve_rustc`/
@@ -32,11 +37,13 @@
 //! install, and plain `PATH` resolution can silently pick a
 //! wrong-architecture one, which is harmless for a checkpoint that only
 //! compiles in isolation but would break `LinkNativeExecutable` once it
-//! actually links these objects together.
+//! actually links these objects together. `cc`/`c++`/`ar` (Checkpoints
+//! 1 and 4) do not have this problem on this machine and stay resolved
+//! off `PATH`.
 //!
-//! The remaining `RequiredActionKind` variants this fixture's positive
-//! plan also requires (`CompileCppAdapterObject`,
-//! `LinkNativeExecutable`, `PreflightRuntimeContract`,
+//! With Checkpoint 4, every compile-side `RequiredActionKind` this
+//! fixture's positive plan requires is done. The remaining variants
+//! (`LinkNativeExecutable`, `PreflightRuntimeContract`,
 //! `PublishProvenance`) are real, disclosed, not-yet-implemented gaps
 //! -- the rest of issue #46's own action chain, deliberately left for
 //! following checkpoints rather than claimed here.
@@ -253,37 +260,36 @@ fn verify_symbol_referenced_undefined(path: &Path, symbol: &str) -> Result<(), G
     }
 }
 
-/// Actually executes the real `compile-c-object:cadd@1.0.0` and
-/// `archive-static-library:cadd@1.0.0` `RequiredAction` pair
-/// (`cc -c` then `ar rcs`) against the fixture's real `cadd@1` C
-/// sources, verifies the real result independently (`nm`, a real
-/// SHA-256), and discharges the closure's
-/// `ArtifactProduction:archive:cadd` obligation through
-/// `archive-static-library:cadd@1.0.0` -- the exact action id G1 itself
-/// emitted and recorded as that obligation's `required_action`. Fails
-/// (and leaves the obligation untouched) if either real command fails,
-/// if `nm` does not confirm `c_add` as defined in the real output, or
-/// if `PositiveClosure::discharge_obligation` itself refuses the
-/// transition (e.g. the obligation was already discharged).
-pub fn compile_and_archive_cadd_v1(
-    closure: &mut PositiveClosure,
-    fixture_root: &Path,
+/// Shared by every "compile one translation unit, then archive it"
+/// checkpoint (C's `cadd@1` and C++'s `cppmax@1.0.0`, which use
+/// different compilers but are otherwise structurally identical real
+/// action pairs): actually runs `<compiler> -c` then `ar rcs`,
+/// verifies the real result independently (`nm` confirms
+/// `expected_defined_symbol`, plus a real SHA-256). Does not discharge
+/// anything itself -- each caller knows its own obligation/action ids
+/// and calls `PositiveClosure::discharge_obligation` with this
+/// function's evidence.
+fn compile_and_archive_native_source(
+    compiler: &str,
+    source_path: &Path,
+    include_dir: &Path,
     out_dir: &Path,
+    object_filename: &str,
+    archive_filename: &str,
+    expected_defined_symbol: &str,
 ) -> Result<CObjectArchiveEvidence, G2Error> {
     fs::create_dir_all(out_dir).map_err(|e| G2Error::Io(format!("{}: {e}", out_dir.display())))?;
 
-    let c_dir = fixture_root.join("c/cadd/v1");
-    let c_source = c_dir.join("cadd.c");
-    let object_path = out_dir.join("cadd.o");
-    let archive_path = out_dir.join("libcadd.a");
+    let object_path = out_dir.join(object_filename);
+    let archive_path = out_dir.join(archive_filename);
 
     run_tool(
-        "cc",
+        compiler,
         &[
             "-c",
-            &c_source.to_string_lossy(),
+            &source_path.to_string_lossy(),
             "-I",
-            &c_dir.to_string_lossy(),
+            &include_dir.to_string_lossy(),
             "-o",
             &object_path.to_string_lossy(),
         ],
@@ -301,24 +307,93 @@ pub fn compile_and_archive_cadd_v1(
         ],
     )?;
 
-    verify_symbol_defined(&archive_path, "c_add")?;
+    verify_symbol_defined(&archive_path, expected_defined_symbol)?;
 
     let archive_size_bytes = fs::metadata(&archive_path)
         .map_err(|e| G2Error::Io(format!("{}: {e}", archive_path.display())))?
         .len();
     let archive_sha256 = sha256_file(&archive_path)?;
 
-    let evidence = CObjectArchiveEvidence {
+    Ok(CObjectArchiveEvidence {
         object_path,
         archive_path,
         archive_size_bytes,
         archive_sha256,
-        confirmed_defined_symbol: "c_add".to_string(),
-    };
+        confirmed_defined_symbol: expected_defined_symbol.to_string(),
+    })
+}
+
+/// Actually executes the real `compile-c-object:cadd@1.0.0` and
+/// `archive-static-library:cadd@1.0.0` `RequiredAction` pair
+/// (`cc -c` then `ar rcs`) against the fixture's real `cadd@1` C
+/// sources, verifies the real result independently (`nm`, a real
+/// SHA-256), and discharges the closure's
+/// `ArtifactProduction:archive:cadd` obligation through
+/// `archive-static-library:cadd@1.0.0` -- the exact action id G1 itself
+/// emitted and recorded as that obligation's `required_action`. Fails
+/// (and leaves the obligation untouched) if either real command fails,
+/// if `nm` does not confirm `c_add` as defined in the real output, or
+/// if `PositiveClosure::discharge_obligation` itself refuses the
+/// transition (e.g. the obligation was already discharged).
+pub fn compile_and_archive_cadd_v1(
+    closure: &mut PositiveClosure,
+    fixture_root: &Path,
+    out_dir: &Path,
+) -> Result<CObjectArchiveEvidence, G2Error> {
+    let c_dir = fixture_root.join("c/cadd/v1");
+    let evidence = compile_and_archive_native_source(
+        "cc",
+        &c_dir.join("cadd.c"),
+        &c_dir,
+        out_dir,
+        "cadd.o",
+        "libcadd.a",
+        "c_add",
+    )?;
 
     closure.discharge_obligation(
         "ArtifactProduction:archive:cadd",
         "archive-static-library:cadd@1.0.0",
+        DischargeKind::StaticallyLinked,
+        evidence.as_discharge_evidence(),
+    )?;
+
+    Ok(evidence)
+}
+
+/// Actually executes the real `compile-cpp-adapter-object:cppmax@1.0.0`
+/// and `archive-static-library:cppmax@1.0.0` `RequiredAction` pair
+/// (`c++ -c` then `ar rcs`) against the fixture's real `cppmax`
+/// `extern "C"` adapter source, verifies the real result independently
+/// (`nm` confirms `cpp_max_i32` -- the adapter's own exported entry
+/// point, never the `max_value<T>` template itself, which has no
+/// linkable symbol -- is defined, plus a real SHA-256), and discharges
+/// the closure's `ArtifactProduction:archive:cppmax` obligation through
+/// `archive-static-library:cppmax@1.0.0`. `c++`/`ar` are resolved off
+/// `PATH` like `cc`/`ar` (Checkpoint 1) -- this machine's system Xcode
+/// CLT toolchain, unlike its Rust/Nim installs, already resolves to
+/// the correct architecture there; see `resolve_rustc`/`resolve_nim`'s
+/// own doc comments for the toolchains that do need issue #18's
+/// verified resolution instead.
+pub fn compile_and_archive_cppmax(
+    closure: &mut PositiveClosure,
+    fixture_root: &Path,
+    out_dir: &Path,
+) -> Result<CObjectArchiveEvidence, G2Error> {
+    let cpp_dir = fixture_root.join("cpp/cppmax");
+    let evidence = compile_and_archive_native_source(
+        "c++",
+        &cpp_dir.join("cppmax.cpp"),
+        &cpp_dir,
+        out_dir,
+        "cppmax.o",
+        "libcppmax.a",
+        "cpp_max_i32",
+    )?;
+
+    closure.discharge_obligation(
+        "ArtifactProduction:archive:cppmax",
+        "archive-static-library:cppmax@1.0.0",
         DischargeKind::StaticallyLinked,
         evidence.as_discharge_evidence(),
     )?;
@@ -853,6 +928,69 @@ mod tests {
         assert_eq!(
             obligation.required_action.as_deref(),
             Some("compile-nim-static-library:doubler")
+        );
+        assert!(obligation
+            .evidence
+            .as_deref()
+            .unwrap()
+            .contains(&evidence.archive_sha256));
+
+        let _ = fs::remove_dir_all(&out_dir);
+    }
+
+    /// Checkpoint 4's end-to-end case: resolve a real G1 positive
+    /// closure, actually run `c++ -c` then `ar rcs` against the real
+    /// `cpp/cppmax/cppmax.cpp` adapter source, and discharge the
+    /// resulting `ArtifactProduction:archive:cppmax` obligation with
+    /// the real, independently verified result. `c++`/`ar` resolve off
+    /// `PATH` (no `toolchain_resolve` needed, unlike Checkpoints 2/3).
+    #[test]
+    fn g2_really_compiles_and_archives_cppmax_and_discharges_its_obligation() {
+        let layout = FixtureLayout::discover();
+        let runner = RecordingCommandRunner::new();
+        let input = ingest_fixture_input(&runner, &layout, &["1.0.0"])
+            .expect("must ingest the real positive fixture");
+        let mut closure = resolve(&input).expect("must resolve a positive closure");
+
+        let obligation_id = "ArtifactProduction:archive:cppmax";
+        assert_eq!(
+            closure.obligations[obligation_id].state,
+            ObligationState::Satisfied,
+            "must start from G1's own terminal state"
+        );
+
+        let out_dir = std::env::temp_dir().join(format!(
+            "laminaria-g2-checkpoint-4-{}-cppmax",
+            std::process::id()
+        ));
+        let evidence = compile_and_archive_cppmax(&mut closure, &layout.root, &out_dir)
+            .expect("real c++ + ar execution and discharge must succeed");
+
+        assert!(
+            evidence.object_path.is_file(),
+            "the real compiled object must exist on disk"
+        );
+        assert!(
+            evidence.archive_path.is_file(),
+            "the real archive must exist on disk"
+        );
+        assert!(evidence.archive_size_bytes > 0);
+        assert_eq!(
+            evidence.archive_sha256.len(),
+            64,
+            "must be a real hex SHA-256"
+        );
+        assert_eq!(evidence.confirmed_defined_symbol, "cpp_max_i32");
+
+        let obligation = &closure.obligations[obligation_id];
+        assert_eq!(obligation.state, ObligationState::Discharged);
+        assert_eq!(
+            obligation.discharge_kind,
+            Some(DischargeKind::StaticallyLinked)
+        );
+        assert_eq!(
+            obligation.required_action.as_deref(),
+            Some("archive-static-library:cppmax@1.0.0")
         );
         assert!(obligation
             .evidence
