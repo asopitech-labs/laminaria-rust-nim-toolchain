@@ -81,6 +81,25 @@ pub struct SymbolId {
 /// encoding is not, and a macOS/Mach-O (or Windows/COFF) port needs its
 /// own relocation-shape verification against real `clang`/`cl.exe`
 /// output before this crate's claims can be said to hold there.
+///
+/// **Windows/COFF, verified directly** (`x86_64-w64-mingw32-gcc -c` on
+/// the exact same external-call C source used for `real_compute_code_and_relocs`,
+/// inspected with the matching `objdump -f/-d/-r`): the physical
+/// placeholder shape is identical to ELF (a `call` opcode followed by a
+/// zeroed 4-byte operand, at the same kind of byte offset), but the
+/// *relocation type* differs -- COFF names it `IMAGE_REL_AMD64_REL32`,
+/// not `R_X86_64_PLT32`, and (unlike the ELF records, which printed an
+/// explicit `-0x4` addend) `objdump -r` on the COFF object showed no
+/// addend at all, suggesting `IMAGE_REL_AMD64_REL32`'s own -4 offset is
+/// implicit in the relocation type itself rather than a caller-supplied
+/// value -- this needs confirming against the PE/COFF spec before an
+/// `apply_relocations` variant for this target is written, not assumed
+/// from this one observation. Calling convention also differs (Windows
+/// x64 passes the first two integer arguments in `edx`/`ecx`; the real
+/// System V/ELF disassembly used `edi`/`esi`) but that is a
+/// frontend-local concern (which registers a realm's own code generator
+/// emits), not something `PendingReloc`/`apply_relocations` need to
+/// know about.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingReloc {
     /// Byte offset into `code` where the placeholder begins.
