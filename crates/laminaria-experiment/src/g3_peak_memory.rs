@@ -16,17 +16,41 @@
 //! child process is genuinely that process's own peak RSS, not a shared
 //! or approximated figure.
 //!
-//! **What this does and does not prove**: the child binary's own baseline
-//! overhead (Rust runtime init, `ingest_fixture_input`'s real `cargo
-//! metadata`/Nimble/C-header work) is included in every reported peak-RSS
-//! figure -- this is not a pure "resolve() call's own heap delta"
-//! measurement. Because both E0 and E1 runs share the identical harness
-//! (same child binary, same ingest, same injection code, differing only
-//! in which resolve path runs), that shared overhead is present in both
-//! sides equally, so it cancels out of the E0-vs-E1 *comparison* even
-//! though it inflates both absolute numbers. This is the same evidence
-//! discipline `g3_e0_vs_e1` itself uses for wall time (same production
-//! path, same fixture, same injection).
+//! **What this does and does not prove -- measured, then corrected**:
+//! this module's first version claimed E0's own `peak_rss_bytes` trends
+//! upward with injected scale while E1's stays flat, based on a native
+//! Ubuntu 22.04 host run at scale 10,000 (E0 ~60.6MB vs. E1 ~31.3MB).
+//! Re-running the identical harness inside this repo's own
+//! `docker/bootstrap.Dockerfile` container (Debian 12/glibc 2.36, the
+//! reproducible environment this project's own measurement-foundation
+//! doc requires bootstrap/correctness claims to be checked against) does
+//! **not** reproduce that trend: both E0 and E1 report peak RSS pinned
+//! around ~84.5-84.8MB regardless of injected scale (0 through 10,000),
+//! with no consistent E0-vs-E1 ordering across repeated runs. The
+//! difference is glibc malloc's arena/trim behavior, not this crate's
+//! own allocation pattern -- confirmed by `MALLOC_ARENA_MAX=1` making no
+//! difference either. `ru_maxrss` (this module's only available metric,
+//! via `wait4`) is dominated by allocator/OS-page-retention noise that
+//! differs enough between a native host and this project's own
+//! reproducibility container to flip the measured direction entirely,
+//! so this module draws **no absolute or trend conclusion from
+//! `peak_rss_bytes` at all** -- it still records the real, observed
+//! value on every sample (never fabricated), but the only assertions
+//! this module's own tests make are the same structurally-guaranteed
+//! claims `g3_e0_vs_e1` already establishes for wall time (E1's own
+//! retained candidate/obligation counts are scale-invariant, which
+//! follows directly from `resolve_demand_driven` pruning before
+//! `resolve` ever runs, not from any allocator behavior). Issue #65's
+//! carried-forward item 2 asked for "an adopt/reject/reformulate
+//! decision with evidence" -- the evidence here is: **reformulate**.
+//! `ru_maxrss` peak-RSS-per-process is not a reliable signal for this
+//! comparison at this fixture's scale; a real peak-memory claim would
+//! need either a heap-profiling instrument (e.g. `jemalloc`
+//! `stats.allocated` sampling, or a custom global allocator that counts
+//! live bytes) that isolates the resolver's own allocations from
+//! process/runtime/allocator-arena overhead, or evidence at a much
+//! larger injected scale where the resolver's own share of peak RSS
+//! could plausibly dominate the noise floor this module measured.
 
 use std::path::{Path, PathBuf};
 
@@ -176,48 +200,26 @@ pub struct G3PeakMemoryReport {
 }
 
 impl G3PeakMemoryReport {
-    /// True only when every sample on both sides actually reported a
-    /// peak-RSS figure and, at the largest injected scale, E1's own peak
-    /// RSS came in at or below E0's -- the direct claim item 2 asks this
-    /// measurement to either support or refute with evidence.
-    pub fn e1_peak_memory_at_or_below_e0_at_largest_scale(&self) -> Option<bool> {
-        if !self.peak_rss_supported {
-            return None;
-        }
-        let e0_last = self.eager.last()?;
-        let e1_last = self.demand_driven.last()?;
-        let e0_rss = e0_last.peak_rss_bytes?;
-        let e1_rss = e1_last.peak_rss_bytes?;
-        Some(e1_rss <= e0_rss)
-    }
-
-    /// Whether E0's own reported peak RSS grows with injected scale while
-    /// E1's stays flat -- the shape issue #65's carried-forward item 2
-    /// actually predicts (E1 prunes injected candidates before `resolve`
-    /// ever sees them, so its own retained obligation/candidate count is
-    /// scale-invariant; E0 walks every injected candidate and keeps a
-    /// `Rejected` obligation per one, so its own peak RSS should trend
-    /// upward with scale even if each individual candidate is a small
-    /// allocation). Distinct from
-    /// `e1_peak_memory_at_or_below_e0_at_largest_scale`, which compares
-    /// absolute values dominated by shared per-process baseline overhead
-    /// (Rust runtime init, fixture ingest) -- this compares *trend*, which
-    /// that baseline overhead does not contribute to.
-    pub fn e0_peak_rss_trends_up_with_scale_while_e1_stays_flat(&self) -> Option<bool> {
-        if !self.peak_rss_supported || self.eager.len() < 2 {
-            return None;
-        }
-        let e0_first = self.eager.first()?.peak_rss_bytes?;
-        let e0_last = self.eager.last()?.peak_rss_bytes?;
-        let e1_first = self.demand_driven.first()?.peak_rss_bytes?;
-        let e1_last = self.demand_driven.last()?.peak_rss_bytes?;
-        // "Flat" allows for ordinary allocator/measurement noise rather
-        // than requiring bit-for-bit equality; 5% of the first sample is
-        // generous relative to the ~0.03% jitter actually observed
-        // between repeated runs of this same harness.
-        let e1_noise_budget = e1_first / 20;
-        let e1_flat = e1_last.abs_diff(e1_first) <= e1_noise_budget;
-        Some(e0_last > e0_first && e1_flat)
+    /// Whether E1's own retained package-candidate count (via
+    /// `package_candidates_considered`) stays scale-invariant across
+    /// every injected scale this report measured -- a structural
+    /// consequence of `resolve_demand_driven` pruning unreachable
+    /// candidates before `resolve` ever runs (already established by
+    /// `g3_e0_vs_e1`'s in-process comparison; this method reconfirms it
+    /// against the out-of-process child). Unlike a `peak_rss_bytes`
+    /// comparison, this claim depends only on this crate's own resolver
+    /// logic, not on allocator/OS memory-retention behavior -- see this
+    /// module's own doc comment on why `peak_rss_bytes` itself is not
+    /// used for a pass/fail claim here.
+    pub fn e1_considered_candidates_are_scale_invariant(&self) -> bool {
+        let mut considered = self
+            .demand_driven
+            .iter()
+            .filter_map(|s| s.package_candidates_considered);
+        let Some(first) = considered.next() else {
+            return false;
+        };
+        considered.all(|c| c == first)
     }
 }
 
@@ -256,31 +258,18 @@ mod tests {
     use super::*;
 
     /// The real end-to-end case: spawns the real child binary at
-    /// increasing injected scale for both E0 and E1, confirms every sample
-    /// reports a nonzero peak RSS, and confirms the actually-observed
-    /// shape -- E0's own peak RSS trends upward with injected scale while
-    /// E1's stays flat (E1 prunes injected candidates before `resolve`
-    /// ever runs, so nothing about its own resolve work scales with
-    /// injected count).
-    ///
-    /// This test measures at scale 0 vs. 10,000 (not smaller intermediate
-    /// scales) because measured directly against the real fixture, at
-    /// small injected-candidate counts (0/100/1000, tried first) the
-    /// difference between E0's and E1's own resolve-time allocations is
-    /// small enough (single-digit KB) to be dominated by this harness's
-    /// own shared per-process baseline (Rust runtime init, the real
-    /// `cargo metadata`/Nimble/C-header ingest both sides pay identically)
-    /// -- that noise floor made the assertion flaky at those scales. That
-    /// is real evidence, not a missing feature: peak-memory pruning only
-    /// becomes the dominant signal at injected scales large enough for
-    /// the per-candidate `Rejected`-obligation cost E0 pays (and E1
-    /// avoids) to exceed the shared baseline noise floor -- confirmed
-    /// directly: at scale 10,000, E0's own peak RSS (~60.6MB) is
-    /// consistently roughly double E1's (~31.3MB), a gap far outside the
-    /// single-digit-KB noise observed at smaller scales. This mirrors
-    /// `g3_e0_vs_e1`'s own wall-time comparison, which also needed
-    /// 10k-candidate scale to show a clear effect for the analogous
-    /// reason.
+    /// increasing injected scale for both E0 and E1, records each
+    /// sample's real peak RSS (asserting only that it is nonzero and was
+    /// actually observed, never that it follows any particular
+    /// direction -- see this module's own doc comment on why a
+    /// native-host run and a run inside this repo's own
+    /// `docker/bootstrap.Dockerfile` container produced opposite
+    /// E0-vs-E1 peak-RSS orderings for the identical harness), and
+    /// asserts only the claims that do not depend on allocator behavior:
+    /// E1's own retained candidate count and obligation count are
+    /// scale-invariant (the same structural claim `g3_e0_vs_e1`'s
+    /// in-process comparison already established, reconfirmed here
+    /// against the out-of-process child).
     ///
     /// Requires `laminaria-g3-e0-or-e1-child` to already be built next to
     /// this test binary -- true under `cargo test --workspace` (Cargo
@@ -288,29 +277,24 @@ mod tests {
     /// tests) but not if this test binary is invoked in isolation without
     /// that build step.
     #[test]
-    fn e0_peak_rss_trends_up_with_scale_while_e1_stays_flat_at_the_real_fixture() {
-        let report = run(&[0, 10_000]).expect("must run against the real fixture");
-        assert_eq!(report.eager.len(), 2);
-        assert_eq!(report.demand_driven.len(), 2);
+    fn e1_considered_candidates_and_obligations_stay_flat_across_scale_at_the_real_fixture() {
+        let report = run(&[0, 100, 1000, 10_000]).expect("must run against the real fixture");
+        assert_eq!(report.eager.len(), 4);
+        assert_eq!(report.demand_driven.len(), 4);
 
-        if !report.peak_rss_supported {
+        if report.peak_rss_supported {
+            for sample in report.eager.iter().chain(report.demand_driven.iter()) {
+                assert!(
+                    sample.peak_rss_bytes.unwrap() > 0,
+                    "expected a nonzero peak RSS, got {sample:?}"
+                );
+            }
+        } else {
             eprintln!(
-                "peak_rss_bytes unsupported on this platform; skipping the peak-memory assertion"
-            );
-            return;
-        }
-
-        for sample in report.eager.iter().chain(report.demand_driven.iter()) {
-            assert!(
-                sample.peak_rss_bytes.unwrap() > 0,
-                "expected a nonzero peak RSS, got {sample:?}"
+                "peak_rss_bytes unsupported on this platform; recording no peak-memory figures"
             );
         }
 
-        // E1's own considered-candidate/obligation counts must stay flat
-        // across scale (same claim `g3_e0_vs_e1`'s in-process comparison
-        // already established, reconfirmed here against the
-        // out-of-process child).
         let e1_obligation_counts: Vec<usize> = report
             .demand_driven
             .iter()
@@ -320,11 +304,29 @@ mod tests {
             e1_obligation_counts.windows(2).all(|w| w[0] == w[1]),
             "E1's obligation count must be flat across scales, got {e1_obligation_counts:?}"
         );
+        assert!(
+            report.e1_considered_candidates_are_scale_invariant(),
+            "E1's considered-candidate count must be flat across scales, got {:?}",
+            report
+                .demand_driven
+                .iter()
+                .map(|s| s.package_candidates_considered)
+                .collect::<Vec<_>>()
+        );
 
-        assert_eq!(
-            report.e0_peak_rss_trends_up_with_scale_while_e1_stays_flat(),
-            Some(true),
-            "report: {report:#?}"
+        // E0's own obligation count, by contrast, must grow with
+        // injected scale -- it walks every injected candidate and keeps
+        // a Rejected obligation per one (this is the structural
+        // candidate-pruning claim; unlike peak RSS it depends only on
+        // this crate's own resolve() logic, not on allocator behavior).
+        let e0_obligation_counts: Vec<usize> = report
+            .eager
+            .iter()
+            .map(|s| s.obligations_in_closure)
+            .collect();
+        assert!(
+            e0_obligation_counts.windows(2).all(|w| w[1] > w[0]),
+            "E0's obligation count must strictly grow with injected scale, got {e0_obligation_counts:?}"
         );
     }
 }
