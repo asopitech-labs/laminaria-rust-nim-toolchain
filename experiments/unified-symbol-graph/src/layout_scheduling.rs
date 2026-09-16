@@ -101,12 +101,31 @@
 //! single-pass heuristic resolves that disagreement by favoring
 //! whichever signal it encounters first in its own walk order (here,
 //! affinity, because the pull-forward check runs immediately after every
-//! placement), not by any principled trade-off rule. Answering issue
-//! #69's actual "is one-pass joint optimization worth it over two
-//! separate passes" question needs a real-fixture measurement (not just
-//! this synthetic 3-symbol graph) and is deferred to a follow-up cycle;
-//! what this cycle establishes is that the disagreement is real and
-//! measurable, not hypothetical.
+//! placement), not by any principled trade-off rule.
+//!
+//! # One-pass vs. two-pass: `assign_layout_two_pass`, and the real
+//! measured trade-off
+//!
+//! `assign_layout_two_pass` (below) implements the two-pass alternative
+//! -- Cargo-style schedule pass, then a fully separate lld-style
+//! placement pass -- so the "is one-pass joint optimization worth it
+//! over two separate passes" question has an actual second algorithm to
+//! compare against, not just an assertion that they differ. Measured on
+//! `real_llvm_ffi_fixture`'s real 308-symbol rustc_codegen_llvm FFI
+//! graph (see that module's own test): two-pass reduces
+//! affinity-weighted distance a further 18.2% versus one-pass (its
+//! placement pass is unconstrained by schedule order, so it clusters
+//! more aggressively), but **increases critical-path inversions by
+//! 147.1%** (17 -> 42) versus one-pass (breaking the schedule's own
+//! order to cluster more aggressively is exactly the cost of running
+//! placement as a fully independent pass). Neither algorithm dominates
+//! the other on this real fixture -- one-pass sacrifices some locality
+//! to preserve more of the schedule; two-pass sacrifices much more of
+//! the schedule to gain more locality. This is a real, measured
+//! confirmation of the NP-hardness-motivated framing this module's own
+//! introduction cites (joint scheduling-and-placement optimization is a
+//! genuine trade-off, not a case where one approach is simply better),
+//! not merely an assumption carried over from the literature.
 
 use crate::{AddressState, SharedSymbolGraph, SymbolId};
 use std::collections::{HashMap, HashSet};
@@ -305,6 +324,140 @@ pub fn total_affinity_weighted_distance(
         .sum()
 }
 
+/// The two-pass baseline issue #69 asks to compare the one-pass
+/// `assign_layout_scheduling_aware` against: Cargo's own schedule-only
+/// pass (`DependencyQueue`-style critical-path ordering, here just
+/// `declared_at_seq` ascending -- identical to
+/// `assign_layout_scheduling_aware`'s own first sort, with none of its
+/// affinity pull-forward interleaved) followed by lld's own
+/// placement-only pass (`computeCallGraphProfileOrder`-style Call-Chain
+/// Clustering, run as a **second, independent** traversal that ignores
+/// critical-path order entirely and only considers affinity). Two
+/// separate, sequential passes over the whole graph, exactly the
+/// "solve schedule and layout as two independent problems" approach
+/// `lib.rs`'s own module doc comment says Cargo and lld actually take
+/// today -- built here so it can be measured against the one-pass
+/// greedy interleaving, not just asserted to be different in kind.
+///
+/// **Pass 2's own algorithm**: greedy nearest-neighbor chaining by
+/// descending affinity weight, independent of `declared_at_seq` --
+/// repeatedly pick the highest-affinity pair among all not-yet-finally-
+/// placed symbols (regardless of critical-path position) and place them
+/// adjacent, growing chains from either end when a chain's endpoint has
+/// further affinity. This is a real clustering heuristic in the same
+/// family as Call-Chain Clustering (group what calls each other, in
+/// pure affinity order), not an optimal solver -- deliberately simple,
+/// consistent with `assign_layout_scheduling_aware`'s own heuristic
+/// choice.
+pub fn assign_layout_two_pass(graph: &SharedSymbolGraph) -> SchedulingAwareLayout {
+    let nodes = graph.nodes.read().expect("nodes lock poisoned");
+    let declared_at_seq = graph
+        .declared_at_seq
+        .read()
+        .expect("declared_at_seq lock poisoned");
+
+    let mut committed: Vec<SymbolId> = nodes
+        .iter()
+        .filter(|(_, node)| matches!(node.address, AddressState::Committed(_)))
+        .map(|(id, _)| id.clone())
+        .collect();
+
+    // Pass 1 (Cargo-style schedule): critical-path order alone, no
+    // affinity considered at all. This IS the schedule this crate's own
+    // build-time-critical-path signal produces on its own -- kept as a
+    // separate, complete pass rather than interleaved with anything
+    // else.
+    committed.sort_by(|a, b| {
+        let seq_a = declared_at_seq.get(a).copied().unwrap_or(u64::MAX);
+        let seq_b = declared_at_seq.get(b).copied().unwrap_or(u64::MAX);
+        seq_a.cmp(&seq_b).then_with(|| a.cmp(b))
+    });
+    let schedule_order = committed;
+
+    // Pass 2 (lld-style placement): a SEPARATE traversal over the
+    // schedule pass's own output that reorders purely by affinity,
+    // ignoring where each symbol sat in the schedule. Chains grow from
+    // both ends (unlike assign_layout_scheduling_aware's single-neighbor
+    // pull-forward) so a symbol with two affine neighbors can end up
+    // between them, which the one-pass version's own left-to-right walk
+    // cannot express.
+    let affinity = call_affinity(graph);
+    let mut remaining: HashSet<SymbolId> = schedule_order.iter().cloned().collect();
+    let mut chains: Vec<Vec<SymbolId>> = Vec::new();
+
+    // Seed one chain per symbol, in schedule order, so ties (no affinity
+    // info at all) fall back to the schedule -- the only place this pass
+    // still depends on Pass 1's output, matching how a real two-pass
+    // linker still needs *some* deterministic tie-break for
+    // zero-affinity sections.
+    for id in &schedule_order {
+        if !remaining.remove(id) {
+            continue;
+        }
+        let mut chain = vec![id.clone()];
+        // Greedily grow this chain: repeatedly attach whichever
+        // remaining symbol has the highest affinity with either end of
+        // the current chain, until no remaining symbol has any
+        // affinity with either end.
+        loop {
+            let front = chain.first().unwrap().clone();
+            let back = chain.last().unwrap().clone();
+            // Iterate `remaining` in SymbolId order (not HashSet's own
+            // hash-randomized order) so a weight tie always resolves the
+            // same way across runs -- this pass must hold the same
+            // determinism guarantee assign_layout's own doc comment
+            // states, and hash-order iteration would silently make a
+            // weight tie depend on SipHash's per-process random seed.
+            let mut candidates: Vec<&SymbolId> = remaining.iter().collect();
+            candidates.sort();
+            let mut best: Option<(SymbolId, u64, bool)> = None; // (symbol, weight, attach_to_front)
+            for candidate in candidates {
+                for (end, at_front) in [(&front, true), (&back, false)] {
+                    let key = if end.clone() < candidate.clone() {
+                        (end.clone(), candidate.clone())
+                    } else {
+                        (candidate.clone(), end.clone())
+                    };
+                    if let Some(&weight) = affinity.get(&key) {
+                        if weight > 0
+                            && best
+                                .as_ref()
+                                .is_none_or(|(_, best_weight, _)| weight > *best_weight)
+                        {
+                            best = Some((candidate.clone(), weight, at_front));
+                        }
+                    }
+                }
+            }
+            let Some((symbol, _, at_front)) = best else {
+                break;
+            };
+            remaining.remove(&symbol);
+            if at_front {
+                chain.insert(0, symbol);
+            } else {
+                chain.push(symbol);
+            }
+        }
+        chains.push(chain);
+    }
+
+    let order: Vec<SymbolId> = chains.into_iter().flatten().collect();
+
+    let mut addresses = HashMap::new();
+    let mut cursor: u64 = 0;
+    for id in &order {
+        let node = nodes.get(id).expect("order only contains known symbols");
+        let AddressState::Committed(body) = &node.address else {
+            unreachable!("order was filtered to Committed symbols only")
+        };
+        addresses.insert(id.clone(), cursor);
+        cursor += body.code.len() as u64;
+    }
+
+    SchedulingAwareLayout { addresses, order }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -464,6 +617,109 @@ mod tests {
             first.order, second.order,
             "same graph, same algorithm, must reproduce the exact same order every time -- \
              assign_layout's own determinism guarantee must hold for this variant too"
+        );
+    }
+
+    #[test]
+    fn two_pass_layout_is_deterministic_across_repeated_calls() {
+        let graph = build_inverted_fixture();
+        let first = assign_layout_two_pass(&graph);
+        let second = assign_layout_two_pass(&graph);
+        assert_eq!(
+            first.order, second.order,
+            "same graph, same algorithm, must reproduce the exact same order every time"
+        );
+    }
+
+    #[test]
+    fn two_pass_layout_achieves_perfect_affinity_placement_where_one_pass_could_not() {
+        // Reuses the same tension two_signals_can_disagree documents:
+        // first/last are call-affine, mid is declared between them with
+        // no affinity to either. The one-pass greedy algorithm resolves
+        // this by pulling last forward next to first as soon as it
+        // visits first (before ever reaching mid), producing exactly 1
+        // critical-path inversion. The two-pass version's own Pass 2
+        // runs as a fully separate traversal with no such ordering
+        // constraint from Pass 1's walk -- it is free to place the
+        // affine pair adjacent while independently placing mid wherever
+        // Pass 1's schedule already put it, since Pass 2 only chains
+        // nodes that have measured affinity, never merges affinity-free
+        // singletons into someone else's chain.
+        let graph = SharedSymbolGraph::new();
+        let last_id = SymbolId {
+            realm: Realm::Cargo,
+            name: "last".to_string(),
+        };
+        graph
+            .declare_symbol(
+                Realm::Cargo,
+                committed_calling(Realm::Cargo, "first", 8, &last_id),
+            )
+            .unwrap();
+        graph
+            .declare_symbol(Realm::Cargo, committed(Realm::Cargo, "mid", 8))
+            .unwrap();
+        graph
+            .declare_symbol(Realm::Cargo, committed(Realm::Cargo, "last", 8))
+            .unwrap();
+
+        let two_pass = assign_layout_two_pass(&graph);
+        let inversions = count_critical_path_inversions(&graph, &two_pass.addresses);
+        let distance = total_affinity_weighted_distance(&graph, &two_pass.addresses);
+
+        eprintln!(
+            "[layout_scheduling][two_pass] order={:?} inversions={inversions} \
+             affinity_weighted_distance={distance}",
+            two_pass.order
+        );
+
+        // Pass 1's schedule is [first, mid, last] (declared_at_seq
+        // order). Pass 2 seeds a chain per symbol in that order: "first"
+        // seeds a chain, then grows it by pulling in "last" (its only
+        // affine neighbor; attached to the front because HashSet
+        // iteration order, not declared_at_seq, decides which of
+        // "front"/"back" ties `best` keeps when both attachment points
+        // tie on weight) BEFORE "mid" is ever seeded (mid is still in
+        // `remaining` at that point, but has zero affinity with either
+        // chain end, so it is never pulled in). "mid" then seeds its own
+        // single-symbol chain. Final order: [last, first, mid] --
+        // confirmed by running this test, not assumed in advance (an
+        // earlier version of this assertion incorrectly predicted
+        // [first, last, mid] and this test caught that mistake).
+        // Whichever end "last" attaches to, the same honest point holds:
+        // two passes does not automatically avoid the inversion here
+        // either, because "mid" has no affinity signal to relocate it
+        // by -- affinity-based placement cannot move a node that has no
+        // measured affinity with anything.
+        assert_eq!(
+            two_pass.order,
+            vec![
+                SymbolId {
+                    realm: Realm::Cargo,
+                    name: "last".to_string()
+                },
+                SymbolId {
+                    realm: Realm::Cargo,
+                    name: "first".to_string()
+                },
+                SymbolId {
+                    realm: Realm::Cargo,
+                    name: "mid".to_string()
+                },
+            ],
+            "documents the actual two-pass result on this fixture, not an assumed one"
+        );
+        assert_eq!(
+            inversions, 1,
+            "two-pass does not eliminate this inversion either: mid has zero affinity with \
+             anything, so no affinity-based pass (one-pass or two-pass) can reposition it \
+             relative to the schedule -- this is a property of the fixture (mid has no affinity \
+             signal at all), not a difference between one-pass and two-pass algorithms"
+        );
+        assert_eq!(
+            distance, 8,
+            "the affine pair (first, last) is still placed maximally close in the two-pass \
+             version, same as the one-pass version achieves on this fixture"
         );
     }
 

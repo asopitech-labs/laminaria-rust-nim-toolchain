@@ -68,14 +68,18 @@
 //!   target is equivalent to, and simpler than, adding a multiplicity
 //!   field this crate's `ElfX86_64PendingReloc` does not have).
 //!
-//! See this module's own test for the measured result, reported
+//! This module's own test also measures `layout_scheduling`'s two-pass
+//! alternative (`assign_layout_two_pass`) against the same real graph --
+//! see this module's own test and `layout_scheduling`'s "One-pass vs.
+//! two-pass" doc section for the result (a genuine trade-off: two-pass
+//! wins on locality, one-pass wins on critical-path fidelity), reported
 //! honestly regardless of which way it cuts (same standard as
 //! `cost_correlation.rs`/`disk_tiering.rs`).
 
 #![cfg(test)]
 
 use crate::layout_scheduling::{
-    assign_layout_scheduling_aware, count_critical_path_inversions,
+    assign_layout_scheduling_aware, assign_layout_two_pass, count_critical_path_inversions,
     total_affinity_weighted_distance,
 };
 use crate::{
@@ -2111,13 +2115,49 @@ mod tests {
             }
         );
 
-        // Reported, not steered: no assertion on which direction either
-        // metric moves. The synthetic-fixture tests already establish
-        // the algorithm's designed behavior (reduces both metrics on a
-        // fixture built to expose that); this test's job is to report
-        // what happens on real call-graph data, honestly, whichever way
-        // it cuts -- matching the standard cost_correlation.rs holds
-        // itself to for its own real-data measurement.
+        // issue #69's own remaining question: one-pass joint heuristic
+        // vs. two separate passes (Cargo-style schedule, then
+        // independent lld-style placement). Measured against the same
+        // real fixture, not just the 3-symbol synthetic one.
+        let two_pass = assign_layout_two_pass(&graph);
+        let two_pass_inversions = count_critical_path_inversions(&graph, &two_pass.addresses);
+        let two_pass_distance = total_affinity_weighted_distance(&graph, &two_pass.addresses);
+
+        eprintln!(
+            "[layout_scheduling][real_fixture] one-pass vs two-pass -- critical-path inversions: \
+             one-pass(scheduling-aware)={scheduled_inversions}, two-pass={two_pass_inversions} \
+             ({:+} two-pass vs one-pass, {:.1}% change)",
+            two_pass_inversions as i64 - scheduled_inversions as i64,
+            if scheduled_inversions > 0 {
+                100.0 * (two_pass_inversions as f64 - scheduled_inversions as f64)
+                    / scheduled_inversions as f64
+            } else {
+                0.0
+            }
+        );
+        eprintln!(
+            "[layout_scheduling][real_fixture] one-pass vs two-pass -- affinity-weighted \
+             distance: one-pass(scheduling-aware)={scheduled_distance}, two-pass={two_pass_distance} \
+             ({:+} two-pass vs one-pass, {:.1}% change)",
+            two_pass_distance as i64 - scheduled_distance as i64,
+            if scheduled_distance > 0 {
+                100.0 * (two_pass_distance as f64 - scheduled_distance as f64)
+                    / scheduled_distance as f64
+            } else {
+                0.0
+            }
+        );
+
+        // Reported, not steered: no assertion on which direction any
+        // metric moves, and no assertion on which of one-pass/two-pass
+        // "wins" -- that judgment is issue #69's own open question, to
+        // be made from the eprintln! output above, not baked into a
+        // pass/fail here. The synthetic-fixture tests already establish
+        // each algorithm's designed behavior on a fixture built to
+        // expose it; this test's job is to report what happens on real
+        // call-graph data, honestly, whichever way it cuts -- matching
+        // the standard cost_correlation.rs holds itself to for its own
+        // real-data measurement.
         assert!(
             total_symbols > 300,
             "sanity check: this fixture must actually be large (>300 symbols), not accidentally \

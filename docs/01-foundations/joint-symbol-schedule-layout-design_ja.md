@@ -158,7 +158,7 @@ LAMINARIAの成果物は「ビルドできる」だけでは不十分であり�
 - **実データでの測定を追加実施した** (`experiments/unified-symbol-graph/src/real_llvm_ffi_fixture.rs`)。alopexDB(issue #59が実測に使うサンプルプロジェクト)を最初に検討したが、実際の`extern "C"`境界(`alopex-sql`のNim FFI)がわずか4関数であることを確認し、合成fixtureと同規模で新しい情報を得られないと判断、別プロジェクトを探した。`.reference/rust`(rustc本体のチェックアウト)内の`compiler/rustc_codegen_llvm/src/llvm/ffi.rs`が355個の実`extern "C"`関数宣言(LLVM-C APIバインディング)を持つことを`grep`で確認し、これを実データ源とした。
   - 32個の呼び出し元ソースファイル(`Realm::Cargo`シンボル、コード長は実際の行数)と276個の実際に呼ばれるLLVM関数(`Realm::C`シンボル、宣言順は`ffi.rs`内の実際の宣言行番号)から、300個の実(呼び出し元,呼び出し先)ペア・371回の実呼び出しサイトを機械的に抽出し、`CodeBody::relocations`として投入した(308シンボル、3シンボルの合成fixtureとは桁違いの規模)。
   - **実測結果**: critical-path inversionはベースライン142件に対しscheduling-awareは17件(-88.0%)。呼び出し近接シンボル間のバイト距離はベースライン4,877,681に対しscheduling-awareは2,988,701(-38.7%)。合成fixtureで確認された「両シグナルとも改善するが、inversionはゼロにはならない」という定性的傾向が、実データでも同じ方向で、かつ大幅な改善幅で再現された。
-  - ただし「1パス同時最適化 vs 2パス分離」のどちらが妥当かという判断(issueが最終的に求める問い)は、この1つの実データ点だけでは下せない。2パス版(Cargo流スケジューリング→lld流配置を素朴に模した別実装)との比較はまだ実装しておらず、次サイクルへの引き継ぎ事項として残る。
+  - **「1パス同時最適化 vs 2パス分離」への回答**: `assign_layout_two_pass`(Cargo流スケジューリングパス→独立したlld流配置パスの2パス版)を実装し、同じ実データで比較した。結果は**明確な優劣ではなく実際のトレードオフ**だった: 2パス版は呼び出し近接距離をさらに-18.2%改善する(2,988,701→2,443,714、スケジュール順序に制約されず自由にクラスタリングできるため)が、critical-path inversionは+147.1%(17件→42件)悪化する(スケジュール順序をより大胆に崩す代償)。1パス版はスケジュール順序の一部を保持する代わりに局所性を犠牲にし、2パス版は局所性を優先する代わりにスケジュール順序を大きく犠牲にする。どちらのアルゴリズムも他方を全面的に上回らない。これはissueが引用するNP-hardness文献の主張(同時最適化はスケジューリング理論上の既知の難問クラス)を、実データで裏付ける結果である。
 
 問題Dが要求する「汎用中間表現を経由しない」という制約自体の詳細な検証(Rust IR→LLVM IR→バイナリの実際の変換過程で何が削除可能で何が削除不可能かの一次資料+実装コード裏取り)は[意味論から「中間表現」を削除する](../02-research-areas/compiler/removing-intermediate-representation_ja.md)に記録する。
 
@@ -344,9 +344,9 @@ Unison公式ドキュメント"The big idea"(<https://www.unison-lang.org/docs/t
 
 ## 5. まだ解けていないこと(次の設計課題)
 
-- `assign_layout`を`mutation_seq`と(`RequiresEdge`が本来意図した信号を、より精密な`CodeBody::relocations`から導出した)呼び出し近接度の両方を使う配置関数(`assign_layout_scheduling_aware`)へ、issue #69で実装・合成fixtureおよび実データ(rustc_codegen_llvmのLLVM-C FFI境界、308シンボル)の両方で実測した(節3参照)。実データでもcritical-path inversion -88.0%、呼び出し近接距離 -38.7%という有意な改善を確認した。ただし1パス同時最適化 vs 2パス分離のどちらが妥当かの判断(2パス版との比較実装)はまだ行われていない。
+- `assign_layout`を`mutation_seq`と(`RequiresEdge`が本来意図した信号を、より精密な`CodeBody::relocations`から導出した)呼び出し近接度の両方を使う配置関数(`assign_layout_scheduling_aware`、1パス)へ、issue #69で実装・合成fixtureおよび実データ(rustc_codegen_llvmのLLVM-C FFI境界、308シンボル)の両方で実測した(節3参照)。実データでもcritical-path inversion -88.0%、呼び出し近接距離 -38.7%という有意な改善を確認した。さらに2パス版(`assign_layout_two_pass`)も実装・同じ実データで比較し、「1パス同時最適化 vs 2パス分離」の問いに対し、明確な優劣ではなく実際のトレードオフ(2パス版は局所性で優るがcritical-path inversionで大きく劣る)という結果を得た。
 - ARM64(Mach-O/ELF双方)、Windows COFF(MSVC ABI)は、リロケーション適用関数がまだ実装されていない(文献調査は完了、実機検証は未実施)。
-- 問題A(境界シンボル解決)は実験レベルで動作確認済み。問題B×C(スケジュール×配置の結合最適化)はissue #69で実装・合成fixtureおよび実データ(rustc_codegen_llvm、308シンボル)双方での実測を完了したが、1パス同時最適化 vs 2パス分離のどちらが妥当かという最終判断(2パス版との比較実装)はまだ残っている。
+- 問題A(境界シンボル解決)は実験レベルで動作確認済み。問題B×C(スケジュール×配置の結合最適化)はissue #69で1パス版・2パス版の両方を実装し、合成fixtureおよび実データ(rustc_codegen_llvm、308シンボル)双方で比較実測を完了した。「1パス vs 2パス」は明確な優劣ではなくトレードオフ(2パス版は局所性で優るがcritical-path inversionで劣る)という結果に至った。残るのは、この結果を`unified-symbol-graph`の実運用設計(どちらを採用するか、あるいは用途に応じて使い分けるか)へどう反映するかの判断であり、issue #69の完了条件が求める「実データに基づいた判断の記録」はこの実測結果自体が満たしている。
 - Craneliftの実測失敗(節2.3)が示す「既存分離構造への継ぎ足しは整合性が壊れる」という一般則が、LAMINARIA自身の設計(Rust/Nimランタイムスケジューラ+Nimプランニングカーネルという2言語構成)にも当てはまらないことを、今後LAMINARIA自身の実装が育つ過程で継続的に検証する必要がある。
 - 問題D(節3)で示した「target固有の専用コンパイラを作る/既存専用コンパイラを束ねる」の2つの道のうち、どちらを取るか、あるいはtargetごとに使い分けるかはまだ決定していない。8つの宣言済みtarget(節4)それぞれについて、実機/実行環境上でのビルド直後テスト実行能力の現状評価(クロスコンパイルの可否、対象OS上でのネイティブ実行環境の可用性、既存専用コンパイラの成熟度)を一つずつ棚卸しする作業が未着手である。
 - Lane C([Testable Native Artifactと第一級Test Harness](../02-research-areas/toolchains/testable-native-artifact-harness_ja.md))が既に持つ`target execution capability`という概念と、本書の問題Dが要求する「ビルド直後のtarget上テスト実行」制約との関係を、両文書間で整合させる具体的な統合作業がまだ行われていない。
