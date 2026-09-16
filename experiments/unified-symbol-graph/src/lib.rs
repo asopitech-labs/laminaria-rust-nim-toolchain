@@ -437,6 +437,13 @@ pub mod target_ir;
 /// doc comment.
 pub mod layout_scheduling;
 
+/// Issue #69 follow-up: measures `layout_scheduling` against a real
+/// FFI-boundary-symbol-scale graph (rustc_codegen_llvm's LLVM-C
+/// bindings) instead of a synthetic fixture. See
+/// `real_llvm_ffi_fixture`'s own module doc comment for why this
+/// fixture was chosen over alopexDB.
+pub mod real_llvm_ffi_fixture;
+
 /// The four ecosystems this hypothesis is scoped to (matching this repo's
 /// own `cadd`/`app` fixture: Cargo, Nimble, C, C++). Not meant to be an
 /// exhaustive or permanent list -- a placeholder for "whichever realms a

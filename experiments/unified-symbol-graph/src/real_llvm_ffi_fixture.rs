@@ -1,0 +1,2127 @@
+//! Issue #69 follow-up: a real-data measurement of
+//! `assign_layout_scheduling_aware` vs. the alphabetical baseline, using
+//! `rustc_codegen_llvm`'s actual LLVM-C FFI surface
+//! (`.reference/rust/compiler/rustc_codegen_llvm/src/llvm/ffi.rs`, a real
+//! checked-out copy of the rustc repository this workspace already keeps
+//! under `.reference/`) rather than a synthetic 3-symbol graph.
+//!
+//! **Why this fixture, and why not alopexDB**: the task instructions
+//! asked to try alopexDB (`/home/roomtv/works/alopex-db`) first, since
+//! issue #59 already treats it as this workspace's real-world sample
+//! project. Checked directly: alopexDB's own `extern "C"` boundary
+//! (`alopex-sql`'s `nim_ffi.rs`, the Cargo<->Nimble FFI edge) is only 4
+//! functions -- the same order of magnitude as the synthetic fixtures
+//! already in `layout_scheduling.rs`'s own tests. A large project is not
+//! automatically a large *FFI-boundary* fixture; alopexDB's size is
+//! Cargo-crate-dependency size, not boundary-symbol-graph size, and using
+//! it here would not have added information beyond the synthetic
+//! fixture. `rustc_codegen_llvm`'s LLVM-C bindings were found instead by
+//! grepping `.reference/rust` for `extern "C"` density across candidate
+//! components and checking actual declaration counts, not by assuming
+//! project size correlates with FFI surface size.
+//!
+//! **What was actually measured, mechanically, against the real
+//! `.reference/rust` checkout** (commands run and their outputs kept in
+//! this module's own commit -- reproducible by re-running the same greps
+//! against the same `.reference/rust` checkout):
+//! - `compiler/rustc_codegen_llvm/src/llvm/ffi.rs` declares 355 real
+//!   `LLVM*`-prefixed `extern "C"` functions (`grep -c '^\s*pub(crate) fn
+//!   LLVM'`).
+//! - Across the 32 non-`ffi.rs` source files in
+//!   `compiler/rustc_codegen_llvm/src` that call at least one of them
+//!   (`grep -rn 'llvm::FN_NAME(' compiler/rustc_codegen_llvm/src`,
+//!   excluding `ffi.rs` itself), there are 300 distinct (caller file,
+//!   callee function) call-count pairs, 371 total call sites, spanning
+//!   276 of the 355 declared functions (the remaining 79 are declared
+//!   but not called from a source file directly under
+//!   `rustc_codegen_llvm/src`, e.g. only from a submodule not walked, or
+//!   truly unused from this crate's own call sites).
+//!
+//! **What each "symbol" in this fixture represents, and what is
+//! honestly approximate about it**:
+//! - Each of the 32 caller files becomes one `Realm::Cargo` boundary
+//!   symbol. Its `CodeBody.code` length is set to that file's own real
+//!   line count (`wc -l`) -- a real, measured quantity, but a proxy for
+//!   "how big is this symbol's own code," not real x86_64 machine code
+//!   size (this fixture has no compiled artifact for these files, only
+//!   source). Its `declared_at_seq` proxy (via `declare_symbol`'s own
+//!   arrival-order recording) is derived from the real line number of
+//!   that file's *first* `llvm::LLVM...(` call site -- "how early in the
+//!   file does FFI usage begin" is a real, measured quantity directly
+//!   analogous to `mutation_seq`'s own "when did this arrive" semantics,
+//!   though at the file-content level rather than the graph-mutation
+//!   level (`.reference/rust` is a separate checkout this crate does not
+//!   control the commit history of, so a true first-commit-date arrival
+//!   order was not available -- named honestly as a substitution, not
+//!   hidden).
+//! - Each of the 276 actually-called LLVM functions becomes one
+//!   `Realm::C` boundary symbol (LLVM-C is, definitionally, a C API).
+//!   Its `CodeBody.code` length is a nominal 4 bytes (this fixture has no
+//!   real LLVM binary to measure) -- named honestly as arbitrary, unlike
+//!   the caller-file sizes above. Its `declared_at_seq` proxy is derived
+//!   from its real declaration line number in `ffi.rs`.
+//! - Each (caller, callee, count) triple becomes `count` relocations
+//!   from the caller symbol's own `CodeBody` targeting the callee symbol
+//!   -- one relocation per real call site, matching
+//!   `layout_scheduling`'s own affinity model (`call_affinity` sums
+//!   relocation counts, so `count` repeated relocations to the same
+//!   target is equivalent to, and simpler than, adding a multiplicity
+//!   field this crate's `ElfX86_64PendingReloc` does not have).
+//!
+//! See this module's own test for the measured result, reported
+//! honestly regardless of which way it cuts (same standard as
+//! `cost_correlation.rs`/`disk_tiering.rs`).
+
+#![cfg(test)]
+
+use crate::layout_scheduling::{
+    assign_layout_scheduling_aware, count_critical_path_inversions,
+    total_affinity_weighted_distance,
+};
+use crate::{
+    AddressState, CodeBody, ElfX86_64PendingReloc, Realm, SharedSymbolGraph, SymbolId, SymbolNode,
+};
+use std::collections::HashMap;
+
+/// (caller_file_path, first_llvm_call_line, total_line_count) -- see this
+/// module's own doc comment for how each field was measured.
+const CALLER_FILES: &[(&str, u32, u32)] = &[
+    ("compiler/rustc_codegen_llvm/src/abi.rs", 699, 765),
+    ("compiler/rustc_codegen_llvm/src/allocator.rs", 150, 184),
+    ("compiler/rustc_codegen_llvm/src/asm.rs", 465, 1691),
+    ("compiler/rustc_codegen_llvm/src/back/archive.rs", 41, 102),
+    ("compiler/rustc_codegen_llvm/src/back/lto.rs", 252, 855),
+    (
+        "compiler/rustc_codegen_llvm/src/back/owned_target_machine.rs",
+        44,
+        96,
+    ),
+    ("compiler/rustc_codegen_llvm/src/back/write.rs", 74, 1403),
+    ("compiler/rustc_codegen_llvm/src/base.rs", 55, 264),
+    ("compiler/rustc_codegen_llvm/src/builder.rs", 56, 2207),
+    (
+        "compiler/rustc_codegen_llvm/src/builder/autodiff.rs",
+        200,
+        392,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder/gpu_offload.rs",
+        337,
+        735,
+    ),
+    ("compiler/rustc_codegen_llvm/src/common.rs", 63, 537),
+    ("compiler/rustc_codegen_llvm/src/consts.rs", 283, 926),
+    ("compiler/rustc_codegen_llvm/src/context.rs", 191, 1336),
+    (
+        "compiler/rustc_codegen_llvm/src/coverageinfo/llvm_cov.rs",
+        10,
+        122,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/di_builder.rs",
+        18,
+        98,
+    ),
+    ("compiler/rustc_codegen_llvm/src/debuginfo/gdb.rs", 35, 116),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/metadata.rs",
+        116,
+        1842,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/metadata/enums/cpp_like.rs",
+        585,
+        1002,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/metadata/enums/mod.rs",
+        121,
+        437,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/metadata/enums/native.rs",
+        283,
+        479,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/metadata/type_map.rs",
+        196,
+        342,
+    ),
+    ("compiler/rustc_codegen_llvm/src/debuginfo/mod.rs", 102, 758),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/namespace.rs",
+        36,
+        47,
+    ),
+    ("compiler/rustc_codegen_llvm/src/debuginfo/utils.rs", 31, 97),
+    ("compiler/rustc_codegen_llvm/src/declare.rs", 47, 276),
+    ("compiler/rustc_codegen_llvm/src/intrinsic.rs", 218, 3424),
+    ("compiler/rustc_codegen_llvm/src/lib.rs", 83, 533),
+    ("compiler/rustc_codegen_llvm/src/llvm_util.rs", 31, 805),
+    ("compiler/rustc_codegen_llvm/src/type_.rs", 39, 343),
+    ("compiler/rustc_codegen_llvm/src/typetree.rs", 95, 180),
+    ("compiler/rustc_codegen_llvm/src/value.rs", 24, 29),
+];
+
+/// (caller_file_path, callee_llvm_function_name, call_count,
+/// callee_declared_line_in_ffi_rs) -- see this module's own doc comment.
+const CALL_EDGES: &[(&str, &str, u32, u32)] = &[
+    (
+        "compiler/rustc_codegen_llvm/src/abi.rs",
+        "LLVMRustCreateElementTypeAttr",
+        1,
+        2014,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/abi.rs",
+        "LLVMRustGetElementTypeArgIndex",
+        1,
+        2588,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/allocator.rs",
+        "LLVMAppendBasicBlockInContext",
+        1,
+        1147,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/asm.rs",
+        "LLVMGetInlineAsm",
+        1,
+        913,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/asm.rs",
+        "LLVMRustGetMangledName",
+        3,
+        2586,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/asm.rs",
+        "LLVMRustInlineAsmVerify",
+        1,
+        2111,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/back/archive.rs",
+        "LLVMRustGetSymbols",
+        1,
+        2593,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/back/archive.rs",
+        "LLVMRustIs64BitSymbolicFile",
+        1,
+        2601,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/back/archive.rs",
+        "LLVMRustIsAnyArm64Coff",
+        1,
+        2605,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/back/archive.rs",
+        "LLVMRustIsECObject",
+        1,
+        2603,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/back/lto.rs",
+        "LLVMRustBufferFree",
+        1,
+        2524,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/back/lto.rs",
+        "LLVMRustBufferLen",
+        1,
+        2523,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/back/lto.rs",
+        "LLVMRustBufferPtr",
+        1,
+        2522,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/back/lto.rs",
+        "LLVMRustComputeLTOCacheKey",
+        1,
+        2562,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/back/lto.rs",
+        "LLVMRustCreateThinLTOData",
+        1,
+        2529,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/back/lto.rs",
+        "LLVMRustFreeThinLTOData",
+        1,
+        2547,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/back/lto.rs",
+        "LLVMRustLinkerAdd",
+        1,
+        2556,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/back/lto.rs",
+        "LLVMRustLinkerFree",
+        2,
+        2561,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/back/lto.rs",
+        "LLVMRustLinkerNew",
+        1,
+        2555,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/back/lto.rs",
+        "LLVMRustModuleCost",
+        1,
+        2525,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/back/lto.rs",
+        "LLVMRustModuleSerialize",
+        1,
+        2528,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/back/lto.rs",
+        "LLVMRustParseBitcodeForLTO",
+        1,
+        2548,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/back/lto.rs",
+        "LLVMRustPrepareThinLTOImport",
+        1,
+        2542,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/back/lto.rs",
+        "LLVMRustPrepareThinLTOInternalize",
+        1,
+        2541,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/back/lto.rs",
+        "LLVMRustPrepareThinLTORename",
+        1,
+        2535,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/back/lto.rs",
+        "LLVMRustPrepareThinLTOResolveWeak",
+        1,
+        2540,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/back/lto.rs",
+        "LLVMRustRunRestrictionPass",
+        1,
+        2474,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/back/owned_target_machine.rs",
+        "LLVMDisposeTargetMachine",
+        1,
+        899,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/back/owned_target_machine.rs",
+        "LLVMRustCreateTargetMachine",
+        1,
+        2387,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/back/write.rs",
+        "LLVMAddAnalysisPasses",
+        1,
+        1637,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/back/write.rs",
+        "LLVMCreatePassManager",
+        1,
+        1635,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/back/write.rs",
+        "LLVMDeleteFunction",
+        1,
+        1123,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/back/write.rs",
+        "LLVMGetReturnType",
+        1,
+        955,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/back/write.rs",
+        "LLVMGlobalGetValueType",
+        1,
+        1077,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/back/write.rs",
+        "LLVMReplaceAllUsesWith",
+        1,
+        981,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/back/write.rs",
+        "LLVMRustAddLibraryInfo",
+        1,
+        2413,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/back/write.rs",
+        "LLVMRustContextConfigureDiagnosticHandler",
+        1,
+        2575,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/back/write.rs",
+        "LLVMRustContextGetDiagnosticHandler",
+        1,
+        2568,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/back/write.rs",
+        "LLVMRustContextSetDiagnosticHandler",
+        1,
+        2571,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/back/write.rs",
+        "LLVMRustModuleInstructionStats",
+        1,
+        2526,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/back/write.rs",
+        "LLVMRustOptimize",
+        1,
+        2428,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/back/write.rs",
+        "LLVMRustPrintModule",
+        1,
+        2466,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/back/write.rs",
+        "LLVMRustWriteDiagnosticInfoToString",
+        2,
+        2495,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/back/write.rs",
+        "LLVMRustWriteOutputFile",
+        1,
+        2419,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/back/write.rs",
+        "LLVMWriteBitcodeToFile",
+        1,
+        1632,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/base.rs",
+        "LLVMDeleteGlobal",
+        1,
+        1085,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/base.rs",
+        "LLVMGetFirstGlobal",
+        1,
+        1083,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/base.rs",
+        "LLVMGetFirstGlobalAlias",
+        1,
+        1104,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/base.rs",
+        "LLVMReplaceAllUsesWith",
+        1,
+        981,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/base.rs",
+        "LLVMRustSetNoSanitizeAddress",
+        1,
+        2607,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/base.rs",
+        "LLVMRustSetNoSanitizeHWAddress",
+        1,
+        2608,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMAddCase",
+        2,
+        1244,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMAddClause",
+        1,
+        1247,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMAddHandler",
+        1,
+        1240,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMAddIncoming",
+        2,
+        1166,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMAppendBasicBlockInContext",
+        2,
+        1147,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildAdd",
+        1,
+        1253,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildAlloca",
+        3,
+        1425,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildAtomicCmpXchg",
+        1,
+        1603,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildAtomicRMW",
+        1,
+        1615,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildBitCast",
+        2,
+        1516,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildBr",
+        2,
+        1186,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildCallBr",
+        1,
+        1696,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildCallWithOperandBundles",
+        2,
+        1674,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildCatchPad",
+        1,
+        1221,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildCatchRet",
+        1,
+        1228,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildCatchSwitch",
+        1,
+        1233,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildCleanupPad",
+        1,
+        1209,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildCleanupRet",
+        1,
+        1216,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildCondBr",
+        1,
+        1187,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildExtractElement",
+        1,
+        1568,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildExtractValue",
+        1,
+        1588,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildFCmp",
+        1,
+        1544,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildFPExt",
+        1,
+        1498,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildFPToSI",
+        1,
+        1474,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildFPToUI",
+        1,
+        1468,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildFPTrunc",
+        1,
+        1492,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildFence",
+        1,
+        1624,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildGEPWithNoWrapFlags",
+        4,
+        1439,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildICmp",
+        1,
+        1537,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildInsertElement",
+        1,
+        1574,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildInsertValue",
+        1,
+        1594,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildIntCast2",
+        1,
+        1528,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildIntToPtr",
+        1,
+        1510,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildInvokeWithOperandBundles",
+        1,
+        1684,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildLandingPad",
+        1,
+        1199,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildLoad2",
+        3,
+        1430,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildMul",
+        1,
+        1277,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildOr",
+        1,
+        1397,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildPhi",
+        1,
+        1553,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildPointerCast",
+        3,
+        1522,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildPtrToInt",
+        1,
+        1504,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildResume",
+        1,
+        1206,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildRet",
+        2,
+        1185,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildSExt",
+        1,
+        1462,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildSIToFP",
+        1,
+        1486,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildSelect",
+        1,
+        1555,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildShuffleVector",
+        1,
+        1581,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildStore",
+        3,
+        1437,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildSub",
+        1,
+        1265,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildSwitch",
+        2,
+        1193,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildTrunc",
+        2,
+        1450,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildUIToFP",
+        1,
+        1480,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildUnreachable",
+        1,
+        1207,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildVAArg",
+        2,
+        1562,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMBuildZExt",
+        1,
+        1456,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMCreateBuilderInContext",
+        1,
+        1174,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMDisposeBuilder",
+        1,
+        1177,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMGetBasicBlockParent",
+        1,
+        1146,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMGetFirstBasicBlock",
+        2,
+        1155,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMGetInsertBlock",
+        1,
+        1176,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMGetUndef",
+        1,
+        996,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMIsAInstruction",
+        6,
+        1154,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMMDNodeInContext2",
+        1,
+        1005,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMPositionBuilderAtEnd",
+        2,
+        1175,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMReplaceMDNodeOperandWith",
+        1,
+        1015,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMRustBuildMemCpy",
+        1,
+        2064,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMRustBuildMemMove",
+        1,
+        2073,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMRustBuildMemSet",
+        1,
+        2082,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMRustBuildVScale",
+        1,
+        2091,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMRustIsNonGVFunctionPointerTy",
+        2,
+        1972,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMRustPositionBuilderAtStart",
+        1,
+        2516,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMRustSetAllowReassoc",
+        2,
+        2060,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMRustSetNoSignedZeros",
+        2,
+        2061,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMRustStripPointerCasts",
+        1,
+        1973,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMSetAlignment",
+        9,
+        1075,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMSetCleanup",
+        1,
+        1250,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMSetIsDisjoint",
+        1,
+        1420,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMSetNSW",
+        4,
+        1422,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMSetNUW",
+        4,
+        1421,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMSetOrdering",
+        2,
+        1163,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMSetPersonalityFn",
+        1,
+        1241,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMSetVolatile",
+        4,
+        1162,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder.rs",
+        "LLVMSetWeak",
+        1,
+        1613,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder/autodiff.rs",
+        "LLVMBuildMul",
+        1,
+        1277,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder/autodiff.rs",
+        "LLVMFunctionType",
+        1,
+        947,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder/gpu_offload.rs",
+        "LLVMPositionBuilderAtEnd",
+        2,
+        1175,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/builder/gpu_offload.rs",
+        "LLVMRustPositionBuilderPastAllocas",
+        2,
+        2515,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/common.rs",
+        "LLVMConstArray2",
+        1,
+        1027,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/common.rs",
+        "LLVMConstInBoundsGEP2",
+        2,
+        1053,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/common.rs",
+        "LLVMConstInt",
+        2,
+        1018,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/common.rs",
+        "LLVMConstIntOfArbitraryPrecision",
+        1,
+        1019,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/common.rs",
+        "LLVMConstIntToPtr",
+        3,
+        1060,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/common.rs",
+        "LLVMConstNamedStruct",
+        1,
+        1045,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/common.rs",
+        "LLVMConstNull",
+        2,
+        995,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/common.rs",
+        "LLVMConstPtrToInt",
+        1,
+        1059,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/common.rs",
+        "LLVMConstReal",
+        1,
+        1024,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/common.rs",
+        "LLVMConstStringInContext2",
+        2,
+        1033,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/common.rs",
+        "LLVMConstStructInContext",
+        1,
+        1039,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/common.rs",
+        "LLVMConstVector",
+        1,
+        1050,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/common.rs",
+        "LLVMGetAggregateElement",
+        1,
+        1063,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/common.rs",
+        "LLVMGetPoison",
+        1,
+        997,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/common.rs",
+        "LLVMGetUndef",
+        1,
+        996,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/common.rs",
+        "LLVMIsAConstantInt",
+        1,
+        1661,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/common.rs",
+        "LLVMRustConstInt128Get",
+        1,
+        1977,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/common.rs",
+        "LLVMRustConstIntGetZExtValue",
+        1,
+        1976,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/common.rs",
+        "LLVMTypeOf",
+        1,
+        978,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/consts.rs",
+        "LLVMConstBitCast",
+        1,
+        1061,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/consts.rs",
+        "LLVMConstPointerCast",
+        1,
+        1062,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/consts.rs",
+        "LLVMGetAlignment",
+        1,
+        1074,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/consts.rs",
+        "LLVMRustSetNoSanitizeAddress",
+        1,
+        2607,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/consts.rs",
+        "LLVMRustSetNoSanitizeHWAddress",
+        1,
+        2608,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/consts.rs",
+        "LLVMSetAlignment",
+        1,
+        1075,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/context.rs",
+        "LLVMAddNamedMetadataOperand",
+        1,
+        1010,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/context.rs",
+        "LLVMConstInt",
+        1,
+        1018,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/context.rs",
+        "LLVMGetDataLayoutStr",
+        1,
+        909,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/context.rs",
+        "LLVMGetMDKindIDInContext",
+        1,
+        891,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/context.rs",
+        "LLVMGlobalGetValueType",
+        1,
+        1077,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/context.rs",
+        "LLVMGlobalSetMetadata",
+        1,
+        987,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/context.rs",
+        "LLVMMDNodeInContext2",
+        1,
+        1005,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/context.rs",
+        "LLVMMDStringInContext2",
+        1,
+        1000,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/context.rs",
+        "LLVMModuleCreateWithNameInContext",
+        1,
+        902,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/context.rs",
+        "LLVMRustGlobalAddMetadata",
+        1,
+        1967,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/context.rs",
+        "LLVMRustSetDataLayoutFromTargetMachine",
+        1,
+        2513,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/context.rs",
+        "LLVMRustSetModuleCodeModel",
+        1,
+        2520,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/context.rs",
+        "LLVMRustSetModuleLargeDataThreshold",
+        1,
+        2521,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/context.rs",
+        "LLVMRustSetModulePICLevel",
+        1,
+        2518,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/context.rs",
+        "LLVMRustSetModulePIELevel",
+        1,
+        2519,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/context.rs",
+        "LLVMRustSetNormalizedTarget",
+        1,
+        2473,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/context.rs",
+        "LLVMSetDataLayout",
+        1,
+        910,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/coverageinfo/llvm_cov.rs",
+        "LLVMRustCoverageCreatePGOFuncNameVar",
+        1,
+        2153,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/coverageinfo/llvm_cov.rs",
+        "LLVMRustCoverageHashBytes",
+        1,
+        2158,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/coverageinfo/llvm_cov.rs",
+        "LLVMRustCoverageWriteFilenamesToBuffer",
+        1,
+        2131,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/coverageinfo/llvm_cov.rs",
+        "LLVMRustCoverageWriteFunctionMappingsToBuffer",
+        1,
+        2139,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/di_builder.rs",
+        "LLVMCreateDIBuilder",
+        1,
+        1718,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/di_builder.rs",
+        "LLVMDIBuilderCreateExpression",
+        1,
+        1893,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/di_builder.rs",
+        "LLVMDIBuilderCreateGlobalVariableExpression",
+        1,
+        1899,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/di_builder.rs",
+        "LLVMDisposeDIBuilder",
+        1,
+        1719,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/di_builder.rs",
+        "LLVMGlobalSetMetadata",
+        1,
+        987,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/gdb.rs",
+        "LLVMGetNamedGlobal",
+        1,
+        1082,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/gdb.rs",
+        "LLVMSetAlignment",
+        1,
+        1075,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/metadata.rs",
+        "LLVMDIBuilderCreateArrayType",
+        2,
+        1788,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/metadata.rs",
+        "LLVMDIBuilderCreateBasicType",
+        1,
+        1797,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/metadata.rs",
+        "LLVMDIBuilderCreateExpression",
+        1,
+        1893,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/metadata.rs",
+        "LLVMDIBuilderCreateLexicalBlockFile",
+        1,
+        1739,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/metadata.rs",
+        "LLVMDIBuilderCreateMemberType",
+        1,
+        1835,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/metadata.rs",
+        "LLVMDIBuilderCreatePointerType",
+        1,
+        1806,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/metadata.rs",
+        "LLVMDIBuilderCreateSubroutineType",
+        1,
+        1754,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/metadata.rs",
+        "LLVMDIBuilderCreateTypedef",
+        2,
+        1870,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/metadata.rs",
+        "LLVMDIBuilderGetOrCreateSubrange",
+        2,
+        1881,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/metadata.rs",
+        "LLVMGetConstOpcode",
+        1,
+        1064,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/metadata.rs",
+        "LLVMGetOperand",
+        1,
+        1156,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/metadata.rs",
+        "LLVMIsAConstantExpr",
+        1,
+        1065,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/metadata.rs",
+        "LLVMRustDIBuilderCreateCompileUnit",
+        1,
+        2207,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/metadata.rs",
+        "LLVMRustDIBuilderCreateFile",
+        1,
+        2226,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/metadata.rs",
+        "LLVMRustDICreateVectorType",
+        1,
+        2353,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/metadata.rs",
+        "LLVMRustDIGetOrCreateSubrange",
+        1,
+        2343,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/metadata/enums/cpp_like.rs",
+        "LLVMDIBuilderCreateQualifiedType",
+        1,
+        1864,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/metadata/enums/cpp_like.rs",
+        "LLVMDIBuilderCreateStaticMemberType",
+        1,
+        1849,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/metadata/enums/mod.rs",
+        "LLVMDIBuilderCreateEnumeratorOfArbitraryPrecision",
+        1,
+        1762,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/metadata/enums/mod.rs",
+        "LLVMRustDIBuilderCreateEnumerationType",
+        1,
+        2292,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/metadata/enums/native.rs",
+        "LLVMRustDIBuilderCreateVariantMemberType",
+        1,
+        2276,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/metadata/enums/native.rs",
+        "LLVMRustDIBuilderCreateVariantPart",
+        1,
+        2307,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/metadata/type_map.rs",
+        "LLVMDIBuilderCreateStructType",
+        1,
+        1816,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/metadata/type_map.rs",
+        "LLVMDIBuilderCreateUnionType",
+        1,
+        1771,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/metadata/type_map.rs",
+        "LLVMRustDICompositeTypeReplaceArrays",
+        1,
+        2334,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/mod.rs",
+        "LLVMDIBuilderCreateAutoVariable",
+        1,
+        1933,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/mod.rs",
+        "LLVMDIBuilderCreateDebugLocation",
+        1,
+        1746,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/mod.rs",
+        "LLVMDIBuilderCreateExpression",
+        1,
+        1893,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/mod.rs",
+        "LLVMDIBuilderCreateLexicalBlock",
+        1,
+        1731,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/mod.rs",
+        "LLVMDIBuilderCreateParameterVariable",
+        1,
+        1946,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/mod.rs",
+        "LLVMDIBuilderFinalize",
+        1,
+        1721,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/mod.rs",
+        "LLVMDIBuilderInsertDbgValueRecordAtEnd",
+        1,
+        1924,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/mod.rs",
+        "LLVMDIBuilderInsertDeclareRecordAtEnd",
+        1,
+        1915,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/mod.rs",
+        "LLVMGetCurrentDebugLocation2",
+        1,
+        1181,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/mod.rs",
+        "LLVMIsAArgument",
+        1,
+        1141,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/mod.rs",
+        "LLVMIsAInstruction",
+        1,
+        1154,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/mod.rs",
+        "LLVMRustDIBuilderCreateFunction",
+        1,
+        2241,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/mod.rs",
+        "LLVMRustDIBuilderCreateMethod",
+        1,
+        2260,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/mod.rs",
+        "LLVMRustDIBuilderCreateTemplateTypeParameter",
+        1,
+        2324,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/mod.rs",
+        "LLVMRustDILocationCloneWithBaseDiscriminator",
+        1,
+        2363,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/mod.rs",
+        "LLVMRustDebugMetadataVersion",
+        1,
+        2174,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/mod.rs",
+        "LLVMSetCurrentDebugLocation2",
+        2,
+        1180,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/namespace.rs",
+        "LLVMDIBuilderCreateNameSpace",
+        1,
+        1723,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/debuginfo/utils.rs",
+        "LLVMDIBuilderGetOrCreateArray",
+        1,
+        1887,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/declare.rs",
+        "LLVMRustGetNamedValue",
+        1,
+        2001,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/declare.rs",
+        "LLVMRustGetOrInsertFunction",
+        1,
+        2037,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/declare.rs",
+        "LLVMRustGetOrInsertGlobal",
+        1,
+        1988,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/declare.rs",
+        "LLVMRustGetOrInsertGlobalInAddrspace",
+        1,
+        1994,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/intrinsic.rs",
+        "LLVMBuildCallWithOperandBundles",
+        1,
+        1674,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/intrinsic.rs",
+        "LLVMGetAlignment",
+        1,
+        1074,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/intrinsic.rs",
+        "LLVMRustSetNoSignedZeros",
+        1,
+        2061,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/intrinsic.rs",
+        "LLVMRustUpgradeIntrinsicFunction",
+        1,
+        1134,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/intrinsic.rs",
+        "LLVMSetAlignment",
+        2,
+        1075,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/lib.rs",
+        "LLVMContextCreate",
+        3,
+        888,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/lib.rs",
+        "LLVMContextDispose",
+        1,
+        889,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/lib.rs",
+        "LLVMContextSetDiscardValueNames",
+        3,
+        890,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/lib.rs",
+        "LLVMRustPrintPassTimings",
+        1,
+        2103,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/lib.rs",
+        "LLVMRustPrintStatistics",
+        1,
+        2106,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/lib.rs",
+        "LLVMRustPrintStatisticsJSON",
+        1,
+        2109,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/lib.rs",
+        "LLVMRustTimeTraceProfilerFinishThread",
+        1,
+        2095,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/lib.rs",
+        "LLVMRustTimeTraceProfilerInitialize",
+        1,
+        2093,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/llvm_util.rs",
+        "LLVMDisposeMessage",
+        1,
+        1641,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/llvm_util.rs",
+        "LLVMGetHostCPUFeatures",
+        1,
+        1639,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/llvm_util.rs",
+        "LLVMGetVersion",
+        1,
+        897,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/llvm_util.rs",
+        "LLVMIsMultithreaded",
+        1,
+        1643,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/llvm_util.rs",
+        "LLVMRustDisableSystemDialogsOnCrash",
+        1,
+        1963,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/llvm_util.rs",
+        "LLVMRustGetHostCPUName",
+        1,
+        2383,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/llvm_util.rs",
+        "LLVMRustGetTargetFeature",
+        1,
+        2376,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/llvm_util.rs",
+        "LLVMRustGetTargetFeaturesCount",
+        1,
+        2375,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/llvm_util.rs",
+        "LLVMRustHasFeature",
+        1,
+        2371,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/llvm_util.rs",
+        "LLVMRustInstallErrorHandlers",
+        1,
+        1962,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/llvm_util.rs",
+        "LLVMRustPrintPasses",
+        1,
+        2472,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/llvm_util.rs",
+        "LLVMRustPrintTargetCPUs",
+        1,
+        2374,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/llvm_util.rs",
+        "LLVMRustSetLLVMOptions",
+        1,
+        2471,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/llvm_util.rs",
+        "LLVMRustTargetHasMnemonic",
+        1,
+        2372,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/llvm_util.rs",
+        "LLVMRustTimeTraceProfilerFinish",
+        1,
+        2097,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/llvm_util.rs",
+        "LLVMRustTimeTraceProfilerInitialize",
+        1,
+        2093,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/llvm_util.rs",
+        "LLVMRustVersionMajor",
+        1,
+        2181,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/type_.rs",
+        "LLVMAddFunction",
+        1,
+        1118,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/type_.rs",
+        "LLVMArrayType2",
+        1,
+        1032,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/type_.rs",
+        "LLVMBFloatTypeInContext",
+        1,
+        944,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/type_.rs",
+        "LLVMCountParamTypes",
+        1,
+        953,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/type_.rs",
+        "LLVMCountStructElementTypes",
+        1,
+        1654,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/type_.rs",
+        "LLVMDoubleTypeInContext",
+        1,
+        940,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/type_.rs",
+        "LLVMFP128TypeInContext",
+        1,
+        941,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/type_.rs",
+        "LLVMFloatTypeInContext",
+        1,
+        939,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/type_.rs",
+        "LLVMFunctionType",
+        2,
+        947,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/type_.rs",
+        "LLVMGetElementType",
+        1,
+        971,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/type_.rs",
+        "LLVMGetIntTypeWidth",
+        1,
+        935,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/type_.rs",
+        "LLVMGetParamTypes",
+        1,
+        954,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/type_.rs",
+        "LLVMGetReturnType",
+        1,
+        955,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/type_.rs",
+        "LLVMGetStructElementTypes",
+        1,
+        1655,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/type_.rs",
+        "LLVMGetVectorSize",
+        1,
+        972,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/type_.rs",
+        "LLVMHalfTypeInContext",
+        1,
+        938,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/type_.rs",
+        "LLVMInt16TypeInContext",
+        1,
+        930,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/type_.rs",
+        "LLVMInt1TypeInContext",
+        1,
+        928,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/type_.rs",
+        "LLVMInt32TypeInContext",
+        1,
+        931,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/type_.rs",
+        "LLVMInt64TypeInContext",
+        1,
+        932,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/type_.rs",
+        "LLVMInt8TypeInContext",
+        1,
+        929,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/type_.rs",
+        "LLVMIsFunctionVarArg",
+        1,
+        956,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/type_.rs",
+        "LLVMRustWriteTypeToString",
+        1,
+        2368,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/type_.rs",
+        "LLVMScalableVectorType",
+        1,
+        969,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/type_.rs",
+        "LLVMStructCreateNamed",
+        1,
+        1645,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/type_.rs",
+        "LLVMStructSetBody",
+        1,
+        1647,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/type_.rs",
+        "LLVMStructTypeInContext",
+        1,
+        959,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/type_.rs",
+        "LLVMVectorType",
+        1,
+        968,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/type_.rs",
+        "LLVMVoidTypeInContext",
+        1,
+        975,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/typetree.rs",
+        "LLVMGetDataLayoutStr",
+        1,
+        909,
+    ),
+    (
+        "compiler/rustc_codegen_llvm/src/value.rs",
+        "LLVMRustWriteValueToString",
+        1,
+        2369,
+    ),
+];
+
+fn build_real_fixture_graph() -> SharedSymbolGraph {
+    let graph = SharedSymbolGraph::new();
+
+    // Callee (Realm::C) symbols first, each with a nominal 4-byte body
+    // (see doc comment: no real LLVM binary exists in this fixture to
+    // measure a real size from) and a declared_at_seq proxy derived from
+    // callee_declared_line_in_ffi_rs (real data). Deduplicated since
+    // multiple callers can reference the same callee.
+    let mut callee_declared_line: HashMap<&str, u32> = HashMap::new();
+    for (_, callee, _, declared_line) in CALL_EDGES {
+        callee_declared_line.entry(callee).or_insert(*declared_line);
+    }
+    // Declare in declared_line order so declared_at_seq (arrival order)
+    // matches the real declaration order in ffi.rs, not iteration order
+    // of a HashMap.
+    let mut callees_by_line: Vec<(&str, u32)> = callee_declared_line
+        .iter()
+        .map(|(name, line)| (*name, *line))
+        .collect();
+    callees_by_line.sort_by_key(|(_, line)| *line);
+    for (callee, _) in &callees_by_line {
+        let id = SymbolId {
+            realm: Realm::C,
+            name: callee.to_string(),
+        };
+        graph
+            .declare_symbol(
+                Realm::C,
+                SymbolNode {
+                    id,
+                    address: AddressState::Committed(CodeBody {
+                        code: vec![0u8; 4],
+                        relocations: vec![],
+                    }),
+                },
+            )
+            .expect("realm matches declared_symbol's own realm argument");
+    }
+
+    // Caller (Realm::Cargo) symbols, in first-llvm-call-line order (real
+    // data), each carrying one relocation per real call site to its own
+    // callees.
+    let mut callers_sorted: Vec<&(&str, u32, u32)> = CALLER_FILES.iter().collect();
+    callers_sorted.sort_by_key(|(_, first_line, _)| *first_line);
+    for (path, _, total_lines) in callers_sorted {
+        let relocations: Vec<ElfX86_64PendingReloc> = CALL_EDGES
+            .iter()
+            .filter(|(caller, _, _, _)| caller == path)
+            .flat_map(|(_, callee, count, _)| {
+                std::iter::repeat_n(
+                    ElfX86_64PendingReloc {
+                        offset: 0,
+                        width: 4,
+                        target: SymbolId {
+                            realm: Realm::C,
+                            name: callee.to_string(),
+                        },
+                        addend: 0,
+                    },
+                    *count as usize,
+                )
+            })
+            .collect();
+        let id = SymbolId {
+            realm: Realm::Cargo,
+            name: path.to_string(),
+        };
+        graph
+            .declare_symbol(
+                Realm::Cargo,
+                SymbolNode {
+                    id,
+                    address: AddressState::Committed(CodeBody {
+                        code: vec![0u8; *total_lines as usize],
+                        relocations,
+                    }),
+                },
+            )
+            .expect("realm matches declared_symbol's own realm argument");
+    }
+
+    graph
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn real_rustc_codegen_llvm_ffi_fixture_measures_both_layouts_honestly() {
+        let graph = build_real_fixture_graph();
+
+        let total_symbols = CALLER_FILES.len() + {
+            let mut callees: std::collections::HashSet<&str> = std::collections::HashSet::new();
+            for (_, callee, _, _) in CALL_EDGES {
+                callees.insert(callee);
+            }
+            callees.len()
+        };
+        eprintln!(
+            "[layout_scheduling][real_fixture] graph built from rustc_codegen_llvm's real LLVM-C \
+             FFI surface: {} caller symbols (Realm::Cargo), {} unique callee symbols (Realm::C), \
+             {} call edges ({} total call sites) -- source: .reference/rust/compiler/rustc_codegen_llvm",
+            CALLER_FILES.len(),
+            total_symbols - CALLER_FILES.len(),
+            CALL_EDGES.len(),
+            CALL_EDGES.iter().map(|(_, _, count, _)| *count as u64).sum::<u64>(),
+        );
+
+        let baseline = graph.assign_layout();
+        let baseline_inversions = count_critical_path_inversions(&graph, &baseline.addresses);
+        let baseline_distance = total_affinity_weighted_distance(&graph, &baseline.addresses);
+
+        let scheduled = assign_layout_scheduling_aware(&graph);
+        let scheduled_inversions = count_critical_path_inversions(&graph, &scheduled.addresses);
+        let scheduled_distance = total_affinity_weighted_distance(&graph, &scheduled.addresses);
+
+        eprintln!(
+            "[layout_scheduling][real_fixture] critical-path inversions: alphabetical \
+             baseline={baseline_inversions}, scheduling-aware={scheduled_inversions} \
+             ({:+} vs baseline, {:.1}% change)",
+            scheduled_inversions as i64 - baseline_inversions as i64,
+            if baseline_inversions > 0 {
+                100.0 * (scheduled_inversions as f64 - baseline_inversions as f64)
+                    / baseline_inversions as f64
+            } else {
+                0.0
+            }
+        );
+        eprintln!(
+            "[layout_scheduling][real_fixture] affinity-weighted distance: alphabetical \
+             baseline={baseline_distance}, scheduling-aware={scheduled_distance} \
+             ({:+} vs baseline, {:.1}% change)",
+            scheduled_distance as i64 - baseline_distance as i64,
+            if baseline_distance > 0 {
+                100.0 * (scheduled_distance as f64 - baseline_distance as f64)
+                    / baseline_distance as f64
+            } else {
+                0.0
+            }
+        );
+
+        // Reported, not steered: no assertion on which direction either
+        // metric moves. The synthetic-fixture tests already establish
+        // the algorithm's designed behavior (reduces both metrics on a
+        // fixture built to expose that); this test's job is to report
+        // what happens on real call-graph data, honestly, whichever way
+        // it cuts -- matching the standard cost_correlation.rs holds
+        // itself to for its own real-data measurement.
+        assert!(
+            total_symbols > 300,
+            "sanity check: this fixture must actually be large (>300 symbols), not accidentally \
+             degenerate to synthetic-fixture scale -- got {total_symbols}"
+        );
+    }
+}
