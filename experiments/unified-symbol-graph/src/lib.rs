@@ -400,6 +400,12 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 
+/// Issue #67 experiment harness (state-retention/durability/eviction
+/// questions -- separate from this module's own linking-hypothesis
+/// scope). See `durability`'s own module doc comment for what it does
+/// and does not claim.
+pub mod durability;
+
 /// The four ecosystems this hypothesis is scoped to (matching this repo's
 /// own `cadd`/`app` fixture: Cargo, Nimble, C, C++). Not meant to be an
 /// exhaustive or permanent list -- a placeholder for "whichever realms a
@@ -550,13 +556,13 @@ pub struct RequiresEdge {
 /// without requiring a lock-free concurrent hash map (the real gap ld.lld
 /// itself named -- see this crate's own README).
 pub struct SharedSymbolGraph {
-    nodes: RwLock<HashMap<SymbolId, SymbolNode>>,
+    pub(crate) nodes: RwLock<HashMap<SymbolId, SymbolNode>>,
     /// requirement -> the provider realms declared as candidates, in
     /// declaration order (first-registered is not "wins" here -- that is
     /// exactly the GNU-ld-style order dependency this hypothesis exists
     /// to avoid; order is retained only as evidence, never as a tie-break
     /// rule).
-    edges: RwLock<HashMap<RequiresEdge, Vec<Realm>>>,
+    pub(crate) edges: RwLock<HashMap<RequiresEdge, Vec<Realm>>>,
     /// Monotonic counter so every mutation this graph accepts can be
     /// ordered for later inspection/debugging without relying on
     /// wall-clock time (which is not comparable across threads reliably
