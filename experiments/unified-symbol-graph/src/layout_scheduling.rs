@@ -103,38 +103,70 @@
 //! affinity, because the pull-forward check runs immediately after every
 //! placement), not by any principled trade-off rule.
 //!
-//! # One-pass vs. two-pass: `assign_layout_two_pass`, and the real
-//! measured trade-off
+//! # One-pass vs. two-pass: three algorithms, not two
 //!
-//! `assign_layout_two_pass` (below) implements the two-pass alternative
-//! -- Cargo-style schedule pass, then a lld-style placement pass -- so
-//! the "is one-pass joint optimization worth it over two separate
-//! passes" question has an actual second algorithm to compare against,
-//! not just an assertion that they differ. **The placement pass is not
-//! fully independent of the schedule**: it only reorders symbols
-//! *within* the affinity-chains it greedily grows; the order of the
-//! chains themselves still follows the schedule pass's own output
-//! exactly (see `assign_layout_two_pass`'s own doc comment for the
-//! precise two-level structure -- an earlier version of this paragraph
-//! overstated the independence and was corrected after that mismatch
-//! with the code was pointed out). Measured on `real_llvm_ffi_fixture`'s
-//! real 308-symbol rustc_codegen_llvm FFI graph (see that module's own
-//! test): two-pass reduces affinity-weighted distance a further 18.2%
-//! versus one-pass (its placement pass can reorder freely within each
-//! chain, so it clusters more aggressively there), but **increases
-//! critical-path inversions by 147.1%** (17 -> 42) versus one-pass
-//! (intra-chain reordering by affinity, even though chain order itself
-//! still tracks the schedule, is enough on its own to disturb more of
-//! the fine-grained arrival order than the one-pass version's single
-//! per-placement pull-forward does). Neither algorithm dominates the
-//! other on this real fixture -- one-pass sacrifices some locality to
-//! preserve more of the fine-grained schedule; two-pass sacrifices more
-//! of it to gain more locality within each chain. This is a real,
-//! measured confirmation of the NP-hardness-motivated framing this
-//! module's own introduction cites (joint scheduling-and-placement
-//! optimization is a genuine trade-off, not a case where one approach is
-//! simply better), not merely an assumption carried over from the
-//! literature.
+//! An earlier version of this module claimed
+//! `assign_layout_schedule_seeded_clustering` (then named
+//! `assign_layout_two_pass`) was "the" two-pass alternative to
+//! `assign_layout_scheduling_aware`'s one-pass approach. That claim was
+//! challenged and did not survive scrutiny: that function's own Pass 2
+//! seeds one chain per symbol *by walking the schedule pass's own
+//! output in order*, so the schedule still fully determines which chain
+//! comes before which -- only intra-chain order is free of it. That
+//! makes it a stronger version of the *same family* as the one-pass
+//! algorithm (both let the schedule dominate overall order and only let
+//! affinity act locally), not a structurally different, schedule-blind
+//! second pass. Calling the comparison between them "one-pass vs.
+//! two-pass" mischaracterized what was actually being compared: two
+//! points on a "how much does affinity get to override the schedule"
+//! spectrum, not two different algorithm families.
+//!
+//! `assign_layout_two_pass` (below, the name freed up by the rename
+//! above) is the actual schedule-independent second family: it builds
+//! a global edge list sorted purely by affinity weight across *all* pairs in the
+//! whole graph (a global sort, not seeded by or walked in schedule
+//! order), then merges symbols into chains greedily by that global
+//! order (Kruskal's-algorithm-style edge selection: take the next
+//! highest-weight edge, and if its two endpoints are not already in the
+//! same chain, merge the two chains at those endpoints), and only
+//! finally places any symbol untouched by this process, plus (this is
+//! the ONLY place the schedule is even consulted) breaks ties among
+//! finished chains by the schedule position of each chain's own
+//! lowest-`declared_at_seq` member -- needed because *some* deterministic
+//! rule must decide which finished chain goes first, and "which chain
+//! happened to include the earliest-arriving symbol" is a real, cheap,
+//! schedule-derived tie-break, not schedule-driven overall ordering.
+//!
+//! Measured on `real_llvm_ffi_fixture`'s real 308-symbol
+//! rustc_codegen_llvm FFI graph (see that module's own test for the
+//! reproducing code), critical-path inversions / affinity-weighted
+//! distance for all three, relative to `assign_layout_scheduling_aware`
+//! (one-pass) as the reference point:
+//!
+//! | algorithm | inversions | vs one-pass | distance | vs one-pass |
+//! |---|---|---|---|---|
+//! | one-pass (`assign_layout_scheduling_aware`) | 17 | -- | 2,988,701 | -- |
+//! | schedule-seeded clustering (`assign_layout_schedule_seeded_clustering`) | 42 | +147.1% | 2,443,714 | -18.2% |
+//! | true two-pass (`assign_layout_two_pass`) | 38 | +123.5% | 1,534,651 | -48.6% |
+//!
+//! The true two-pass algorithm not only achieves far better locality
+//! (-48.6% vs. -18.2%) than the schedule-seeded version, it also
+//! produces *fewer* inversions (38 vs. 42) -- schedule-seeded clustering
+//! is not just mischaracterized as "two-pass," it is a strictly worse
+//! point on both axes than the real two-pass algorithm on this fixture,
+//! confirming that letting the schedule seed chain order (rather than
+//! only using it as a last-resort tie-break) actively hurts both
+//! objectives here rather than trading one for the other. The genuine
+//! trade-off is between one-pass and true two-pass: one-pass preserves
+//! far more of the fine-grained schedule (17 vs. 38 inversions) at the
+//! cost of locality; true two-pass achieves much better locality at the
+//! cost of the fine-grained schedule. This is a real, measured
+//! confirmation of the NP-hardness-motivated framing this module's own
+//! introduction cites (joint scheduling-and-placement optimization is a
+//! genuine trade-off, not a case where one approach is simply better) --
+//! but only once compared against an algorithm that actually earns the
+//! name "two-pass," which `assign_layout_schedule_seeded_clustering`
+//! alone did not.
 
 use crate::{AddressState, SharedSymbolGraph, SymbolId};
 use std::collections::{HashMap, HashSet};
@@ -346,7 +378,7 @@ pub fn total_affinity_weighted_distance(
 /// ignores critical-path order entirely. It only reorders *within* the
 /// chains it greedily grows by affinity; the order of the chains
 /// themselves still follows Pass 1's own schedule order exactly (see
-/// `assign_layout_two_pass`'s own doc comment for the precise
+/// `assign_layout_schedule_seeded_clustering`'s own doc comment for the precise
 /// two-level structure). Two sequential passes over the whole graph,
 /// but not two *fully* independent ones -- a partial, not total,
 /// realization of the "solve schedule and layout as two independent
@@ -374,7 +406,9 @@ pub fn total_affinity_weighted_distance(
 /// intra-chain order" is the accurate one -- corrected here after this
 /// same overstatement was pointed out as inconsistent with the code
 /// during issue #69's own review.
-pub fn assign_layout_two_pass(graph: &SharedSymbolGraph) -> SchedulingAwareLayout {
+pub fn assign_layout_schedule_seeded_clustering(
+    graph: &SharedSymbolGraph,
+) -> SchedulingAwareLayout {
     let nodes = graph.nodes.read().expect("nodes lock poisoned");
     let declared_at_seq = graph
         .declared_at_seq
@@ -468,6 +502,162 @@ pub fn assign_layout_two_pass(graph: &SharedSymbolGraph) -> SchedulingAwareLayou
     }
 
     let order: Vec<SymbolId> = chains.into_iter().flatten().collect();
+
+    let mut addresses = HashMap::new();
+    let mut cursor: u64 = 0;
+    for id in &order {
+        let node = nodes.get(id).expect("order only contains known symbols");
+        let AddressState::Committed(body) = &node.address else {
+            unreachable!("order was filtered to Committed symbols only")
+        };
+        addresses.insert(id.clone(), cursor);
+        cursor += body.code.len() as u64;
+    }
+
+    SchedulingAwareLayout { addresses, order }
+}
+
+/// The actual schedule-independent two-pass placement algorithm -- see
+/// this module's own "One-pass vs. two-pass: three algorithms, not two"
+/// doc section for why `assign_layout_schedule_seeded_clustering` did
+/// not qualify as this, and what this one does differently.
+///
+/// Pass 1 (Cargo-style schedule) is identical to the other two
+/// functions: `declared_at_seq` ascending, ties by `SymbolId`.
+///
+/// Pass 2 (real lld-style global clustering, Kruskal's-algorithm-style):
+/// every affinity edge in the whole graph is sorted once, by weight
+/// descending (ties broken by the `SymbolId` pair, for determinism --
+/// never by schedule position, since this pass must not consult the
+/// schedule at all until the very last, unavoidable step). Chains start
+/// as one symbol each. Walking edges in that global order, each edge
+/// whose two endpoints are not already in the same chain merges those
+/// two chains by attaching at the matching endpoints (an edge whose
+/// endpoints are both interior to their own chains, or already in the
+/// same chain, is skipped -- this is exactly Kruskal's own "skip an edge
+/// that would create a cycle" rule, adapted to "skip an edge that can't
+/// extend a chain from an endpoint"). This produces the maximum-weight
+/// set of chains reachable by always taking the next-best global edge,
+/// with zero input from `declared_at_seq` anywhere in this process.
+///
+/// The only place the schedule is consulted at all: once every edge has
+/// been considered and every symbol belongs to exactly one finished
+/// chain, the chains themselves must still be placed in *some* final
+/// order relative to each other, and a byte layout cannot avoid picking
+/// one. Each chain is ordered by its own lowest-`declared_at_seq`
+/// member -- a real, cheap, deterministic tie-break for "which
+/// completely-unrelated cluster of code goes at a lower address," not a
+/// mechanism that lets the schedule influence which symbols end up
+/// adjacent (that was decided entirely by Pass 2's own affinity sort).
+pub fn assign_layout_two_pass(graph: &SharedSymbolGraph) -> SchedulingAwareLayout {
+    let nodes = graph.nodes.read().expect("nodes lock poisoned");
+    let declared_at_seq = graph
+        .declared_at_seq
+        .read()
+        .expect("declared_at_seq lock poisoned");
+
+    let committed: Vec<SymbolId> = nodes
+        .iter()
+        .filter(|(_, node)| matches!(node.address, AddressState::Committed(_)))
+        .map(|(id, _)| id.clone())
+        .collect();
+
+    // Pass 2 (global clustering): sort every affinity edge once, purely
+    // by weight, never touching declared_at_seq.
+    let affinity = call_affinity(graph);
+    let mut edges: Vec<(SymbolId, SymbolId, u64)> = affinity
+        .into_iter()
+        .map(|((a, b), weight)| (a, b, weight))
+        .collect();
+    edges.sort_by(|a, b| {
+        b.2.cmp(&a.2)
+            .then_with(|| a.0.cmp(&b.0))
+            .then_with(|| a.1.cmp(&b.1))
+    });
+
+    // Each symbol starts as its own chain, tracked as a VecDeque so both
+    // ends can be extended in O(1). `chain_of` maps a symbol to the
+    // index of the chain it currently belongs to; only an endpoint's
+    // entry is trustworthy for merge decisions, but every member's own
+    // entry is kept in sync so `chain_of` never goes stale.
+    let mut chains: Vec<std::collections::VecDeque<SymbolId>> = committed
+        .iter()
+        .map(|id| std::collections::VecDeque::from([id.clone()]))
+        .collect();
+    let mut chain_of: HashMap<SymbolId, usize> = committed
+        .iter()
+        .enumerate()
+        .map(|(i, id)| (id.clone(), i))
+        .collect();
+    let mut merged_away: HashSet<usize> = HashSet::new();
+
+    for (a, b, weight) in edges {
+        if weight == 0 {
+            continue;
+        }
+        let Some(&chain_a) = chain_of.get(&a) else {
+            continue;
+        };
+        let Some(&chain_b) = chain_of.get(&b) else {
+            continue;
+        };
+        if chain_a == chain_b {
+            continue; // Already in the same chain -- would create a cycle.
+        }
+        // Kruskal's-style edge acceptance additionally requires here
+        // that BOTH endpoints are still exposed at an end of their own
+        // chain (an affinity edge to a symbol buried in the interior of
+        // a chain cannot extend anything -- that symbol already has two
+        // neighbors, or is not at an end).
+        let a_at_front = chains[chain_a].front() == Some(&a);
+        let a_at_back = chains[chain_a].back() == Some(&a);
+        let b_at_front = chains[chain_b].front() == Some(&b);
+        let b_at_back = chains[chain_b].back() == Some(&b);
+        if !(a_at_front || a_at_back) || !(b_at_front || b_at_back) {
+            continue;
+        }
+
+        // Merge chain_b into chain_a, orienting chain_b so `b`'s own end
+        // is adjacent to `a`'s own end.
+        let mut incoming = std::mem::take(&mut chains[chain_b]);
+        if b_at_back {
+            incoming.make_contiguous().reverse();
+        }
+        // incoming now has `b` at its front (if it was at the back, the
+        // reverse above put it at front; if it was already at front, no
+        // reversal was needed).
+        if a_at_back {
+            chains[chain_a].extend(incoming);
+        } else {
+            // a_at_front: prepend, so a stays adjacent to b.
+            incoming.extend(std::mem::take(&mut chains[chain_a]));
+            chains[chain_a] = incoming;
+        }
+        for member in chains[chain_a].iter() {
+            chain_of.insert(member.clone(), chain_a);
+        }
+        merged_away.insert(chain_b);
+    }
+
+    // Order the surviving chains by each chain's own earliest
+    // declared_at_seq member -- the one and only place this pass
+    // consults the schedule, purely as a tie-break for cluster order
+    // (see this function's own doc comment).
+    let mut surviving: Vec<&std::collections::VecDeque<SymbolId>> = chains
+        .iter()
+        .enumerate()
+        .filter(|(i, chain)| !merged_away.contains(i) && !chain.is_empty())
+        .map(|(_, chain)| chain)
+        .collect();
+    surviving.sort_by_key(|chain| {
+        chain
+            .iter()
+            .map(|id| declared_at_seq.get(id).copied().unwrap_or(u64::MAX))
+            .min()
+            .unwrap_or(u64::MAX)
+    });
+
+    let order: Vec<SymbolId> = surviving.into_iter().flatten().cloned().collect();
 
     let mut addresses = HashMap::new();
     let mut cursor: u64 = 0;
@@ -646,10 +836,10 @@ mod tests {
     }
 
     #[test]
-    fn two_pass_layout_is_deterministic_across_repeated_calls() {
+    fn schedule_seeded_clustering_is_deterministic_across_repeated_calls() {
         let graph = build_inverted_fixture();
-        let first = assign_layout_two_pass(&graph);
-        let second = assign_layout_two_pass(&graph);
+        let first = assign_layout_schedule_seeded_clustering(&graph);
+        let second = assign_layout_schedule_seeded_clustering(&graph);
         assert_eq!(
             first.order, second.order,
             "same graph, same algorithm, must reproduce the exact same order every time"
@@ -657,19 +847,19 @@ mod tests {
     }
 
     #[test]
-    fn two_pass_layout_achieves_perfect_affinity_placement_where_one_pass_could_not() {
+    fn schedule_seeded_clustering_achieves_perfect_affinity_placement_where_one_pass_could_not() {
         // Reuses the same tension two_signals_can_disagree documents:
         // first/last are call-affine, mid is declared between them with
         // no affinity to either. The one-pass greedy algorithm resolves
         // this by pulling last forward next to first as soon as it
         // visits first (before ever reaching mid), producing exactly 1
-        // critical-path inversion. The two-pass version's own Pass 2
-        // runs as a fully separate traversal with no such ordering
-        // constraint from Pass 1's walk -- it is free to place the
-        // affine pair adjacent while independently placing mid wherever
-        // Pass 1's schedule already put it, since Pass 2 only chains
-        // nodes that have measured affinity, never merges affinity-free
-        // singletons into someone else's chain.
+        // critical-path inversion. This function's own Pass 2 still
+        // seeds chains by walking Pass 1's schedule in order (see this
+        // module's own "three algorithms, not two" doc section), so it
+        // is NOT free of the schedule's influence on chain order -- it
+        // happens to place the affine pair adjacent here because "last"
+        // gets pulled into "first"'s chain before "mid" is ever seeded,
+        // not because this pass ignores the schedule.
         let graph = SharedSymbolGraph::new();
         let last_id = SymbolId {
             realm: Realm::Cargo,
@@ -688,36 +878,32 @@ mod tests {
             .declare_symbol(Realm::Cargo, committed(Realm::Cargo, "last", 8))
             .unwrap();
 
-        let two_pass = assign_layout_two_pass(&graph);
-        let inversions = count_critical_path_inversions(&graph, &two_pass.addresses);
-        let distance = total_affinity_weighted_distance(&graph, &two_pass.addresses);
+        let clustered = assign_layout_schedule_seeded_clustering(&graph);
+        let inversions = count_critical_path_inversions(&graph, &clustered.addresses);
+        let distance = total_affinity_weighted_distance(&graph, &clustered.addresses);
 
         eprintln!(
-            "[layout_scheduling][two_pass] order={:?} inversions={inversions} \
+            "[layout_scheduling][schedule_seeded_clustering] order={:?} inversions={inversions} \
              affinity_weighted_distance={distance}",
-            two_pass.order
+            clustered.order
         );
 
         // Pass 1's schedule is [first, mid, last] (declared_at_seq
         // order). Pass 2 seeds a chain per symbol in that order: "first"
         // seeds a chain, then grows it by pulling in "last" (its only
-        // affine neighbor; attached to the front because HashSet
-        // iteration order, not declared_at_seq, decides which of
-        // "front"/"back" ties `best` keeps when both attachment points
-        // tie on weight) BEFORE "mid" is ever seeded (mid is still in
-        // `remaining` at that point, but has zero affinity with either
-        // chain end, so it is never pulled in). "mid" then seeds its own
-        // single-symbol chain. Final order: [last, first, mid] --
-        // confirmed by running this test, not assumed in advance (an
-        // earlier version of this assertion incorrectly predicted
-        // [first, last, mid] and this test caught that mistake).
-        // Whichever end "last" attaches to, the same honest point holds:
-        // two passes does not automatically avoid the inversion here
-        // either, because "mid" has no affinity signal to relocate it
-        // by -- affinity-based placement cannot move a node that has no
-        // measured affinity with anything.
+        // affine neighbor; attached to the front because, among
+        // SymbolId-sorted candidates, "first" tries at_front=true before
+        // at_front=false and the weights tie) BEFORE "mid" is ever
+        // seeded (mid is still in `remaining` at that point, but has
+        // zero affinity with either chain end, so it is never pulled
+        // in). "mid" then seeds its own single-symbol chain. Final
+        // order: [last, first, mid] -- confirmed by running this test,
+        // not assumed in advance. This still depends on chain SEEDING
+        // order tracking the schedule (see this module's own "three
+        // algorithms, not two" doc section) -- it is not evidence that
+        // this pass ignores the schedule.
         assert_eq!(
-            two_pass.order,
+            clustered.order,
             vec![
                 SymbolId {
                     realm: Realm::Cargo,
@@ -732,19 +918,190 @@ mod tests {
                     name: "mid".to_string()
                 },
             ],
-            "documents the actual two-pass result on this fixture, not an assumed one"
+            "documents the actual schedule_seeded_clustering result on this fixture, not an \
+             assumed one"
         );
         assert_eq!(
             inversions, 1,
-            "two-pass does not eliminate this inversion either: mid has zero affinity with \
-             anything, so no affinity-based pass (one-pass or two-pass) can reposition it \
-             relative to the schedule -- this is a property of the fixture (mid has no affinity \
-             signal at all), not a difference between one-pass and two-pass algorithms"
+            "schedule_seeded_clustering does not eliminate this inversion either: mid has zero \
+             affinity with anything, so no affinity-based pass can reposition it relative to the \
+             schedule -- this is a property of the fixture (mid has no affinity signal at all)"
         );
         assert_eq!(
             distance, 8,
-            "the affine pair (first, last) is still placed maximally close in the two-pass \
-             version, same as the one-pass version achieves on this fixture"
+            "the affine pair (first, last) is still placed maximally close, same as the \
+             one-pass version achieves on this fixture"
+        );
+    }
+
+    #[test]
+    fn two_pass_is_deterministic_across_repeated_calls() {
+        let graph = build_inverted_fixture();
+        let first = assign_layout_two_pass(&graph);
+        let second = assign_layout_two_pass(&graph);
+        assert_eq!(
+            first.order, second.order,
+            "same graph, same algorithm, must reproduce the exact same order every time"
+        );
+    }
+
+    /// The test the schedule-seeded version could not honestly claim to
+    /// pass: a fixture where the schedule order and the affinity
+    /// structure actively DISAGREE about grouping, and the true
+    /// two-pass algorithm groups by affinity anyway, in direct
+    /// contradiction of the schedule's own adjacency.
+    ///
+    /// Declared (schedule) order: w, x, y, z. Affinity: w<->z (strong,
+    /// weight 5) and x<->y (strong, weight 5) -- i.e. the schedule
+    /// interleaves two pairs that should each cluster together, in the
+    /// worst possible order for a schedule-seeded approach (adjacent
+    /// schedule neighbors x,y ARE each other's affinity partners, but w
+    /// and z, which are also partners, are schedule-adjacent to the
+    /// WRONG members of the other pair).
+    #[test]
+    fn two_pass_clusters_by_affinity_even_when_schedule_interleaves_the_two_pairs() {
+        let graph = SharedSymbolGraph::new();
+        let z_id = SymbolId {
+            realm: Realm::Cargo,
+            name: "w_z_pair_z".to_string(),
+        };
+        let y_id = SymbolId {
+            realm: Realm::Cargo,
+            name: "x_y_pair_y".to_string(),
+        };
+        // w (declared 1st) calls z (declared 4th) -- 5 relocations for a
+        // strong, unambiguous affinity weight.
+        let w_body = SymbolNode {
+            id: SymbolId {
+                realm: Realm::Cargo,
+                name: "w_z_pair_w".to_string(),
+            },
+            address: AddressState::Committed(CodeBody {
+                code: vec![0u8; 8],
+                relocations: (0..5)
+                    .map(|_| ElfX86_64PendingReloc {
+                        offset: 0,
+                        width: 4,
+                        target: z_id.clone(),
+                        addend: 0,
+                    })
+                    .collect(),
+            }),
+        };
+        // x (declared 2nd) calls y (declared 3rd) -- also weight 5.
+        let x_body = SymbolNode {
+            id: SymbolId {
+                realm: Realm::Cargo,
+                name: "x_y_pair_x".to_string(),
+            },
+            address: AddressState::Committed(CodeBody {
+                code: vec![0u8; 8],
+                relocations: (0..5)
+                    .map(|_| ElfX86_64PendingReloc {
+                        offset: 0,
+                        width: 4,
+                        target: y_id.clone(),
+                        addend: 0,
+                    })
+                    .collect(),
+            }),
+        };
+        graph.declare_symbol(Realm::Cargo, w_body).unwrap();
+        graph.declare_symbol(Realm::Cargo, x_body).unwrap();
+        graph
+            .declare_symbol(Realm::Cargo, committed(Realm::Cargo, "x_y_pair_y", 8))
+            .unwrap();
+        graph
+            .declare_symbol(Realm::Cargo, committed(Realm::Cargo, "w_z_pair_z", 8))
+            .unwrap();
+
+        let two_pass = assign_layout_two_pass(&graph);
+        let distance = total_affinity_weighted_distance(&graph, &two_pass.addresses);
+
+        eprintln!(
+            "[layout_scheduling][two_pass] order={:?} affinity_weighted_distance={distance}",
+            two_pass.order
+        );
+
+        // Both pairs must end up adjacent (byte-distance 8, one
+        // code-length apart), and total_affinity_weighted_distance
+        // weights that per-pair distance by relocation COUNT (5 per
+        // pair here), so the expected total is 2 * (8 * 5) = 80, not a
+        // raw byte-distance sum -- this test's first version asserted
+        // 16 and was caught wrong by actually running it, corrected
+        // here. This is still the property
+        // assign_layout_schedule_seeded_clustering cannot guarantee
+        // here (its own chain-seeding order still tracks the schedule),
+        // and is exactly what "genuinely schedule-independent
+        // clustering" means in practice.
+        assert_eq!(
+            distance, 80,
+            "both affine pairs must be placed maximally adjacent (8 bytes each, weighted by 5 \
+             relocations per pair) despite the schedule interleaving them, proving Pass 2 \
+             clustered by affinity alone -- got {distance}"
+        );
+
+        // Structural check on the order itself: each pair must be
+        // contiguous (no third symbol wedged between them).
+        let pos = |name: &str| {
+            two_pass
+                .order
+                .iter()
+                .position(|id| id.name == name)
+                .unwrap_or_else(|| panic!("{name} missing from order"))
+        };
+        assert_eq!(
+            (pos("w_z_pair_w") as isize - pos("w_z_pair_z") as isize).abs(),
+            1,
+            "w and z must be placed immediately adjacent in the final order, order was {:?}",
+            two_pass.order
+        );
+        assert_eq!(
+            (pos("x_y_pair_x") as isize - pos("x_y_pair_y") as isize).abs(),
+            1,
+            "x and y must be placed immediately adjacent in the final order, order was {:?}",
+            two_pass.order
+        );
+    }
+
+    #[test]
+    fn two_pass_matches_schedule_order_when_there_is_no_affinity_at_all() {
+        // With zero affinity edges, Pass 2's global sort has nothing to
+        // merge, so every symbol stays a singleton chain, and the only
+        // ordering signal left is the schedule tie-break -- this must
+        // reduce to plain declared_at_seq order, same as the other two
+        // algorithms in the same degenerate case.
+        let graph = SharedSymbolGraph::new();
+        graph
+            .declare_symbol(Realm::Cargo, committed(Realm::Cargo, "ccc", 4))
+            .unwrap();
+        graph
+            .declare_symbol(Realm::Cargo, committed(Realm::Cargo, "aaa", 4))
+            .unwrap();
+        graph
+            .declare_symbol(Realm::Cargo, committed(Realm::Cargo, "bbb", 4))
+            .unwrap();
+
+        let two_pass = assign_layout_two_pass(&graph);
+        assert_eq!(
+            two_pass.order,
+            vec![
+                SymbolId {
+                    realm: Realm::Cargo,
+                    name: "ccc".to_string()
+                },
+                SymbolId {
+                    realm: Realm::Cargo,
+                    name: "aaa".to_string()
+                },
+                SymbolId {
+                    realm: Realm::Cargo,
+                    name: "bbb".to_string()
+                },
+            ],
+            "with zero affinity, order must fall back to declared_at_seq (declaration order: \
+             ccc, aaa, bbb -- deliberately NOT alphabetical, to prove this is schedule order, \
+             not a hidden alphabetical fallback)"
         );
     }
 

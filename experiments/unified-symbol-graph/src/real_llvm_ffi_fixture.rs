@@ -69,7 +69,7 @@
 //!   field this crate's `ElfX86_64PendingReloc` does not have).
 //!
 //! This module's own test also measures `layout_scheduling`'s two-pass
-//! alternative (`assign_layout_two_pass`) against the same real graph --
+//! alternative (`assign_layout_schedule_seeded_clustering`) against the same real graph --
 //! see this module's own test and `layout_scheduling`'s "One-pass vs.
 //! two-pass" doc section for the result (a genuine trade-off: two-pass
 //! wins on locality, one-pass wins on critical-path fidelity), reported
@@ -79,8 +79,8 @@
 #![cfg(test)]
 
 use crate::layout_scheduling::{
-    assign_layout_scheduling_aware, assign_layout_two_pass, count_critical_path_inversions,
-    total_affinity_weighted_distance,
+    assign_layout_schedule_seeded_clustering, assign_layout_scheduling_aware,
+    assign_layout_two_pass, count_critical_path_inversions, total_affinity_weighted_distance,
 };
 use crate::{
     AddressState, CodeBody, ElfX86_64PendingReloc, Realm, SharedSymbolGraph, SymbolId, SymbolNode,
@@ -2115,37 +2115,37 @@ mod tests {
             }
         );
 
-        // issue #69's own remaining question: one-pass joint heuristic
-        // vs. two separate passes (Cargo-style schedule, then
-        // independent lld-style placement). Measured against the same
-        // real fixture, not just the 3-symbol synthetic one.
+        // issue #69's own remaining question, now compared against
+        // THREE algorithms, not two: assign_layout_scheduling_aware
+        // (one-pass, weak pull-forward), assign_layout_schedule_seeded_clustering
+        // (a stronger pull-forward in the SAME family -- its own chain
+        // seeding order still tracks the schedule, see
+        // layout_scheduling's own "three algorithms, not two" doc
+        // section for why this does NOT qualify as a genuine second
+        // pass), and assign_layout_two_pass (the actual
+        // schedule-independent global clustering pass). Measured
+        // against the same real fixture, not just the synthetic one.
+        let clustered = assign_layout_schedule_seeded_clustering(&graph);
+        let clustered_inversions = count_critical_path_inversions(&graph, &clustered.addresses);
+        let clustered_distance = total_affinity_weighted_distance(&graph, &clustered.addresses);
+
         let two_pass = assign_layout_two_pass(&graph);
         let two_pass_inversions = count_critical_path_inversions(&graph, &two_pass.addresses);
         let two_pass_distance = total_affinity_weighted_distance(&graph, &two_pass.addresses);
 
         eprintln!(
-            "[layout_scheduling][real_fixture] one-pass vs two-pass -- critical-path inversions: \
-             one-pass(scheduling-aware)={scheduled_inversions}, two-pass={two_pass_inversions} \
-             ({:+} two-pass vs one-pass, {:.1}% change)",
+            "[layout_scheduling][real_fixture] critical-path inversions across all three: \
+             one-pass={scheduled_inversions}, schedule_seeded_clustering={clustered_inversions} \
+             ({:+} vs one-pass), two-pass={two_pass_inversions} ({:+} vs one-pass)",
+            clustered_inversions as i64 - scheduled_inversions as i64,
             two_pass_inversions as i64 - scheduled_inversions as i64,
-            if scheduled_inversions > 0 {
-                100.0 * (two_pass_inversions as f64 - scheduled_inversions as f64)
-                    / scheduled_inversions as f64
-            } else {
-                0.0
-            }
         );
         eprintln!(
-            "[layout_scheduling][real_fixture] one-pass vs two-pass -- affinity-weighted \
-             distance: one-pass(scheduling-aware)={scheduled_distance}, two-pass={two_pass_distance} \
-             ({:+} two-pass vs one-pass, {:.1}% change)",
+            "[layout_scheduling][real_fixture] affinity-weighted distance across all three: \
+             one-pass={scheduled_distance}, schedule_seeded_clustering={clustered_distance} \
+             ({:+} vs one-pass), two-pass={two_pass_distance} ({:+} vs one-pass)",
+            clustered_distance as i64 - scheduled_distance as i64,
             two_pass_distance as i64 - scheduled_distance as i64,
-            if scheduled_distance > 0 {
-                100.0 * (two_pass_distance as f64 - scheduled_distance as f64)
-                    / scheduled_distance as f64
-            } else {
-                0.0
-            }
         );
 
         // Reported, not steered: no assertion on which direction any
