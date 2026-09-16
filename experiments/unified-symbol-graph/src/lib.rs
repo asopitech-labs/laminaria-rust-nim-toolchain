@@ -444,6 +444,16 @@ pub mod layout_scheduling;
 /// fixture was chosen over alopexDB.
 pub mod real_llvm_ffi_fixture;
 
+/// Issue #69 follow-up: measures whether the layout order the three
+/// `layout_scheduling` algorithms choose has any measurable effect on
+/// real wall-clock execution time (this crate's own earlier claims
+/// about lld's Call-Chain Clustering being validated were, on scrutiny,
+/// citations of lld's own literature, not a measurement this crate
+/// performed -- see `runtime_cache_benchmark`'s own module doc comment
+/// for the direct measurement taken instead, and why `perf` could not
+/// be used in this environment).
+pub mod runtime_cache_benchmark;
+
 /// The four ecosystems this hypothesis is scoped to (matching this repo's
 /// own `cadd`/`app` fixture: Cargo, Nimble, C, C++). Not meant to be an
 /// exhaustive or permanent list -- a placeholder for "whichever realms a

@@ -190,12 +190,34 @@
 //! algorithms exist, are implemented, are deterministic, and produce
 //! measurably different orderings on both a synthetic and a real
 //! 308-symbol fixture -- whether any of those differences matter for a
-//! real build or a real running program is a **separate, unanswered**
-//! question. Answering it needs the same kind of direct measurement
+//! real build or a real running program is a **separate** question.
+//! Answering it needs the same kind of direct measurement
 //! `cost_correlation.rs` did for degree vs. real compile time (issue
 //! #67): compile real code with each layout, and either time the build
 //! or profile the resulting binary's actual cache behavior, rather than
 //! reasoning from an unmeasured proxy in either direction.
+//!
+//! # A direct answer, taken next: `runtime_cache_benchmark`
+//!
+//! `runtime_cache_benchmark` does exactly that measurement -- compiles
+//! and links a real ~800 KB fixture (well over this machine's own
+//! measured 32 KiB L1i) with all three algorithms' own orderings, and
+//! times repeated real execution (`perf` was unavailable in this
+//! session's WSL2 environment; wall-clock was the remaining real
+//! measurement, not a citation). Result, across two independent runs:
+//! **no reproducible effect of layout order on wall-clock execution
+//! time was detected** -- inter-algorithm differences (under 2%) were
+//! smaller than, and less stable in direction than, the run-to-run
+//! noise within a single binary's own repeated executions (5-10%). This
+//! is this crate's own first real answer to the question this section
+//! posed, and it is a negative one: at this fixture's scale, in this
+//! environment, the metrics this module optimizes for (critical-path
+//! inversions, affinity-weighted distance) have not been shown to
+//! predict anything about actual execution time. See
+//! `runtime_cache_benchmark`'s own module doc comment for the full
+//! account, including two real bugs (a circular-call segfault, then an
+//! exponential call-tree blowup) that the fixture's own development
+//! caught only by actually running the compiled binary.
 
 use crate::{AddressState, SharedSymbolGraph, SymbolId};
 use std::collections::{HashMap, HashSet};
