@@ -107,25 +107,34 @@
 //! measured trade-off
 //!
 //! `assign_layout_two_pass` (below) implements the two-pass alternative
-//! -- Cargo-style schedule pass, then a fully separate lld-style
-//! placement pass -- so the "is one-pass joint optimization worth it
-//! over two separate passes" question has an actual second algorithm to
-//! compare against, not just an assertion that they differ. Measured on
-//! `real_llvm_ffi_fixture`'s real 308-symbol rustc_codegen_llvm FFI
-//! graph (see that module's own test): two-pass reduces
-//! affinity-weighted distance a further 18.2% versus one-pass (its
-//! placement pass is unconstrained by schedule order, so it clusters
-//! more aggressively), but **increases critical-path inversions by
-//! 147.1%** (17 -> 42) versus one-pass (breaking the schedule's own
-//! order to cluster more aggressively is exactly the cost of running
-//! placement as a fully independent pass). Neither algorithm dominates
-//! the other on this real fixture -- one-pass sacrifices some locality
-//! to preserve more of the schedule; two-pass sacrifices much more of
-//! the schedule to gain more locality. This is a real, measured
-//! confirmation of the NP-hardness-motivated framing this module's own
-//! introduction cites (joint scheduling-and-placement optimization is a
-//! genuine trade-off, not a case where one approach is simply better),
-//! not merely an assumption carried over from the literature.
+//! -- Cargo-style schedule pass, then a lld-style placement pass -- so
+//! the "is one-pass joint optimization worth it over two separate
+//! passes" question has an actual second algorithm to compare against,
+//! not just an assertion that they differ. **The placement pass is not
+//! fully independent of the schedule**: it only reorders symbols
+//! *within* the affinity-chains it greedily grows; the order of the
+//! chains themselves still follows the schedule pass's own output
+//! exactly (see `assign_layout_two_pass`'s own doc comment for the
+//! precise two-level structure -- an earlier version of this paragraph
+//! overstated the independence and was corrected after that mismatch
+//! with the code was pointed out). Measured on `real_llvm_ffi_fixture`'s
+//! real 308-symbol rustc_codegen_llvm FFI graph (see that module's own
+//! test): two-pass reduces affinity-weighted distance a further 18.2%
+//! versus one-pass (its placement pass can reorder freely within each
+//! chain, so it clusters more aggressively there), but **increases
+//! critical-path inversions by 147.1%** (17 -> 42) versus one-pass
+//! (intra-chain reordering by affinity, even though chain order itself
+//! still tracks the schedule, is enough on its own to disturb more of
+//! the fine-grained arrival order than the one-pass version's single
+//! per-placement pull-forward does). Neither algorithm dominates the
+//! other on this real fixture -- one-pass sacrifices some locality to
+//! preserve more of the fine-grained schedule; two-pass sacrifices more
+//! of it to gain more locality within each chain. This is a real,
+//! measured confirmation of the NP-hardness-motivated framing this
+//! module's own introduction cites (joint scheduling-and-placement
+//! optimization is a genuine trade-off, not a case where one approach is
+//! simply better), not merely an assumption carried over from the
+//! literature.
 
 use crate::{AddressState, SharedSymbolGraph, SymbolId};
 use std::collections::{HashMap, HashSet};
@@ -331,24 +340,40 @@ pub fn total_affinity_weighted_distance(
 /// `assign_layout_scheduling_aware`'s own first sort, with none of its
 /// affinity pull-forward interleaved) followed by lld's own
 /// placement-only pass (`computeCallGraphProfileOrder`-style Call-Chain
-/// Clustering, run as a **second, independent** traversal that ignores
-/// critical-path order entirely and only considers affinity). Two
-/// separate, sequential passes over the whole graph, exactly the
-/// "solve schedule and layout as two independent problems" approach
-/// `lib.rs`'s own module doc comment says Cargo and lld actually take
-/// today -- built here so it can be measured against the one-pass
+/// Clustering). **Important correction, made after this doc comment's
+/// own first version overstated Pass 2's independence and was caught as
+/// inconsistent with the code**: Pass 2 is not a full reordering that
+/// ignores critical-path order entirely. It only reorders *within* the
+/// chains it greedily grows by affinity; the order of the chains
+/// themselves still follows Pass 1's own schedule order exactly (see
+/// `assign_layout_two_pass`'s own doc comment for the precise
+/// two-level structure). Two sequential passes over the whole graph,
+/// but not two *fully* independent ones -- a partial, not total,
+/// realization of the "solve schedule and layout as two independent
+/// problems" approach `lib.rs`'s own module doc comment says Cargo and
+/// lld actually take today -- built here so it can be measured against
+/// the one-pass
 /// greedy interleaving, not just asserted to be different in kind.
 ///
-/// **Pass 2's own algorithm**: greedy nearest-neighbor chaining by
-/// descending affinity weight, independent of `declared_at_seq` --
-/// repeatedly pick the highest-affinity pair among all not-yet-finally-
-/// placed symbols (regardless of critical-path position) and place them
-/// adjacent, growing chains from either end when a chain's endpoint has
-/// further affinity. This is a real clustering heuristic in the same
-/// family as Call-Chain Clustering (group what calls each other, in
-/// pure affinity order), not an optimal solver -- deliberately simple,
-/// consistent with `assign_layout_scheduling_aware`'s own heuristic
-/// choice.
+/// **Pass 2's own algorithm, precisely**: NOT a full reordering by
+/// affinity alone -- that overstates its independence from Pass 1.
+/// What it actually does: walk `schedule_order` (Pass 1's own output)
+/// left to right, and for each not-yet-consumed symbol, seed a new
+/// chain and grow it greedily by affinity (picking the single
+/// highest-affinity not-yet-placed symbol among ALL remaining symbols,
+/// not just neighbors in the schedule, and attaching it to either end
+/// of the chain) until no further affinity exists at either end. This
+/// produces a two-level structure: **chain order** (which chain comes
+/// before which) is still exactly `schedule_order`'s own order -- the
+/// same critical-path constraint Pass 1 established, never revisited --
+/// while **placement inside a chain** is free of that constraint,
+/// decided purely by affinity, in either direction, which the one-pass
+/// version's single left-to-right walk cannot express. "Two fully
+/// independent passes" is the wrong mental model for this
+/// implementation; "schedule decides chain order, affinity decides only
+/// intra-chain order" is the accurate one -- corrected here after this
+/// same overstatement was pointed out as inconsistent with the code
+/// during issue #69's own review.
 pub fn assign_layout_two_pass(graph: &SharedSymbolGraph) -> SchedulingAwareLayout {
     let nodes = graph.nodes.read().expect("nodes lock poisoned");
     let declared_at_seq = graph
