@@ -156,17 +156,36 @@
 //! point on both axes than the real two-pass algorithm on this fixture,
 //! confirming that letting the schedule seed chain order (rather than
 //! only using it as a last-resort tie-break) actively hurts both
-//! objectives here rather than trading one for the other. The genuine
-//! trade-off is between one-pass and true two-pass: one-pass preserves
-//! far more of the fine-grained schedule (17 vs. 38 inversions) at the
-//! cost of locality; true two-pass achieves much better locality at the
-//! cost of the fine-grained schedule. This is a real, measured
-//! confirmation of the NP-hardness-motivated framing this module's own
-//! introduction cites (joint scheduling-and-placement optimization is a
-//! genuine trade-off, not a case where one approach is simply better) --
-//! but only once compared against an algorithm that actually earns the
-//! name "two-pass," which `assign_layout_schedule_seeded_clustering`
-//! alone did not.
+//! objectives here rather than trading one for the other.
+//!
+//! **Is one-pass vs. true-two-pass itself a trade-off, or does two-pass
+//! just win?** An earlier version of this doc comment called it a
+//! trade-off (one-pass keeps more schedule fidelity, two-pass gains more
+//! locality) -- that framing was challenged as putting two unequally-
+//! validated things on the same footing. `count_critical_path_inversions`
+//! measures deviation from `declared_at_seq`, an arrival-order proxy for
+//! critical-path position that this crate has **never independently
+//! validated** as actually correlating with build-time cost (the closest
+//! validated result, `cost_correlation.rs`'s own finding for issue #67,
+//! is that *degree* -- a different signal -- only weakly correlates with
+//! real compile time, r=-0.38 to -0.49; `declared_at_seq` itself has had
+//! no equivalent validation). `total_affinity_weighted_distance`, by
+//! contrast, is built directly on `CodeBody::relocations` -- an exact,
+//! `objdump`-verified record of real call relationships -- and
+//! approximates a mechanism (Call-Chain Clustering) lld actually ships
+//! because it measurably reduces i-cache/i-TLB misses. Treating a
+//! 123.5%-worse score on an unvalidated proxy metric as equally weighty
+//! against a 48.6% improvement on a metric grounded in real call data and
+//! a real, adopted linker technique is not a neutral trade-off framing --
+//! it manufactures symmetry between a speculative cost and a
+//! demonstrated benefit. Absent independent evidence that
+//! `declared_at_seq` deviation has a real build-time cost, this crate's
+//! own data supports adopting `assign_layout_two_pass` (true two-pass)
+//! outright, not treating this as an open trade-off to defer.
+//! Validating (or refuting) `declared_at_seq` as a real cost proxy --
+//! the same kind of measurement `cost_correlation.rs` already did for
+//! degree -- remains open future work and could change this
+//! recommendation.
 
 use crate::{AddressState, SharedSymbolGraph, SymbolId};
 use std::collections::{HashMap, HashSet};
