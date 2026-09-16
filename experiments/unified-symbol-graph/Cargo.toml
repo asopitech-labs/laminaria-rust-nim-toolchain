@@ -5,3 +5,17 @@ name = "unified-symbol-graph"
 version = "0.0.0"
 edition = "2021"
 publish = false
+
+# Issue #68, task #5 (controlled re-run of the LLVM "energy" comparison):
+# a dedicated opt-level=0 profile so `examples/energy_comparison_controlled.rs`
+# can build the LLVM-compiled reference function with the exact same
+# optimization level as `lower_target_ir_to_code_body`'s own direct
+# x86_64 lowering (which has no optimizer at all) -- the pre-registered
+# "支持条件" in the design doc's section 5.11.2 requires "opt-level=0
+# 同士" specifically because the crate's default `--release` profile
+# (opt-level=3) lets LLVM eliminate the branch entirely (confirmed via
+# objdump: `sete`+`lea`, no `cmp`/`je`), which is not a fair comparison
+# against a lowering path that performs no optimization passes.
+[profile.opt0]
+inherits = "release"
+opt-level = 0
