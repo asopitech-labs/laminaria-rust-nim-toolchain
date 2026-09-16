@@ -201,22 +201,36 @@
 //!
 //! `runtime_cache_benchmark` does exactly that measurement -- compiles
 //! and links a real ~800 KB fixture (well over this machine's own
-//! measured 32 KiB L1i) with all three algorithms' own orderings, and
-//! times repeated real execution (`perf` was unavailable in this
-//! session's WSL2 environment; wall-clock was the remaining real
-//! measurement, not a citation). Result, across two independent runs:
-//! **no reproducible effect of layout order on wall-clock execution
-//! time was detected** -- inter-algorithm differences (under 2%) were
-//! smaller than, and less stable in direction than, the run-to-run
-//! noise within a single binary's own repeated executions (5-10%). This
-//! is this crate's own first real answer to the question this section
-//! posed, and it is a negative one: at this fixture's scale, in this
-//! environment, the metrics this module optimizes for (critical-path
-//! inversions, affinity-weighted distance) have not been shown to
-//! predict anything about actual execution time. See
-//! `runtime_cache_benchmark`'s own module doc comment for the full
-//! account, including two real bugs (a circular-call segfault, then an
-//! exponential call-tree blowup) that the fixture's own development
+//! measured 32 KiB L1i, but well UNDER its 7.5 MiB L2) with all three
+//! algorithms' own orderings, and times repeated real execution (`perf`
+//! was unavailable in this session's WSL2 environment; wall-clock was
+//! the remaining real measurement, not a citation). Result, across two
+//! independent runs: no reproducible effect of layout order on
+//! wall-clock execution time was detected -- inter-algorithm
+//! differences (under 2%) were smaller than, and less stable in
+//! direction than, the run-to-run noise within a single binary's own
+//! repeated executions (5-10%). A follow-up literature check (prompted
+//! by the direct question "wouldn't a small-enough binary just not
+//! care?") found that every cited real-world validation of this class
+//! of technique -- Call-Chain Clustering's own origin paper, BOLT,
+//! Propeller -- was performed only on binaries in the 10s-to-100s-of-MB
+//! range, explicitly described (BOLT's own writeup) as "too large to
+//! fit in any modern CPU instruction cache." None validate, or claim a
+//! benefit, at a scale that fits inside one cache level. Read
+//! charitably toward teams with every incentive to claim the widest
+//! applicability: their silence on the small-binary regime is better
+//! read as "already known not to pay off there" than "nobody checked."
+//! Under that reading, this fixture's negative result is the expected
+//! outcome for its scale (~800 KB, comfortably inside L2), not a
+//! challenge to the technique's validity at the scale it was actually
+//! designed for. It does **not** establish that layout order matters at
+//! that larger, cache-exceeding scale either -- that remains untested
+//! by this crate, resting only on `total_affinity_weighted_distance`
+//! and citations of others' results, pending a fixture sized to exceed
+//! this machine's own L2/L3. See `runtime_cache_benchmark`'s own module
+//! doc comment for the full account, including two real bugs (a
+//! circular-call segfault, then an exponential call-tree blowup) that
+//! the fixture's own development
 //! caught only by actually running the compiled binary.
 
 use crate::{AddressState, SharedSymbolGraph, SymbolId};

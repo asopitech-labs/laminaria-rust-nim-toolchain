@@ -68,19 +68,43 @@
 //! run and faster in another; true two-pass was faster in both runs but
 //! by an amount (1.5% and 0.6%) smaller than the spread WITHIN a single
 //! binary's own 7 repeated runs (each binary's own fastest-to-slowest
-//! spread across repetitions was consistently 5-10%). **No reproducible
+//! spread across repetitions was consistently 5-10%). No reproducible
 //! effect of layout order on wall-clock execution time was detected at
-//! this fixture's scale, in this environment.** This is a real,
-//! honestly-reported negative result, not a failure to find one: it
-//! does not prove layout order never matters (a larger fixture, a
-//! machine with less noisy scheduling, or a real hardware
-//! cache-miss counter instead of wall-clock might show an effect this
-//! measurement cannot), but it does mean this crate now has an actual
-//! measurement, not a citation, backing the claim "layout order might
-//! not matter as much as `total_affinity_weighted_distance` implies" --
-//! exactly the open question `layout_scheduling.rs`'s own doc comment
-//! flagged after its "adopt two-pass" recommendation was corrected
-//! twice.
+//! this fixture's scale.
+//!
+//! **This is not the surprising or unresolved result it first looked
+//! like.** This fixture's total code footprint (~800 KB) fits entirely
+//! within this machine's own L2 cache (7.5 MiB, `lscpu`-reported), far
+//! below the scale any cited real-world adopter of this class of
+//! optimization has ever validated it against: the original Call-Chain
+//! Clustering paper (Ottoni & Maher, CGO 2017) targeted Facebook's
+//! large-scale server binaries; BOLT's own engineering writeup
+//! (Meta, 2018) states its motivating regime explicitly as binaries
+//! "ranging from 10s to 100s of megabytes... too large to fit in any
+//! modern CPU instruction cache"; Propeller (Google) was likewise only
+//! validated on large, already-optimized data-center binaries. None of
+//! these projects report validating -- or claiming a benefit -- at a
+//! scale that fits inside a single cache level. A research pass over
+//! this literature (prompted directly by the question "wouldn't a
+//! small-enough binary just not care?") found no source that tests the
+//! small-binary regime at all, in either direction. Read charitably
+//! toward the field rather than as a gap in the literature: teams that
+//! build and ship this optimization professionally, and would have
+//! every incentive to claim the widest possible applicability, have
+//! uniformly chosen not to validate or advertize it below the
+//! cache-exceeding regime -- the more likely explanation is that they
+//! already know it doesn't pay off there, not that nobody thought to
+//! check. Under that reading, this experiment's result (no effect at
+//! ~800 KB, comfortably inside L2) is the expected, unsurprising
+//! outcome for a fixture at this scale, not a challenge to the
+//! technique's validity at the scale it was actually designed for and
+//! tested at. It does not, by itself, establish that the technique
+//! yields a real effect at that larger scale either -- that remains
+//! this crate's own untested claim, resting on `total_affinity_weighted_distance`
+//! and citations of others' published results, unless and until a
+//! fixture sized to exceed this machine's own L2/L3 (comparable to the
+//! 10s-of-MB regime the literature actually validated) is built and
+//! measured here directly.
 //!
 //! This fixture's own development also caught two real, unrelated bugs
 //! before it could produce a result at all -- both found only by
