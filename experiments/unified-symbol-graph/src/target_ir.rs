@@ -799,7 +799,7 @@ pub mod diamond_and_loop_cfg {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct BlockId(pub usize);
 
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum Terminator {
         /// Unconditional jump -- the real shape both `goto -> bb5` (the
         /// diamond's own merge) and `goto -> bb1` (the loop's own
@@ -818,7 +818,7 @@ pub mod diamond_and_loop_cfg {
         Return(LocalId),
     }
 
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct BasicBlock {
         pub statements: Vec<Statement>,
         pub terminator: Terminator,
@@ -832,7 +832,7 @@ pub mod diamond_and_loop_cfg {
     /// one 8-byte-aligned slot, whether or not it survives a merge --
     /// deliberately not attempting liveness-based slot reuse, a real
     /// optimization this submodule's own stated minimalism excludes).
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct CfgBody {
         pub blocks: Vec<BasicBlock>,
         pub entry: BlockId,
@@ -1557,6 +1557,195 @@ pub mod diamond_and_loop_cfg {
                 &header_condition_test,
                 "the back-edge jmp must land exactly on the loop header block's own first \
                  instruction (its condition test), not merely somewhere plausible"
+            );
+        }
+
+        /// Issue #68, H5: the actual integration this hypothesis was
+        /// missing -- a `CfgBody` (H4's own diamond CFG, independently
+        /// verified in `diamond_cfg_lowers_to_the_objdump_verified_byte_sequence`
+        /// above) reaching `SharedSymbolGraph` through
+        /// `declare_analyzed_symbol`'s real `AddressState::Analyzed` ->
+        /// `Committed` demand-driven pipeline (issue #67 problem F), not
+        /// merely called directly as a standalone function the way every
+        /// other test in this file does. This is the concrete answer to
+        /// the design doc's own section 4.3 ("`AddressState::Analyzed(SemanticFacts)`
+        /// ...本設計はこれを次のように拡張する候補を示す"): the CFG now
+        /// travels inside `SemanticFacts::control_flow`, and the
+        /// `finish_codegen` closure registered alongside it is exactly
+        /// `lower_cfg_body_to_code_body` -- the same lowering function,
+        /// invoked through the graph's own demand-driven machinery
+        /// instead of being called directly.
+        ///
+        /// Mirrors `crate::demand_driven_promotion_from_analyzed_to_committed_on_require`'s
+        /// own discipline: asserts codegen has NOT run immediately after
+        /// `declare_analyzed_symbol` (still `Analyzed`), then asserts it
+        /// runs exactly once after the first `require_symbol` call, and
+        /// exactly once (not twice) after a second `require_symbol` call
+        /// on the same symbol -- the demand-driven claim is not just that
+        /// this compiles, but that lowering genuinely happens on demand,
+        /// not at declaration time.
+        #[test]
+        fn diamond_cfg_reaches_committed_only_through_demand_driven_promotion() {
+            use crate::{
+                AddressState, ControlFlowFacts, Realm, SemanticFacts, SharedSymbolGraph, SymbolId,
+            };
+            use std::sync::atomic::{AtomicUsize, Ordering as AOrdering};
+            use std::sync::Arc;
+
+            let param0 = LocalId(0);
+            let x = LocalId(1);
+            let cond = LocalId(2);
+            let merged_copy = LocalId(3);
+            let one = LocalId(4);
+
+            let cfg = CfgBody {
+                num_locals: 5,
+                entry: BlockId(0),
+                blocks: vec![
+                    BasicBlock {
+                        statements: vec![
+                            Statement {
+                                assign_to: one,
+                                rvalue: Rvalue::Const(1),
+                            },
+                            Statement {
+                                assign_to: cond,
+                                rvalue: Rvalue::NotEqualZero(param0),
+                            },
+                        ],
+                        terminator: Terminator::Branch {
+                            cond,
+                            then_block: BlockId(1),
+                            else_block: BlockId(2),
+                        },
+                    },
+                    BasicBlock {
+                        statements: vec![Statement {
+                            assign_to: x,
+                            rvalue: Rvalue::Add(param0, one),
+                        }],
+                        terminator: Terminator::Goto(BlockId(3)),
+                    },
+                    BasicBlock {
+                        statements: vec![Statement {
+                            assign_to: x,
+                            rvalue: Rvalue::Sub(param0, one),
+                        }],
+                        terminator: Terminator::Goto(BlockId(3)),
+                    },
+                    BasicBlock {
+                        statements: vec![
+                            Statement {
+                                assign_to: merged_copy,
+                                rvalue: Rvalue::Copy(x),
+                            },
+                            Statement {
+                                assign_to: merged_copy,
+                                rvalue: Rvalue::Add(merged_copy, merged_copy),
+                            },
+                        ],
+                        terminator: Terminator::Return(merged_copy),
+                    },
+                ],
+            };
+
+            // Independently recompute the expected lowered bytes by
+            // calling `lower_cfg_body_to_code_body` directly on a clone
+            // of the same `cfg` -- so this test does not just check that
+            // *some* `CodeBody` appeared, but that the graph-mediated
+            // path produced byte-for-byte the same output the direct
+            // call (already objdump-verified in this file's own earlier
+            // test) produces.
+            let expected_code =
+                lower_cfg_body_to_code_body(&cfg).expect("diamond CfgBody must lower directly");
+
+            let graph = SharedSymbolGraph::new();
+            let codegen_run_count = Arc::new(AtomicUsize::new(0));
+            let counter_for_closure = Arc::clone(&codegen_run_count);
+
+            let diamond_id = SymbolId {
+                realm: Realm::Cargo,
+                name: "diamond".to_string(),
+            };
+
+            graph
+                .declare_analyzed_symbol(
+                    Realm::Cargo,
+                    diamond_id.clone(),
+                    SemanticFacts {
+                        signature: "(i32) -> i32".to_string(),
+                        depends_on: vec![],
+                        control_flow: Some(Box::new(ControlFlowFacts { cfg: cfg.clone() })),
+                    },
+                    move |facts| {
+                        counter_for_closure.fetch_add(1, AOrdering::SeqCst);
+                        let control_flow = facts
+                            .control_flow
+                            .as_ref()
+                            .expect("this symbol's own SemanticFacts must carry a CfgBody");
+                        let code = lower_cfg_body_to_code_body(&control_flow.cfg)
+                            .expect("diamond CfgBody must lower inside the registered closure");
+                        crate::CodeBody {
+                            code,
+                            relocations: vec![],
+                        }
+                    },
+                )
+                .unwrap();
+
+            // Right after declaration: still Analyzed, lowering has not
+            // run yet -- the CfgBody sat inside SemanticFacts unused.
+            {
+                let nodes = graph.nodes.read().unwrap();
+                let node = nodes.get(&diamond_id).expect("declared node must exist");
+                assert!(
+                    matches!(node.address, AddressState::Analyzed(_)),
+                    "symbol must remain Analyzed (CfgBody not yet lowered) until something \
+                     requires it, got {:?}",
+                    node.address
+                );
+            }
+            assert_eq!(
+                codegen_run_count.load(AOrdering::SeqCst),
+                0,
+                "lower_cfg_body_to_code_body must not run before require_symbol demands it"
+            );
+
+            // First require_symbol call: triggers the Analyzed ->
+            // Committed promotion, which runs the registered closure
+            // exactly once.
+            graph.require_symbol(Realm::C, diamond_id.clone(), Realm::Cargo);
+            assert_eq!(
+                codegen_run_count.load(AOrdering::SeqCst),
+                1,
+                "the first require_symbol call must trigger exactly one lowering"
+            );
+            {
+                let nodes = graph.nodes.read().unwrap();
+                let node = nodes.get(&diamond_id).expect("node must still exist");
+                match &node.address {
+                    AddressState::Committed(body) => {
+                        assert_eq!(
+                            body.code, expected_code,
+                            "the graph-mediated lowering must produce byte-for-byte the same \
+                             machine code as calling lower_cfg_body_to_code_body directly on \
+                             the same CfgBody"
+                        );
+                    }
+                    other => panic!("expected Committed after require_symbol, got {other:?}"),
+                }
+            }
+
+            // Second require_symbol call on the same already-Committed
+            // symbol: must be a no-op, not a second lowering (mirrors
+            // Cargo's own pipelining, where a second downstream consumer
+            // of an already-built crate does not trigger a second build).
+            graph.require_symbol(Realm::Cargo, diamond_id.clone(), Realm::Cargo);
+            assert_eq!(
+                codegen_run_count.load(AOrdering::SeqCst),
+                1,
+                "a second require_symbol call on an already-Committed symbol must not re-run \
+                 lowering"
             );
         }
     }

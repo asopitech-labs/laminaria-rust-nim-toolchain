@@ -553,6 +553,34 @@ pub struct SemanticFacts {
     /// (before codegen) -- the same information `ElfX86_64PendingReloc::target`
     /// records post-hoc, but available earlier here.
     pub depends_on: Vec<SymbolId>,
+    /// Issue #68, H5: the CFG-plus-ownership-tags shape
+    /// `target_ir::diamond_and_loop_cfg::CfgBody` already models, held
+    /// here as the field the design doc's own section 4.3 named
+    /// ("`SemanticFacts`に、CFG構造...を追加できるようにする") as the
+    /// concrete integration point between the two research efforts.
+    /// `None` for every symbol that predates this addition (issue #67's
+    /// own boundary-symbol shape, or any node whose `finish_codegen`
+    /// closure builds its `CodeBody` some other way) -- this field is
+    /// additive, not a replacement for the closure-based
+    /// `declare_analyzed_symbol` mechanism itself, which stays
+    /// unchanged. `Box` (not `Option<ControlFlowFacts>` inline) keeps
+    /// this struct's own size close to its pre-H5 shape for the common
+    /// case where a symbol has no CFG at all.
+    pub control_flow: Option<Box<ControlFlowFacts>>,
+}
+
+/// Issue #68, H5: the specific piece of `SemanticFacts` this hypothesis
+/// was missing a home for -- a real CFG (diamond merges, loop
+/// back-edges) known at semantic-analysis time, before any machine code
+/// exists. Deliberately just a newtype around
+/// `target_ir::diamond_and_loop_cfg::CfgBody` rather than a redesigned
+/// type: the whole point of this integration is that H4's own CFG
+/// representation (already independently verified via real x86_64/
+/// AArch64 execution, see the design doc's own sections 5.9/5.12) is
+/// what gets stored here, not a new one invented for this purpose.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControlFlowFacts {
+    pub cfg: crate::target_ir::diamond_and_loop_cfg::CfgBody,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -637,7 +665,8 @@ pub struct SharedSymbolGraph {
     /// since this hypothesis has exactly one use of it and does not need
     /// a plugin system.
     #[allow(clippy::type_complexity)]
-    pending_codegen: RwLock<HashMap<SymbolId, Box<dyn Fn(&SemanticFacts) -> CodeBody + Send + Sync>>>,
+    pending_codegen:
+        RwLock<HashMap<SymbolId, Box<dyn Fn(&SemanticFacts) -> CodeBody + Send + Sync>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1394,6 +1423,7 @@ mod tests {
                 SemanticFacts {
                     signature: "(i32, i32) -> i32".to_string(),
                     depends_on: vec![],
+                    control_flow: None,
                 },
                 move |_facts| {
                     counter_for_closure.fetch_add(1, AOrdering::SeqCst);

@@ -668,10 +668,37 @@ x86_64ホスト上ではAArch64バイナリを直接実行できないため、D
 | H2 | 所有権情報(`Ownership`)がtarget固有コード生成に必要十分な精度で再エンコードできる | 部分的支持。`frozen`(UnsafeCell)軸のみ解決(節5.10)。`unpin`(`Pin<&mut T>`)軸、単相化前の`Ty::is_freeze`精度は未着手(節6参照) |
 | H3 | target非依存の中間表現1つで、Craneliftの`InstructionData`/`MachInst`という2層構造を消せる | 部分的棄却(節5.12)。表現は共有できるが、変換ロジックは共有できない。Assert/Call未統合のまま判定した点は事前登録からの逸脱(節5.12.3の方法論上の注記参照) |
 | H4 | 分岐+ループを含む実CFG(diamond・back-edge)の不動点計算モデルを正しく実装できる | 支持(節5.9)。独立レビュアーによる自作CFG・境界値での再現でも全件一致を確認 |
-| H5 | `AddressState`(このIR設計の別の柱)へ`CfgBody`をどう統合するか | 未着手 |
+| H5 | `AddressState`(このIR設計の別の柱)へ`CfgBody`をどう統合するか | 支持(節5.15)。`SemanticFacts`に`control_flow: Option<Box<ControlFlowFacts>>`を追加し、`declare_analyzed_symbol`/`require_symbol`の実デマンド駆動パイプラインを通してH4の`CfgBody`が実際に`lower_cfg_body_to_code_body`へ到達することを実証 |
 | H6 | 8個の実targetそれぞれへの分岐可能性 | 未着手(AArch64のみ、8個中1個の部分的前進、かつH3の判定通り共有ロジックはほぼゼロ) |
 
-H3が「変換ロジックの共通化はできない」と判定した以上、次の設計上の争点はH5(`CfgBody`をこの中間表現のもう一つの柱である`AddressState`とどう関係づけるか)であり、本セッションではまだ着手していない。
+## 5.15 H5(`CfgBody`の`AddressState`統合)の実装と検証
+
+### 5.15.1 実装: `SemanticFacts::control_flow`フィールドの追加
+
+節4.3が示した統合方針(`AddressState::Analyzed(SemanticFacts)`のうち`SemanticFacts`を拡張してCFG構造を保持できるようにする)を、実際にコードとして実装した。
+
+`unified-symbol-graph`の`SemanticFacts`(issue #67確立、`lib.rs`)に、新しいオプショナルフィールド`control_flow: Option<Box<ControlFlowFacts>>`を追加した。`ControlFlowFacts`は`target_ir::diamond_and_loop_cfg::CfgBody`(H4で実装・独立検証済みのCFG表現)を包む薄いnewtypeであり、新しいCFG表現を再設計することはしていない。既存の`AddressState`型定義自体(`Unresolved`/`Analyzed`/`Committed`という3値)は、節6が明記した後方互換制約の通り一切変更していない。フィールド追加のみであり、既存の`SemanticFacts`構築箇所(`lib.rs`内の唯一の呼び出し)は`control_flow: None`を渡すだけで既存動作を保った。
+
+### 5.15.2 検証: デマンド駆動パイプラインを通した実lowering呼び出し
+
+`target_ir::diamond_and_loop_cfg::tests::diamond_cfg_reaches_committed_only_through_demand_driven_promotion`を新設し、以下を実証した:
+
+1. H4で独立検証済みのdiamond CFG(`if param0 != 0 { param0+1 } else { param0-1 }`の後`*2`)を`SemanticFacts::control_flow`に載せ、`finish_codegen`クロージャとして`lower_cfg_body_to_code_body`自体を`SharedSymbolGraph::declare_analyzed_symbol`へ登録する。
+2. 宣言直後は`AddressState::Analyzed`のままで、lowering(クロージャ)は一度も実行されていないことを確認(カウンタ0)。
+3. `require_symbol`を呼んだ時点で初めてクロージャが実行され、`AddressState::Committed`へ昇格すること、かつ生成された`CodeBody`が`lower_cfg_body_to_code_body`を直接呼んだ場合(節5.9で既にobjdump検証済み)とバイト単位で完全一致することを確認。
+4. 同じシンボルへの2回目の`require_symbol`呼び出しではlowering が再実行されない(カウンタは1のまま)ことを確認 — Cargoのパイプライニングにおける「既にビルド済みのクレートへの2回目の要求はビルドを再実行しない」という性質と対応する。
+
+この検証は`crate::demand_driven_promotion_from_analyzed_to_committed_on_require`(issue #67で確立済みの既存テスト)と同じ規律に従っているが、後者は任意のダミーコード生成クロージャを使うのに対し、本テストは実際にH4のCFG lowering関数を接続した点が新しい。
+
+### 5.15.3 判定: 支持
+
+`CfgBody`を`AddressState`(正確には`AddressState::Analyzed`が保持する`SemanticFacts`)へ統合するというH5の問いは、実際に統合可能であることを実データで示せた。統合に際して`AddressState`型自体の変更は不要であり、`SemanticFacts`への加法的なフィールド追加のみで、issue #67のデマンド駆動promotion機構(`declare_analyzed_symbol`→`require_symbol`→`promote_analyzed_to_committed_if_needed`)をそのまま再利用できた。
+
+ただし、この支持は限定的な範囲に留まることを正直に記録する: 検証したのはCFGを1つ`SemanticFacts`に載せて1回lowerする最小構成のみであり、以下は未検証のまま残る。
+
+- 所有権タグ(`Ownership`)を同時に`SemanticFacts`へ載せ、CFG+所有権を同時にlowerする統合(H2とH5の統合)。
+- 複数のシンボルが互いに`depends_on`で参照し合い、CFG越しの呼び出し(`Terminator::Call`相当、まだ`diamond_and_loop_cfg`には存在しない)を解決する経路。
+- `ControlFlowFacts`が保持する`CfgBody`のクローンコストがスケールする実装かどうか(現状は`Box`で1段抑えているのみで、大きなCFGでのメモリ効率は未計測)。
 
 ## 6. まだ解けていないこと
 
@@ -687,7 +714,7 @@ H3が「変換ロジックの共通化はできない」と判定した以上、
 - 節5.2.3で実測した通り、`lower_target_ir_to_code_body`は最適化パスを一切持たず、LLVMが行う分岐除去等の最適化(この実験では約2.7〜3.0倍の実行時性能差の原因)を代替できていない。本設計がLLVM IRを削除した後も「意味論を確定させる境界」(前回研究節7)の先に、何らかの最適化層を独自に持つ必要があるのか、あるいは実行時性能を犠牲にしてでも中間成果物の軽量さ(節5.2.2)を優先するのかは、未決定の設計判断である。
 - 節5.2.1で確認した通り、コンパイル時間の公平な比較には、本設計を実際の`rustc`ドライバへ統合し(`-Zcodegen-backend`相当)、プロセス起動オーバーヘッドを除いた実運用規模での計測が必要。1関数単位の計測では、rustc自身の起動コストに埋もれてしまい、LLVM自体の処理時間差を検出できないことを本セッションで確認した。
 - `mir_text::parse_mir_text`が対応するRust構文は「直線コード」と「2分岐+`switchInt`+共通`goto`合流点」の2パターンのみ。`match`式(3分岐以上)、ループ、関数呼び出し、構造体/参照型、`i32`以外の数値型は未対応であり、`rustc`の出力フォーマット自体も"human-readable"であり将来変更されうる非公式形式である(rustc自身の警告コメント`// WARNING: This output format is intended for human consumers only and is subject to change without notice.`が実際に出力に含まれることを確認済み)ため、本格的な統合には`-Zunpretty=mir`ではなく`rustc_middle::mir::Body`自体を扱う(コンパイラプラグイン/カスタムドライバとしての)経路が必要になる。節5.3の`rustc_driver`ベースの経路が、まさにこの「本格的な統合」の第一歩である。
-- `SemanticFacts`の拡張(CFG+所有権タグ)を`unified-symbol-graph`の`declare_analyzed_symbol`/`require_symbol`パスへ実際に統合する作業(本書ではPoCとして独立モジュールに留め、既存の`AddressState`型定義自体はissue #67の後方互換のため変更しない)。
+- **(節5.15でCFG部分のみ解消)** `SemanticFacts`の拡張を`unified-symbol-graph`の`declare_analyzed_symbol`/`require_symbol`パスへ実際に統合する作業のうち、CFG(`ControlFlowFacts`が包む`CfgBody`)側は節5.15で実装・検証済み(既存の`AddressState`型定義自体はissue #67の後方互換のため変更していない)。ただし所有権タグ(`Ownership`)を同じ`SemanticFacts`へ同時に載せ、CFG+所有権を1つの`finish_codegen`クロージャで同時にlowerする統合はまだ行っていない——節5.15.3が明記した通り、H2とH5の統合は未検証のまま残る。
 - x86_64以外の7つのtarget(ELF/ARM64、COFF x2、Mach-O/ARM64、WASM x3)への`TargetIr`→`CodeBody`変換規則の分岐は未着手。特にWASMは前回研究の`unified-symbol-graph`自身のdoc comment(節「WASMの実測」)が既に確認した通り、アドレス計算を伴わないインデックス置換モデルであり、本書のx86_64 PC相対分岐という前提が全く成立しない別設計が必要になる。
 - QBEのように型を犠牲にする再エンコードを避けつつ、所有権タグをtarget固有表現の中でどこまで保持し続けるべきかの具体的な境界(全ての値にタグを付けるのか、noalias相当の最適化ヒントを出す箇所だけに限定するのか)は未設計。
 - `BuilderMethods`のABI決定層(`rustc_target::callconv::FnAbi`)を、独自にどこまで再実装する必要があるか、あるいは`rustc_target`クレート自体を(LLVM非依存な形で)再利用できるかは未検証。
