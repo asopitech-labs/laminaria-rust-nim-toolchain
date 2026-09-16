@@ -1063,6 +1063,271 @@ pub mod diamond_and_loop_cfg {
         Ok(())
     }
 
+    /// Issue #68, H3 (can Cranelift's `InstructionData`/`MachInst`
+    /// two-layer split be avoided with one target-generic IR?): takes
+    /// the exact same `CfgBody` (already accepted by
+    /// `lower_cfg_body_to_code_body` above, x86_64) and lowers it to
+    /// AArch64 (`aarch64-unknown-linux-gnu`) machine code -- the pre-
+    /// registered experiment from the design doc's section 5.11.2.
+    ///
+    /// **Real AArch64 encodings this function uses, verified this
+    /// session** (never assumed from documentation): a container with a
+    /// real `aarch64-linux-gnu-as`/`objdump` cross-toolchain was used to
+    /// hand-assemble a diamond-shaped function equivalent to this
+    /// submodule's own `diamond.mir` example and disassemble the result,
+    /// confirming (all fields decoded directly from the real 32-bit
+    /// instruction words, not read from an ISA manual alone):
+    ///
+    /// - `sub sp, sp, #imm12` = `0xD1_0043FF`-shaped (`sf=1,op=1,S=0,
+    ///   10001,shift,imm12,Rn=11111,Rd=11111`), `add sp,sp,#imm12`
+    ///   analogous with `op=0`.
+    /// - `str w{t}, [sp, #imm]` / `ldr w{t}, [sp, #imm]`: unsigned-offset
+    ///   immediate form, `imm12` is the byte offset **divided by 4**
+    ///   (word-scaled, confirmed directly: `str w0,[sp,#12]` encoded
+    ///   `imm12=3`), `Rn` field holds `31` for `sp`.
+    /// - `add/sub w{d}, w{n}, #imm12`: immediate arithmetic form,
+    ///   `imm12` unscaled (confirmed: `add w8,w8,#1` encoded `imm12=1`).
+    /// - `cmp w{n}, #imm12` is `subs wzr, w{n}, #imm12` (`Rd=31`).
+    /// - `b.cond <label>`: `0101010 0 imm19 0 cond`, `imm19` is a
+    ///   **word-scaled offset measured from the branch instruction's own
+    ///   start** (confirmed: `b.eq` at address `0xc` targeting `0x20`
+    ///   encoded `imm19=5`, and `5*4 = 0x14 = 0x20-0xc`) -- structurally
+    ///   different from x86_64's `rel32` (byte-scaled, measured from the
+    ///   *end* of the displacement field), confirming this crate's own
+    ///   prior, literature-only finding (`lib.rs`'s own module doc,
+    ///   "AArch64's own `bl`/`b` instructions encode a ... field inside a
+    ///   fixed 32-bit instruction word") with a real, directly-observed
+    ///   measurement rather than only ARM's own published spec.
+    /// - `b <label>` (unconditional): `000101 imm26`, word-scaled from
+    ///   the branch's own start (confirmed: `b` at `0x1c` targeting
+    ///   `0x2c` encoded `imm26=4`, `4*4=0x10=0x2c-0x1c`).
+    ///
+    /// **What is and is not shared with the x86_64 lowering function
+    /// above, reported honestly as this experiment's own actual
+    /// finding**: the *algorithm* (two-pass layout: emit each block in
+    /// isolation with placeholder fixups, compute real block start
+    /// offsets, patch fixups to real relative displacements) is
+    /// identical in shape between this function and
+    /// `lower_cfg_body_to_code_body` -- but no code is literally shared,
+    /// because the two real per-target facts this session measured
+    /// directly (byte-scaled-from-displacement-end vs.
+    /// word-scaled-from-instruction-start; variable-length vs. fixed
+    /// 4-byte instructions) each independently break naive code reuse:
+    /// the fixup-patching arithmetic itself differs (`(target - site) /
+    /// 4` here vs. `target - site` there), and the "site" measurement
+    /// point differs (instruction start here vs. displacement-field end
+    /// there). This is recorded per the design doc's own pre-registered
+    /// rejection criterion (section 5.11.2): this is evidence *against*
+    /// H3 in its strong form (one IR avoiding Cranelift's two-layer
+    /// split with zero per-target code), though the *shape* of the
+    /// algorithm (not the arithmetic) does generalize.
+    pub fn lower_cfg_body_to_aarch64_code_body(cfg: &CfgBody) -> Result<Vec<u8>, LowerError> {
+        // AArch64 SP must stay 16-byte aligned; frame_bytes counts real
+        // local-slot bytes (4 bytes per i32 local, unlike x86_64's own
+        // 8-byte-per-slot choice -- AArch64's own str/ldr word-scaled
+        // immediate offset works most simply against 4-byte-aligned
+        // slots for a 32-bit value, and this function's own local_offset_aarch64
+        // below reflects that).
+        let frame_bytes = (cfg.num_locals * 4).next_multiple_of(16).max(16) as i64;
+
+        struct EmittedBlock {
+            code: Vec<u32>,
+            /// (instruction index within `code` that is a branch needing
+            /// a fixup, target block) -- indexed by instruction, not
+            /// byte offset, since every AArch64 instruction here is
+            /// exactly one 32-bit word.
+            fixups: Vec<(usize, BlockId, BranchKind)>,
+        }
+        enum BranchKind {
+            Unconditional,
+            ConditionalEq,
+        }
+
+        let mut emitted: Vec<EmittedBlock> = Vec::with_capacity(cfg.blocks.len());
+        for bb in &cfg.blocks {
+            let mut code: Vec<u32> = Vec::new();
+            let mut fixups = Vec::new();
+            for stmt in &bb.statements {
+                emit_statement_aarch64(&mut code, stmt, cfg.num_locals)?;
+            }
+            match &bb.terminator {
+                Terminator::Goto(target) => {
+                    fixups.push((code.len(), *target, BranchKind::Unconditional));
+                    code.push(0x1400_0000); // b <placeholder>
+                }
+                Terminator::Branch {
+                    cond,
+                    then_block,
+                    else_block,
+                } => {
+                    let cond_off = local_offset_aarch64(*cond, cfg.num_locals)?;
+                    // cmp w9, #0  (subs wzr, w9, #0) -- load cond into w9 first.
+                    code.push(ldr_w_sp(9, cond_off));
+                    code.push(0x7100_001F | (9 << 5)); // subs wzr, w9, #0 (cmp w9,#0)
+                    fixups.push((code.len(), *else_block, BranchKind::ConditionalEq));
+                    code.push(0x5400_0000); // b.eq <placeholder>
+                    fixups.push((code.len(), *then_block, BranchKind::Unconditional));
+                    code.push(0x1400_0000); // b <placeholder>
+                }
+                Terminator::Return(local) => {
+                    let off = local_offset_aarch64(*local, cfg.num_locals)?;
+                    code.push(ldr_w_sp(0, off)); // ldr w0, [sp, #off]
+                    code.push(0x9100_0000 | ((frame_bytes as u32) << 10) | (31 << 5) | 31); // add sp, sp, #frame_bytes
+                    code.push(0xD65F_03C0); // ret
+                }
+            }
+            emitted.push(EmittedBlock { code, fixups });
+        }
+
+        // Prologue: sub sp, sp, #frame_bytes ; str w0, [sp, #local0_off] (spill param0).
+        let mut prologue: Vec<u32> =
+            vec![0x9100_0000 | 0x4000_0000 | ((frame_bytes as u32) << 10) | (31 << 5) | 31];
+        // The line above ORs in bit 30 (the `op`=1/subtract bit) directly
+        // since `sub sp,sp,#imm` and `add sp,sp,#imm` share every other
+        // field, confirmed against the real `0xD1_0043FF`/`0x91_0043FF`
+        // pair captured this session (differing only in bit 30).
+        if cfg.num_locals > 0 {
+            let off = local_offset_aarch64(LocalId(0), cfg.num_locals)?;
+            prologue.push(str_w_sp(0, off)); // str w0, [sp, #off]
+        }
+
+        let mut block_starts = vec![0usize; emitted.len()];
+        let mut cursor = prologue.len();
+        for (i, eb) in emitted.iter().enumerate() {
+            block_starts[i] = cursor;
+            cursor += eb.code.len();
+        }
+        if cfg.entry.0 != 0 || cfg.entry.0 >= emitted.len() {
+            return Err(LowerError::UnknownBlock(cfg.entry));
+        }
+
+        let mut words: Vec<u32> = prologue;
+        for (i, eb) in emitted.iter().enumerate() {
+            let block_base = block_starts[i];
+            let mut block_code = eb.code.clone();
+            for (insn_idx, target, kind) in &eb.fixups {
+                let target_idx = target.0;
+                let target_start = *block_starts
+                    .get(target_idx)
+                    .ok_or(LowerError::UnknownBlock(*target))?;
+                let site = block_base + insn_idx; // AArch64: measured from the branch instruction's own start, per this function's own doc comment.
+                let word_offset = target_start as i64 - site as i64;
+                match kind {
+                    BranchKind::Unconditional => {
+                        let imm26 = (word_offset as i32) & 0x3FF_FFFF;
+                        block_code[*insn_idx] = 0x1400_0000 | (imm26 as u32);
+                    }
+                    BranchKind::ConditionalEq => {
+                        let imm19 = (word_offset as i32) & 0x7_FFFF;
+                        block_code[*insn_idx] = 0x5400_0000 | ((imm19 as u32) << 5);
+                    }
+                }
+            }
+            words.extend_from_slice(&block_code);
+        }
+
+        let mut bytes = Vec::with_capacity(words.len() * 4);
+        for w in words {
+            bytes.extend_from_slice(&w.to_le_bytes());
+        }
+        Ok(bytes)
+    }
+
+    /// AArch64 locals are 4-byte-aligned word slots (unlike this
+    /// submodule's own x86_64 function, which uses 8-byte slots) --
+    /// `LocalId(n)` lives at `[sp, #4*(n+1)]`.
+    fn local_offset_aarch64(id: LocalId, num_locals: usize) -> Result<u32, LowerError> {
+        if id.0 >= num_locals {
+            return Err(LowerError::UnknownLocal(id));
+        }
+        Ok(((id.0 as u32) + 1) * 4)
+    }
+
+    /// `str w{rt}, [sp, #byte_offset]` -- unsigned-offset immediate form,
+    /// confirmed this session against real `aarch64-linux-gnu-as`+
+    /// `objdump` output (`str w0, [sp, #12]` encoded as `0xb9000fe0`,
+    /// `imm12` field = `byte_offset / 4`).
+    fn str_w_sp(rt: u32, byte_offset: u32) -> u32 {
+        0xB900_0000 | ((byte_offset / 4) << 10) | (31 << 5) | rt
+    }
+
+    /// `ldr w{rt}, [sp, #byte_offset]` -- same shape as `str_w_sp` with
+    /// the load/store bit (bit 22) set, confirmed against real captured
+    /// `ldr w8, [sp, #12]` = `0xb9400fe8`.
+    fn ldr_w_sp(rt: u32, byte_offset: u32) -> u32 {
+        0xB940_0000 | ((byte_offset / 4) << 10) | (31 << 5) | rt
+    }
+
+    fn emit_statement_aarch64(
+        code: &mut Vec<u32>,
+        stmt: &Statement,
+        num_locals: usize,
+    ) -> Result<(), LowerError> {
+        let dst_off = local_offset_aarch64(stmt.assign_to, num_locals)?;
+        match stmt.rvalue {
+            Rvalue::Const(v) => {
+                // movz w9, #imm16 (low 16 bits) ; movk w9, #imm16, lsl #16 (high 16 bits) ; str w9, [sp, #dst_off]
+                // -- real AArch64 has no single "move 32-bit immediate"
+                // instruction; MOVZ+MOVK is the standard two-instruction
+                // sequence a real backend uses for an arbitrary i32
+                // constant (confirmed against ARM's own documented MOVZ/MOVK
+                // semantics; this crate's own container did not need to
+                // re-derive this from objdump since it is a simple,
+                // well-known two-field split, unlike the branch/immediate
+                // encodings above which this function's own doc comment
+                // states were independently measured).
+                let bits = v as u32;
+                let lo16 = bits & 0xFFFF;
+                let hi16 = (bits >> 16) & 0xFFFF;
+                code.push(0x5280_0000 | (lo16 << 5) | 9); // movz w9, #lo16
+                if hi16 != 0 {
+                    // movk w9, #hi16, lsl #16 -- base 0x72A00000 (hw=01
+                    // for lsl #16), confirmed via aarch64-linux-gnu-as
+                    // after an initial 0x72800000 guess (hw field
+                    // omitted) was caught wrong by objdump.
+                    code.push(0x72A0_0000 | (hi16 << 5) | 9);
+                }
+                code.push(str_w_sp(9, dst_off));
+            }
+            Rvalue::Copy(src) => {
+                let src_off = local_offset_aarch64(src, num_locals)?;
+                code.push(ldr_w_sp(9, src_off));
+                code.push(str_w_sp(9, dst_off));
+            }
+            Rvalue::Add(a, b) => {
+                let a_off = local_offset_aarch64(a, num_locals)?;
+                let b_off = local_offset_aarch64(b, num_locals)?;
+                code.push(ldr_w_sp(9, a_off));
+                code.push(ldr_w_sp(10, b_off));
+                code.push(0x0B0A_0129); // add w9, w9, w10 (register form)
+                code.push(str_w_sp(9, dst_off));
+            }
+            Rvalue::Sub(a, b) => {
+                let a_off = local_offset_aarch64(a, num_locals)?;
+                let b_off = local_offset_aarch64(b, num_locals)?;
+                code.push(ldr_w_sp(9, a_off));
+                code.push(ldr_w_sp(10, b_off));
+                code.push(0x4B0A_0129); // sub w9, w9, w10 (register form)
+                code.push(str_w_sp(9, dst_off));
+            }
+            Rvalue::NotEqualZero(a) => {
+                let a_off = local_offset_aarch64(a, num_locals)?;
+                code.push(ldr_w_sp(9, a_off));
+                code.push(0x7100_001F | (9 << 5)); // subs wzr, w9, #0 (cmp w9, #0)
+                code.push(0x1A9F_07E9); // cset w9, ne (real encoding, verified via aarch64-linux-gnu-as)
+                code.push(str_w_sp(9, dst_off));
+            }
+            Rvalue::GreaterThanZero(a) => {
+                let a_off = local_offset_aarch64(a, num_locals)?;
+                code.push(ldr_w_sp(9, a_off));
+                code.push(0x7100_001F | (9 << 5)); // subs wzr, w9, #0 (cmp w9, #0)
+                code.push(0x1A9F_D7E9); // cset w9, gt
+                code.push(str_w_sp(9, dst_off));
+            }
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
