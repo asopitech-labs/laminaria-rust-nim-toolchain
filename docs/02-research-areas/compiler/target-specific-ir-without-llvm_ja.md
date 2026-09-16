@@ -107,8 +107,22 @@ pub trait LowerBackend {
 
 この概念実証は「production-quality command generator」ではなく、「MIR相当のCFG入力から、LLVM IRという中間成果物を一度も生成せずにCodeBodyへ到達できる」という設計方針そのものが実装可能であることを示す最小の証拠である。
 
+### 5.1 実際のRust構文からの経路: `target_ir::mir_text`
+
+節5の`TargetIr`は当初、開発者が手で組み立てた値のみを入力としていた。これでは「実際のRust言語の構文」を実験したことにならないという指摘を受け、`experiments/unified-symbol-graph/src/target_ir.rs`内の`mir_text`サブモジュールとして、次の経路を追加した。
+
+1. 実際に`rustc --edition 2021 --crate-type lib -C debuginfo=0 --emit=mir`を、次の3つの実Rustソースに対して本セッション内で実行し、実際の出力を直接取得した(手元での推測や過去の記憶からの再現ではない)。
+   - `pub fn branch(param0: i32) -> i32 { if param0 != 0 { 7 } else { 9 } }`(`!=`分岐)
+   - `pub fn branch2(param0: i32) -> i32 { if param0 == 0 { 1 } else { 2 } }`(`==`分岐)
+   - `pub fn passthrough(param0: i32) -> i32 { param0 }`(直線コード)
+2. これらの実出力(`switchInt(move _2) -> [0: bbX, otherwise: bbY]`、`goto -> bbZ`、`_0 = const K_i32`等、rustcが実際に出力したテキストそのもの)を`mir_text::parse_mir_text`がパースし、節5の`TargetIr`へ変換する。
+3. 変換された`TargetIr`を、節5と同じ`lower_target_ir_to_code_body`へそのまま渡し、x86_64機械語バイト列を生成する。`!=`分岐のケースでは、手組みの`TargetIr`で既に`objdump`検証済みの命令バイト列と**完全に一致する**ことをテストで確認した(`real_rustc_mir_dump_for_ne_branch_parses_and_lowers_to_the_verified_bytes`)。
+
+これにより、「実際のRustソースコード → 実際の`rustc`によるMIR生成 → 本設計のTargetIrへの変換 → LLVM IRを経由しないx86_64機械語生成」という経路全体を、開発者の手組みデータに頼らず実データで実証した。ただし対応範囲は、直線コードと2分岐+共通合流点(`goto`)を持つ`switchInt`の2パターンに限定されており(節6の限界を参照)、`match`の3分岐以上、ループ、関数呼び出し、`i32`以外の型は`ParseError::UnrecognizedShape`として明示的に拒否する。
+
 ## 6. まだ解けていないこと
 
+- `mir_text::parse_mir_text`が対応するRust構文は「直線コード」と「2分岐+`switchInt`+共通`goto`合流点」の2パターンのみ。`match`式(3分岐以上)、ループ、関数呼び出し、構造体/参照型、`i32`以外の数値型は未対応であり、`rustc`の出力フォーマット自体も"human-readable"であり将来変更されうる非公式形式である(rustc自身の警告コメント`// WARNING: This output format is intended for human consumers only and is subject to change without notice.`が実際に出力に含まれることを確認済み)ため、本格的な統合には`-Zunpretty=mir`ではなく`rustc_middle::mir::Body`自体を扱う(コンパイラプラグイン/カスタムドライバとしての)経路が必要になる。
 - `SemanticFacts`の拡張(CFG+所有権タグ)を`unified-symbol-graph`の`declare_analyzed_symbol`/`require_symbol`パスへ実際に統合する作業(本書ではPoCとして独立モジュールに留め、既存の`AddressState`型定義自体はissue #67の後方互換のため変更しない)。
 - x86_64以外の7つのtarget(ELF/ARM64、COFF x2、Mach-O/ARM64、WASM x3)への`TargetIr`→`CodeBody`変換規則の分岐は未着手。特にWASMは前回研究の`unified-symbol-graph`自身のdoc comment(節「WASMの実測」)が既に確認した通り、アドレス計算を伴わないインデックス置換モデルであり、本書のx86_64 PC相対分岐という前提が全く成立しない別設計が必要になる。
 - QBEのように型を犠牲にする再エンコードを避けつつ、所有権タグをtarget固有表現の中でどこまで保持し続けるべきかの具体的な境界(全ての値にタグを付けるのか、noalias相当の最適化ヒントを出す箇所だけに限定するのか)は未設計。
