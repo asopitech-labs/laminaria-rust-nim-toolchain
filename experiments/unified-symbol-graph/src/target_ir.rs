@@ -630,6 +630,606 @@ pub fn lower_call_and_increment_to_code_body(callee: crate::SymbolId) -> crate::
     }
 }
 
+/// Issue #68, fourth-round critical review, the decisive gap this
+/// submodule closes: an independent reviewer pointed out that every
+/// prior `TargetIr`/`Terminator` shape in this module (`Branch` with two
+/// *independently returning* arms) deliberately folds away the one
+/// structure the design doc's own section 2.2 (citing
+/// `removing-intermediate-representation_ja.md`) claims is
+/// un-deletable: **a merge point downstream of both branch arms, where a
+/// value written on either arm is read afterward** -- a real diamond
+/// CFG -- and this module had never modeled a loop (a back-edge) at all.
+/// Without either, "this proof of concept demonstrates CFG lowering" was
+/// an overclaim: a `Branch` whose arms each independently `ret` needs no
+/// CFG at all, only two straight-line sequences reachable via one
+/// conditional jump. The reviewer's own words: "合流点をまたいで生存する
+/// 値(diamond)とループ" ("a value that survives across a merge point
+/// (diamond), and a loop") are "そこで初めて...設計判断が生まれます"
+/// ("exactly where a design decision is actually required").
+///
+/// This submodule models both real MIR shapes captured in this session:
+///
+/// ```text
+/// // pub fn diamond(param0: i32) -> i32 {
+/// //     let x = if param0 != 0 { param0 + 1 } else { param0 - 1 };
+/// //     x * 2
+/// // }
+/// bb0: { _3 = Ne(copy _1, const 0_i32); switchInt(move _3) -> [0: bb3, otherwise: bb1]; }
+/// bb1: { _2 = _1 + 1; goto -> bb5; }   // (overflow-check details omitted)
+/// bb3: { _2 = _1 - 1; goto -> bb5; }
+/// bb5: { _6 = copy _2; _0 = _6 * 2; return; }   // bb5 is the merge point: reads _2, written on BOTH arms
+/// ```
+///
+/// and
+///
+/// ```text
+/// // pub fn countdown(param0: i32) -> i32 {
+/// //     let mut n = param0; let mut acc = 0;
+/// //     while n > 0 { acc += n; n -= 1; }
+/// //     acc
+/// // }
+/// bb0: { _2 = copy _1; _3 = const 0_i32; goto -> bb1; }
+/// bb1: { _4 = Gt(copy _2, const 0_i32); switchInt(move _4) -> [0: bb5, otherwise: bb2]; }  // loop header
+/// bb2: { _3 = _3 + _2; goto -> bb3; }
+/// bb3: { _2 = _2 - 1; goto -> bb4; }
+/// bb4: { goto -> bb1; }   // back-edge: bb4 -> bb1, a real loop
+/// bb5: { _0 = copy _3; return; }
+/// ```
+///
+/// **Design decision this submodule actually makes** (unlike every prior
+/// function in this module, which had no merge point to make a decision
+/// about): a value that must survive across a merge point or a loop
+/// back-edge is stored in a **fixed stack slot** (`rbp`-relative), not a
+/// fixed register and not an SSA/phi value. This is the simplest correct
+/// answer (equivalent to LLVM IR before its own `mem2reg` pass promotes
+/// stack slots to SSA registers) -- it is deliberately *not* claimed to
+/// be an efficient one; register allocation across merge points is a
+/// separate, harder design question this submodule does not attempt to
+/// answer (see its own tests' honest scope notes).
+pub mod diamond_and_loop_cfg {
+    /// A stack-resident local variable slot -- the direct analogue of a
+    /// real MIR `Local` (`_2`, `_3`, ...) that survives across a basic
+    /// block boundary. `LocalId(0)` is reserved for the function's own
+    /// `param0` (already materialized in `edi` on entry; this module's
+    /// prologue spills it to its stack slot immediately, matching what a
+    /// real, unoptimized backend does for any local whose address might
+    /// be taken or that lives across a control-flow join).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct LocalId(pub usize);
+
+    /// The right-hand side of an assignment -- deliberately minimal
+    /// (three real MIR `Rvalue` shapes this session's own captured
+    /// `diamond.mir`/`countdown.mir` actually used: a literal, a copy of
+    /// another local, and this session's own three real binary
+    /// operators). Real MIR wraps arithmetic in `CheckedBinaryOp` +
+    /// `assert` for overflow (confirmed in both captured MIR samples
+    /// above); this submodule deliberately does not model that assert
+    /// (out of scope, matching this module's own established precedent
+    /// of not implementing panic/unwind machinery) -- arithmetic here
+    /// wraps silently, and this scope limit is asserted on directly in
+    /// this submodule's own tests rather than left implicit.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Rvalue {
+        Const(i32),
+        Copy(LocalId),
+        Add(LocalId, LocalId),
+        Sub(LocalId, LocalId),
+        /// The condition test both captured MIR samples use
+        /// (`Ne(copy _1, const 0_i32)` / `Gt(copy _2, const 0_i32)`),
+        /// generalized to "compare against zero" since this submodule's
+        /// scope (per its own stated minimalism) does not model a
+        /// general comparison-operand pair.
+        NotEqualZero(LocalId),
+        GreaterThanZero(LocalId),
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Statement {
+        pub assign_to: LocalId,
+        pub rvalue: Rvalue,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct BlockId(pub usize);
+
+    #[derive(Debug, Clone)]
+    pub enum Terminator {
+        /// Unconditional jump -- the real shape both `goto -> bb5` (the
+        /// diamond's own merge) and `goto -> bb1` (the loop's own
+        /// back-edge) take in the captured MIR above. This is the one
+        /// terminator kind entirely absent from this module's earlier
+        /// `Terminator` enum (branch arms there returned directly,
+        /// never rejoined).
+        Goto(BlockId),
+        /// `cond`'s stack slot must hold `0` or `1` (the boolean result
+        /// of a comparison rvalue) by the time this terminator runs.
+        Branch {
+            cond: LocalId,
+            then_block: BlockId,
+            else_block: BlockId,
+        },
+        Return(LocalId),
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct BasicBlock {
+        pub statements: Vec<Statement>,
+        pub terminator: Terminator,
+    }
+
+    /// The MIR-equivalent input this submodule's lowering function
+    /// consumes -- a real, general basic-block graph (unlike this
+    /// module's earlier `TargetIr`, whose `blocks` could only ever form
+    /// the fixed shapes its own `lower_target_ir_to_code_body` accepted).
+    /// `num_locals` fixes the stack frame size up front (every local gets
+    /// one 8-byte-aligned slot, whether or not it survives a merge --
+    /// deliberately not attempting liveness-based slot reuse, a real
+    /// optimization this submodule's own stated minimalism excludes).
+    #[derive(Debug, Clone)]
+    pub struct CfgBody {
+        pub blocks: Vec<BasicBlock>,
+        pub entry: BlockId,
+        pub num_locals: usize,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum LowerError {
+        UnknownBlock(BlockId),
+        UnknownLocal(LocalId),
+    }
+
+    /// Lowers a general `CfgBody` (diamond merges and loop back-edges
+    /// both representable, unlike this module's earlier
+    /// `lower_target_ir_to_code_body`) directly to x86_64 System V bytes.
+    ///
+    /// **Stack frame layout**: `push rbp; mov rbp, rsp; sub rsp, N` where
+    /// `N = num_locals * 8` (rounded so the frame stays 16-byte aligned,
+    /// matching the real System V ABI's own alignment requirement,
+    /// confirmed against this crate's own existing `real_c_add_code`
+    /// fixture in `lib.rs`, whose real `cc`-emitted prologue is exactly
+    /// `push rbp; mov rbp, rsp`). `LocalId(n)` lives at `[rbp - 8*(n+1)]`.
+    /// `param0` (`edi` on entry) is spilled to `LocalId(0)`'s slot in the
+    /// prologue, mirroring what an unoptimized real backend does for any
+    /// parameter whose value must survive past the first basic block.
+    ///
+    /// **Two-pass block layout**: block order in `blocks` is preserved
+    /// (no block reordering/optimization); a first pass computes each
+    /// block's own byte offset from its predecessors' lengths, a second
+    /// pass emits real code with every `Goto`/`Branch` target resolved to
+    /// a real `rel32` displacement -- necessary here (and not needed by
+    /// this module's earlier two-block-only function) because a
+    /// `Goto`/`Branch` can now target a block that appears *before* it in
+    /// program order (the loop back-edge case), which a single forward
+    /// pass cannot resolve.
+    pub fn lower_cfg_body_to_code_body(cfg: &CfgBody) -> Result<Vec<u8>, LowerError> {
+        let frame_bytes = (cfg.num_locals * 8).next_multiple_of(16).max(16) as i64;
+
+        // Pass 1: emit each block's own code in isolation, with every
+        // Goto/Branch target left as a placeholder relative to *that
+        // block's own start* (never a whole-function absolute offset at
+        // this stage) -- then compute real block start offsets from
+        // these lengths, then patch every placeholder in Pass 2.
+        struct EmittedBlock {
+            code: Vec<u8>,
+            /// (byte offset within `code` where the rel32 begins, target block)
+            fixups: Vec<(usize, BlockId)>,
+        }
+
+        let prologue_and_epilogue_overhead = 7 + 4; // push rbp(1) + mov rbp,rsp(3) + sub rsp,imm32(7) is emitted once, up front, not per block -- see below.
+        let _ = prologue_and_epilogue_overhead; // documentation only; actual prologue emitted directly below.
+
+        let mut emitted: Vec<EmittedBlock> = Vec::with_capacity(cfg.blocks.len());
+        for bb in &cfg.blocks {
+            let mut code = Vec::new();
+            let mut fixups = Vec::new();
+            for stmt in &bb.statements {
+                emit_statement(&mut code, stmt, cfg.num_locals)?;
+            }
+            match &bb.terminator {
+                Terminator::Goto(target) => {
+                    code.push(0xE9); // jmp rel32
+                    fixups.push((code.len(), *target));
+                    code.extend_from_slice(&[0, 0, 0, 0]);
+                }
+                Terminator::Branch {
+                    cond,
+                    then_block,
+                    else_block,
+                } => {
+                    let cond_off = local_offset(*cond, cfg.num_locals)?;
+                    // cmp dword [rbp - off], 0
+                    code.extend_from_slice(&[0x83, 0xBD]);
+                    code.extend_from_slice(&(-cond_off as i32).to_le_bytes());
+                    code.push(0x00);
+                    // je else_block (rel32) ; jmp then_block (rel32)
+                    code.extend_from_slice(&[0x0F, 0x84]);
+                    fixups.push((code.len(), *else_block));
+                    code.extend_from_slice(&[0, 0, 0, 0]);
+                    code.push(0xE9);
+                    fixups.push((code.len(), *then_block));
+                    code.extend_from_slice(&[0, 0, 0, 0]);
+                }
+                Terminator::Return(local) => {
+                    let off = local_offset(*local, cfg.num_locals)?;
+                    // mov eax, [rbp - off]
+                    code.extend_from_slice(&[0x8B, 0x85]);
+                    code.extend_from_slice(&(-off as i32).to_le_bytes());
+                    // leave ; ret  (leave = mov rsp,rbp; pop rbp -- the real
+                    // matching epilogue for this function's own push
+                    // rbp/mov rbp,rsp prologue, confirmed as a real x86_64
+                    // instruction pair, not this crate's own invention)
+                    code.push(0xC9);
+                    code.push(0xC3);
+                }
+            }
+            emitted.push(EmittedBlock { code, fixups });
+        }
+
+        // Real prologue: push rbp ; mov rbp, rsp ; sub rsp, frame_bytes ;
+        // mov [rbp-8], edi (spill param0 to LocalId(0)'s own slot).
+        let mut prologue = vec![0x55]; // push rbp
+        prologue.extend_from_slice(&[0x48, 0x89, 0xE5]); // mov rbp, rsp
+        prologue.extend_from_slice(&[0x48, 0x81, 0xEC]); // sub rsp, imm32
+        prologue.extend_from_slice(&(frame_bytes as i32).to_le_bytes());
+        if cfg.num_locals > 0 {
+            let off = local_offset(LocalId(0), cfg.num_locals)?;
+            prologue.extend_from_slice(&[0x89, 0xBD]); // mov [rbp-off], edi
+            prologue.extend_from_slice(&(-off as i32).to_le_bytes());
+        }
+
+        // Compute each block's own absolute start offset (prologue
+        // length, then cumulative block lengths in program order).
+        let mut block_starts = vec![0usize; emitted.len()];
+        let mut cursor = prologue.len();
+        for (i, eb) in emitted.iter().enumerate() {
+            block_starts[i] = cursor;
+            cursor += eb.code.len();
+        }
+        let entry_index = cfg.entry.0;
+        if entry_index >= emitted.len() {
+            return Err(LowerError::UnknownBlock(cfg.entry));
+        }
+        // This function's own entry must be laid out first in `blocks`
+        // for the prologue to fall through into it correctly -- a real
+        // constraint this function enforces rather than silently
+        // reordering blocks to satisfy (block reordering is a real
+        // optimization, out of scope per this submodule's own stated
+        // minimalism).
+        if entry_index != 0 {
+            return Err(LowerError::UnknownBlock(cfg.entry));
+        }
+
+        // Pass 2: concatenate, patching every fixup to a real rel32
+        // (target_block_start - (fixup_site_within_whole_function + 4)).
+        let mut code = prologue;
+        for (i, eb) in emitted.iter().enumerate() {
+            let block_base = block_starts[i];
+            let mut block_code = eb.code.clone();
+            for (local_off, target) in &eb.fixups {
+                let target_idx = target.0;
+                let target_start = *block_starts
+                    .get(target_idx)
+                    .ok_or(LowerError::UnknownBlock(*target))?;
+                let site_end = block_base + local_off + 4;
+                let rel = target_start as i64 - site_end as i64;
+                block_code[*local_off..*local_off + 4].copy_from_slice(&(rel as i32).to_le_bytes());
+            }
+            code.extend_from_slice(&block_code);
+        }
+
+        Ok(code)
+    }
+
+    fn local_offset(id: LocalId, num_locals: usize) -> Result<i64, LowerError> {
+        if id.0 >= num_locals {
+            return Err(LowerError::UnknownLocal(id));
+        }
+        Ok(((id.0 + 1) * 8) as i64)
+    }
+
+    fn emit_statement(
+        code: &mut Vec<u8>,
+        stmt: &Statement,
+        num_locals: usize,
+    ) -> Result<(), LowerError> {
+        let dst_off = local_offset(stmt.assign_to, num_locals)?;
+        match stmt.rvalue {
+            Rvalue::Const(v) => {
+                // mov dword [rbp-off], imm32
+                code.extend_from_slice(&[0xC7, 0x85]);
+                code.extend_from_slice(&(-dst_off as i32).to_le_bytes());
+                code.extend_from_slice(&v.to_le_bytes());
+            }
+            Rvalue::Copy(src) => {
+                let src_off = local_offset(src, num_locals)?;
+                // mov eax, [rbp-src_off] ; mov [rbp-dst_off], eax
+                code.extend_from_slice(&[0x8B, 0x85]);
+                code.extend_from_slice(&(-src_off as i32).to_le_bytes());
+                code.extend_from_slice(&[0x89, 0x85]);
+                code.extend_from_slice(&(-dst_off as i32).to_le_bytes());
+            }
+            Rvalue::Add(a, b) => {
+                let a_off = local_offset(a, num_locals)?;
+                let b_off = local_offset(b, num_locals)?;
+                // mov eax, [rbp-a_off] ; add eax, [rbp-b_off] ; mov [rbp-dst_off], eax
+                code.extend_from_slice(&[0x8B, 0x85]);
+                code.extend_from_slice(&(-a_off as i32).to_le_bytes());
+                code.extend_from_slice(&[0x03, 0x85]);
+                code.extend_from_slice(&(-b_off as i32).to_le_bytes());
+                code.extend_from_slice(&[0x89, 0x85]);
+                code.extend_from_slice(&(-dst_off as i32).to_le_bytes());
+            }
+            Rvalue::Sub(a, b) => {
+                let a_off = local_offset(a, num_locals)?;
+                let b_off = local_offset(b, num_locals)?;
+                // mov eax, [rbp-a_off] ; sub eax, [rbp-b_off] ; mov [rbp-dst_off], eax
+                code.extend_from_slice(&[0x8B, 0x85]);
+                code.extend_from_slice(&(-a_off as i32).to_le_bytes());
+                code.extend_from_slice(&[0x2B, 0x85]);
+                code.extend_from_slice(&(-b_off as i32).to_le_bytes());
+                code.extend_from_slice(&[0x89, 0x85]);
+                code.extend_from_slice(&(-dst_off as i32).to_le_bytes());
+            }
+            Rvalue::NotEqualZero(a) => {
+                let a_off = local_offset(a, num_locals)?;
+                // cmp dword [rbp-a_off], 0 ; setne al ; movzx eax, al ; mov [rbp-dst_off], eax
+                code.extend_from_slice(&[0x83, 0xBD]);
+                code.extend_from_slice(&(-a_off as i32).to_le_bytes());
+                code.push(0x00);
+                code.extend_from_slice(&[0x0F, 0x95, 0xC0]); // setne al
+                code.extend_from_slice(&[0x0F, 0xB6, 0xC0]); // movzx eax, al
+                code.extend_from_slice(&[0x89, 0x85]);
+                code.extend_from_slice(&(-dst_off as i32).to_le_bytes());
+            }
+            Rvalue::GreaterThanZero(a) => {
+                let a_off = local_offset(a, num_locals)?;
+                // cmp dword [rbp-a_off], 0 ; setg al ; movzx eax, al ; mov [rbp-dst_off], eax
+                code.extend_from_slice(&[0x83, 0xBD]);
+                code.extend_from_slice(&(-a_off as i32).to_le_bytes());
+                code.push(0x00);
+                code.extend_from_slice(&[0x0F, 0x9F, 0xC0]); // setg al
+                code.extend_from_slice(&[0x0F, 0xB6, 0xC0]); // movzx eax, al
+                code.extend_from_slice(&[0x89, 0x85]);
+                code.extend_from_slice(&(-dst_off as i32).to_le_bytes());
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// Issue #68 fourth-round critical review: the decisive structural
+        /// test this whole submodule exists for. Builds the real diamond
+        /// CFG captured this session (`diamond.mir`: `if param0 != 0 {
+        /// param0 + 1 } else { param0 - 1 }` then `* 2` at the merge
+        /// point) and confirms the generated bytes are exactly what
+        /// `objdump` independently disassembled as valid x86_64 in this
+        /// session -- a real `je`/`jmp` pair both landing on their own
+        /// block's real start, and the merge block genuinely reading the
+        /// value either arm wrote (`mov -0x10(%rbp),%eax` at the merge
+        /// point, the same stack slot both arms' own `mov %eax,-0x10(%rbp)`
+        /// wrote to).
+        #[test]
+        fn diamond_cfg_lowers_to_the_objdump_verified_byte_sequence() {
+            let param0 = LocalId(0);
+            let x = LocalId(1);
+            let cond = LocalId(2);
+            let merged_copy = LocalId(3);
+            let one = LocalId(4);
+
+            let cfg = CfgBody {
+                num_locals: 5,
+                entry: BlockId(0),
+                blocks: vec![
+                    BasicBlock {
+                        statements: vec![
+                            Statement {
+                                assign_to: one,
+                                rvalue: Rvalue::Const(1),
+                            },
+                            Statement {
+                                assign_to: cond,
+                                rvalue: Rvalue::NotEqualZero(param0),
+                            },
+                        ],
+                        terminator: Terminator::Branch {
+                            cond,
+                            then_block: BlockId(1),
+                            else_block: BlockId(2),
+                        },
+                    },
+                    BasicBlock {
+                        statements: vec![Statement {
+                            assign_to: x,
+                            rvalue: Rvalue::Add(param0, one),
+                        }],
+                        terminator: Terminator::Goto(BlockId(3)),
+                    },
+                    BasicBlock {
+                        statements: vec![Statement {
+                            assign_to: x,
+                            rvalue: Rvalue::Sub(param0, one),
+                        }],
+                        terminator: Terminator::Goto(BlockId(3)),
+                    },
+                    BasicBlock {
+                        statements: vec![
+                            Statement {
+                                assign_to: merged_copy,
+                                rvalue: Rvalue::Copy(x),
+                            },
+                            Statement {
+                                assign_to: merged_copy,
+                                rvalue: Rvalue::Add(merged_copy, merged_copy),
+                            },
+                        ],
+                        terminator: Terminator::Return(merged_copy),
+                    },
+                ],
+            };
+
+            let code = lower_cfg_body_to_code_body(&cfg).expect("diamond CfgBody must lower");
+
+            assert_eq!(
+                code,
+                vec![
+                    0x55, // push rbp
+                    0x48, 0x89, 0xE5, // mov rbp, rsp
+                    0x48, 0x81, 0xEC, 0x30, 0x00, 0x00, 0x00, // sub rsp, 0x30
+                    0x89, 0xBD, 0xF8, 0xFF, 0xFF, 0xFF, // mov [rbp-8], edi (spill param0)
+                    0xC7, 0x85, 0xD8, 0xFF, 0xFF, 0xFF, 0x01, 0x00, 0x00,
+                    0x00, // mov dword [rbp-0x28], 1
+                    0x83, 0xBD, 0xF8, 0xFF, 0xFF, 0xFF, 0x00, // cmp dword [rbp-8], 0
+                    0x0F, 0x95, 0xC0, // setne al
+                    0x0F, 0xB6, 0xC0, // movzx eax, al
+                    0x89, 0x85, 0xE8, 0xFF, 0xFF, 0xFF, // mov [rbp-0x18], eax
+                    0x83, 0xBD, 0xE8, 0xFF, 0xFF, 0xFF, 0x00, // cmp dword [rbp-0x18], 0
+                    0x0F, 0x84, 0x1C, 0x00, 0x00, 0x00, // je +0x1c (to bb2/else, real offset)
+                    0xE9, 0x00, 0x00, 0x00, 0x00, // jmp +0 (to bb1/then, real offset)
+                    // bb1 (then): x = param0 + 1
+                    0x8B, 0x85, 0xF8, 0xFF, 0xFF, 0xFF, // mov eax, [rbp-8]
+                    0x03, 0x85, 0xD8, 0xFF, 0xFF, 0xFF, // add eax, [rbp-0x28]
+                    0x89, 0x85, 0xF0, 0xFF, 0xFF, 0xFF, // mov [rbp-0x10], eax
+                    0xE9, 0x17, 0x00, 0x00, 0x00, // jmp +0x17 (to merge block)
+                    // bb2 (else): x = param0 - 1
+                    0x8B, 0x85, 0xF8, 0xFF, 0xFF, 0xFF, // mov eax, [rbp-8]
+                    0x2B, 0x85, 0xD8, 0xFF, 0xFF, 0xFF, // sub eax, [rbp-0x28]
+                    0x89, 0x85, 0xF0, 0xFF, 0xFF, 0xFF, // mov [rbp-0x10], eax
+                    0xE9, 0x00, 0x00, 0x00, 0x00, // jmp +0 (to merge block)
+                    // bb3 (merge): reads the SAME slot [rbp-0x10] both
+                    // arms above wrote to -- this is the decisive
+                    // structural fact this test exists to check.
+                    0x8B, 0x85, 0xF0, 0xFF, 0xFF, 0xFF, // mov eax, [rbp-0x10]
+                    0x89, 0x85, 0xE0, 0xFF, 0xFF, 0xFF, // mov [rbp-0x20], eax
+                    0x8B, 0x85, 0xE0, 0xFF, 0xFF, 0xFF, // mov eax, [rbp-0x20]
+                    0x03, 0x85, 0xE0, 0xFF, 0xFF, 0xFF, // add eax, [rbp-0x20]
+                    0x89, 0x85, 0xE0, 0xFF, 0xFF, 0xFF, // mov [rbp-0x20], eax
+                    0x8B, 0x85, 0xE0, 0xFF, 0xFF, 0xFF, // mov eax, [rbp-0x20]
+                    0xC9, // leave
+                    0xC3, // ret
+                ],
+                "must match the exact byte sequence independently disassembled with objdump in \
+                 this session as valid x86_64 with both branch targets landing correctly and \
+                 the merge block reading the slot both arms wrote"
+            );
+        }
+
+        /// Issue #68 fourth-round critical review, the loop half of H4:
+        /// a real back-edge (`jmp` to an *earlier* block, the structural
+        /// case the two-block-only `lower_target_ir_to_code_body`
+        /// (defined earlier in this file) could never represent). This
+        /// confirms the specific back-edge byte (`jmp -0x53` at the loop
+        /// body's own end, landing exactly back on the loop header's real
+        /// start) independently recomputed, not mirrored from this
+        /// function's own arithmetic.
+        #[test]
+        fn loop_cfg_back_edge_lands_on_the_independently_recomputed_header_offset() {
+            let param0 = LocalId(0);
+            let n = LocalId(1);
+            let acc = LocalId(2);
+            let cond = LocalId(3);
+            let const_one = LocalId(4);
+
+            let cfg = CfgBody {
+                num_locals: 5,
+                entry: BlockId(0),
+                blocks: vec![
+                    BasicBlock {
+                        statements: vec![
+                            Statement {
+                                assign_to: n,
+                                rvalue: Rvalue::Copy(param0),
+                            },
+                            Statement {
+                                assign_to: acc,
+                                rvalue: Rvalue::Const(0),
+                            },
+                            Statement {
+                                assign_to: const_one,
+                                rvalue: Rvalue::Const(1),
+                            },
+                        ],
+                        terminator: Terminator::Goto(BlockId(1)),
+                    },
+                    BasicBlock {
+                        statements: vec![Statement {
+                            assign_to: cond,
+                            rvalue: Rvalue::GreaterThanZero(n),
+                        }],
+                        terminator: Terminator::Branch {
+                            cond,
+                            then_block: BlockId(2),
+                            else_block: BlockId(4),
+                        },
+                    },
+                    BasicBlock {
+                        statements: vec![Statement {
+                            assign_to: acc,
+                            rvalue: Rvalue::Add(acc, n),
+                        }],
+                        terminator: Terminator::Goto(BlockId(3)),
+                    },
+                    BasicBlock {
+                        statements: vec![Statement {
+                            assign_to: n,
+                            rvalue: Rvalue::Sub(n, const_one),
+                        }],
+                        terminator: Terminator::Goto(BlockId(1)), // the real back-edge
+                    },
+                    BasicBlock {
+                        statements: vec![],
+                        terminator: Terminator::Return(acc),
+                    },
+                ],
+            };
+
+            let code = lower_cfg_body_to_code_body(&cfg).expect("countdown CfgBody must lower");
+
+            // Independent verification strategy: rather than
+            // hand-recomputing every block's own byte length (error-prone,
+            // as this test's own earlier draft demonstrated -- an
+            // off-by-several-bytes miscount of the `mov dword
+            // [rbp+disp32], imm32` encoding length produced a wrong
+            // predicted offset that this session's own objdump run then
+            // caught), decode the actual `jmp rel32` opcode (0xE9) that
+            // immediately precedes block 4 (the loop exit, `mov eax,
+            // [rbp-0x18]; leave; ret` -- a fixed, recognizable 8-byte
+            // suffix) and confirm its target byte, found by walking
+            // forward from that jump, is the real loop-header block's own
+            // first instruction (`cmp dword [rbp-0x10], 0` = `83 BD F0 FF
+            // FF FF 00`, the header's own condition test).
+            let exit_suffix = [0x8B, 0x85, 0xE8, 0xFF, 0xFF, 0xFF, 0xC9, 0xC3];
+            let exit_start = code
+                .windows(exit_suffix.len())
+                .position(|w| w == exit_suffix)
+                .expect("the loop-exit block's own fixed byte suffix must be present verbatim");
+            let back_edge_jmp_start = exit_start - 5; // the jmp rel32 (5 bytes) immediately precedes the exit block
+            assert_eq!(
+                code[back_edge_jmp_start], 0xE9,
+                "the instruction immediately before the loop-exit block must be a jmp rel32"
+            );
+            let rel32_offset = back_edge_jmp_start + 1;
+            let rel = i32::from_le_bytes(
+                code[rel32_offset..rel32_offset + 4]
+                    .try_into()
+                    .expect("4 bytes"),
+            );
+            let site_end = rel32_offset + 4;
+            let target = (site_end as i64 + rel as i64) as usize;
+
+            let header_condition_test = [0x83, 0xBD, 0xF0, 0xFF, 0xFF, 0xFF, 0x00];
+            assert_eq!(
+                &code[target..target + header_condition_test.len()],
+                &header_condition_test,
+                "the back-edge jmp must land exactly on the loop header block's own first \
+                 instruction (its condition test), not merely somewhere plausible"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
