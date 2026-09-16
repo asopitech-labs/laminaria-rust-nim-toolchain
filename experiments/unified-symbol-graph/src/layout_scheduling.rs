@@ -158,34 +158,44 @@
 //! only using it as a last-resort tie-break) actively hurts both
 //! objectives here rather than trading one for the other.
 //!
-//! **Is one-pass vs. true-two-pass itself a trade-off, or does two-pass
-//! just win?** An earlier version of this doc comment called it a
-//! trade-off (one-pass keeps more schedule fidelity, two-pass gains more
-//! locality) -- that framing was challenged as putting two unequally-
-//! validated things on the same footing. `count_critical_path_inversions`
-//! measures deviation from `declared_at_seq`, an arrival-order proxy for
-//! critical-path position that this crate has **never independently
-//! validated** as actually correlating with build-time cost (the closest
-//! validated result, `cost_correlation.rs`'s own finding for issue #67,
-//! is that *degree* -- a different signal -- only weakly correlates with
-//! real compile time, r=-0.38 to -0.49; `declared_at_seq` itself has had
-//! no equivalent validation). `total_affinity_weighted_distance`, by
-//! contrast, is built directly on `CodeBody::relocations` -- an exact,
-//! `objdump`-verified record of real call relationships -- and
-//! approximates a mechanism (Call-Chain Clustering) lld actually ships
-//! because it measurably reduces i-cache/i-TLB misses. Treating a
-//! 123.5%-worse score on an unvalidated proxy metric as equally weighty
-//! against a 48.6% improvement on a metric grounded in real call data and
-//! a real, adopted linker technique is not a neutral trade-off framing --
-//! it manufactures symmetry between a speculative cost and a
-//! demonstrated benefit. Absent independent evidence that
-//! `declared_at_seq` deviation has a real build-time cost, this crate's
-//! own data supports adopting `assign_layout_two_pass` (true two-pass)
-//! outright, not treating this as an open trade-off to defer.
-//! Validating (or refuting) `declared_at_seq` as a real cost proxy --
-//! the same kind of measurement `cost_correlation.rs` already did for
-//! degree -- remains open future work and could change this
-//! recommendation.
+//! **Neither "trade-off" nor "two-pass wins" is a conclusion this data
+//! actually supports -- second correction to this section.** Two earlier
+//! versions of this doc comment each got this wrong in a different way:
+//! first calling it a trade-off (treating both metrics as equally
+//! meaningful), then correcting to "adopt two-pass outright" on the
+//! reasoning that `total_affinity_weighted_distance` is validated while
+//! `count_critical_path_inversions` is not. That second correction was
+//! itself wrong, caught by the same scrutiny: **this crate has never
+//! measured whether `total_affinity_weighted_distance` correlates with
+//! anything real either.** Citing that lld ships Call-Chain Clustering
+//! is citing lld's own external literature, not a measurement this
+//! crate performed -- no cycle here has ever compiled, linked, and
+//! actually profiled i-cache/i-TLB misses or wall-clock execution time
+//! against this metric. `declared_at_seq` deviation and affinity-weighted
+//! distance are BOTH unvalidated proxies in this codebase's own terms;
+//! neither has been shown to predict anything about real build time or
+//! real runtime performance here.
+//!
+//! What this means concretely: the numbers in the table above (inversions,
+//! distance, for all three algorithms) demonstrate that each algorithm
+//! does what it was designed to do on real call-graph data at real scale
+//! (a genuine result, and not nothing -- `assign_layout_scheduling_aware`'s
+//! own doc comment makes the identical, narrower claim about its
+//! synthetic fixture). They do **not** demonstrate that any algorithm is
+//! better for actually building or running software, because neither
+//! axis being measured has been shown to matter. Recommending
+//! `assign_layout_two_pass` for adoption, or calling the comparison a
+//! trade-off worth weighing, both overstate what this experiment
+//! establishes. The honest scope of this cycle's result is: three layout
+//! algorithms exist, are implemented, are deterministic, and produce
+//! measurably different orderings on both a synthetic and a real
+//! 308-symbol fixture -- whether any of those differences matter for a
+//! real build or a real running program is a **separate, unanswered**
+//! question. Answering it needs the same kind of direct measurement
+//! `cost_correlation.rs` did for degree vs. real compile time (issue
+//! #67): compile real code with each layout, and either time the build
+//! or profile the resulting binary's actual cache behavior, rather than
+//! reasoning from an unmeasured proxy in either direction.
 
 use crate::{AddressState, SharedSymbolGraph, SymbolId};
 use std::collections::{HashMap, HashSet};
