@@ -270,8 +270,45 @@ pub trait LowerBackend {
 - `match`(節5.4.1)の`discriminant_read_count`も同様に、検出のみで、`discriminant`読み取り+3分岐以上の`switchInt`を`target_ir`側で実際にlowerする経路は未実装。既存の`mir_text`/`lower_target_ir_to_code_body`は依然として2分岐限定のままである。
 - borrow checkゲート統合(節5.4.3)は`&mut i32`/`&i32`という1引数関数のみを対象としており、複数引数、複数の借用が絡む複雑な借用関係(前回研究節2.5のPolonius定式化が扱うような、複数の`(region, point)`ペア)は未検証。
 
+## 5.5 3度目のユーザー指摘への応答: 他のRust言語機能の並列検証(dyn Trait・複数借用・レイアウト・unsafe)
+
+ユーザーから「他にもRust言語の機能は?」という指摘を受け、`&mut`/`&`/ジェネリクス/`Box`/`match`に続く4つの機能領域(トレイトオブジェクト動的ディスパッチ、複数借用の絡み合い、構造体・クロージャのレイアウト、unsafe/生ポインタ)を並列で実データ検証した。`experiments/rustc-driver-poc/`を`src/lib.rs`(共有基盤)+`src/main.rs`+`src/bin/{dyn_trait_check,lifetime_check,layout_check,unsafe_check}.rs`という構成に再編し、各機能領域を独立ファイルとして実装した(計26テスト、全て合格)。
+
+### 5.5.1 トレイトオブジェクト・動的ディスパッチ(`dyn Trait`)
+
+`experiments/rustc-driver-poc/src/bin/dyn_trait_check.rs`。決定的な発見: **MIRテキストレベルでは動的ディスパッチと未解決の静的ジェネリクス呼び出しがほぼ区別できない**——`<dyn Shape as Shape>::area(copy _1)`と`<T as Shape>::area(copy _1)`という、構文上ほぼ同一の形で出力される。両者の違いは`Ty<'tcx>`の実際の型カインド(`TyKind::Dynamic` vs `TyKind::Param`)にのみ存在し、`mir_text`のようなテキストパーサーでは原理的に区別不可能であることを実証した。
+
+さらに`tcx.vtable_entries(trait_ref)`(`compiler/rustc_middle/src/ty/vtable.rs`)を実際に呼び出し、`Circle`が`Shape`を実装した場合の実vtableが`[MetadataDropInPlace, MetadataSize, MetadataAlign, Method(<Circle as Shape>::area)]`という4エントリ(先頭3つは固定のメタデータヘッダ、4番目が実メソッド)であることを確認した。当初「vtableはメソッドポインタから始まる」という誤った想定を持っていたが、実際の`VtblEntry` enum定義を読んで訂正した。これはtarget固有バックエンドが動的ディスパッチをサポートする際に必須となる、実際のvtableレイアウト情報である。
+
+### 5.5.2 複数借用の絡み合い(ライフタイム)とPoloniusへの実アクセス可否
+
+`experiments/rustc-driver-poc/src/bin/lifetime_check.rs`。重要な訂正: 以前の節5.3の記述は`tcx.mir_borrowck`がリージョン制約情報を含意しているかのように書いていたが、実際のクエリ定義(`compiler/rustc_middle/src/queries.rs`)を確認したところ、`mir_borrowck`の戻り値は`Result<&'tcx FxIndexMap<LocalDefId, ty::DefinitionSiteHiddenType<'tcx>>, ErrorGuaranteed>`——**opaque型のhidden type推論結果のマップ**であり、リージョン制約グラフとは無関係だった。この誤りを正直に訂正した。
+
+前回研究(節2.5)が言及した`LocalizedConstraintGraph`(Polonius定式化)への、`Callbacks`経由の直接アクセス経路は本セッションでは見つからなかった。代わりに、`-Z nll-facts`という別のコンパイラフラグ(`Callbacks`フックとは独立したプロセスレベルの機構)を実際に実行し、`(region, region, point)`という実際のoutlives制約ファクトを取得した。`fn first_or_second<'a>(cond: bool, x: &'a i32, y: &'a i32) -> &'a i32`という、3引数が同じライフタイム`'a`を共有する関数に対し、`'?1`(共有`'a`)と`'?4`/`'?5`(各引数の内部リージョン)の間の相互outlives制約が、`Start(bb0[0])`/`Mid(bb0[0])`という実際のCFG上の点ごとに記録されていることを確認した。これは前回研究が言及したPolonius入力データの実例だが、`rustc_driver::Callbacks`ベースのパイプラインへの統合はできていないことを正直に記録する。
+
+また、異なる変数への複数`&mut`(合法)と、同一変数への複数`&mut`(E0499で拒否)の両方を実際にコンパイルし、前者は成功・後者は失敗することを確認した。
+
+### 5.5.3 構造体・クロージャのメモリレイアウト
+
+`experiments/rustc-driver-poc/src/bin/layout_check.rs`(計6テスト)。`struct Reordered { a: u8, b: u64, c: u8 }`(デフォルトの`#[repr(Rust)]`)が実際に24バイトではなく16バイトに縮小され、`b`(u64)がオフセット0へ並び替えられることを`TyAndLayout::fields()`(`FieldsShape::Arbitrary`)で実測した。`#[repr(C)]`版は宣言順を保持し24バイトのままであることも対比確認した。さらに独立した`-Z print-type-sizes`フラグでも同じ結果を再確認しており、単一の測定手段だけに依存していない。
+
+`Option<&i32>`(参照型、null不可)がニッチ最適化により追加の判別子バイトなしで8バイトのまま(`TagEncoding::Niche`)である一方、`Option<i32>`は`i32`に無効なビットパターンが存在しないため実際の判別子フィールドを持つ(`TagEncoding::Direct`)ことも確認した。当初「`Option<i32>`は8バイトを超えて成長するはず」という仮説を持っていたが、実測で誤りと判明し、正直に記録している。クロージャのキャプチャ環境(`move || x + y`の`x: i32, y: i64`)も実際には匿名の構造体型として表現され、通常の構造体と同じフィールド並び替え最適化(16バイト、24バイトではない)を受けることを確認した。
+
+### 5.5.4 unsafe/生ポインタ: 前回研究節5.6.3の実証
+
+`experiments/rustc-driver-poc/src/bin/unsafe_check.rs`(計4テスト)。前回研究の主張——「`unsafe`はborrow checkingを無効化しない、`check_unsafety`と`mir_borrowck`は独立クエリである」——を、本セッションで初めて実際に動くコードとして実証した。`unsafe`ブロックの内側に借用違反(`&mut`の二重取得)を配置しても依然としてE0499で拒否されること、生ポインタのデリファレンスは`unsafe`なしではE0133で拒否され`unsafe`ブロック内でのみ許可されることの両方を実データで確認した。また、生ポインタ型(`*const i32`)は既存の`Ownership`分類(`Unique`/`Shared`/`Boxed`)のいずれにも該当せず`NotAReference`に分類されることを確認し、これが「生ポインタには型システムによるエイリアシング保証が一切ない」という事実を正しく反映した、意図的なスコープ限定であることを明記した。
+
+### 5.5.5 総合的な限界(正直な記録)
+
+- vtableエントリ(5.5.1)は取得できたが、これを実際に`target_ir`のx86_64コード生成(間接呼び出し命令の発行)へ接続する作業は未着手。
+- Polonius定式化への直接アクセス(5.5.2)は`-Z nll-facts`という別プロセスフラグ経由でのみ確認でき、`rustc_driver::Callbacks`ベースの統合パイプラインには組み込めていない。
+- レイアウト情報(5.5.3)は構造体・クロージャについて実測できたが、これを`target_ir`のスタックフレーム設計へ接続する作業は未着手。
+- unsafe/生ポインタ(5.5.4)の検証は、既存の`Ownership`分類の限界を明確にしただけであり、生ポインタを安全に扱うための新しい分類軸の設計は行っていない。
+- 4つの検証は全て独立した`src/bin/*.rs`ファイルであり、相互の統合(例: 動的ディスパッチ+複数借用が同時に絡む関数)は未検証。
+
 ## 6. まだ解けていないこと
 
+- vtableエントリ(節5.5.1)・Poloniusファクト(節5.5.2)・レイアウト情報(節5.5.3)は、いずれも実データとして取得できたが、`target_ir`のx86_64コード生成パイプラインへの接続は一切行っていない。動的ディスパッチ・複数借用・複合型レイアウトを実際に扱うtarget固有中間表現の設計は、本セッションでは着手していない。
 - **(節5.4.2で部分的に解消)** 節5.3で実証した`rustc_driver`ベースの型・借用チェック済みMIR取得を、`target_ir`のコード生成へ接続する作業は、`&mut i32`/`&i32`という最小の`*p + *p`パターン(`lower_double_load_to_code_body`)に限っては実装済み。ただし`lower_target_ir_to_code_body`(分岐を含む本来のCFG lowering関数)自体は依然として`Ownership`を消費していない。両者の統合(分岐+所有権を同時に考慮したlowering)は未着手。
 - `experiments/rustc-driver-poc/`はnightly専用(`rustc-private` feature)であり、`unified-symbol-graph`クレート自体のstableツールチェーンでのビルドとは両立しない。現状は「nightly専用クレートがstable専用クレートへpath依存する」という一方向の依存で回避しているが(節5.4.2)、これはビルド設定が2つのツールチェーンにまたがるという複雑さを本質的には解消していない。本格的な統合には、`unified-symbol-graph`自体をnightly専用にするか、この依存構造を恒久的な設計として採用するかの判断が未決定。
 - 節5.2.3で実測した通り、`lower_target_ir_to_code_body`は最適化パスを一切持たず、LLVMが行う分岐除去等の最適化(この実験では約2.7〜3.0倍の実行時性能差の原因)を代替できていない。本設計がLLVM IRを削除した後も「意味論を確定させる境界」(前回研究節7)の先に、何らかの最適化層を独自に持つ必要があるのか、あるいは実行時性能を犠牲にしてでも中間成果物の軽量さ(節5.2.2)を優先するのかは、未決定の設計判断である。
