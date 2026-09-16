@@ -235,4 +235,51 @@ fn main() {
         "ratio of medians (target_ir / llvm): {:.4}x",
         target_ir_median / llvm_median
     );
+
+    // A/A control: an independent reviewer of this experiment pointed
+    // out that a ratio "near 1.0x" is meaningless without first
+    // measuring this harness's own noise floor -- two byte-identical
+    // functions, timed through the exact same measurement loop, should
+    // report a ratio of 1.0x if the harness can resolve anything
+    // smaller than its own measurement noise. Re-uses `target_ir_fn`
+    // as both "sides" (same underlying mmap'd bytes, called through
+    // the same function-pointer mechanism) rather than compiling a
+    // second identical function, since the goal is to measure this
+    // specific harness's noise, not a second codegen path's.
+    eprintln!(
+        "[energy_comparison_controlled] running A/A control (same code on both sides) to \
+         measure this harness's own noise floor..."
+    );
+    let mut aa_samples_a = Vec::with_capacity(trials);
+    let mut aa_samples_b = Vec::with_capacity(trials);
+    for _ in 0..trials {
+        aa_samples_a.push(time_trial(target_ir_fn, iters_per_trial).as_secs_f64());
+        aa_samples_b.push(time_trial(target_ir_fn, iters_per_trial).as_secs_f64());
+    }
+    summarize("A/A control, side A (target_ir_fn)", aa_samples_a.clone());
+    summarize("A/A control, side B (target_ir_fn)", aa_samples_b.clone());
+    let aa_a_sorted = {
+        let mut s = aa_samples_a;
+        s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        s
+    };
+    let aa_b_sorted = {
+        let mut s = aa_samples_b;
+        s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        s
+    };
+    let aa_ratio = median(&aa_a_sorted) / median(&aa_b_sorted);
+    println!("A/A control ratio of medians (should be ~1.0x if harness resolves real signal): {aa_ratio:.4}x");
+    let real_ratio = target_ir_median / llvm_median;
+    let deviation_from_one = (real_ratio - 1.0).abs();
+    let aa_deviation_from_one = (aa_ratio - 1.0).abs();
+    if aa_deviation_from_one >= deviation_from_one {
+        eprintln!(
+            "[energy_comparison_controlled] WARNING: the A/A control's own deviation from 1.0x \
+             ({aa_deviation_from_one:.4}) is >= the target_ir-vs-llvm ratio's deviation from 1.0x \
+             ({deviation_from_one:.4}). This harness cannot distinguish the measured ratio from \
+             pure noise -- do NOT report the target_ir/llvm ratio above as evidence of equivalent \
+             performance without also reporting this A/A result alongside it."
+        );
+    }
 }
