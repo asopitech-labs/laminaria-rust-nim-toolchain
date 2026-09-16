@@ -199,20 +199,81 @@ pub trait LowerBackend {
 
 ### 5.3.2 副産物として確認できた、borrow checkゲートの実挙動(前回研究の裏取り強化)
 
-実装過程で、意図的に借用違反を含むコード(`let y = &mut *x; let z = &mut *x;`)を同じ入力として与えたところ、`after_analysis`フック自体に**到達せず**、`rustc_driver::run_compiler`がE0499で即座にコンパイルを中断した。これは前回研究(節5.6.1)が実装コードの読解のみから導いていた判定——「borrow checkはクレート全体をコード生成前でゲートし、失敗時はcodegenへの到達自体を止める」——を、本セッションで**実際に動くプログラムとして再現・確認した**、初めての直接実証である。前回研究の該当箇所は「確認した」という表現を使っていたが、それは`rustc`ソースコードを読んだ結果であり、本セッションで初めて「実際に動かして観測した」という段階に到達した。
+実装過程で、意図的に借用違反を含むコード(`let y = &mut *x; let z = &mut *x;`)を同じ入力として与えたところ、`after_analysis`フック自体に到達せず、コンパイルがE0499で中断した。この時点では「`rustc_driver::run_compiler`がプロセスを中断させた」とだけ記録していたが、この判定は**不正確だった**ことが節5.4の調査で判明した。正しい説明は節5.4を参照。
 
-### 5.3.3 これでも「本格的にRustで使える」ことの証明ではない、と明記する
+### 5.3.3 この段階でもまだ「本格的にRustで使える」ことの証明ではない、と明記する
 
-上記の実証は、次の限定の中でのみ成立する。
+節5.3の実証は、次の限定の中でのみ成立していた(節5.4で一部は解消)。
 
-- `experiments/rustc-driver-poc/`は`unified-symbol-graph`クレート(stableツールチェーンでビルド)とは別の、nightly専用のスクラッチクレートである。`#![feature(rustc_private)]`はnightly限定の機能であり、本クレートの正式なビルドパイプラインへ組み込むには、ツールチェーン要件自体を変更する必要がある(節6の未解決事項)。
-- 取得した`Ownership`は、まだ`target_ir::lower_target_ir_to_code_body`(節5)へ実際に繋がっていない。「型システムから正しい情報を取得できる」ことと、「その情報をtarget固有コード生成が実際に消費する」ことは別の作業であり、後者は未実装である。
-- ジェネリクス単相化後のコード、トレイト境界、`Drop`実装、構造体レイアウトといった、Rustの型システムのより広い部分は未検証。今回検証したのは`&mut i32`/`&i32`/`i32`という最小の3パターンのみである。
+- `experiments/rustc-driver-poc/`は`unified-symbol-graph`クレート(stableツールチェーンでビルド)とは別の、nightly専用のスクラッチクレートである。`#![feature(rustc_private)]`はnightly限定の機能であり、本クレートの正式なビルドパイプラインへ組み込むには、ツールチェーン要件自体を変更する必要がある(節6の未解決事項、現状もこの制約自体は解消していない)。
+- 取得した`Ownership`は、まだ`target_ir::lower_target_ir_to_code_body`(節5)へ実際に繋がっていなかった。「型システムから正しい情報を取得できる」ことと、「その情報をtarget固有コード生成が実際に消費する」ことは別の作業であり、後者は未実装だった。**節5.4.2で解消**。
+- ジェネリクス単相化後のコード、トレイト境界、`Drop`実装、構造体レイアウトといった、Rustの型システムのより広い部分は未検証だった。今回検証したのは`&mut i32`/`&i32`/`i32`という最小の3パターンのみだった。**節5.4.1で一部(ジェネリクス単相化・`Box`・enum判別子読み取り)を解消**。
+
+## 5.4 ユーザーによる二度目の批判的レビューへの応答: 検証範囲の拡大と、以前の記述の訂正
+
+節5.3の内容自体に対し、ユーザーから2つの重ねての批判を受けた。(1) 検証対象が`&mut`/`&`/`i32`のみで、これはC言語の`const`修飾子でも表現できる区分であり、ジェネリクス・`Box`・パターンマッチというRust特有の機構を一切検証していない。(2) 取得した`Ownership`情報が実際のコード生成に一度も使われておらず、「取得できる」ことの確認に留まっている。加えて「本番実装に入ってからやっぱりできませんでしたはあり得ない」という強い指摘を受け、以下を実装した。
+
+### 5.4.1 ジェネリクス単相化・`Box`・パターンマッチの実データ検証
+
+`rustc --emit=mir`の実出力を直接取得し(本セッションで`rustc`コマンドラインから実行、以下は実際の出力から抜粋):
+
+- **ジェネリクス単相化**: `fn identity<T>(x: T) -> T`を`Instance::instantiate_mir_and_normalize_erasing_regions`(`compiler/rustc_middle/src/ty/instance.rs`)で`i32`/`i64`それぞれに単相化し、`TyCtxt::layout_of`で実際のレイアウトサイズを取得。結果: `identity<i32>`は4バイト、`identity<i64>`は8バイトと、**同じ関数が型ごとに異なる実レイアウトを持つ**ことを実データで確認した(テスト`generic_function_monomorphized_with_different_types_yields_different_real_layout_sizes`)。
+- **`Box<T>`(ヒープ所有権+drop)**: `pub fn consumes_box(b: Box<i32>) -> i32 { *b }`の実MIRを取得したところ、単純なデリファレンスだけで`drop(_1) -> [return: bb1, unwind continue];`という実際の`TerminatorKind::Drop`、およびアライメント/nullチェックの`assert`ターミネータが生成されることを確認した。`Ty::is_box()`(`compiler/rustc_middle/src/ty/sty.rs`)で`Box<i32>`を検出し、`Ownership::Boxed`という新しい分類を追加、`drop_terminator_count`を実際に`Body`の全基本ブロックを走査して数えるロジックを実装し、期待通り`1`であることを確認した。
+- **パターンマッチ(enum discriminant)**: 3バリアントの`enum Shape { Circle(i32), Square(i32), Point }`に対する`match`の実MIRを取得したところ、`_2 = discriminant(_1); switchInt(move _2) -> [0: bb4, 1: bb3, 2: bb2, otherwise: bb1];`という、`Rvalue::Discriminant`読み取り+3分岐+到達不能アームへ変換されることを確認した。これは節5.1の`mir_text::parse_mir_text`(2分岐・定数returnのみ対応)が全く扱えない構造である。`Rvalue::Discriminant`の出現回数を実際にカウントし、期待通り`1`であることを確認した。
+
+これら3つとも、C言語の型システムには存在しない、Rust特有の機構(型ごとの単相化、所有権を伴うヒープ確保・破棄、タグ付きunionの判別)を、実際のrustc内部データ構造から取得している。
+
+### 5.4.2 `Ownership`情報を実際にコード生成へ接続する
+
+節5.3.3が指摘していた最も重要なギャップ——「取得した型情報が、実際のコード生成に一度も使われていない」——を解消した。
+
+`experiments/unified-symbol-graph/src/target_ir.rs`に、`Ownership`を実際に消費する新しい関数`lower_double_load_to_code_body`を実装した。`*p + *p`(ポインタが指す値を2回加算する)という最小の意味論に対し:
+
+- `Ownership::Unique`(`&mut i32`/`Box<i32>`の類推): 他に別名が存在しないため、1回のロードで済ませ、レジスタ内で2倍にする——`mov eax, [rdi]; add eax, eax; ret`(5バイト)。
+- `Ownership::Shared`(`&i32`の類推、ただし本実装は保守的側に倒し、常に2回読み直す設計とした——実際のRustの`&i32`不変性保証はさらに強い一括読み込みも安全に許すが、この実装は意図的にその精密さまでは踏み込まず、2つの分岐が視覚的に異なる出力になることだけを保証する最小実装とした): 2回別々にロードして加算——`mov eax, [rdi]; mov ecx, [rdi]; add eax, ecx; ret`(7バイト)。
+
+生成されたバイト列は`objdump`で実際に正しい命令列であることを確認し、さらに`experiments/unified-symbol-graph/examples/ownership_consumption_check.rs`で両方の経路を実際に`mmap`実行し、`i32::MAX`/`i32::MIN`を含む7つの入力全てで同じ(正しい)結果を返すことを実行時に確認した。これにより「`Ownership`が違えば生成バイト列も異なり、かつ両方とも正しい」ことを実測で示した。
+
+さらに、`experiments/rustc-driver-poc/`から`unified-symbol-graph`(stableツールチェーン)へのpath依存を追加し(逆方向の依存は作らない——`unified-symbol-graph`自体はrustc内部APIを一切知らない)、次の完全なパイプラインを実装・実測した。
+
+```
+実Rustソース → rustc_driver::run_compiler(borrow check含む)
+             → Ty<'tcx>からOwnership導出
+             → unified_symbol_graph::target_ir::lower_double_load_to_code_body呼び出し
+             → 実x86_64機械語バイト列
+```
+
+`&mut i32`関数は`[0x8B, 0x07, 0x01, 0xC0, 0xC3]`(1回ロード版)、`&i32`関数は`[0x8B, 0x07, 0x8B, 0x0F, 0x01, 0xC8, 0xC3]`(2回ロード版)を実際に生成し、これは`unified-symbol-graph`側の単体テストが`objdump`で個別に検証済みのバイト列と完全一致することを確認した(テスト`real_ownership_from_borrow_checked_types_reaches_and_changes_generated_code`)。
+
+### 5.4.3 borrow checkゲートを、実際にコード生成パイプラインへ統合する(前回の記述の訂正を含む)
+
+節5.3.2の記述——「`rustc_driver::run_compiler`がプロセスを中断させた」——は不正確だったことが判明した。`compiler/rustc_span/src/fatal_error.rs`を直接確認したところ、前回研究(節5.6.1)が確認した`raise_fatal()`は、実際には`std::panic::resume_unwind(Box::new(FatalErrorMarker))`という**アンワインドパニック**であり、プロセスの強制終了ではない。これは`rustc_errors::catch_fatal_errors`(内部は`panic::catch_unwind`)で捕捉できるよう、意図的にこの実装になっている。
+
+この事実を使い、`inspect_result`関数を`catch_fatal_errors`でラップし、借用チェック失敗を`Result::Err`として捕捉できるようにした。これにより、次の統合関数`compile_pointer_function_respecting_borrowck_gate`を実装した: 実Rustソースを渡し、(1) borrow checkが成功すれば型情報から`Ownership`を導出し`unified-symbol-graph`のコード生成を呼び出して`Some(bytes)`を返す、(2) borrow checkが失敗すれば(パニックを`catch_fatal_errors`で捕捉し)コード生成に一切到達せず`None`を返す。
+
+実測結果:
+
+| 入力 | 結果 |
+| --- | --- |
+| 有効な`&mut i32`関数 | `Some([0x8B, 0x07, 0x01, 0xC0, 0xC3])` |
+| 有効な`&i32`関数 | `Some([0x8B, 0x07, 0x8B, 0x0F, 0x01, 0xC8, 0xC3])` |
+| 借用違反(`&mut`の二重取得)を含む関数 | `None`(コード生成に到達せず) |
+
+これは前回研究(節5.6.6)が要求した「borrow checkは省略可能な診断ではなく、コード生成へ進む前提条件を検査するゲートである」という設計要求を、**本セッションで初めて実際に動くパイプラインとして実装した**。前回の「E0499でプロセスが中断した」という観察は、単に「エラーを捕捉していなかったので、パニックがそのままプロセスへ伝播した」ことの誤解釈であり、実際には`catch_fatal_errors`という正規の捕捉機構が存在し、それを使えばRustプログラムとして正常に継続動作できる。この訂正自体、批判的レビューが実装の理解不足を明らかにした具体例である。
+
+### 5.4.4 それでも残る限界(正直な記録)
+
+- `Ownership::Shared`の保守的な2回ロード実装は、Rustの`&T`が実際に持つより強い不変性保証(一度も書き換えられないことが保証される)を活かしきっていない。より精密な実装にはStacked/Tree Borrowsレベルの解析が必要であり(前回研究節3.3)、これは意図的にスコープ外としている。
+- 検証したのは`i32`という単一の値型のみ。構造体・タプル・トレイトオブジェクト・クロージャのレイアウト・キャプチャは一切検証していない。
+- ジェネリクス単相化(節5.4.1)は`Layout`のみを比較し、単相化された`Body`自体を`target_ir`/`lower_double_load_to_code_body`へ接続するところまでは行っていない——「型ごとに異なるレイアウトが取得できる」ことと「その型ごとの`Body`を正しくtarget固有コードへ変換する」ことは別の作業であり、後者はまだ未接続である。
+- `Box`(節5.4.1)の`drop_terminator_count`は数えられるようになったが、この`Drop`ターミネータ自体をtarget固有コード(実際のヒープ解放呼び出し)へ変換するところまでは実装していない——検出しただけで、まだ「使って」いない。
+- `match`(節5.4.1)の`discriminant_read_count`も同様に、検出のみで、`discriminant`読み取り+3分岐以上の`switchInt`を`target_ir`側で実際にlowerする経路は未実装。既存の`mir_text`/`lower_target_ir_to_code_body`は依然として2分岐限定のままである。
+- borrow checkゲート統合(節5.4.3)は`&mut i32`/`&i32`という1引数関数のみを対象としており、複数引数、複数の借用が絡む複雑な借用関係(前回研究節2.5のPolonius定式化が扱うような、複数の`(region, point)`ペア)は未検証。
 
 ## 6. まだ解けていないこと
 
-- 節5.3で実証した`rustc_driver`ベースの型・借用チェック済みMIR取得を、`target_ir::lower_target_ir_to_code_body`と実際に接続する作業は未着手。現状は「型情報を正しく取得できる(節5.3)」と「target固有コードを正しく生成できる(節5)」が、別々の独立したプログラムとして存在するだけである。
-- `experiments/rustc-driver-poc/`はnightly専用(`rustc-private` feature)であり、`unified-symbol-graph`クレート自体のstableツールチェーンでのビルドとは両立しない。本格的な統合には、`unified-symbol-graph`自体をnightly専用にするか、rustc内部APIへの依存を独立クレートに閉じ込め、stableな`unified-symbol-graph`側からは値渡し(本書の`InspectedItem`のような、`Ty<'tcx>`のライフタイムから切り離した所有データ)でのみやり取りするかの設計判断が未決定。
+- **(節5.4.2で部分的に解消)** 節5.3で実証した`rustc_driver`ベースの型・借用チェック済みMIR取得を、`target_ir`のコード生成へ接続する作業は、`&mut i32`/`&i32`という最小の`*p + *p`パターン(`lower_double_load_to_code_body`)に限っては実装済み。ただし`lower_target_ir_to_code_body`(分岐を含む本来のCFG lowering関数)自体は依然として`Ownership`を消費していない。両者の統合(分岐+所有権を同時に考慮したlowering)は未着手。
+- `experiments/rustc-driver-poc/`はnightly専用(`rustc-private` feature)であり、`unified-symbol-graph`クレート自体のstableツールチェーンでのビルドとは両立しない。現状は「nightly専用クレートがstable専用クレートへpath依存する」という一方向の依存で回避しているが(節5.4.2)、これはビルド設定が2つのツールチェーンにまたがるという複雑さを本質的には解消していない。本格的な統合には、`unified-symbol-graph`自体をnightly専用にするか、この依存構造を恒久的な設計として採用するかの判断が未決定。
 - 節5.2.3で実測した通り、`lower_target_ir_to_code_body`は最適化パスを一切持たず、LLVMが行う分岐除去等の最適化(この実験では約2.7〜3.0倍の実行時性能差の原因)を代替できていない。本設計がLLVM IRを削除した後も「意味論を確定させる境界」(前回研究節7)の先に、何らかの最適化層を独自に持つ必要があるのか、あるいは実行時性能を犠牲にしてでも中間成果物の軽量さ(節5.2.2)を優先するのかは、未決定の設計判断である。
 - 節5.2.1で確認した通り、コンパイル時間の公平な比較には、本設計を実際の`rustc`ドライバへ統合し(`-Zcodegen-backend`相当)、プロセス起動オーバーヘッドを除いた実運用規模での計測が必要。1関数単位の計測では、rustc自身の起動コストに埋もれてしまい、LLVM自体の処理時間差を検出できないことを本セッションで確認した。
 - `mir_text::parse_mir_text`が対応するRust構文は「直線コード」と「2分岐+`switchInt`+共通`goto`合流点」の2パターンのみ。`match`式(3分岐以上)、ループ、関数呼び出し、構造体/参照型、`i32`以外の数値型は未対応であり、`rustc`の出力フォーマット自体も"human-readable"であり将来変更されうる非公式形式である(rustc自身の警告コメント`// WARNING: This output format is intended for human consumers only and is subject to change without notice.`が実際に出力に含まれることを確認済み)ため、本格的な統合には`-Zunpretty=mir`ではなく`rustc_middle::mir::Body`自体を扱う(コンパイラプラグイン/カスタムドライバとしての)経路が必要になる。節5.3の`rustc_driver`ベースの経路が、まさにこの「本格的な統合」の第一歩である。

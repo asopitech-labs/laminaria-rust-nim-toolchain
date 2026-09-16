@@ -5,3 +5,14 @@ name = "rustc-driver-poc"
 version = "0.0.0"
 edition = "2021"
 publish = false
+
+[dependencies]
+# Path dependency, one direction only: this nightly-only scratch crate
+# depends on the stable-toolchain `unified-symbol-graph` crate's public
+# `target_ir` lowering functions, never the reverse -- `unified-symbol-graph`
+# itself stays buildable on stable and has no knowledge of `rustc_private`.
+# This lets the borrow-check gate this crate observes via `rustc_driver`
+# actually decide whether `unified-symbol-graph`'s codegen path runs at
+# all, per the design doc's section 5.6.6 requirement (a gate, not a
+# skippable diagnostic).
+unified-symbol-graph = { path = "../unified-symbol-graph" }
