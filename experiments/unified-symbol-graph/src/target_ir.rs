@@ -60,10 +60,25 @@
 /// doc as the mechanism responsible for real `noalias` miscompilations).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ownership {
-    /// No other live value may alias this one -- the analogue of `&mut T`/`Box<T>`.
+    /// No other live value may alias this one -- the analogue of `&mut T`.
     Unique,
-    /// Aliasing is permitted -- the analogue of `&T`.
+    /// Aliasing is permitted, but no live reference can observe a change
+    /// (Rust's own `&T` immutability guarantee) -- the analogue of `&T`.
     Shared,
+    /// A heap-owning handle -- the analogue of `Box<T>`. Added alongside
+    /// `experiments/rustc-driver-poc`'s own `Ownership::Boxed` (derived
+    /// there from the real `Ty::is_box()` query) so this crate's
+    /// classification matches what that crate's rustc-driven type
+    /// inspection actually distinguishes, rather than silently collapsing
+    /// `Box<T>` into `Unique` at this boundary.
+    Boxed,
+    /// No compiler-checked aliasing guarantee exists at all -- the
+    /// analogue of an untyped raw pointer whose provenance the type
+    /// system makes no promise about (e.g. one obtained via `as` from an
+    /// arbitrary integer, or `rustc-driver-poc`'s own `Ownership::NotAReference`
+    /// classification for a `*const`/`*mut T` parameter). Lowering must
+    /// never license a caching optimization for this variant.
+    NotAReference,
 }
 
 /// This proof of concept has exactly one representable type (a 32-bit
@@ -301,6 +316,24 @@ fn lower_return_only_block(bb: &BasicBlock) -> Result<Vec<u8>, LowerError> {
 /// demonstration, not because that is the tightest correct rule -- a
 /// real implementation would need Stacked/Tree Borrows-level precision,
 /// explicitly out of scope per the design doc's section 6).
+///
+/// **Third-round critical review, decisive correction**: an independent
+/// fresh-context reviewer (no session history, judging only this file and
+/// the design doc) confirmed the finding this doc comment already
+/// admitted above -- treating `Shared` conservatively here is not a real
+/// Rust aliasing rule, it is an artifact manufactured only to make the
+/// two branches visibly differ. The reviewer's report states this
+/// plainly: "実際のRust最適化としての正当性を持たない、デモのためだけに
+/// 作られた人工的な差" (this has no real Rust-optimization justification;
+/// it is an artificial difference manufactured only for the demo). This
+/// function is kept, unmodified, specifically as evidence of that
+/// critique -- see `lower_load_or_reload_to_code_body` below for the
+/// corrected contrast this crate now also carries, which does not have
+/// this defect: it contrasts *provably safe to cache* (`Unique`/pointer
+/// unaliased) against *genuinely unknown provenance* (`NotAReference`,
+/// modeling an untyped/unsafe raw pointer with no compiler-checked
+/// aliasing guarantee at all), never a manufactured pessimization of a
+/// case that is in fact just as safe to cache.
 pub fn lower_double_load_to_code_body(ownership: Ownership) -> Vec<u8> {
     match ownership {
         Ownership::Unique => vec![
@@ -314,6 +347,105 @@ pub fn lower_double_load_to_code_body(ownership: Ownership) -> Vec<u8> {
             0x01, 0xC8, // add eax, ecx
             0xC3, // ret
         ],
+        // `Ownership` grew `Boxed`/`NotAReference` variants for
+        // `lower_load_or_reload_to_code_body` below (the corrected
+        // contrast), after this function was already fixed as documented
+        // evidence of the reviewer's critique -- this function's own
+        // two-variant scope was never meant to grow with the enum, so
+        // these two are refused rather than silently given an arbitrary
+        // answer.
+        Ownership::Boxed | Ownership::NotAReference => unimplemented!(
+            "lower_double_load_to_code_body is fixed as the reviewer-critiqued two-variant \
+             example (see its own doc comment) -- pass Ownership::Unique or Ownership::Shared, \
+             or use lower_load_or_reload_to_code_body for the corrected four-variant contrast"
+        ),
+    }
+}
+
+/// Issue #68 third-round critical review, the corrected contrast: rather
+/// than an artificial `Unique` vs. `Shared` split (the previous function's
+/// own admitted defect -- see its doc comment above), this function
+/// contrasts a genuinely different pair of real-world cases and, more
+/// importantly, **integrates ownership-aware lowering with the branch
+/// lowering `lower_target_ir_to_code_body` performs** -- the reviewer's
+/// top-priority recommendation ("`lower_target_ir_to_code_body`（CFG分岐)
+/// と`Ownership`を統合する", i.e. branch lowering and ownership-aware
+/// codegen had remained two disconnected functions until now).
+///
+/// Models `fn f(p: *const i32) -> i32 { if *p != 0 { *p } else { -*p } }`
+/// -- a real Rust shape (a signum-like function reading through a
+/// pointer inside a branch, then reading it again on both arms) where
+/// the *same* memory location is read three times textually (the
+/// condition check, and once more on each arm) but only needs to be read
+/// from memory **once** if the compiler can prove nothing else can have
+/// written to `*p` between the reads:
+///
+/// - `Ownership::Unique` (the checked case: a `&i32`/`&mut i32` with no
+///   other live alias, or `Ownership::Boxed`, confirmed via real
+///   `experiments/rustc-driver-poc` `Ty::is_box()`/`TyKind::Ref` data):
+///   the compiler-verified absence of aliasing writes licenses caching
+///   the loaded value in a register across the branch. Emits exactly one
+///   `mov` (`8b 07`), then `test`+two possible `neg`s operating on the
+///   cached register, never re-touching memory --
+///   `mov eax,[rdi]; test eax,eax; je .neg; ret; .neg: neg eax; ret`.
+/// - `NotAReference` (this crate's stand-in for an untyped raw pointer
+///   with no compiler-checked provenance at all -- e.g. a `*const i32`
+///   obtained via `as` from an arbitrary integer, which Rust's type
+///   system makes zero aliasing promises about): nothing licenses
+///   caching, so this path re-issues the memory load on **every** access
+///   -- three separate `mov [rdi]` instructions, one per textual read,
+///   matching what a correctness-preserving compiler must do without the
+///   ownership information the `Unique` path had.
+///
+/// `Shared` is deliberately not given a third, different branch here --
+/// unlike the previous function's now-documented defect, this function
+/// does not manufacture an artificial distinction where none exists: a
+/// real `&i32` genuinely licenses the same single-load caching a
+/// `Unique`/`&mut i32` does (Rust's immutability guarantee for `&T` means
+/// no live reference, shared or unique, can observe the value changing
+/// between these reads), so `Shared` is treated identically to `Unique`
+/// below -- the *sound* answer, not a manufactured one.
+pub fn lower_load_or_reload_to_code_body(ownership: Ownership) -> Vec<u8> {
+    match ownership {
+        Ownership::Unique | Ownership::Shared | Ownership::Boxed => {
+            // Layout: mov eax,[rdi] (2) ; test eax,eax (2) ; je +1 (2) ; ret (1) ; neg eax (2) ; ret (1)
+            //
+            // `je`'s rel8 is measured from the end of the `je` instruction
+            // itself (offset 6): the single-byte `ret` at offset 6 must be
+            // skipped to land on `neg eax` at offset 7, so rel8 = 7 - 6 = 1
+            // -- confirmed directly with objdump after an earlier `+2`
+            // draft of this function was caught landing one byte into
+            // `neg`'s own opcode (`f7`) instead of at its start, which
+            // objdump's own disassembly immediately exposed as garbage.
+            vec![
+                0x8B, 0x07, // mov eax, [rdi]
+                0x85, 0xC0, // test eax, eax
+                0x74, 0x01, // je +1 (skip the next 1 byte: `ret`)
+                0xC3, // ret (taken when *p != 0: return the cached value as-is)
+                0xF7, 0xD8, // neg eax
+                0xC3, // ret (taken when *p == 0: return -*p, still from the cached register)
+            ]
+        }
+        Ownership::NotAReference => {
+            // No aliasing guarantee at all -- reload from [rdi] on every
+            // textual access, since nothing licenses trusting a
+            // previously-loaded register still reflects *p's live value.
+            //
+            // `je`'s rel8 is measured from the end of the `je` instruction
+            // (offset 6): the then-arm's `mov eax,[rdi]` (2 bytes) + `ret`
+            // (1 byte) = 3 bytes must be skipped to land on the else-arm's
+            // own `mov eax,[rdi]` at offset 9, so rel8 = 9 - 6 = 3.
+            vec![
+                0x8B, 0x07, // mov eax, [rdi]   (the condition check's own read)
+                0x85, 0xC0, // test eax, eax
+                0x74, 0x03, // je +3 (skip the then-arm's reload+ret)
+                0x8B, 0x07, // mov eax, [rdi]   (reload: the *p != 0 arm's own read)
+                0xC3, // ret
+                0x8B, 0x07, // mov eax, [rdi]   (reload: the *p == 0 arm's own read)
+                0xF7, 0xD8, // neg eax
+                0xC3, // ret
+            ]
+        }
     }
 }
 
@@ -498,6 +630,54 @@ mod tests {
             unique_code.len() < shared_code.len(),
             "the Unique-ownership path must produce strictly fewer bytes, proving the tag was \
              actually consulted rather than carried inertly"
+        );
+    }
+
+    /// Issue #68 third-round critical review, the corrected contrast:
+    /// `Unique`/`Shared`/`Boxed` (all provably non-aliased across these
+    /// reads, per Rust's own type system) must all take the *same*,
+    /// shorter single-load-plus-cache path, while `NotAReference` (no
+    /// compiler-checked aliasing guarantee at all) must reload from
+    /// memory on every textual access and therefore produce strictly
+    /// more bytes -- proving the tag drives a genuinely sound
+    /// distinction (checked-aliasing vs. no-guarantee), not an arbitrary
+    /// one manufactured only to make two branches look different (the
+    /// defect `lower_double_load_to_code_body`'s own doc comment now
+    /// documents about itself).
+    #[test]
+    fn load_or_reload_treats_all_checked_ownership_variants_identically_and_only_reloads_for_untyped_pointers(
+    ) {
+        let unique_code = lower_load_or_reload_to_code_body(Ownership::Unique);
+        let shared_code = lower_load_or_reload_to_code_body(Ownership::Shared);
+        let boxed_code = lower_load_or_reload_to_code_body(Ownership::Boxed);
+        let raw_code = lower_load_or_reload_to_code_body(Ownership::NotAReference);
+
+        let expected_cached = vec![0x8B, 0x07, 0x85, 0xC0, 0x74, 0x01, 0xC3, 0xF7, 0xD8, 0xC3];
+        assert_eq!(
+            unique_code, expected_cached,
+            "Unique must cache the single load across both branch arms"
+        );
+        assert_eq!(
+            shared_code, expected_cached,
+            "Shared must be treated identically to Unique -- &T's immutability guarantee \
+             licenses the same caching, not a manufactured pessimization"
+        );
+        assert_eq!(
+            boxed_code, expected_cached,
+            "Boxed (a unique heap-owning handle) must also be treated identically"
+        );
+
+        let expected_reload = vec![
+            0x8B, 0x07, 0x85, 0xC0, 0x74, 0x03, 0x8B, 0x07, 0xC3, 0x8B, 0x07, 0xF7, 0xD8, 0xC3,
+        ];
+        assert_eq!(
+            raw_code, expected_reload,
+            "NotAReference (no compiler-checked aliasing guarantee) must reload from memory \
+             on every textual access"
+        );
+        assert!(
+            raw_code.len() > unique_code.len(),
+            "the no-guarantee path must be strictly longer, since it cannot cache the load"
         );
     }
 }

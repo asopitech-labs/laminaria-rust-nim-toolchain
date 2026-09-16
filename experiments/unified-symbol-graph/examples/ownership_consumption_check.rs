@@ -10,7 +10,9 @@
 //!
 //! Run: `cargo run --release --example ownership_consumption_check`
 
-use unified_symbol_graph::target_ir::{lower_double_load_to_code_body, Ownership};
+use unified_symbol_graph::target_ir::{
+    lower_double_load_to_code_body, lower_load_or_reload_to_code_body, Ownership,
+};
 
 const PROT_READ: i32 = 0x1;
 const PROT_WRITE: i32 = 0x2;
@@ -91,5 +93,58 @@ fn main() {
          doubled) and the Shared-path conservative code (two loads, summed) compute the identical \
          result for this test's fixed-value inputs -- Ownership changed the emitted instructions \
          (confirmed via objdump separately) without changing the observable result here"
+    );
+
+    // Issue #68 third-round critical review: verifies the corrected
+    // contrast (lower_load_or_reload_to_code_body) is not just
+    // differently-sized bytes but genuinely correct machine code for
+    // `if *p != 0 { *p } else { -*p }`, across all four Ownership
+    // variants and both branch directions -- the earlier
+    // lower_double_load_to_code_body check above never exercised a
+    // branch inside the generated code at all, so this closes that gap
+    // too (the reviewer's #1 priority: integrate branch lowering with
+    // ownership-aware codegen).
+    eprintln!();
+    eprintln!("[ownership_consumption_check] verifying lower_load_or_reload_to_code_body...");
+    let mut reload_failures = 0;
+    for ownership in [
+        Ownership::Unique,
+        Ownership::Shared,
+        Ownership::Boxed,
+        Ownership::NotAReference,
+    ] {
+        let code = lower_load_or_reload_to_code_body(ownership);
+        let f = unsafe { make_callable(&code) };
+        for input in [5, -5, 0, i32::MAX, i32::MIN] {
+            let expected = if input != 0 {
+                input
+            } else {
+                input.wrapping_neg()
+            };
+            let actual = f(&input);
+            let ok = actual == expected;
+            println!(
+                "{ownership:?} input={input}: actual={actual} expected={expected} {}",
+                if ok { "OK" } else { "MISMATCH" }
+            );
+            if !ok {
+                reload_failures += 1;
+            }
+        }
+    }
+
+    if reload_failures > 0 {
+        eprintln!(
+            "[ownership_consumption_check] {reload_failures} MISMATCH(ES) in \
+             lower_load_or_reload_to_code_body -- the branch+ownership integration was NOT \
+             correctness-preserving for at least one (ownership, input) pair"
+        );
+        std::process::exit(1);
+    }
+    eprintln!(
+        "[ownership_consumption_check] all (ownership, input) pairs agree for \
+         lower_load_or_reload_to_code_body across both branch directions, including i32::MIN \
+         (where negation wraps) -- confirms the corrected, branch-integrated contrast is not \
+         only differently-sized bytes but actually correct execution"
     );
 }
