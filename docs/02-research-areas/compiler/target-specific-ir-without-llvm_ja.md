@@ -339,6 +339,50 @@ pub trait LowerBackend {
 - 4機能検証(dyn Trait/lifetime/layout/unsafe)の相互統合(レビュアー提案3: 複合ケースの実接続)はまだ着手していない。
 - `lower_load_or_reload_to_code_body`自体も、実際のStacked/Tree Borrowsレベルの精密さ(前回研究節3.3)には遠く及ばない、`i32`単一型・1ポインタ引数のみの最小実装である。
 
+## 5.7 5度目のユーザー指摘への応答: 文字列・配列・HashMap操作、および`Call`ターミネータ
+
+ユーザーから「文字列、配列、ハッシュマップの操作全般についての検証は?」という指摘を受けた。境界チェック(bounds check)を`target_ir`へ実接続する方針で対応した。加えて、追加指示「これ等を含めた『リテラル』の検証もやって」を受け、リテラルのMIR表現も併せて確認した。
+
+### 5.7.1 スライス境界チェックの実データと`TargetIr`への接続
+
+`pub fn get_elem(s: &[i32], i: usize) -> i32 { s[i] }`の実MIRを取得した結果、`_3 = PtrMetadata(copy _1); _4 = Lt(copy _2, copy _3); assert(move _4, "index out of bounds...", ...) -> [success: bb1, unwind continue];`という構造を確認した。これは`compiler/rustc_middle/src/mir/syntax.rs`で定義される`TerminatorKind::Assert { cond, expected, msg, target, unwind }`であり、既存の`target_ir::Terminator`(`Return`/`Branch`のみ)には存在しない、新しいターミネータ種別である。
+
+`Vec<i32>`の`v[i]`は`<Vec<i32> as Index<usize>>::index(...)`という**トレイト呼び出し**へ脱糖され、境界チェック自体は標準ライブラリの`index`関数内部に隠れて呼び出し元のMIRには現れないことも確認した。境界チェックを直接MIRレベルで観測するには、生スライス経由(`&[i32]`)が必要である。
+
+`experiments/unified-symbol-graph/src/target_ir.rs`に`lower_bounds_checked_slice_index_to_code_body`を実装した。これは実際に`rustc -O --emit=asm`が`pub extern "C" fn get_elem(ptr: *const i32, len: usize, i: usize) -> i32`に対して生成する呼び出し規約(`ptr`=`rdi`、`len`=`rsi`、`i`=`rdx`)と`cmp %rsi, %rdx; jae <fail>; mov (%rdi,%rdx,4),%eax; ret`という命令列を、実際に`rustc -O --emit=asm`の出力から確認した上で再現した。ただし本実装は、実際のパニック/unwind機構(前回研究のスコープ外)を実装する代わりに、範囲外アクセス時に固定センチネル値(`i32::MIN`)を返すという意図的な簡略化を行っている——これは「範囲外アクセスからの正しい回復」ではなく「範囲外アクセスの検出」のみを主張する、と明記した。
+
+`objdump`によるバイト単位検証、および`examples/bounds_check_check.rs`による`mmap`実行検証(5要素配列に対し、範囲内0〜4は正しい要素値、範囲外5・6・105は全てセンチネル値、メモリ範囲外への読み取りが実際に発生しないことを確認)を実施した。さらに`experiments/rustc-driver-poc`側にも`assert_terminator_count`という新しいカウンタを追加し、実際の`get_elem`関数が`TerminatorKind::Assert`をちょうど1個生成することを実データで確認した(`real_slice_index_lowers_to_a_real_assert_terminator`テスト)。
+
+### 5.7.2 文字列・スライスのfat pointer表現とリテラルの実データ
+
+`"hello"`という文字列リテラルの実MIRを取得した結果、`_0 = const "hello";`という一見単純な代入の裏に、`alloc1 (size: 5, align: 1) { 68 65 6c 6c 6f │ hello }`という**独立したメモリ内容(実バイト列)の宣言**が存在することを確認した。`&'static str`は`(ptr, len)`のfat pointerであり、リテラルの実体は別領域に確保され、変数はそこへのポインタ+長さを持つ。バイト文字列リテラル`b"bytes"`は`&[u8; 5]`(固定長配列)として確保された後、`PointerCoercion(Unsize, Implicit)`という明示的な型強制変換を経て`&[u8]`(可変長スライス)へ変換されることも確認した。数値リテラル(`42_i32`)・浮動小数点リテラル(`3.14f64`が実際には`3.1400000000000001f64`という丸め誤差を伴う内部表現になる)・真偽値・文字リテラルは、いずれも単純な`const`定数として`Operand::Const`相当の形に収まり、既存の`target_ir::Operand::Const`が既にこの構造に対応済みであることを確認した。配列リテラル`[1, 2, 3]`は`Aggregate` Rvalue(`_0 = [const 1_i32, const 2_i32, const 3_i32];`)として表現される。
+
+`.len()`が実際には計算ではなく、fat pointerの第2ワードの直接読み取りであることを、実際の`rustc -O --emit=asm`出力(`str_len`関数が`movq %rsi, %rax; retq`というゼロ命令本体にコンパイルされる)で確認し、`lower_str_or_slice_len_to_code_body`として実装した。空文字列を含む安全な先頭バイトアクセス(`if s.is_empty() { 0 } else { s[0] }`)も、実際の`rustc -O --emit=asm`出力(`testq %rsi,%rsi; je .empty; movzbl (%rdi),%eax; ret; .empty: xorl %eax,%eax; ret`)を再現する`lower_first_byte_or_zero_to_code_body`として実装した。`examples/string_slice_check.rs`で、`"hello"`・空文字列・`"a"`・複数語の文字列・日本語(`"文字列"`、UTF-8マルチバイト、9バイト)を含む実データで、両関数の実行結果を検証した。
+
+### 5.7.3 HashMapの決定的な発見: 新しいMIR構造を追加しない、`Call`ターミネータが本質
+
+`use std::collections::HashMap; pub fn get_or_default(m: &HashMap<i32, i32>, k: i32) -> i32 { match m.get(&k) { Some(v) => *v, None => -1 } }`の実MIRを取得した結果、**`HashMap::get`は単一の`TerminatorKind::Call`(`_3 = HashMap::<i32, i32>::get::<i32>(copy _1, copy _4) -> [return: bb1, unwind continue];`)へ脱糖され、その戻り値`Option<&i32>`に対する処理は、既に節5.5.1で検証済みの`discriminant`読み取り+2分岐`switchInt`という、enumの`match`と全く同じ構造であることが判明した**。ハッシュ計算・バケット探索・衝突解決といったHashMap特有の処理は、全て呼び出し先(標準ライブラリの`get`関数本体)の内部にあり、呼び出し元のMIRには一切現れない。
+
+この発見は、issue #68の「HashMapの検証」という問いに対する誠実な答えを与える: **HashMapのアクセス自体は、呼び出し元のMIRレベルでは何も新しい構造を要求しない**。真に新しい構造は、この呼び出し自体を実現する`TerminatorKind::Call`である。`compiler/rustc_middle/src/mir/syntax.rs`で確認した`Call { func, args, destination, target: Option<BasicBlock>, unwind, call_source, fn_span }`は、既存の`target_ir::Terminator`が扱っていない、実際のx86_64`call`命令に対応する構造である。
+
+`lower_call_and_increment_to_code_body`を実装し、issue #67で確立済みの`ElfX86_64PendingReloc`/`CodeBody`/`SharedSymbolGraph::apply_elf_x86_64_relocations`という既存の再配置機構を**そのまま再利用**して(新しい再配置の仕組みを発明せず)、実際に外部の別コンパイル済み関数を`call rel32`で呼び出し、戻り値に`+1`するコードを生成した。
+
+`examples/call_relocation_check.rs`で、`SharedSymbolGraph`に呼び出し元・トランポリン(実関数`triple`への`jmp`)の両方を宣言し、`assign_layout`+`apply_elf_x86_64_relocations`で実際にrelocationをパッチし、その結果を`mmap`で実行して、別コンパイルされた実関数を正しく呼び出せることを実証した。
+
+**この実装過程で発見・修正した2つの実際の問題**:
+
+1. **診断の誤り**: relocationパッチ後のバイト列が全てゼロのままに見え、当初「relocationパイプラインのバグ」と誤診断した。実際には、そのレイアウト(呼び出し元オフセット0、呼び出し先オフセット9)でPC相対変位を手計算すると、真の値が偶然`0`になる(`(9-4)-(0+1+4)=0`)ことが原因であり、「ゼロでないことを確認する」という検証方法自体が誤りだった。独立した計算式による再検証(`lib.rs`の既存テストと同じ規律)に置き換えて解消した。
+2. **実際のバグ**: `call rel32 = 0`は「次の命令へのフォールスルー」を意味するため、呼び出し元とトランポリンのオフセットが近すぎると、実際に呼び出しが発生せず(no-op)、それでも何らかの値(直前の呼び出しの残骸)を返してしまうという、**もっともらしく見えるが誤った実行結果**を生んでいた。2つのシンボルの間に十分な間隔を持つパディング用シンボルを追加することで解消した。
+
+いずれも「実際に動かして確認する」という規律がなければ発見できなかった問題であり、正直に記録する。
+
+### 5.7.4 この対応でも解消されていないこと(正直な記録)
+
+- `HashMap`自体の内部実装(ハッシュ関数、バケット、衝突解決)は一切検証していない——節5.7.3の発見が示す通り、これは呼び出し元のMIRには現れないため、検証するには標準ライブラリの`HashMap::get`関数自体のMIR/実装を追う必要があり、本セッションのスコープ外とした。
+- `lower_call_and_increment_to_code_body`は固定で1つの`i32`引数を取る外部関数呼び出しのみを扱う。複数引数、複数の戻り値型、可変長引数、トレイトオブジェクト経由の動的呼び出し(節5.5.1のvtable)は未接続のままである。
+- 文字列操作(`lower_str_or_slice_len_to_code_body`/`lower_first_byte_or_zero_to_code_body`)は`.len()`と安全な先頭バイトアクセスのみ。文字列比較、UTF-8境界検証、`String`の可変操作(push、resize、reallocation)は未検証。
+- 配列/`Vec`のリテラル(`Aggregate` Rvalue)自体を`target_ir`のコード生成で実際に構築する(スタック上に複数要素を書き込む)処理は未実装。
+
 ## 6. まだ解けていないこと
 
 - vtableエントリ(節5.5.1)・Poloniusファクト(節5.5.2)・レイアウト情報(節5.5.3)は、いずれも実データとして取得できたが、`target_ir`のx86_64コード生成パイプラインへの接続は一切行っていない。動的ディスパッチ・複数借用・複合型レイアウトを実際に扱うtarget固有中間表現の設計は、本セッションでは着手していない。

@@ -113,6 +113,16 @@ pub struct InspectedItem {
     /// `mir_text` module's own 2-arm boolean `switchInt` shape, which
     /// cannot represent this at all.
     pub discriminant_read_count: usize,
+    /// How many real `TerminatorKind::Assert` terminators this item's
+    /// real MIR body contains -- confirmed in this session against real
+    /// MIR for a slice index (session's own captured `sliceindex.mir`
+    /// from `pub fn get_elem(s: &[i32], i: usize) -> i32 { s[i] }`):
+    /// `_3 = PtrMetadata(copy _1); _4 = Lt(copy _2, copy _3);
+    /// assert(move _4, "index out of bounds...", ...)`. This is the real
+    /// MIR shape a bounds-checked array/slice/`Vec` index lowers to --
+    /// `unified_symbol_graph::target_ir::lower_bounds_checked_slice_index_to_code_body`
+    /// models the corresponding x86_64 codegen for this exact shape.
+    pub assert_terminator_count: usize,
 }
 
 struct Inspect {
@@ -163,9 +173,16 @@ impl Callbacks for Inspect {
             // counting logic.
             let mut drop_terminator_count = 0;
             let mut discriminant_read_count = 0;
+            let mut assert_terminator_count = 0;
             for bb in body.basic_blocks.iter() {
-                if let rustc_middle::mir::TerminatorKind::Drop { .. } = bb.terminator().kind {
-                    drop_terminator_count += 1;
+                match bb.terminator().kind {
+                    rustc_middle::mir::TerminatorKind::Drop { .. } => {
+                        drop_terminator_count += 1;
+                    }
+                    rustc_middle::mir::TerminatorKind::Assert { .. } => {
+                        assert_terminator_count += 1;
+                    }
+                    _ => {}
                 }
                 for stmt in &bb.statements {
                     if let rustc_middle::mir::StatementKind::Assign(place_and_rvalue) = &stmt.kind {
@@ -186,6 +203,7 @@ impl Callbacks for Inspect {
                 locals,
                 drop_terminator_count,
                 discriminant_read_count,
+                assert_terminator_count,
             });
         }
         rustc_driver::Compilation::Stop

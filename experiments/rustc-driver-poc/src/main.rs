@@ -253,12 +253,17 @@ pub fn area_hint(s: Shape) -> i32 {
         Shape::Point => 0,
     }
 }
+
+pub fn get_elem(s: &[i32], i: usize) -> i32 {
+    s[i]
+}
 ",
         &[
             "takes_mut_ref",
             "takes_shared_ref",
             "consumes_box",
             "area_hint",
+            "get_elem",
         ],
     );
     for item in &items {
@@ -269,6 +274,10 @@ pub fn area_hint(s: Shape) -> i32 {
         println!(
             "  discriminant_read_count = {}",
             item.discriminant_read_count
+        );
+        println!(
+            "  assert_terminator_count = {}",
+            item.assert_terminator_count
         );
         for (idx, ty_debug, ownership) in &item.locals {
             println!("  local _{idx}: {ty_debug} -> Ownership = {ownership:?}");
@@ -437,6 +446,26 @@ pub fn area_hint(s: Shape) -> i32 {
         assert_eq!(
             item.discriminant_read_count, 1,
             "matching on a 3-variant enum must read the discriminant exactly once"
+        );
+    }
+
+    /// Issue #68 follow-up ("文字列、配列、ハッシュマップの操作全般についての
+    /// 検証は？"): a real slice index `s[i]` must lower to exactly one
+    /// real `TerminatorKind::Assert` -- the bounds check
+    /// `unified_symbol_graph::target_ir::lower_bounds_checked_slice_index_to_code_body`
+    /// models the corresponding x86_64 codegen for.
+    #[test]
+    fn real_slice_index_lowers_to_a_real_assert_terminator() {
+        let items = inspect(
+            "pub fn get_elem(s: &[i32], i: usize) -> i32 { s[i] }",
+            &["get_elem"],
+        );
+        assert_eq!(items.len(), 1);
+        let item = &items[0];
+        assert!(item.borrowck_succeeded);
+        assert_eq!(
+            item.assert_terminator_count, 1,
+            "a single slice index must lower to exactly one Assert terminator (the bounds check)"
         );
     }
 

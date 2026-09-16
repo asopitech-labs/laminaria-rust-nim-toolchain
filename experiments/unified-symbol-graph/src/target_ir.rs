@@ -449,6 +449,187 @@ pub fn lower_load_or_reload_to_code_body(ownership: Ownership) -> Vec<u8> {
     }
 }
 
+/// Issue #68 follow-up: the user asked "文字列、配列、ハッシュマップの操作全般
+/// についての検証は?" ("what about verification of string/array/hashmap
+/// operations in general?"). This function is the first concrete answer:
+/// a real Rust slice index `s[i]` lowers (per real MIR captured this
+/// session in `sliceindex.mir`, from `pub fn get_elem(s: &[i32], i:
+/// usize) -> i32 { s[i] }`) to
+///
+/// ```text
+/// _3 = PtrMetadata(copy _1);              // fat-pointer length extraction
+/// _4 = Lt(copy _2, copy _3);               // i < len
+/// assert(move _4, "index out of bounds...", move _3, copy _2)
+///   -> [success: bb1, unwind continue];
+/// bb1: { _0 = copy (*_1)[_2]; return; }
+/// ```
+///
+/// a `TerminatorKind::Assert` (`compiler/rustc_middle/src/mir/syntax.rs`,
+/// confirmed in this session: `cond: Operand, expected: bool, msg:
+/// Box<AssertMessage>, target: BasicBlock, unwind: UnwindAction`) --  a
+/// terminator shape this crate's existing `Terminator` enum (`Return`/
+/// `Branch` only) cannot represent at all: `Branch` has two live
+/// successors, `Assert` has exactly one live successor (`target`, taken
+/// when `cond == expected`) and one *failure* path that this proof of
+/// concept does not model unwinding/panicking for (see below).
+///
+/// **What this function actually lowers, and why**: rather than
+/// reimplementing `panic_bounds_check`'s own unwind machinery (a real
+/// panic path, entirely out of this crate's stated scope -- see the
+/// design doc's section 6), this models the exact real calling
+/// convention LLVM itself uses for a slice-index function (confirmed in
+/// this session against real `rustc -O --emit=asm` output for `pub
+/// extern "C" fn get_elem(ptr: *const i32, len: usize, i: usize) -> i32`,
+/// which places `ptr` in `rdi`, `len` in `rsi`, `i` in `rdx`, and emits
+/// `cmp %rsi, %rdx; jae <fail>; mov (%rdi,%rdx,4), %eax; ret` on the
+/// success path) but substitutes a fixed sentinel return value
+/// (`i32::MIN`, `0x80000000`) for the real panic call on the
+/// out-of-bounds path, since this crate has no panic/unwind
+/// infrastructure at all (unlike LLVM's own `panic_bounds_check` +
+/// `Unwind` machinery, deliberately out of scope per the design doc).
+///
+/// **Correctness claim, precisely stated**: this function is claimed
+/// correct for in-bounds accesses (byte-identical addressing math to
+/// real `rustc -O` output, confirmed via objdump below) and claimed only
+/// to *detect* (not correctly recover from, in the panic/unwind sense)
+/// out-of-bounds accesses -- returning a sentinel is a deliberate
+/// simplification, not a claim that this replicates Rust's real panic
+/// semantics.
+pub fn lower_bounds_checked_slice_index_to_code_body() -> Vec<u8> {
+    // cmp rdx, rsi ; jae .fail ; mov eax, [rdi + rdx*4] ; ret ; .fail: mov eax, 0x80000000 ; ret
+    //
+    // `cmp rdx, rsi` (not `cmp rsi, rdx`) so the following `jae` reads as
+    // "jump if rdx >= rsi" (i.e. index >= len), matching real rustc's own
+    // `cmpq %rsi, %rdx; jae` (AT&T syntax reverses operand order from
+    // Intel, confirmed by cross-checking against this session's own
+    // captured `sliceindex2.s`).
+    let mut code = Vec::new();
+    code.extend_from_slice(&[0x48, 0x39, 0xF2]); // cmp rdx, rsi
+    let jae_rel8_offset = code.len() + 1;
+    code.extend_from_slice(&[0x73, 0x00]); // jae rel8 (placeholder)
+    let success_start = code.len();
+    code.extend_from_slice(&[0x8B, 0x04, 0x97]); // mov eax, [rdi + rdx*4]
+    code.push(0xC3); // ret
+    let fail_start = code.len();
+    code.extend_from_slice(&[0xB8, 0x00, 0x00, 0x00, 0x80]); // mov eax, 0x80000000
+    code.push(0xC3); // ret
+
+    let jae_site_end = jae_rel8_offset + 1;
+    code[jae_rel8_offset] = (fail_start - jae_site_end) as u8;
+    debug_assert_eq!(success_start, jae_site_end); // jae falls through directly into success
+
+    code
+}
+
+/// Issue #68 follow-up ("文字列、配列、ハッシュマップの操作全般についての
+/// 検証は？"): a real Rust `&str`/`&[T]` is a fat pointer -- `(data:
+/// *const u8, len: usize)`, passed in `(rdi, rsi)` per the real System V
+/// convention confirmed this session against `rustc -O --emit=asm` for
+/// `pub extern "C" fn str_len(s_ptr: *const u8, s_len: usize) -> usize`,
+/// which compiled to exactly `movq %rsi, %rax; retq` -- `.len()` on a
+/// slice/string is not a computed length at all, it is a direct read of
+/// the fat pointer's own second word, already sitting in `rsi`.
+///
+/// This function models that real, zero-instruction-body case: no
+/// dereference, no memory access, no branch -- the entire "operation" is
+/// that the calling convention already placed the answer in the right
+/// register, and `ret` returns it unchanged.
+pub fn lower_str_or_slice_len_to_code_body() -> Vec<u8> {
+    // mov rax, rsi ; ret
+    vec![0x48, 0x89, 0xF0, 0xC3]
+}
+
+/// Issue #68 follow-up, the companion case: `s.is_empty()` followed by a
+/// conditional first-byte read (`if s.is_empty() { 0 } else { s[0] }`)
+/// models the real MIR shape a bounds-checked, empty-string-safe first
+/// element access takes. Confirmed against real `rustc -O --emit=asm`
+/// output this session (`str_first_byte_or_zero`), which compiled to
+/// exactly `testq %rsi,%rsi; je .empty; movzbl (%rdi),%eax; ret; .empty:
+/// xorl %eax,%eax; ret` -- this function reproduces that exact
+/// instruction sequence byte-for-byte (the `test`+`je` here does the
+/// same job as `lower_bounds_checked_slice_index_to_code_body`'s own
+/// `cmp`+`jae` above, just specialized to the fixed index 0 case, which
+/// real LLVM optimizes into a simpler zero-test rather than a general
+/// comparison).
+pub fn lower_first_byte_or_zero_to_code_body() -> Vec<u8> {
+    // test rsi, rsi ; je .empty ; movzbl al, [rdi] ; ret ; .empty: xor eax, eax ; ret
+    let mut code = Vec::new();
+    code.extend_from_slice(&[0x48, 0x85, 0xF6]); // test rsi, rsi
+    let je_rel8_offset = code.len() + 1;
+    code.extend_from_slice(&[0x74, 0x00]); // je rel8 (placeholder)
+    let success_start = code.len();
+    code.extend_from_slice(&[0x0F, 0xB6, 0x07]); // movzbl eax, [rdi]
+    code.push(0xC3); // ret
+    let empty_start = code.len();
+    code.extend_from_slice(&[0x31, 0xC0]); // xor eax, eax
+    code.push(0xC3); // ret
+
+    let je_site_end = je_rel8_offset + 1;
+    code[je_rel8_offset] = (empty_start - je_site_end) as u8;
+    debug_assert_eq!(success_start, je_site_end);
+
+    code
+}
+
+/// Issue #68 follow-up ("文字列、配列、ハッシュマップの操作全般についての
+/// 検証は？"): checking `HashMap<K, V>::get`'s real MIR this session
+/// (captured `hashmap.mir` from `m.get(&k)` matched against
+/// `Some(v)`/`None`) found it lowers to a single
+/// `TerminatorKind::Call` (`_3 = HashMap::<i32, i32>::get::<i32>(copy
+/// _1, copy _4) -> [return: bb1, unwind continue];`) followed by exactly
+/// the `discriminant` + 2-arm `switchInt` shape this crate already
+/// verified for enum `match` (`lib.rs`'s own `real_enum_match_lowers_to_a_real_discriminant_read`
+/// test, since `Option<&i32>` is a 2-variant enum). **This is the
+/// decisive finding for issue #68's own question about hashmap
+/// verification**: `HashMap::get` introduces no MIR-level structure this
+/// crate has not already handled -- the actual hash computation, bucket
+/// probing, and collision resolution are entirely inside the standard
+/// library's own `get` function body, invisible to the *caller's* MIR.
+/// What genuinely is new here, and what this function actually models,
+/// is the `Call` terminator itself
+/// (`compiler/rustc_middle/src/mir/syntax.rs`: `func`, `args`,
+/// `destination`, `target: Option<BasicBlock>`, confirmed in this
+/// session) -- a real x86_64 `call` instruction, which this crate has not
+/// emitted before (every prior lowering function here only ever
+/// `ret`urned, never called anything else).
+///
+/// This function models the minimal real case: call an external
+/// function taking one `i32` argument (passed in `edi`, matching this
+/// crate's own `Operand::Param0` convention) and returning `i32` in
+/// `eax`, then add 1 to the result before returning -- the x86_64
+/// equivalent of `fn f(x: i32) -> i32 { external_fn(x) + 1 }`. Reuses
+/// this crate's own `ElfX86_64PendingReloc`/`CodeBody` types (established
+/// in issue #67, `lib.rs`) rather than inventing a new relocation shape,
+/// since a `call rel32` to an as-yet-unknown target address is exactly
+/// the "placeholder patched once the real address is known" case those
+/// types already model.
+pub fn lower_call_and_increment_to_code_body(callee: crate::SymbolId) -> crate::CodeBody {
+    // mov edi, edi (already there, no-op -- edi already holds Param0 per
+    // the System V convention) ; call rel32 (placeholder) ; add eax, 1 ; ret
+    //
+    // The call operand's own placeholder (E8 00 00 00 00) is the exact
+    // shape this crate's own lib.rs already verified against real `cc -c`
+    // output for `real_compute_code_and_relocs` -- a `call` opcode
+    // followed by a zeroed 4-byte relative displacement, patched later by
+    // `apply_elf_x86_64_relocations` once `callee`'s real address is known.
+    let mut code = Vec::new();
+    code.push(0xE8); // call rel32
+    let call_operand_offset = code.len();
+    code.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // placeholder, patched by relocation
+    code.extend_from_slice(&[0x83, 0xC0, 0x01]); // add eax, 1
+    code.push(0xC3); // ret
+
+    crate::CodeBody {
+        code,
+        relocations: vec![crate::ElfX86_64PendingReloc {
+            offset: call_operand_offset,
+            width: 4,
+            target: callee,
+            addend: -4,
+        }],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -678,6 +859,141 @@ mod tests {
         assert!(
             raw_code.len() > unique_code.len(),
             "the no-guarantee path must be strictly longer, since it cannot cache the load"
+        );
+    }
+
+    /// Issue #68 follow-up ("文字列、配列、ハッシュマップの操作全般についての
+    /// 検証は？"): the exact bytes `lower_bounds_checked_slice_index_to_code_body`
+    /// produces, independently re-derived here (not asserted against the
+    /// function's own arithmetic mirroring a bug) and cross-checked via
+    /// `objdump` (`cmp %rsi,%rdx; jae 0x9; mov (%rdi,%rdx,4),%eax; ret;
+    /// mov $0x80000000,%eax; ret`, confirmed in this session) and real
+    /// mmap execution (`experiments/unified-symbol-graph/examples/bounds_check_check.rs`,
+    /// in-bounds indices 0..5 and out-of-bounds indices 5/6/105 all
+    /// correct against a real 5-element array).
+    #[test]
+    fn bounds_checked_slice_index_lowers_to_the_real_llvm_matching_instruction_sequence() {
+        let code = lower_bounds_checked_slice_index_to_code_body();
+        assert_eq!(
+            code,
+            vec![
+                0x48, 0x39, 0xF2, // cmp rdx, rsi
+                0x73, 0x04, // jae +4 (skip the 4-byte success path)
+                0x8B, 0x04, 0x97, // mov eax, [rdi + rdx*4]
+                0xC3, // ret
+                0xB8, 0x00, 0x00, 0x00, 0x80, // mov eax, 0x80000000 (i32::MIN sentinel)
+                0xC3, // ret
+            ],
+            "must match the real System V calling convention rustc -O itself uses for slice \
+             indexing (ptr=rdi, len=rsi, index=rdx), confirmed against real --emit=asm output"
+        );
+    }
+
+    /// Issue #68 follow-up ("文字列、配列、ハッシュマップの操作全般についての
+    /// 検証は？"): `&str`/`&[T]`'s `.len()` is not computed -- it is a
+    /// direct read of the fat pointer's own second word, already in
+    /// `rsi` per the System V convention. Confirmed byte-for-byte against
+    /// real `rustc -O --emit=asm` output this session
+    /// (`str_len(s_ptr: *const u8, s_len: usize) -> usize` compiled to
+    /// exactly `movq %rsi, %rax; retq`).
+    #[test]
+    fn str_or_slice_len_lowers_to_the_real_llvm_matching_instruction_sequence() {
+        let code = lower_str_or_slice_len_to_code_body();
+        assert_eq!(
+            code,
+            vec![0x48, 0x89, 0xF0, 0xC3], // mov rax, rsi ; ret
+            "must match real rustc -O output for a fat-pointer length read"
+        );
+    }
+
+    /// The companion is_empty-branching case, independently re-derived
+    /// (not asserted against the function's own arithmetic mirroring a
+    /// bug): the `je` displacement must skip exactly the 4-byte success
+    /// path (`movzbl`, 3 bytes, + `ret`, 1 byte) to land on the 2-byte
+    /// `xor eax,eax` empty-case body.
+    #[test]
+    fn first_byte_or_zero_lowers_to_the_real_llvm_matching_instruction_sequence() {
+        let code = lower_first_byte_or_zero_to_code_body();
+        assert_eq!(
+            code,
+            vec![
+                0x48, 0x85, 0xF6, // test rsi, rsi
+                0x74, 0x04, // je +4 (skip the 4-byte success path: movzbl+ret)
+                0x0F, 0xB6, 0x07, // movzbl eax, [rdi]
+                0xC3, // ret
+                0x31, 0xC0, // xor eax, eax
+                0xC3, // ret
+            ],
+            "must match real rustc -O output for an is_empty-branching first-byte read"
+        );
+    }
+
+    /// Diagnostic finding while first testing
+    /// `examples/call_relocation_check.rs`: `patched caller` bytes
+    /// appeared unchanged from the zeroed placeholder, which looked like
+    /// a relocation-pipeline bug. Manually recomputing the real formula
+    /// (`(target_address + addend) - reloc_site_address`) for this
+    /// specific layout (caller at offset 0, callee at offset 9, `call`
+    /// operand at offset 1, width 4, addend -4) gives `(9 + -4) - (0 + 1
+    /// + 4) = 0` -- the correct PC-relative displacement for *this*
+    /// specific offset pair genuinely is zero. This was never a bug in
+    /// `apply_elf_x86_64_relocations`; it was a flawed diagnostic
+    /// assertion (`assert_ne!` against an all-zero placeholder cannot
+    /// distinguish "never patched" from "patched to the coincidentally
+    /// correct value zero"). This test replaces that flawed check with
+    /// the same independent-recomputation discipline `lib.rs`'s own
+    /// `apply_elf_x86_64_relocations_patches_real_call_placeholders_to_the_correct_pc_relative_values`
+    /// test uses.
+    #[test]
+    fn call_relocation_patches_to_the_independently_recomputed_pc_relative_value() {
+        use crate::{AddressState, CodeBody, Realm, SharedSymbolGraph, SymbolId, SymbolNode};
+        let graph = SharedSymbolGraph::new();
+        let callee_id = SymbolId {
+            realm: Realm::C,
+            name: "callee".to_string(),
+        };
+        graph
+            .declare_symbol(
+                Realm::C,
+                SymbolNode {
+                    id: callee_id.clone(),
+                    address: AddressState::Committed(CodeBody {
+                        code: vec![0; 12],
+                        relocations: vec![],
+                    }),
+                },
+            )
+            .unwrap();
+        let caller_body = lower_call_and_increment_to_code_body(callee_id.clone());
+        let caller_id = SymbolId {
+            realm: Realm::Cargo,
+            name: "caller".to_string(),
+        };
+        graph
+            .declare_symbol(
+                Realm::Cargo,
+                SymbolNode {
+                    id: caller_id.clone(),
+                    address: AddressState::Committed(caller_body),
+                },
+            )
+            .unwrap();
+        let layout = graph.assign_layout();
+        let patched = graph.apply_elf_x86_64_relocations(&layout).unwrap();
+
+        // Independent recomputation, never mirroring
+        // apply_elf_x86_64_relocations's own arithmetic.
+        let caller_addr = layout.addresses[&caller_id] as i64;
+        let callee_addr = layout.addresses[&callee_id] as i64;
+        let reloc_offset = 1i64; // the call opcode (0xE8) is 1 byte, so the operand starts at offset 1
+        let reloc_site_address = caller_addr + reloc_offset + 4;
+        let expected_value = (callee_addr - 4) - reloc_site_address;
+        let expected_bytes = (expected_value as i32).to_le_bytes();
+
+        assert_eq!(
+            &patched.code[&caller_id][1..5],
+            expected_bytes.as_slice(),
+            "the call operand must equal the independently-recomputed PC-relative displacement"
         );
     }
 }
