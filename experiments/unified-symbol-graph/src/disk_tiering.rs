@@ -254,10 +254,13 @@ impl DiskTieredGraph {
             }
         }
 
-        self.flushes.lock().expect("flushes lock poisoned").push(FlushFile {
-            path: path.clone(),
-            symbol_ids,
-        });
+        self.flushes
+            .lock()
+            .expect("flushes lock poisoned")
+            .push(FlushFile {
+                path: path.clone(),
+                symbol_ids,
+            });
 
         Ok(FlushReport {
             file: path,
@@ -353,7 +356,8 @@ impl DiskTieredGraph {
         // Newest-wins dedup: iterate oldest -> newest so a later
         // insertion overwrites an earlier one in the map, matching
         // "the most recent flush of a given symbol is authoritative."
-        let mut merged: std::collections::HashMap<SymbolId, CodeBody> = std::collections::HashMap::new();
+        let mut merged: std::collections::HashMap<SymbolId, CodeBody> =
+            std::collections::HashMap::new();
         for flush in flushes.iter() {
             bytes_before_on_disk += fs::metadata(&flush.path)?.len();
             let bytes = fs::read(&flush.path)?;
@@ -529,20 +533,20 @@ fn decode_all_nodes(bytes: &[u8]) -> Option<Vec<(SymbolId, CodeBody)>> {
                 addend,
             });
         }
-        out.push((
-            SymbolId { realm, name },
-            CodeBody { code, relocations },
-        ));
+        out.push((SymbolId { realm, name }, CodeBody { code, relocations }));
     }
     Some(out)
 }
 
 fn find_and_decode_node(bytes: &[u8], want: &SymbolId) -> Option<SymbolNode> {
     let nodes = decode_all_nodes(bytes)?;
-    nodes.into_iter().find(|(id, _)| id == want).map(|(id, body)| SymbolNode {
-        id,
-        address: AddressState::Committed(body),
-    })
+    nodes
+        .into_iter()
+        .find(|(id, _)| id == want)
+        .map(|(id, body)| SymbolNode {
+            id,
+            address: AddressState::Committed(body),
+        })
 }
 
 fn read_u8(bytes: &[u8], pos: &mut usize) -> Option<u8> {
@@ -604,11 +608,8 @@ mod tests {
                  harness invocation, not a default this crate silently picks itself)",
             );
             let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-            let path = PathBuf::from(root).join(format!(
-                "usg-disk-tiering-{}-{}",
-                std::process::id(),
-                n
-            ));
+            let path =
+                PathBuf::from(root).join(format!("usg-disk-tiering-{}-{}", std::process::id(), n));
             fs::create_dir_all(&path).expect("create scratch dir");
             ScratchDir { path }
         }
@@ -657,7 +658,10 @@ mod tests {
         declare_committed(&tiered.graph, Realm::Nimble, "nim_double", vec![2u8; 150]);
 
         let before_bytes = tiered.estimate_memtable_bytes();
-        assert!(before_bytes > 0, "graph must report non-zero estimated bytes before flush");
+        assert!(
+            before_bytes > 0,
+            "graph must report non-zero estimated bytes before flush"
+        );
 
         let report = tiered
             .flush_committed_to_disk()
@@ -700,7 +704,10 @@ mod tests {
                 Realm::C,
             )
             .expect("disk read must not error");
-        assert!(found, "c_add must be found via disk fallback after being flushed");
+        assert!(
+            found,
+            "c_add must be found via disk fallback after being flushed"
+        );
 
         // And now it must be resident in memory again, with its original
         // bytes intact (round-trip correctness, not just presence).
@@ -713,7 +720,11 @@ mod tests {
             .expect("c_add must be re-inserted into memory after disk fallback");
         match &node.address {
             AddressState::Committed(body) => {
-                assert_eq!(body.code, vec![0u8; 200], "round-tripped code bytes must match exactly");
+                assert_eq!(
+                    body.code,
+                    vec![0u8; 200],
+                    "round-tripped code bytes must match exactly"
+                );
             }
             other => panic!("expected Committed after disk round-trip, got {other:?}"),
         }
@@ -729,7 +740,9 @@ mod tests {
         let scratch = ScratchDir::new();
         let tiered = DiskTieredGraph::new(&scratch.path);
         declare_committed(&tiered.graph, Realm::C, "c_add", vec![0u8; 50]);
-        tiered.flush_committed_to_disk().expect("flush must succeed");
+        tiered
+            .flush_committed_to_disk()
+            .expect("flush must succeed");
 
         let found = tiered
             .require_symbol_with_disk_fallback(
@@ -759,7 +772,10 @@ mod tests {
             .expect("threshold check must not error");
         assert!(below.is_none(), "must not flush when under threshold");
         assert_eq!(tiered.flush_file_count(), 0);
-        assert!(tiered.estimate_memtable_bytes() > 0, "unflushed data must remain in memory");
+        assert!(
+            tiered.estimate_memtable_bytes() > 0,
+            "unflushed data must remain in memory"
+        );
 
         let above = tiered
             .flush_if_over_threshold(10)
@@ -790,7 +806,11 @@ mod tests {
         declare_committed(&tiered.graph, Realm::Nimble, "sym_c", vec![2u8; 40]);
         tiered.flush_committed_to_disk().expect("third flush");
 
-        assert_eq!(tiered.flush_file_count(), 3, "three flushes must leave three separate files");
+        assert_eq!(
+            tiered.flush_file_count(),
+            3,
+            "three flushes must leave three separate files"
+        );
         let paths = tiered.flush_file_paths();
         let mut total_bytes = 0u64;
         for path in &paths {
@@ -802,7 +822,11 @@ mod tests {
         // one file whose size equals the sum (that would indicate they
         // were merged, contradicting "no compaction implemented").
         let unique_paths: std::collections::HashSet<_> = paths.iter().collect();
-        assert_eq!(unique_paths.len(), 3, "flush files must be distinct paths, never overwritten in place");
+        assert_eq!(
+            unique_paths.len(),
+            3,
+            "flush files must be distinct paths, never overwritten in place"
+        );
         eprintln!(
             "[disk_tiering] fragmentation evidence: 3 flushes -> 3 files, total {total_bytes} bytes across them"
         );
@@ -828,7 +852,9 @@ mod tests {
             );
         }
         let estimated = tiered.estimate_memtable_bytes();
-        let report = tiered.flush_committed_to_disk().expect("flush must succeed");
+        let report = tiered
+            .flush_committed_to_disk()
+            .expect("flush must succeed");
 
         assert_eq!(report.symbols_flushed, 20);
         assert_eq!(report.estimated_memory_bytes, estimated);
@@ -877,23 +903,38 @@ mod tests {
             // before compaction, matching the fragmentation this method
             // exists to fix.
             if i % 3 == 2 {
-                tiered.flush_committed_to_disk().expect("flush must succeed");
+                tiered
+                    .flush_committed_to_disk()
+                    .expect("flush must succeed");
             }
         }
 
-        assert_eq!(tiered.flush_file_count(), 4, "12 symbols flushed 3-at-a-time must leave 4 files before compaction");
+        assert_eq!(
+            tiered.flush_file_count(),
+            4,
+            "12 symbols flushed 3-at-a-time must leave 4 files before compaction"
+        );
 
-        let report = tiered.compact_sstables().expect("compaction must succeed with 4 files present");
+        let report = tiered
+            .compact_sstables()
+            .expect("compaction must succeed with 4 files present");
         assert_eq!(report.files_before, 4);
         assert_eq!(report.files_after, 1);
         assert_eq!(report.symbols_merged, 12);
-        assert_eq!(tiered.flush_file_count(), 1, "(b) file count must actually drop to 1 after compaction");
+        assert_eq!(
+            tiered.flush_file_count(),
+            1,
+            "(b) file count must actually drop to 1 after compaction"
+        );
 
         for (id, code) in &expected {
             let found = tiered
                 .require_symbol_with_disk_fallback(Realm::Cargo, id.clone(), id.realm)
                 .expect("disk read must not error");
-            assert!(found, "{id:?} must still be found after compaction -- (a) no data loss");
+            assert!(
+                found,
+                "{id:?} must still be found after compaction -- (a) no data loss"
+            );
 
             let nodes = tiered.graph.nodes.read().expect("nodes lock poisoned");
             let node = nodes.get(id).expect("must be re-inserted into memory");
@@ -937,24 +978,37 @@ mod tests {
 
         assert_eq!(tiered.flush_file_count(), 2);
         let report = tiered.compact_sstables().expect("compaction must succeed");
-        assert_eq!(report.symbols_merged, 1, "two flushed copies of the same id must merge into exactly one entry");
+        assert_eq!(
+            report.symbols_merged, 1,
+            "two flushed copies of the same id must merge into exactly one entry"
+        );
         assert_eq!(tiered.flush_file_count(), 1);
 
         let found = tiered
             .require_symbol_with_disk_fallback(
                 Realm::Cargo,
-                SymbolId { realm: Realm::C, name: "c_add".to_string() },
+                SymbolId {
+                    realm: Realm::C,
+                    name: "c_add".to_string(),
+                },
                 Realm::C,
             )
             .expect("disk read must not error");
         assert!(found);
         let nodes = tiered.graph.nodes.read().expect("nodes lock poisoned");
         let node = nodes
-            .get(&SymbolId { realm: Realm::C, name: "c_add".to_string() })
+            .get(&SymbolId {
+                realm: Realm::C,
+                name: "c_add".to_string(),
+            })
             .expect("must be resident after disk fallback");
         match &node.address {
             AddressState::Committed(body) => {
-                assert_eq!(body.code, vec![0xBBu8; 32], "compaction must keep the newest flushed copy, not the stale first one");
+                assert_eq!(
+                    body.code,
+                    vec![0xBBu8; 32],
+                    "compaction must keep the newest flushed copy, not the stale first one"
+                );
             }
             other => panic!("expected Committed, got {other:?}"),
         }
@@ -970,15 +1024,25 @@ mod tests {
         let tiered = DiskTieredGraph::new(&scratch.path);
 
         for i in 0..4 {
-            declare_committed(&tiered.graph, Realm::C, &format!("sym_{i}"), vec![i as u8; 20]);
-            tiered.flush_committed_to_disk().expect("flush must succeed");
+            declare_committed(
+                &tiered.graph,
+                Realm::C,
+                &format!("sym_{i}"),
+                vec![i as u8; 20],
+            );
+            tiered
+                .flush_committed_to_disk()
+                .expect("flush must succeed");
         }
         assert_eq!(tiered.flush_file_count(), 4);
 
         let below = tiered
             .compact_if_over_file_threshold(4)
             .expect("threshold check must not error");
-        assert!(below.is_none(), "must not compact when file count is at (not over) the threshold");
+        assert!(
+            below.is_none(),
+            "must not compact when file count is at (not over) the threshold"
+        );
         assert_eq!(tiered.flush_file_count(), 4);
 
         declare_committed(&tiered.graph, Realm::C, "sym_4", vec![9u8; 20]);
@@ -990,7 +1054,11 @@ mod tests {
             .expect("threshold check must not error")
             .expect("must compact once file count exceeds the threshold");
         assert_eq!(above.files_before, 5);
-        assert_eq!(tiered.flush_file_count(), 1, "must compact down to 1 file once the threshold (4) is exceeded");
+        assert_eq!(
+            tiered.flush_file_count(),
+            1,
+            "must compact down to 1 file once the threshold (4) is exceeded"
+        );
     }
 
     /// Write amplification, measured honestly: total bytes physically
@@ -1007,11 +1075,21 @@ mod tests {
         let tiered = DiskTieredGraph::new(&scratch.path);
 
         for i in 0..8 {
-            declare_committed(&tiered.graph, Realm::C, &format!("sym_{i}"), vec![i as u8; 128]);
-            tiered.flush_committed_to_disk().expect("flush must succeed");
+            declare_committed(
+                &tiered.graph,
+                Realm::C,
+                &format!("sym_{i}"),
+                vec![i as u8; 128],
+            );
+            tiered
+                .flush_committed_to_disk()
+                .expect("flush must succeed");
         }
         let bytes_from_flushes_alone = tiered.total_bytes_written();
-        assert!(bytes_from_flushes_alone > 0, "flushes must have written real bytes");
+        assert!(
+            bytes_from_flushes_alone > 0,
+            "flushes must have written real bytes"
+        );
         assert_eq!(tiered.flush_file_count(), 8);
 
         let report = tiered.compact_sstables().expect("compaction must succeed");

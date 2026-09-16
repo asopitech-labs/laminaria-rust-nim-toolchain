@@ -34,7 +34,9 @@
 //! of the two scenarios tested.
 
 use crate::durability::Durability;
-use crate::{AddressState, CodeBody, Realm, RegisterError, SharedSymbolGraph, SymbolId, SymbolNode};
+use crate::{
+    AddressState, CodeBody, Realm, RegisterError, SharedSymbolGraph, SymbolId, SymbolNode,
+};
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
 use std::sync::RwLock;
@@ -138,7 +140,9 @@ struct HeapEntry {
 
 impl Ord for HeapEntry {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.seq.cmp(&other.seq).then_with(|| self.id.cmp(&other.id))
+        self.seq
+            .cmp(&other.seq)
+            .then_with(|| self.id.cmp(&other.id))
     }
 }
 impl PartialOrd for HeapEntry {
@@ -309,7 +313,10 @@ impl HeapEvictingGraph {
             // durable (0-1 redeclares) symbols are never eviction
             // candidates, same as durability.rs's own filter.
             let mut heap = self.heap.write().expect("heap lock poisoned");
-            heap.push(Reverse(HeapEntry { seq, id: id.clone() }));
+            heap.push(Reverse(HeapEntry {
+                seq,
+                id: id.clone(),
+            }));
             let pushes = self
                 .pushes_since_compaction
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -474,10 +481,7 @@ pub struct EvictionTimingResult {
     pub elapsed: std::time::Duration,
 }
 
-pub fn time_sort_based_eviction(
-    n: usize,
-    max_volatile_retained: usize,
-) -> EvictionTimingResult {
+pub fn time_sort_based_eviction(n: usize, max_volatile_retained: usize) -> EvictionTimingResult {
     let g = crate::durability::DurableSymbolGraph::new(max_volatile_retained);
     let start = Instant::now();
     let mut calls = 0u64;
@@ -673,7 +677,10 @@ mod tests {
                 realm, predicted, rate, matches
             );
         }
-        let disagreements = agreement.iter().filter(|(_, _, matches, _)| !matches).count();
+        let disagreements = agreement
+            .iter()
+            .filter(|(_, _, matches, _)| !matches)
+            .count();
         eprintln!(
             "[durability_v2] {disagreements}/4 realms disagree in this reversed-churn scenario -- \
              realm-only pre-classification is NOT universally correct; it encodes an assumption \
@@ -722,7 +729,10 @@ mod tests {
             "[durability_v2] HeapEvictingGraph same scenario as durability::eviction_policy_bounds_retained_state_for_volatile_symbols: \
              {evictions} evictions, {live_node_count} nodes live (durability.rs's sort-based mechanism reported 80 evictions, 21 live nodes for this exact scenario)"
         );
-        assert!(evictions > 0, "heap-based policy must also evict once budget exceeded");
+        assert!(
+            evictions > 0,
+            "heap-based policy must also evict once budget exceeded"
+        );
         assert!(
             live_node_count <= 21,
             "heap-based eviction must bound live nodes the same way sort-based eviction does, got {live_node_count}"
@@ -759,8 +769,10 @@ mod tests {
         let sort_result = time_sort_based_eviction(N, BUDGET);
         let heap_result = time_heap_based_eviction(N, BUDGET);
 
-        let sort_ns_per_call = sort_result.elapsed.as_nanos() as f64 / sort_result.declare_calls as f64;
-        let heap_ns_per_call = heap_result.elapsed.as_nanos() as f64 / heap_result.declare_calls as f64;
+        let sort_ns_per_call =
+            sort_result.elapsed.as_nanos() as f64 / sort_result.declare_calls as f64;
+        let heap_ns_per_call =
+            heap_result.elapsed.as_nanos() as f64 / heap_result.declare_calls as f64;
 
         eprintln!(
             "[durability_v2] eviction mechanism timing at N={N} symbols (budget={BUDGET}, each symbol \
@@ -837,7 +849,12 @@ mod tests {
                     .unwrap();
             }
         }
-        let uncompacted_nodes = uncompacted.graph.nodes.read().expect("nodes lock poisoned").len();
+        let uncompacted_nodes = uncompacted
+            .graph
+            .nodes
+            .read()
+            .expect("nodes lock poisoned")
+            .len();
         let uncompacted_heap_len = uncompacted.heap_len();
         let uncompacted_declares = SYMBOL_COUNT * REDECLARES_PER_SYMBOL;
 
@@ -854,7 +871,12 @@ mod tests {
                     .unwrap();
             }
         }
-        let compacted_nodes = compacted.graph.nodes.read().expect("nodes lock poisoned").len();
+        let compacted_nodes = compacted
+            .graph
+            .nodes
+            .read()
+            .expect("nodes lock poisoned")
+            .len();
         let compacted_heap_len = compacted.heap_len();
         let compacted_declares = SYMBOL_COUNT * REDECLARES_PER_SYMBOL;
 
@@ -874,8 +896,14 @@ mod tests {
         // The nodes map (live symbol state) was always bounded in both
         // designs -- this is NOT the coordinator's concern, confirming
         // it independently in both scenarios.
-        assert_eq!(uncompacted_nodes, SYMBOL_COUNT, "live node count must stay bounded to the 15 hot symbols");
-        assert_eq!(compacted_nodes, SYMBOL_COUNT, "live node count must stay bounded to the 15 hot symbols");
+        assert_eq!(
+            uncompacted_nodes, SYMBOL_COUNT,
+            "live node count must stay bounded to the 15 hot symbols"
+        );
+        assert_eq!(
+            compacted_nodes, SYMBOL_COUNT,
+            "live node count must stay bounded to the 15 hot symbols"
+        );
 
         // The coordinator's concern, confirmed: WITHOUT compaction, the
         // heap's physical length grows roughly linearly with the number
@@ -968,7 +996,9 @@ mod tests {
             durations
         }
 
-        fn max_and_p99(durations: &mut [std::time::Duration]) -> (std::time::Duration, std::time::Duration) {
+        fn max_and_p99(
+            durations: &mut [std::time::Duration],
+        ) -> (std::time::Duration, std::time::Duration) {
             durations.sort();
             let max = *durations.last().expect("non-empty");
             let p99_idx = ((durations.len() as f64) * 0.99) as usize;
@@ -980,7 +1010,8 @@ mod tests {
         let mut batch_durations = run_and_time(&batch_graph);
         let (batch_max, batch_p99) = max_and_p99(&mut batch_durations);
 
-        let incremental_graph = HeapEvictingGraph::new_with_incremental_reclaim(MAX_VOLATILE_RETAINED);
+        let incremental_graph =
+            HeapEvictingGraph::new_with_incremental_reclaim(MAX_VOLATILE_RETAINED);
         let mut incremental_durations = run_and_time(&incremental_graph);
         let (incremental_max, incremental_p99) = max_and_p99(&mut incremental_durations);
 

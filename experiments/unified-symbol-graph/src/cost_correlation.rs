@@ -428,8 +428,15 @@ mod tests {
         // or magnitude of the correlation itself -- that is reported,
         // not asserted, per the task's explicit instruction not to
         // steer toward a favorable-looking result.
-        assert_eq!(samples.len(), 13, "deep-critical-path-graph must have 12 stages + fixture-bin");
-        let distinct_degrees: HashSet<usize> = samples.iter().map(|s| s.transitive_dependent_count).collect();
+        assert_eq!(
+            samples.len(),
+            13,
+            "deep-critical-path-graph must have 12 stages + fixture-bin"
+        );
+        let distinct_degrees: HashSet<usize> = samples
+            .iter()
+            .map(|s| s.transitive_dependent_count)
+            .collect();
         assert!(
             distinct_degrees.len() > 1,
             "deep-critical-path-graph must show a real degree gradient across stages, got only {} distinct value(s)",
@@ -466,7 +473,10 @@ mod tests {
             .iter()
             .filter(|s| s.crate_name != "aggregator")
             .collect();
-        let leaf_degrees: HashSet<usize> = leaves.iter().map(|s| s.transitive_dependent_count).collect();
+        let leaf_degrees: HashSet<usize> = leaves
+            .iter()
+            .map(|s| s.transitive_dependent_count)
+            .collect();
         eprintln!(
             "[cost_correlation][wide-parallel-graph] leaf degree set = {:?} (expect exactly {{1}} -- all \
              8 leaves share the same dependent count by construction, so degree alone cannot \
@@ -474,7 +484,10 @@ mod tests {
             leaf_degrees
         );
 
-        let leaf_times: Vec<f64> = leaves.iter().map(|s| s.compile_time.as_nanos() as f64).collect();
+        let leaf_times: Vec<f64> = leaves
+            .iter()
+            .map(|s| s.compile_time.as_nanos() as f64)
+            .collect();
         let min_t = leaf_times.iter().cloned().fold(f64::INFINITY, f64::min);
         let max_t = leaf_times.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         eprintln!(
@@ -501,7 +514,11 @@ mod tests {
         // from real parsed data, not assumed), then report the real
         // compile-time spread among degree-tied crates without steering
         // the outcome either way.
-        assert_eq!(samples.len(), 9, "wide-parallel-graph must have 8 leaves + aggregator");
+        assert_eq!(
+            samples.len(),
+            9,
+            "wide-parallel-graph must have 8 leaves + aggregator"
+        );
         assert_eq!(
             leaf_degrees,
             HashSet::from([1]),
