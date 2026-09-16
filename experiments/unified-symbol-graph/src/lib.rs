@@ -422,6 +422,12 @@ pub mod disk_tiering;
 /// See `cost_correlation`'s own module doc comment.
 pub mod cost_correlation;
 
+/// Issue #68: a minimal, x86_64-unknown-linux-gnu-only target-specific IR
+/// that lowers directly to `CodeBody` without ever materializing LLVM IR.
+/// See `target_ir`'s own module doc comment and
+/// `docs/02-research-areas/compiler/target-specific-ir-without-llvm_ja.md`.
+pub mod target_ir;
+
 /// The four ecosystems this hypothesis is scoped to (matching this repo's
 /// own `cadd`/`app` fixture: Cargo, Nimble, C, C++). Not meant to be an
 /// exhaustive or permanent list -- a placeholder for "whichever realms a
