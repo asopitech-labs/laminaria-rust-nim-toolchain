@@ -8,7 +8,7 @@
 
 > 既存ツールチェーンは「全体を知る主体」と「実際に計算する主体」を分離しており、この分離自体が構造的な性能・最適性の天井になっている。
 
-以下、この主張を(1) 既存ツールチェーンの実装コードから裏取りし、(2) mold・LLVM・Craneliftという3つの現存する「解決の試み」がなぜこの天井を超えられないかを示し、(3) LAMINARIAが同時に解くべき問題(シンボル解決・スケジューリング・空間配置・target固有ビルド直後テスト実行・検査失敗の影響範囲の5つ)を明示し、(4) その問題に対する現時点の仮説設計(`unified-symbol-graph`実験)を示す。
+以下、この主張を(1) 既存ツールチェーンの実装コードから裏取りし、(2) mold・LLVM・Craneliftという3つの現存する「解決の試み」がなぜこの天井を超えられないかを示し、(3) LAMINARIAが同時に解くべき問題(シンボル解決・スケジューリング・空間配置・target固有ビルド直後テスト実行・検査失敗の影響範囲・成果物の状態化の6つ)を明示し、(4) その問題に対する現時点の仮説設計(`unified-symbol-graph`実験)を示す。
 
 ## 1. 観測された分離: 「全体を知る主体」と「計算する主体」は別人格である
 
@@ -160,6 +160,59 @@ LAMINARIAはこの2段階目(クレート単位でコード生成を丸ごと止
 
 この方針が問題A・B・Cに与える影響: 問題Aのシンボル解決、問題B×Cのスケジュール×配置最適化は、いずれも「クレート全体が一括してビルドされるか、されないか」という二値ではなく、「どのアイテムが、どの検証状態で、いつ利用可能になったか」という、より細かい粒度の情報を扱えるようにする必要がある。これは`mutation_seq`(いつ書き込まれたか)に加えて、検証状態の遷移も追跡する拡張を要求する。
 
+### 問題F: ビルド成果物を「出力」ではなく「状態」として保持し、デマンド駆動で導出する
+
+ユーザーからの明示的な指示: ビルドチェーンの成果物(アセンブリ・オブジェクトファイル・実行可能バイナリ)を、一連の処理が生成して終わる「出力」としてではなく、ソースコードに紐づく永続的な「状態」として保持し、アセンブリが実際に必要になったタイミングでその状態から導出する。これは問題Eの帰結(検証状態は`SharedSymbolGraph`上のノード状態として追跡すべき、節3末尾)を一段押し進め、**機械語そのものも含めた成果物全体を、パイプラインの通過点ではなくグラフ上の状態として設計する**という方針である。
+
+既存の類似システムを裏取りした結果、この方針は複数の先例から独立に裏付けられる。
+
+#### rustc自身が既に「デマンド駆動」を明言している — ただしコード生成の手前まで
+
+rustc-dev-guide "Queries: demand-driven compilation"(<https://rustc-dev-guide.rust-lang.org/query.html>)には次の記述がある。
+
+> Eventually, we want the entire compiler control-flow to be query driven. There will effectively be one top-level query (`compile`) that will run compilation on a crate; this will in turn demand information about that crate, starting from the *end*.
+
+つまりrustc自身が、コンパイラ全体を「フェーズを順番に実行する」設計ではなく「末尾(欲しい結果)から逆算して必要な計算だけを要求する」設計へ向かう方針を明言している。実装コードでも、`tcx.type_of(def_id)`のようなクエリ呼び出しは初回のみ実際に計算し、以降はハッシュテーブルから結果を返す(同ページ「How the compiler executes a query」節)。MIRを含む大部分の中間結果は、既に「一度計算されたら状態として保持され、要求されるまで再計算されない」クエリとして実装されている。
+
+しかし、このデマンド駆動モデルはコード生成そのものには及んでいない。`compiler/rustc_interface/src/passes.rs`の`start_codegen`関数を確認した結果、`codegen_backend.codegen_crate(tcx)`(1336行)は、クエリシステムを経由しない、通常の関数呼び出しとして**1回だけ**実行される。コード生成の結果(LLVM IR、オブジェクトファイル)はクエリの戻り値としてメモ化・キャッシュされる対象ではなく、ディスクへ書き出される副作用として扱われる。**rustcは「意味解析・型検査・MIR生成」までは状態として保持するが、「コード生成」を境に出力モデルへ切り替わる**という非対称な設計を持つ。これは問題Fが要求する「機械語生成まで含めて状態として保持する」設計への、rustc自身による部分的な先例であると同時に、既存実装がその境界をコード生成の手前で止めていることの直接の証拠でもある。
+
+#### Salsa — 「入力」と「導出値」の区別、遅延評価とメモ化の両立
+
+Salsa Book "How Salsa Works"(<https://raw.githubusercontent.com/salsa-rs/salsa/master/book/src/how_salsa_works.md>)は、計算全体を2種類のクエリとして定義する設計を明記している。
+
+> - **Inputs**: the base inputs to your system. You can change these whenever you like.
+> - **Functions**: pure functions (no side effects) that transform your inputs into other values. The results of queries are memoized to avoid recomputing them a lot.
+
+同Book "Salsa overview"(<https://raw.githubusercontent.com/salsa-rs/salsa/master/book/src/overview.md>)はさらに、Salsaの入力構造体(`#[salsa::input]`)は実データを持たず、データベース内に格納された整数IDに過ぎないこと("Salsa structs are just integers")を明記している。つまりSalsaでは、**入力から導出されるすべての値(rust-analyzerの場合はパース結果、名前解決結果、型推論結果を含む)が、呼ばれるまで計算されず(lazy)、一度呼ばれれば入力が変化するまで再計算されない(memoized)**という両方の性質を同時に満たす。
+
+これは問題Fが要求する性質そのものである。Salsaの`#[salsa::tracked]`関数は、「事前に全部計算しておく」のでも「毎回ゼロから計算し直す」のでもなく、**要求された時にだけ計算し、その結果を次回の要求まで状態として保持する**。`unified-symbol-graph`の現状の設計(後述)は、この2つの性質のうち後者(状態として保持する)は持つが、前者(要求されるまで計算しない)を持たない。
+
+#### `unified-symbol-graph`の現状: 「即座に確定」であり「デマンド駆動」ではない
+
+`experiments/unified-symbol-graph/src/lib.rs`を確認した結果、現状の`SharedSymbolGraph::declare_symbol`は、呼び出された時点で`AddressState::Committed(CodeBody)`という形で、**既に生成済みの機械語バイト列をその場でグラフへ書き込む**設計になっている(508-519行の`AddressState`定義、584-612行の`declare_symbol`実装)。これは「成果物を状態として保持する」という要求は満たしているが、「アセンブリが必要になったタイミングで状態から導出する」という要求(デマンド駆動)は満たしていない — `CodeBody`は各realmのフロントエンドが独自の判断で生成し終えた後にグラフへ渡されるものであり、グラフ自体が「このシンボルの機械語をまだ生成していないが、必要になったので今から生成する」という要求を発行する仕組みを持たない。
+
+問題Fが求めているのは、`AddressState`を単純な2値(`Unresolved`/`Committed`)から、**「まだ計算されていないが、要求されれば計算できる(ソースコードと意味解析結果は既に確定している)」という第3の状態**を持つ設計へ拡張することである。これは問題E(検証状態の追跡)が要求する拡張と同じ方向を向いており、両者は同じ設計変更(`AddressState`の拡張)に統合できる可能性が高い。
+
+#### content-addressed cache(Bazel/Buck2)は粒度が異なる先例
+
+reference-projects.lock.jsonに既にピン留めされているBazelの公式ドキュメント(<https://bazel.build/remote/caching>)は、成果物をアクション(コマンド)と入力のハッシュに紐づけたcontent-addressable storage(CAS)、およびそのアクションが既に実行済みかを判定するaction cacheという2層構成を明記している。これは「成果物を、必要になった時に取り出す」という方向性では問題Fと一致するが、粒度が異なる — Bazel/Buck2は**アクション単位(ビルドステップ単位)**でキャッシュ・取得を行うのに対し、問題Fが要求するのは**個々のシンボル・アイテム単位**での状態保持である。Bazel自体はアクションの内部(1つの`rustc`呼び出しの中で何が起きるか)には関与しない。したがってBazel/Buck2は「ビルド成果物をキャッシュとして持ち回す」という上位の設計思想の先例にはなるが、「コンパイラ内部でシンボル単位のデマンド駆動生成を行う」という問題Fの粒度には直接の答えを与えない。
+
+#### LLVM ORC JIT — シンボル単位のデマンド駆動コード生成、最も近い先例
+
+LLVM公式ドキュメント"ORC Design and Implementation"(<https://llvm.org/docs/ORCv2.html>)の"Eager and lazy compilation"節には、次の記述がある。
+
+> By default, ORC will compile symbols as soon as they are looked up in the JIT session object (`ExecutionSession`). [...] ORC also provides built-in support for lazy compilation via lazy-reexports [...] ORC will run the user-supplied compiler when the a definition of a symbol is needed.
+
+これは問題Fが要求する設計の、**シンボル単位での最も直接的な先例**である。ORC JITは「あるシンボルの機械語がまだ存在しなくても、そのシンボルへの参照(ルックアップ)が発生した時点で初めてコンパイラを起動し、機械語を生成する」という遅延コンパイルを標準機能として持つ。ただしORCの主眼は実行時(JIT)の起動コスト削減であり、LAMINARIAが問題Fで想定する用途(ビルド時に、ソースの意味解析結果を状態として保持しつつ、アセンブリの実体化を要求時まで遅らせる)とは、目的(実行速度 vs. 設計上の分離)が異なる。それでも「シンボルの参照(要求)がコード生成のトリガーになる」という構造自体は、`unified-symbol-graph`の`RequiresEdge`(どのシンボルが要求されているか、既に記録している情報)と自然に対応する。
+
+#### 総合: 問題Fが要求する設計
+
+以上の裏取りから、LAMINARIAが取るべき設計の要件を次のように整理できる。
+
+1. **ソースコードに紐づく意味解析結果(型、borrow check結果等)は、rustcのクエリシステムやSalsaと同じ「要求されるまで計算しない、計算されたら状態として保持する」モデルで扱う。** これは問題A(境界シンボル解決)・問題E(検証状態)の設計とも整合する。
+2. **機械語(アセンブリ・オブジェクトコード)自体も、この状態モデルの外に置かない。** rustcが「コード生成」を境に状態モデルから出力モデルへ切り替えているのに対し、LAMINARIAはこの境界を作らず、機械語の生成も「要求されたら導出する」対象にする。ORC JITの「参照が発生した時点でコンパイルする」という設計が最も近い先例になる。
+3. **`SharedSymbolGraph`の`AddressState`を、「未解決」「(意味解析済みだが機械語は未生成)」「(機械語生成済み・状態として保持)」という3値以上の設計へ拡張する必要がある。** 現状は後者2つを区別していない(`Committed`は常に機械語を伴う)。
+
 ## 4. 現時点の仮説アーキテクチャ: `unified-symbol-graph`
 
 上記の問題A(エコシステム横断解決)に対する最小実装が、worktree `experiments/unified-symbol-graph/`に存在する。要点:
@@ -182,6 +235,9 @@ LAMINARIAはこの2段階目(クレート単位でコード生成を丸ごと止
 - 問題E(検査状態の追跡)を`unified-symbol-graph`へ実装する具体設計がまだ無い。`SymbolNode`/`AddressState`に「検証済み/未検証」の軸を追加する場合、既存の`Unresolved`/`Committed`という2値状態とどう組み合わせるか(直交する別フィールドにするか、`Committed`のバリアントを分けるか)は未決定。
 - 問題Eが要求する「未検証アイテムを保守的なコードとして生成する」経路と、「最適化ヒントを伴う検証済みコードを生成する」経路を、target固有バックエンド(問題D)側でどう両立させるか(2種類のコード生成パスを持つのか、後から差し替え可能な1種類のパスにするのか)はまだ設計していない。
 - borrow check以外の検査(型検査、trait解決、const評価等)についても、同じ「アイテム単位で継続、最終リンクだけで遮断する」方針が同様に安全に適用できるか、それとも一部の検査(型検査など、後続の全処理が前提とする基盤的な検査)はborrow checkより早い段階でクレート単位のゲートとして残さざるを得ないかは、検査ごとに個別の検討が必要であり、まだ行っていない。
+- 問題Fが要求する`AddressState`の3値以上への拡張(未解決/意味解析済み・機械語未生成/機械語生成済み)の具体的な型設計、および各状態間の遷移を誰が(どのrealmフロントエンドが、いつ)発生させるかはまだ設計していない。
+- 問題Fの「機械語を要求時に導出する」がSalsa/ORC JITと同じ意味で安全に機能するには、機械語生成関数が純粋(同じ意味解析結果からは常に同じ機械語が出る)である必要があるが、target固有の最適化ヒント(問題E参照)がborrow check結果のような外部状態に依存する場合、この純粋性がどこまで成立するかは未検証。
+- Bazel/Buck2のaction cache相当の粒度(コマンド単位)と、問題Fが要求するシンボル単位のデマンド駆動をどう組み合わせるか(2つの独立したキャッシュ層にするのか、シンボル単位のキャッシュだけで十分なのか)は未検討。
 
 ## 関連文書
 
