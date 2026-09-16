@@ -1,0 +1,5 @@
+# Compiled Nim binaries (extension-less, matching source file names) --
+# `nim c` output, not meant to be committed.
+src/concurrency_check
+src/test_shared_symbol_graph
+nimcache/

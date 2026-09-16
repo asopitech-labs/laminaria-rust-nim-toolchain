@@ -72,7 +72,7 @@ type
     declaredBy*: Realm
     nodeRealm*: Realm
 
-  FinishCodegenFn* = proc(facts: SemanticFacts): CodeBody {.closure.}
+  FinishCodegenFn* = proc(facts: SemanticFacts): CodeBody {.closure, gcsafe.}
 
   LayoutAssignment* = object
     addresses*: Table[SymbolId, uint64]

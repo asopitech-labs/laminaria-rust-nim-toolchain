@@ -757,6 +757,50 @@ issue #68全体としては、以下の理由により完了として扱う:
 - H3(target非依存の単一層表現でCraneliftの2層構造を消せるか)は部分的棄却で決着——これはissueが投げかけた核心的な問いに対する、実データに基づいた否定的だが明確な回答である。
 - H6は上記の理由で意図的に打ち切り、汎用化を追求しないという判断そのものが、この研究セッション全体の結論(「表現は統一できるが、変換ロジックの共有は困難」)と整合する形で記録される。
 
+## 5.18 issue #68クローズ後の追加検証: `SharedSymbolGraph`(スケジューラー/プランナー)のNim移植
+
+issue #68クローズ後、ユーザーからの指摘を受けて`docs/01-foundations/compiler-ownership-contract_ja.md`が定める役割分担(インタフェース/UXはRust、コア=言語解釈・ビルドはNim)を踏まえ、`unified-symbol-graph`のスケジューラー/プランナー部分(`SharedSymbolGraph`: `declare_analyzed_symbol`/`require_symbol`のデマンド駆動promotion、`assign_layout`、`apply_elf_x86_64_relocations`)がNimで実装・検証可能かを確認した。issue #68本体が扱った`mir_text`パーサー/`target_ir`コード生成部分は対象外——今回はスケジューラー/プランナー層のみの検証である。
+
+### 5.18.1 実装方針: C/C++ライブラリ再利用を優先し、Nim独自アルゴリズムは最小化
+
+`compiler-ownership-contract_ja.md`の「C/C++ library再利用をfirst-class requirementとする」という原則に従い、`experiments/unified-symbol-graph-nim/src/shared_symbol_graph.nim`は以下の構成とした:
+
+- ハッシュマップ(`nodes`/`edges`/`pendingCodegen`)はNim標準ライブラリ`std/tables`(内部実装はCのハッシュテーブル)をそのまま使用。
+- 排他制御はNim標準ライブラリ`std/locks`(`pthread_mutex_t`の薄いラッパー)を使用。Rust版の3つの独立した`RwLock`(nodes/edges/pending_codegenそれぞれ)を1つの`Lock`に統合しており、これは意図的な簡略化として明記した(粒度の違いが観測可能な挙動差を生むかは別の検証課題として残す)。
+- `Option[T]`はNim標準ライブラリ`std/options`を使用(自作代数的型を実装しない)。
+- ソート処理はNim標準ライブラリ`std/algorithm`の`sort`を使用。
+
+Nim独自に書いたのは、Rust版の状態遷移ロジック(`AddressState`の3状態、デマンド駆動promotion、layout計算、relocationパッチの数式)そのものであり、これはこの検証の対象そのものであるため独自実装せざるを得ない部分である。
+
+Docker環境(`nim-scheduler-check.Dockerfile`、`choosenim`経由でNim 2.2.12を導入)はホストのツールチェーンを一切汚さない設計とした。
+
+### 5.18.2 検証結果: 全10件がRust版と同じ挙動を示した
+
+`experiments/unified-symbol-graph-nim/src/test_shared_symbol_graph.nim`(9件、Rust版`lib.rs`の主要テストの直接対応)と`concurrency_check.nim`(1件、4 realm並行書き込みテスト)を実装し、全て実行して確認した:
+
+1. `declare_analyzed_symbol`が`require_symbol`が呼ばれるまでコード生成を実行しないこと(デマンド駆動)。
+2. `force_commit`が`require_symbol`を経由せず即座にコード生成を強制すること。
+3. `declare_symbol`が異なるrealmでの登録を拒否すること(`RegisterError`相当)。
+4. `resolve_all`が未解決の要求を`None`として正直に報告すること(捏造しない)。
+5. `resolve_all`が実際に宣言されたproviderと要求を正しく突き合わせること。
+6. `assign_layout`が決定的な(`SymbolId`順の)配置を行い、`Analyzed`状態のシンボルをスキップすること。
+7. `apply_elf_x86_64_relocations`が独立再計算したPC相対値と一致するバイト列にパッチすること。
+8. 未解決のrelocationターゲットに対して例外(`LinkException`)を送出すること。
+9. `mutation_count`が受理した宣言/要求のたびに増加すること。
+10. **4つの実OSスレッド(realm毎に1つ)による並行書き込みテスト**: Nim標準の`Thread[T]`(`{.thread.}`プラグマ付きトップレベルproc、`--threads:on --mm:orc`)を使い、Rust版の`four_realms_declare_and_require_concurrently_and_every_boundary_symbol_resolves`と同じシナリオ(app/C/C++/Nimble realmが同時に宣言・要求)を実行し、`mutation_count=6`という同一の期待値で全requirement解決を確認した。
+
+`Realm`列挙の宣言順(`Cargo, Nimble, C, Cpp`)もRust版と一致させ、`assign_layout`の決定的順序がRust版と同じ規則(realm→name)で動くことを確認した。
+
+### 5.18.3 判定: 支持
+
+`SharedSymbolGraph`が担うスケジューラー/プランナーのロジック(デマンド駆動状態遷移、決定的レイアウト、relocationパッチ、実スレッドによる並行安全性)は、Nim標準ライブラリ(C実装のデータ構造・pthreadラッパーの薄い利用のみ)で、Rust版と同じ意味論を再現できることを実データで示した。これは`compiler-ownership-contract_ja.md`が定める「コア=言語解釈・ビルドはNim側の役割」という方針にとって、少なくともスケジューラー/プランナー層についての肯定的な根拠になる。
+
+限定事項として正直に記録する:
+
+- ロック粒度をRust版の3つの独立した`RwLock`から1つの`Lock`へ統合した。この簡略化が並行性能やスケーラビリティにどう影響するかは未検証。
+- `mir_text`パーサー/`target_ir`コード生成部分(issue #68本体の検証対象)はこの移植のスコープに含めていない。
+- Rustのパーサー実装(構文解析)をC/C++の既存ライブラリで代替する可能性についても調査した(`tree-sitter-rust`がMITライセンスのC実装として最有力候補と判明)が、これは別の検証課題として記録するに留め、実装には着手していない。
+
 ## 6. まだ解けていないこと
 
 - 節5.17で判断した通り、H6(残り6 targetへの分岐)は意図的に未着手のまま打ち切った。これは調査漏れではなく、H3の結論とユーザー指示に基づく明示的なスコープ決定である。
