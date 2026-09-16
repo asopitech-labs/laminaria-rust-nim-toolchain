@@ -526,8 +526,67 @@ let no_alias = match kind {
 - `MutableRef { unpin }`の`unpin`条件、`Box { unpin, global }`の`unpin`/`global`条件は、まだ`Ownership::Unique`/`Boxed`に反映していない——これらも同様の反証を受ける可能性がある(例えば`Pin<&mut T>`のケース)。
 - `frozen`の判定は`Ty::is_freeze`という1つのクエリ呼び出しのみに依存しており、このクエリ自体がどこまで正確か(例えば、ジェネリック型パラメータを含む型に対する`is_freeze`の挙動)は検証していない。
 
+## 5.11 事前登録: 表現カバレッジ行列と、以降の実験(H3・効率比較)の棄却条件
+
+ユーザー指摘(節5.9)が要求した「成功基準の事前定義」を、H4・H2の実装が既に完了した時点で遡って記録する(本来は実装前に行うべきだったという指摘自体は正当であり、節6に反省として記録する)。以降の実験(H3・効率比較の再検証)については、実施前に本節へ棄却条件を追記してから着手する。
+
+### 5.11.1 MIR表現カバレッジ行列(実装済み/未実装)
+
+`compiler/rustc_middle/src/mir/syntax.rs`から実際に確認した`TerminatorKind`全14variantと`Rvalue`全12variantを対象に、`target_ir`クレート全体(`Terminator`/`diamond_and_loop_cfg::Terminator`/専用lowering関数群)での対応状況を棚卸しする。
+
+**`TerminatorKind`(14 variant)**:
+
+| Variant | 対応状況 | 備考 |
+| --- | --- | --- |
+| `Goto` | 対応済み | `diamond_and_loop_cfg::Terminator::Goto`(節5.9) |
+| `SwitchInt` | 部分対応 | 2分岐(bool相当)のみ。`Terminator::Branch`(既存)。3分岐以上(`match`の複数バリアント、節5.5.1で実データ確認済み)は未対応 |
+| `Return` | 対応済み | `Terminator::Return`/`diamond_and_loop_cfg::Terminator::Return` |
+| `Assert` | 部分対応 | `lower_bounds_checked_slice_index_to_code_body`(節5.7.1)で1つの具体形状(境界チェック)のみ固定バイト列として実装。汎用的な`Terminator`のvariantとしては未統合 |
+| `Call` | 部分対応 | `lower_call_and_increment_to_code_body`(節5.7.3)で1引数・1戻り値の固定形状のみ。汎用的な`Terminator`のvariantとしては未統合 |
+| `UnwindResume` | 未対応 | パニック/unwind機構自体が本設計のスコープ外(前回研究、節5.7.1で明記) |
+| `Unreachable` | 未対応 | |
+| `Drop` | 未対応 | `rustc-driver-poc`側で`drop_terminator_count`として検出(節5.5.1)のみ。`target_ir`側のコード生成には未接続 |
+| `TailCall` | 未対応 | |
+| `Yield` | 未対応 | コルーチン/async関連、本設計のスコープ外 |
+| `CoroutineDrop` | 未対応 | 同上 |
+| `FalseEdge` | 未対応 | 借用チェック専用の疑似エッジ(実行時には存在しない) |
+| `FalseUnwind` | 未対応 | 同上 |
+| `InlineAsm` | 未対応 | |
+
+**`Rvalue`(12 variant)**:
+
+| Variant | 対応状況 | 備考 |
+| --- | --- | --- |
+| `Use` | 対応済み | `Operand::Const`/`Operand::Param0`、`diamond_and_loop_cfg::Rvalue::Copy`/`Const` |
+| `BinaryOp` | 部分対応 | `Add`/`Sub`(`diamond_and_loop_cfg::Rvalue`)、比較(`NotEqualZero`/`GreaterThanZero`)のみ。乗算・除算・ビット演算は未対応 |
+| `Discriminant` | 未対応 | `rustc-driver-poc`側で`discriminant_read_count`として検出(節5.5.1)のみ。`target_ir`側は未接続 |
+| `Ref` | 未対応 | 借用の生成自体(`&x`/`&mut x`)。本設計は「既に借用として渡された値」の使用のみを扱い、借用の生成そのものは扱っていない |
+| `Repeat` | 未対応 | 配列リテラル`[x; N]` |
+| `ThreadLocalRef` | 未対応 | |
+| `RawPtr` | 未対応 | 生ポインタの構築 |
+| `Cast` | 未対応 | 型変換 |
+| `UnaryOp` | 部分対応 | `neg`(`lower_load_or_reload_to_code_body`内、節5.6.2)のみ | 
+| `Aggregate` | 未対応 | 配列/構造体リテラルの構築(節5.7.2で実MIR確認済みだが未実装) |
+| `CopyForDeref` | 未対応 | |
+| `WrapUnsafeBinder` | 未対応 | |
+
+**総合評価**: `TerminatorKind`14種中、対応済み2種・部分対応3種・未対応9種。`Rvalue`12種中、対応済み1種・部分対応2種・未対応9種。カバレッジは低く、issue #68が要求する「target固有中間表現の設計」全体からすれば、ごく限られた部分集合の実証に留まっていることを正直に記録する。
+
+### 5.11.2 以降の実験の棄却条件(事前登録)
+
+**H3(第2target・AArch64への分岐判定)**:
+- **支持条件**: Assert/Callを`Terminator`の正式なvariantとしてIRへ統合した上で、同じ`CfgBody`をAArch64向けにlowerする第2の関数を実装し、両target間で「target非依存の共通ロジック」(ブロックレイアウト計算、relocation解決等)と「target固有のロジック」(命令エンコーディング)が、コードの追加なしに自然に分離できることを示せた場合。
+- **棄却条件**: 第2の関数実装が、既存のx86_64専用関数の構造をほぼそのまま複製する形になり、共通化できる部分が「関数のシグネチャ」程度に留まる場合。または、共通化を試みた結果、両target固有の詳細(x86_64の`rel32`直接相対分岐 vs AArch64の`CALL26`/`JUMP26`という26ビットフィールド、既に`lib.rs`のdoc commentで確認済みの構造的差異)が、共通コードの抽象化を破壊する場合。
+- **中間評価は行わない**: 実装前に「たぶんこうなるだろう」という予測を記録に残さない。
+
+**効率比較の統制されたやり直し**:
+- **支持条件**: `opt-level=0`同士・同一呼び出し方式(両者関数ポインタ経由、またはビルド時リンクで統一)・N≥30試行で、本設計がLLVMと同等またはそれ以上の実行時性能を示す、あるいは有意な性能差の原因が特定の最適化パス1つに帰着できる場合。
+- **棄却条件**: 統制条件下でも原因不明の性能差が残る場合(節6の未解決事項として記録済みの、命令列が同一なのに性能差が生じる現象が再現する場合)。この場合、「本設計のコード生成自体の質」ではなく「測定方法自体に still 何らかの見落としがある」と判断し、これ以上の効率比較実験は打ち切る。
+
 ## 6. まだ解けていないこと
 
+- 節5.11の事前登録(成功基準の明文化)は、H4・H2の実装が完了した後に遡って行われた。ユーザー指摘が求めた「実装前の事前登録」という規律には従えておらず、これ自体が本セッションの検証プロセスの限界として記録する。以降のH3・効率比較の実験は、節5.11.2の棄却条件を実装前に確定させた上で着手する。
+- 節5.11.1のカバレッジ行列が示す通り、`TerminatorKind`14種中対応済みはわずか2種(部分対応3種)、`Rvalue`12種中対応済みは1種(部分対応2種)にとどまる。issue #68が要求する「target固有中間表現の設計」全体からすれば、実装できているのはごく限られた部分集合であることを正直に記録する。
 - 節5.10で修正した`Ownership::Shared { frozen }`は`UnsafeCell`の有無のみを追跡する。`MutableRef`/`Box`が実際に持つ`unpin`条件(`Pin<&mut T>`等)は未反映であり、同様の反証が存在する可能性が高い。前回研究が挙げたStacked/Tree Borrowsのタグ+木構造という、より豊かな代替への道筋もまだない。
 - 節5.9で実装した`diamond_and_loop_cfg`は、既存の`Terminator`/`lower_target_ir_to_code_body`(2ブロック限定)、`lower_load_or_reload_to_code_body`(Ownership統合)、`lower_bounds_checked_slice_index_to_code_body`(境界チェック)とは独立した、別々の型体系・別々の関数として存在する。「1つの汎用IRが、分岐+ループ+所有権+境界チェックを同時に扱う」という統合はまだ行っていない——これはH3(単一層のtarget固有表現で済むか)の判定に直接関わる未解決事項であり、節5.9.1で確認した通り、機能を追加するたびに別関数を書いている現状は、H3への否定的な材料になりうる。
 - `diamond_and_loop_cfg`はレジスタ割り当てを一切行わず、全ての値を毎回メモリ(スタックスロット)へ読み書きする素朴な方式である。これはSSA構築・mem2reg相当の最適化を意図的に持たないという設計判断だが、この方式のままでは前回研究が指摘したLLVMとの実行時性能差(節5.2.3、節5.8.3)がさらに拡大する可能性が高い。
