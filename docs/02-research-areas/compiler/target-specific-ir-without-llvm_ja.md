@@ -174,11 +174,48 @@ pub trait LowerBackend {
 
 前回研究の主張(節7)は「LLVM IRという特定の汎用中間表現を削除すべき」という**正しさ**の観点の主張であり、「LLVM IRを経由しないことが常に効率的である」という主張ではない。本実測はこれを裏付ける: LLVMが持つ最適化パスという蓄積された資産は、本設計のような直接lowering方式では代替できておらず(節6の未解決事項)、実行時性能の観点では現時点で明確な劣位にある。一方、中間成果物のサイズという観点では、target固有スコープに限定するという設計方針(前回研究の`unified-symbol-graph`自身の既存方針、`ElfX86_64PendingReloc`の「無理に汎用化しない」原則と同じ)が、目に見える形で効率化に寄与することを確認した。
 
+## 5.3 「Rustで使えるかどうか」の検証: `mir_text`の限界と、rustc内部APIによる型・借用チェック済みMIRの直接取得
+
+節5.1の`mir_text::parse_mir_text`には、ユーザーから決定的な指摘を受けた: このパーサーが実際に受理しているのは`rustc --emit=mir`が出力した**人間可読テキスト**の特定パターン(`switchInt`/`goto`/`const`という文字列)にすぎず、Rustの型システム・所有権・借用チェックを一切経由していない。`Ownership`タグも、lowering処理がその値を一度も参照しない(節5節末尾のテストが確認する通り、`Ownership::Unique`でも`Shared`でもlowering結果は変わらない)という意味で、値として持ち回っているだけの飾りだった。これは「Rustを扱った」ことにはならず、「`rustc`がたまたま出力した文字列を受理する自作パーサーを書いた」ことと区別がつかない、という指摘は正当である。
+
+この指摘に応え、`experiments/rustc-driver-poc/`(nightlyツールチェーン + `rustc-dev`/`llvm-tools`コンポーネント、本セッションでインストール済み)に、`rustc_driver`/`rustc_interface`という**rustc本体の内部API**を実際に呼び出すプログラムを実装した。これは前回研究(節5.3、rustc_codegen_gcc)が確認した「rustc本体のフロントエンド・型検査・借用チェックはそのまま使い、バックエンドだけを差し替える」という構造を、本セッションで実際にコードとして動かした初めての実証である。
+
+### 5.3.1 実装と実測結果
+
+`Callbacks::after_analysis`フック(`compiler/rustc_interface/src/passes.rs`の`run_required_analyses`→`analysis`ゲート、前回研究節5.6.1で確認済みの、borrow check完了・codegen開始前の地点)を使い、実際にコンパイルされた関数の`rustc_middle::mir::Body`から、次を**文字列パースではなく型システムのデータ構造として直接**取得した。
+
+- `tcx.mir_borrowck(local_def_id)`を実際に呼び出し、`Ok(_)`(借用チェック**合格**)であることを確認。
+- 各ローカル変数の実際の`Ty<'tcx>`(例: `&'{erased} mut i32`)を取得し、`TyKind::Ref(_, _, Mutability)`という実フィールド(前回研究が`arg_attrs_for_rust_scalar`で確認した`noalias`導出と同じフィールド)から`Ownership::Unique`/`Shared`を導出。
+
+実測結果(`cargo +nightly test`、3件全て合格):
+
+| 入力(実Rustソース) | 導出された`Ownership` | `mir_borrowck`結果 |
+| --- | --- | --- |
+| `fn f(x: &mut i32)` | `Unique` | `Ok(())` |
+| `fn f(x: &i32)` | `Shared` | `Ok(())` |
+| `fn f(x: i32)`(非参照) | `NotAReference` | `Ok(())` |
+
+これは`mir_text`のテキストパーサーとは質的に異なる: **実際の型検査器・借用チェッカーが生成した`Ty<'tcx>`を読んでいる**のであって、テキスト出力の文字列パターンマッチではない。
+
+### 5.3.2 副産物として確認できた、borrow checkゲートの実挙動(前回研究の裏取り強化)
+
+実装過程で、意図的に借用違反を含むコード(`let y = &mut *x; let z = &mut *x;`)を同じ入力として与えたところ、`after_analysis`フック自体に**到達せず**、`rustc_driver::run_compiler`がE0499で即座にコンパイルを中断した。これは前回研究(節5.6.1)が実装コードの読解のみから導いていた判定——「borrow checkはクレート全体をコード生成前でゲートし、失敗時はcodegenへの到達自体を止める」——を、本セッションで**実際に動くプログラムとして再現・確認した**、初めての直接実証である。前回研究の該当箇所は「確認した」という表現を使っていたが、それは`rustc`ソースコードを読んだ結果であり、本セッションで初めて「実際に動かして観測した」という段階に到達した。
+
+### 5.3.3 これでも「本格的にRustで使える」ことの証明ではない、と明記する
+
+上記の実証は、次の限定の中でのみ成立する。
+
+- `experiments/rustc-driver-poc/`は`unified-symbol-graph`クレート(stableツールチェーンでビルド)とは別の、nightly専用のスクラッチクレートである。`#![feature(rustc_private)]`はnightly限定の機能であり、本クレートの正式なビルドパイプラインへ組み込むには、ツールチェーン要件自体を変更する必要がある(節6の未解決事項)。
+- 取得した`Ownership`は、まだ`target_ir::lower_target_ir_to_code_body`(節5)へ実際に繋がっていない。「型システムから正しい情報を取得できる」ことと、「その情報をtarget固有コード生成が実際に消費する」ことは別の作業であり、後者は未実装である。
+- ジェネリクス単相化後のコード、トレイト境界、`Drop`実装、構造体レイアウトといった、Rustの型システムのより広い部分は未検証。今回検証したのは`&mut i32`/`&i32`/`i32`という最小の3パターンのみである。
+
 ## 6. まだ解けていないこと
 
+- 節5.3で実証した`rustc_driver`ベースの型・借用チェック済みMIR取得を、`target_ir::lower_target_ir_to_code_body`と実際に接続する作業は未着手。現状は「型情報を正しく取得できる(節5.3)」と「target固有コードを正しく生成できる(節5)」が、別々の独立したプログラムとして存在するだけである。
+- `experiments/rustc-driver-poc/`はnightly専用(`rustc-private` feature)であり、`unified-symbol-graph`クレート自体のstableツールチェーンでのビルドとは両立しない。本格的な統合には、`unified-symbol-graph`自体をnightly専用にするか、rustc内部APIへの依存を独立クレートに閉じ込め、stableな`unified-symbol-graph`側からは値渡し(本書の`InspectedItem`のような、`Ty<'tcx>`のライフタイムから切り離した所有データ)でのみやり取りするかの設計判断が未決定。
 - 節5.2.3で実測した通り、`lower_target_ir_to_code_body`は最適化パスを一切持たず、LLVMが行う分岐除去等の最適化(この実験では約2.7〜3.0倍の実行時性能差の原因)を代替できていない。本設計がLLVM IRを削除した後も「意味論を確定させる境界」(前回研究節7)の先に、何らかの最適化層を独自に持つ必要があるのか、あるいは実行時性能を犠牲にしてでも中間成果物の軽量さ(節5.2.2)を優先するのかは、未決定の設計判断である。
 - 節5.2.1で確認した通り、コンパイル時間の公平な比較には、本設計を実際の`rustc`ドライバへ統合し(`-Zcodegen-backend`相当)、プロセス起動オーバーヘッドを除いた実運用規模での計測が必要。1関数単位の計測では、rustc自身の起動コストに埋もれてしまい、LLVM自体の処理時間差を検出できないことを本セッションで確認した。
-- `mir_text::parse_mir_text`が対応するRust構文は「直線コード」と「2分岐+`switchInt`+共通`goto`合流点」の2パターンのみ。`match`式(3分岐以上)、ループ、関数呼び出し、構造体/参照型、`i32`以外の数値型は未対応であり、`rustc`の出力フォーマット自体も"human-readable"であり将来変更されうる非公式形式である(rustc自身の警告コメント`// WARNING: This output format is intended for human consumers only and is subject to change without notice.`が実際に出力に含まれることを確認済み)ため、本格的な統合には`-Zunpretty=mir`ではなく`rustc_middle::mir::Body`自体を扱う(コンパイラプラグイン/カスタムドライバとしての)経路が必要になる。
+- `mir_text::parse_mir_text`が対応するRust構文は「直線コード」と「2分岐+`switchInt`+共通`goto`合流点」の2パターンのみ。`match`式(3分岐以上)、ループ、関数呼び出し、構造体/参照型、`i32`以外の数値型は未対応であり、`rustc`の出力フォーマット自体も"human-readable"であり将来変更されうる非公式形式である(rustc自身の警告コメント`// WARNING: This output format is intended for human consumers only and is subject to change without notice.`が実際に出力に含まれることを確認済み)ため、本格的な統合には`-Zunpretty=mir`ではなく`rustc_middle::mir::Body`自体を扱う(コンパイラプラグイン/カスタムドライバとしての)経路が必要になる。節5.3の`rustc_driver`ベースの経路が、まさにこの「本格的な統合」の第一歩である。
 - `SemanticFacts`の拡張(CFG+所有権タグ)を`unified-symbol-graph`の`declare_analyzed_symbol`/`require_symbol`パスへ実際に統合する作業(本書ではPoCとして独立モジュールに留め、既存の`AddressState`型定義自体はissue #67の後方互換のため変更しない)。
 - x86_64以外の7つのtarget(ELF/ARM64、COFF x2、Mach-O/ARM64、WASM x3)への`TargetIr`→`CodeBody`変換規則の分岐は未着手。特にWASMは前回研究の`unified-symbol-graph`自身のdoc comment(節「WASMの実測」)が既に確認した通り、アドレス計算を伴わないインデックス置換モデルであり、本書のx86_64 PC相対分岐という前提が全く成立しない別設計が必要になる。
 - QBEのように型を犠牲にする再エンコードを避けつつ、所有権タグをtarget固有表現の中でどこまで保持し続けるべきかの具体的な境界(全ての値にタグを付けるのか、noalias相当の最適化ヒントを出す箇所だけに限定するのか)は未設計。

@@ -1,0 +1,7 @@
+[workspace]
+
+[package]
+name = "rustc-driver-poc"
+version = "0.0.0"
+edition = "2021"
+publish = false
