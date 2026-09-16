@@ -415,6 +415,13 @@ pub mod durability_v2;
 /// `disk_tiering`'s own module doc comment.
 pub mod disk_tiering;
 
+/// Issue #67's last unaddressed verification question: whether the
+/// degree `durability_v2`'s invalidation-cost reasoning uses as a proxy
+/// actually correlates with real `rustc` compile time, measured against
+/// two real fixture workspaces with contrasting degree distributions.
+/// See `cost_correlation`'s own module doc comment.
+pub mod cost_correlation;
+
 /// The four ecosystems this hypothesis is scoped to (matching this repo's
 /// own `cadd`/`app` fixture: Cargo, Nimble, C, C++). Not meant to be an
 /// exhaustive or permanent list -- a placeholder for "whichever realms a
