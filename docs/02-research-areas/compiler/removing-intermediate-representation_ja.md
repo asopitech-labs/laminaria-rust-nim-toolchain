@@ -249,6 +249,7 @@ V8はAST→Ignitionバイトコード(汎用中間表現)→Sparkplug/Maglev/Tur
 | LLVM IRという「単一汎用表現を経由する」設計 | **削除すべき(強い実害根拠あり)** | `noalias`のような再エンコードが、正しさを脅かす実際のミスコンパイル(issue #31681/#84958/#54878)を繰り返し引き起こしている |
 | target依存の意味論をtarget非依存表現で扱おうとする試み(panic/unwind等) | **そもそも成立しない** | Itanium/SEHのような差異は、単一表現を経由しても回避できない |
 | 「意味論を1箇所に確定させる」という設計要求 | **削除不可能** | 複数の専用バックエンドを束ねる場合でも、意味論の重複実装を避けるためにはどこかで一度確定させる必要がある(RFC 1211理由6と同じ問題) |
+| `noalias`という特定の再エンコード形式 | **削除すべき(より正確な代替の実在が確認できた)** | Stacked Borrows/Tree Borrowsが、より豊かな操作的意味論(タグ+木構造)を形式化しており、LLVM属性への再エンコードを経由しない代替設計の実在証拠になる |
 | CFG上の不動点計算を「木/CFG構造」に固定する必要性 | **削除可能(より一般的な形へ置換可能)** | rustc自身のPolonius実装(`LocalizedConstraintGraph`)がborrow checkingをグラフ到達可能性問題として定式化しており、`SharedSymbolGraph`と同型の頂点+エッジ抽象の上に統合できる可能性がある(節2.5) |
 
 したがって、LAMINARIAが実際に削除すべきは「**LLVM IRのような、target非依存を標榜しながらtarget依存の意味論(panic/unwind等)を扱いきれず、かつRustの型システムが持つ豊かな意味論を限定的な属性語彙に再エンコードすることで正しさを脅かす、単一の汎用中間表現という層**」である。
@@ -258,21 +259,26 @@ V8はAST→Ignitionバイトコード(汎用中間表現)→Sparkplug/Maglev/Tur
 1. **CFG上のデータフロー解析という計算モデル**(drop elaboration、borrow checking相当の処理) — 名前を「IR」と呼ばない形で実装しても、この計算構造自体は必要。
 2. **意味論を確定させる1箇所の境界** — target固有の専用バックエンドを複数束ねる場合、各バックエンドに意味論を重複実装させないための「意味論の所在」をどこかに置く必要がある。これは新しい「中間表現」ではなく、[全体設計ドキュメント](../../01-foundations/joint-symbol-schedule-layout-design_ja.md)で既に設計している`SharedSymbolGraph`(境界シンボルのみを共有し、各realmの内部意味論は外部へ露出しない)と同じ形の境界として実装できる可能性がある — これは次の設計課題である。
 
-最も近い先行実装パターンはTinyCC(意味解析結果を外部化されたグラフ構造として保持しない)とZig(target固有の直接コード生成をLLVM非依存で持つ)のハイブリッドであり、これは`unified-symbol-graph`の既存設計(`CodeBody`が「意味解析結果」ではなく「機械語バイト列+再配置」を直接保持する)と既に整合している。
+節2.5で確認したPoloniusのグラフ定式化(`LocalizedConstraintGraph`、`(region, point)`頂点+到達可能性)は、この「CFG上の不動点計算」という残らざるを得ない構造自体を、`SharedSymbolGraph`と**同じ抽象(頂点+エッジ+遅延的グラフ走査)の上に統合できる可能性**を具体的に示している。これは、削除できない計算モデル(節2.5の判定)を、既存の他設計(unified-symbol-graph)とは別の新しい構造として追加するのではなく、**同じグラフ構造の異なる頂点・エッジ種別として一体化する**という、まだ検証していない具体的な次の設計仮説である。
+
+最も近い先行実装パターンはTinyCC(意味解析結果を外部化されたグラフ構造として保持しない)とZig(target固有の直接コード生成をLLVM非依存で持つ)のハイブリッドであり、これは`unified-symbol-graph`の既存設計(`CodeBody`が「意味解析結果」ではなく「機械語バイト列+再配置」を直接保持する)と既に整合している。学術的形式化の側からは、Polonius(グラフ到達可能性への再定式化)とStacked/Tree Borrows(`noalias`への再エンコードを経由しない、より豊かな操作的意味論)が、同じ方向性を独立に裏付けている。
 
 節5で確認したRust自身の代替実装(mrustc/gccrs/rustc_codegen_gcc/Miri)は、いずれもLLVMという特定の中間表現には依存しないことに成功しているが、「中間表現という概念そのもの」からは誰も脱却できていない。この事実は、節6の非Rust系事例(TinyCC/QBE/Zig/V8)から得た結論をRust固有の文脈で再確認するものであり、LAMINARIAの主張(中間表現という概念自体の削除)が、Rust言語を対象とした既存の代替実装のいずれよりも野心的な主張であることを裏付けている。それでも、mrustcの「borrow checkingを外すことで実装を大幅に単純化できる」という知見は、節2.1で述べた「意味論を1箇所に固定する境界」の設計コストを下げる手段として、Miriの「コード生成と意味論検証は分離可能」という知見は「意味論の確定」と「target固有コード生成」を別の計算段階として設計できる可能性として、それぞれLAMINARIAの設計判断に直接活用できる。
 
 ## 8. まだ解けていないこと
 
-- MIRが担う不動点計算(drop elaboration相当)を、独立した「IR」という名前の層を持たずに、どのようなデータ構造で実装するかの具体設計はまだ無い。
+- MIRが担う不動点計算(drop elaboration相当)を、独立した「IR」という名前の層を持たずに、どのようなデータ構造で実装するかの具体設計はまだ無い。**Poloniusのグラフ定式化(節2.5)が有力な出発点になり得るが、まだ`SharedSymbolGraph`との統合設計を実装していない。**
 - 「意味論を確定させる1箇所の境界」を`SharedSymbolGraph`とどう統合するか(あるいは別の構造にするか)は未設計。
 - panic/unwind lowering のようなtarget固有の分岐処理を、node 4で示した「target固有専用コンパイラ」それぞれにどう実装させるか(重複実装を許容するか、共通実装をどこかに置くか)は未設計。
 - Zigの並列化モデル(意味解析1スレッド+コード生成複数スレッド+リンク1スレッド)と、LAMINARIAの`SharedSymbolGraph`が想定する並列モデル(各realmフロントエンドが独立して書き込む)の異同を、具体的な比較実験としてまだ検証していない。
 - LAMINARIA自身がborrow checking相当の検証をどこまで・どの段階で行うか(mrustcのように単純化して実用性を優先するか、rustc同等の厳密さを保つか)は、正しさの保証範囲を左右する未決定の設計判断であり、まだ議論していない。
+- Stacked/Tree Borrowsの操作的意味論(タグ+木構造)を、`ElfX86_64PendingReloc`のようなtarget固有の実データ型へどう落とし込むかの具体設計はまだ無い — 現状`unified-symbol-graph`は所有権・エイリアシング情報を一切保持していない(`CodeBody`は機械語バイト列+再配置のみ)。
+- RustBelt/Oxideが示した「型付け規則としての定式化」と、Polonius/`SharedSymbolGraph`が示した「グラフ到達可能性としての定式化」は、異なる形式化の階層(型の健全性 vs. 実行時パス依存の状態計算)にあり、両者をLAMINARIAの設計の中でどう役割分担させるかはまだ整理していない。
 
 ## 関連文書
 
 - [全体設計 — なぜ「一つの計算システム」でなければならないか](../../01-foundations/joint-symbol-schedule-layout-design_ja.md) — 問題D(汎用中間表現を手放す理由)
 - [LLVM再発見研究](llvm-rediscovery-research_ja.md) — LLVM概念の再導出方法論
 - [LLVM内部の実測記録](llvm-internals-observed_ja.md) — MC層・CGU粒度・並列化・ThinLTO・Cranelift実測失敗の記録
+- [Rustそのもののコンパイルを研究・実験した先行プロジェクト・事例](rust-self-compilation-precedents_ja.md) — rustcのstage0/1/2ブートストラップ史、`CodegenBackend` trait経由のバックエンド差し替え機構、no_std/no_core最小構成
 - issue #48 — CGU粒度、LLVM処理速度、Cranelift実測

@@ -166,6 +166,7 @@ LAMINARIAの成果物は「ビルドできる」だけでは不十分であり�
 - [LLVM内部の実測記録](../02-research-areas/compiler/llvm-internals-observed_ja.md) — MC層・CGU粒度・並列化・ThinLTOの実測
 - [Testable Native Artifactと第一級Test Harness](../02-research-areas/toolchains/testable-native-artifact-harness_ja.md) — target execution capability、Lane Cの責務
 - [意味論から「中間表現」を削除する](../02-research-areas/compiler/removing-intermediate-representation_ja.md) — Rust IR→LLVM IR→バイナリの詳細検証、削除可能/不可能の判定
+- [Rustそのもののコンパイルを研究・実験した先行プロジェクト・事例](../02-research-areas/compiler/rust-self-compilation-precedents_ja.md) — rustcのブートストラップ史、バックエンド差し替え機構、no_std最小構成
 - issue #48 — Cargo/Nimble/C/C++の協調解決、CGU粒度、LLVM処理速度、Cranelift実測
 - issue #59 — クリティカルパス実測とmakespan/bin-packingの独立性、スケジュール×配置の同時最適化課題
 - issue #66 — mold設計哲学の評価、プラットフォーム別再配置モデルの実測
