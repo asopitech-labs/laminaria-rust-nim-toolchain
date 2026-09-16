@@ -209,11 +209,14 @@ LAMINARIAが目指す設計(target固有専用コンパイラ、汎用中間表�
 
 節5.1でmrustcが「borrow checkingを行わない」設計を採ることを確認した。本節では、この判断が実際に何を犠牲にしているかを、rustc本体のコンパイルパイプライン(ゲート条件)とmrustc自身の設計判断の両方から確定する。
 
-### 5.6.1 borrow checkingはコンパイラドライバレベルで明示的なゲートとして実装されている
+### 5.6.1 borrow checkingはコンパイラドライバレベルで明示的なゲートとして実装されている — ただし粒度は「アイテム単位で継続、クレート単位で遮断」
 
-`compiler/rustc_interface/src/passes.rs`の`run_required_analyses`関数(1149-1187行)を確認した結果、`mir_borrowck`は`tcx.ensure_ok().mir_borrowck(def_id)`という形で、クレート内の全アイテムに対し**強制実行**される(1160行)。
+`compiler/rustc_interface/src/passes.rs`の`run_required_analyses`関数(1088-1187行)を確認した結果、`mir_borrowck`は`tcx.par_hir_body_owners(|def_id| { ... tcx.ensure_ok().mir_borrowck(def_id); ... })`という形で、クレート内の全アイテム(HIR body owner)を対象に**並列にループ実行**される(1149-1177行)。
 
-決定的なのは、この関数を呼び出す`analysis`関数(1195行)の直後、および`start_codegen`関数(同ファイル1281行)冒頭に置かれたゲートである。
+ここで粒度を正確に区別する必要がある。`mir_borrowck`自体は`Result<_, ErrorGuaranteed>`を返す通常のクエリであり(`rustc_borrowck/src/lib.rs`117-120行)、失敗しても呼び出し元(`ensure_ok()`)は**即座にpanicもabortもしない**。`ensure_ok()`は「このクエリの結果としてエラーが起きていれば、既に診断コンテキストへ記録済みであることを保証する」という意味の呼び出しであり、ループの実行自体はブロックしない。したがって:
+
+- **アイテム単位(def_id単位)**: あるアイテムのborrow checkが失敗しても、`par_hir_body_owners`のループは中断されず、クレート内の他の全アイテムに対する`mir_borrowck`が引き続き実行される。これは「1つエラーが見つかった時点で即座に停止する(fail-fast)」設計ではなく、「クレート全体を走査し、できるだけ多くのエラーを一度にユーザーへ提示してから打ち切る」設計である。
+- **クレート単位**: この全アイテム走査が完了した後、`run_required_analyses`を呼び出す`analysis`関数(1195-1211行)の中で、蓄積されたエラーの有無を**1回だけ**判定するゲートがある。
 
 ```rust
 // analysis() 内、run_required_analyses() 呼び出し直後
@@ -229,9 +232,9 @@ if let Some(guar) = tcx.sess.dcx().has_errors_or_delayed_bugs() {
 }
 ```
 
-borrow checkingが失敗すると`ErrorGuaranteed`という型でエラーが記録され(`rustc_borrowck/src/lib.rs`117-148行の`mir_borrowck`関数のシグネチャ自体が`Result<_, ErrorGuaranteed>`を返す)、この記録は`dcx()`(診断コンテキスト)に蓄積される。`start_codegen`はコード生成を始める前に必ずこのエラー蓄積を確認し、1件でもあれば`raise_fatal()`で**コード生成そのものに到達せず**コンパイルを打ち切る。
+borrow checkingが失敗すると`ErrorGuaranteed`という型でエラーが記録され、この記録はクレート内のどのアイテムで発生したかに関わらず、単一の`sess.dcx()`(セッション全体で共有される診断コンテキスト)へ蓄積される。`start_codegen`はコード生成を始める前に必ずこのエラー蓄積を確認し、1件でもあれば`raise_fatal()`で**コード生成そのものに到達せず**コンパイル全体(このクレート全体のコンパイル)を打ち切る。
 
-**判定**: borrow checkingは「診断だけを出して処理は続行する」ものではない。コンパイラドライバの制御フロー上に明示的に置かれた、**コード生成へ進む前提条件を検査するゲート**である。エラーがあればcodegenのエントリポイント(`codegen_backend.codegen_crate(tcx)`、同ファイル1336行)自体が呼ばれない。
+**判定**: borrow checkingは「診断だけを出して処理は続行する」ものではない。コンパイラドライバの制御フロー上に明示的に置かれた、**コード生成へ進む前提条件を検査するゲート**である。ただしゲートが働く単位は**クレート全体**であり、個々のアイテムではない。すなわち「対象コードだけがコード生成をスキップされ、クレート内の他の(borrow checkに合格した)アイテムは通常通りコード生成される」という部分的な失敗モードは存在しない — クレート内のどこか1箇所でもborrow checkが失敗すれば、`codegen_backend.codegen_crate(tcx)`(同ファイル1336行、クレート全体を1回のバックエンド呼び出しで処理する関数)自体が呼ばれず、**そのクレート全体のコード生成が丸ごと行われない**。これは節1.2で確認したCGU(codegen unit)がクレート単位で分割される設計と整合しており、コード生成の失敗/成功の単位が最初からクレート単位で設計されていることを裏付けている。
 
 さらに、節2.2で確認したdrop elaboration(`mir_drops_elaborated_and_const_checked`)は、同じ`run_required_analyses`内で**`tcx.sess.opts.output_types.should_codegen()`の場合のみ**呼ばれる(1172-1176行)という条件分岐がある。これは「コード生成する場合に限り、drop情報を要求する」という設計であり、borrow checking自体(1160行)はcodegenの有無にかかわらず常に実行される、という非対称性がある。
 
@@ -333,7 +336,7 @@ V8はAST→Ignitionバイトコード(汎用中間表現)→Sparkplug/Maglev/Tur
 | 「意味論を1箇所に確定させる」という設計要求 | **削除不可能** | 複数の専用バックエンドを束ねる場合でも、意味論の重複実装を避けるためにはどこかで一度確定させる必要がある(RFC 1211理由6と同じ問題) |
 | `noalias`という特定の再エンコード形式 | **削除すべき(より正確な代替の実在が確認できた)** | Stacked Borrows/Tree Borrowsが、より豊かな操作的意味論(タグ+木構造)を形式化しており、LLVM属性への再エンコードを経由しない代替設計の実在証拠になる |
 | CFG上の不動点計算を「木/CFG構造」に固定する必要性 | **削除可能(より一般的な形へ置換可能)** | rustc自身のPolonius実装(`LocalizedConstraintGraph`)がborrow checkingをグラフ到達可能性問題として定式化しており、`SharedSymbolGraph`と同型の頂点+エッジ抽象の上に統合できる可能性がある(節2.5) |
-| borrow checkingという検査工程自体 | **削除不可能(削除するとゲートが機能しなくなる)** | コンパイラドライバの制御フロー上でcodegenへ進む前提条件として明示的に配置されており(`raise_fatal`によるゲート)、省略すると型情報だけから独立に導出される`noalias`のような最適化ヒントの安全性根拠が失われる(節5.6) |
+| borrow checkingという検査工程自体 | **削除不可能(削除するとゲートが機能しなくなる)** | コンパイラドライバの制御フロー上でcodegenへ進む前提条件として明示的に配置されており(`raise_fatal`によるゲート)、省略すると型情報だけから独立に導出される`noalias`のような最適化ヒントの安全性根拠が失われる。ゲートの粒度は**クレート全体**(アイテム単位では走査を継続し、クレート単位で一括してcodegenを遮断する)であり、失敗したアイテムだけをコード生成対象から除外する部分実行モードは存在しない(節5.6.1) |
 
 したがって、LAMINARIAが実際に削除すべきは「**LLVM IRのような、target非依存を標榜しながらtarget依存の意味論(panic/unwind等)を扱いきれず、かつRustの型システムが持つ豊かな意味論を限定的な属性語彙に再エンコードすることで正しさを脅かす、単一の汎用中間表現という層**」である。
 
