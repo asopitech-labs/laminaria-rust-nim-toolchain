@@ -233,6 +233,64 @@ Microsoft Learn "Native AOT vs ReadyToRun vs JIT"、および.NETランタイム
 
 これは「あるシンボルのコンパイル結果が単一の確定した状態ではなく、実行時の要求(呼び出し頻度)に応じて異なる品質のバージョンへ動的に置き換わる」という設計であり、Erlangのバージョン共存(参考事例6)と、rustcのクエリシステム(参考事例1)の中間に位置する — 「事前に生成しておいた保守的な結果」と「後から要求に応じて生成する最適化版」が同じシンボルについて共存する。これは問題Eが要求する「検証済みアイテムだけが最適化ヒントを伴う」という要件(未検証時は保守的なコードを出し、検証完了後に最適化版へ差し替える)と構造的に対応する具体的な先例になり得る。
 
+#### 参考事例9: Self-Adjusting Computation(Acar, CMU博士論文2005) — 問題Fが要求する計算モデルの理論的基盤
+
+Umut A. Acar氏のPhD論文"Self-Adjusting Computation"(Carnegie Mellon University, 2005)を一次資料として確認した結果、この論文は動的依存グラフ(dynamic dependence graphs, DDG)によって計算のデータ依存・制御依存を記録し、入力変化時に**変更伝播(change propagation)アルゴリズム**でそのDDGの必要な部分だけを再計算するという理論的基盤を確立している。プログラムの実行を「最初から再実行する」のでも「変化を無視する」のでもなく、依存関係を辿って影響を受けた部分だけを更新するという方式は、参考事例1(rustcのクエリシステム)・参考事例2(Salsa)がいずれも実装レベルで踏襲している設計の、2005年時点での理論的先行研究である。
+
+参照: Umut A. Acar, "Self-Adjusting Computation", PhD Thesis, Carnegie Mellon University, 2005(<https://www.umut-acar.org/publications>で参照可能)。
+
+#### 参考事例10: Adapton(Hammer et al., PLDI 2014) — 「Demanded Computation Graph」という、問題Fの構造そのものを指す概念
+
+Adapton(Hammer, Khoo, Hicks, Foster, PLDI 2014)を確認した結果、この研究は参考事例9の変更伝播理論を土台に、**Demanded Computation Graph(DCG)**という概念を導入している。docs.rs上のAdapton実装ドキュメント(<https://docs.rs/adapton/0/adapton/>)を確認したところ、DCGは次の性質を持つ:
+
+- 計算全体を**Editor役割**(入力を作成・変更し、出力を要求する側)と**Archivist役割**(要求された計算をキャッシュしながら実行する側)に分離する。
+- `Cell`(可変な入力・中間データ)と`Thunk`(遅延された計算、「force」されて初めて観測可能になる)という2つの基本要素を持つ。`Thunk`は生成された時点では計算されず、実際に要求(force)された時点で初めて計算される。
+- **switching**という性質: ある計算が「要求されている」状態と「要求されていない」状態の間を、条件分岐に応じて行き来できる。要求されなくなった計算はキャッシュされた状態を保持したまま非活性化され、再び要求されれば(入力が変化していなければ)そのまま再利用される。
+
+DCGが解決している問題は、Adapton自身のドキュメントが明示する通り、**「入力が変化すると、実際に誰にも要求されていない出力まで含めて全ての依存関係が律儀に再計算されてしまう」**という、それ以前の自己調整計算システムが持っていた無駄である。これは問題Fが要求する構造 — 「機械語は、実際に要求された時にだけ導出され、要求されなくなればキャッシュされた状態のまま止まる」— を、名前(Demanded Computation Graph)から実装(Editor/Archivist分離、Cell/Thunk)まで、ほぼそのまま言い表している最も直接的な学術的先行研究である。
+
+参照: Matthew A. Hammer, Yit Phang Khoo, Michael Hicks, Jeffrey S. Foster, "Adapton: Composable, Demand-Driven Incremental Computation", PLDI 2014(<https://dl.acm.org/doi/10.1145/2594291.2594324>)、実装ドキュメント<https://docs.rs/adapton/0/adapton/>、GitHubリポジトリ<https://github.com/Adapton/adapton.rust>(`src/engine.rs`にDCGの実装がある)。
+
+#### 参考事例11: Nixのderivationモデル — content-addressedな不変状態として成果物を保持し、遅延評価言語がその実体化を要求時まで遅らせる
+
+Nix公式マニュアル(<https://nix.dev/manual/nix/2.18/language/derivations>)を確認した結果、Nixのビルド成果物(derivation)は、全ビルド入力の暗号学的ハッシュから決定的に導出される`/nix/store`内の不変パスとして保持される。同一の入力からは常に同一の出力パスが導出されるため、「このハッシュに対応する成果物が既に存在するなら、再ビルドせず再利用する」という判定が構造的に可能になる。
+
+さらにNix言語自体は遅延評価(call by need)言語であり(公式ドキュメント複数箇所で確認、<https://nix.dev/manual/nix/2.30/language/evaluation>系列のページ)、derivationは定義されただけでは実行されず、**その出力が実際に必要とされた時点で初めてビルドが行われる**。これは、ソースコード(derivationの定義)とビルド成果物(store path)が、ハッシュという形で常に対応関係を保ちながら、実体化(ビルド)自体は要求時まで遅延されるという、問題Fが要求する構造の**システム全体規模での実例**である。ただしNixの粒度はderivation(概ねパッケージ・ビルドステップ)単位であり、参考事例3(Bazel/Buck2)と同様、問題Fが要求するシンボル単位の粒度には直接対応しない。
+
+参照: Nix Reference Manual, "Derivations"(<https://nix.dev/manual/nix/2.18/language/derivations>)、"Evaluation"章(遅延評価の言語仕様)。
+
+#### 参考事例12: Unisonの内容アドレス指定コード — 「invalidationという概念自体が存在しない」、問題Fが目指す極限形
+
+Unison公式ドキュメント"The big idea"(<https://www.unison-lang.org/docs/the-big-idea/>)を確認した結果、Unisonの各定義は**その構文木のハッシュ**によって識別される。関数`increment`は`(#arg1 -> #a8s6df921a8 #arg1 1)`のように、名前付き引数を位置参照に、依存関係をそのハッシュに置き換えた形で内部表現され、このハッシュが実装を一意に固定する。
+
+決定的な記述は次の一文である。
+
+> Since Unison definitions are identified by their hash, they never change [...] we can parse and typecheck definitions once, and then store the results in a cache which is never invalidated. [...] this cache is not just some temporary state in your IDE or build tool...it's part of the Unison codebase format.
+
+ハッシュで識別される定義は原理的に変化しないため、パース・型検査済みの結果を**恒久的に無効化されないキャッシュ**として保持でき、これは一時的なIDE状態やビルドツールの中間ファイルではなく、Unisonのコードベース形式そのものの一部として永続化される。ドキュメントはこの帰結を「実質的にビルドという工程そのものを消し去る(effectively eliminating the build step entirely)」と表現している。
+
+これは問題Fが目指す設計の、調査した範囲での**最も近い極限形**である。Unisonは「ソースコードとコンパイル結果を一体の永続状態として保持する」(参考事例5のSmalltalkと同じ性質)と、「ハッシュが変わらない限り再計算不要」(参考事例2のSalsaと同じ性質)を、**同じ1つの仕組み(内容アドレス指定)で同時に満たしている**。参考事例5(Smalltalk)で指摘した「状態化はできるが遅延は満たさない」という限界を、Unisonはハッシュ不変性によって解消している。ただしUnisonの単位は「定義(関数・値)」であり、`unified-symbol-graph`が扱う「FFI境界を越えるシンボル」という単位とは性質が異なる(Unisonは言語内のあらゆる定義を対象にするが、`unified-symbol-graph`は境界シンボルだけを対象にする、節4参照)。
+
+参照: Unison公式ドキュメント"The big idea"(<https://www.unison-lang.org/docs/the-big-idea/>)。
+
+#### 参考事例13: スプレッドシート/Functional Reactive Programming — 「pull型」と「push型」の区別を明確化する対照事例
+
+スプレッドシート(Microsoft Excel等)は、セルの値が他のセルの式に依存する場合、依存元が変化すると自動的に再計算されるという、Functional Reactive Programming(FRP)の実世界での典型例として知られる(Wikipedia "Functional reactive programming"、<https://en.m.wikipedia.org/wiki/Functional_reactive_programming>で概説を確認)。
+
+ここで重要な区別が明確になる。FRP・データフロープログラミングの一般的な分類として、**push評価**(入力が変化した瞬間に、依存する全ノードへ変化を伝播する、eager)と**pull評価**(出力が要求された時点で、依存関係を遡って必要な値だけを取得する、lazy)という2つのモデルが存在する。スプレッドシートの典型的な実装(セルを開いた瞬間に全依存先が再計算される)はpush型に近い。
+
+問題Fが要求するのは明確に**pull型**である — 「アセンブリが必要になったタイミングで状態から導出する」という要件は、入力(ソースコード)が変化した瞬間に全ての依存する機械語を即座に再生成する(push型)のではなく、実際に要求されるまで再生成を遅らせる(pull型)ことを意味する。この対比により、問題Fの設計がFRP/スプレッドシートの単純な流用ではなく、参考事例2(Salsa)・参考事例4(ORC JIT)・参考事例10(Adapton)が採るpull型の系譜に位置することが確認できる。
+
+参照: Wikipedia, "Functional reactive programming"(<https://en.m.wikipedia.org/wiki/Functional_reactive_programming>)。
+
+#### 参考事例14: Incremental View Maintenance(materialized view) — push型で「常に最新化しておく」、問題Fとは逆方向の設計
+
+リレーショナルデータベースのmaterialized view(事前計算済みのクエリ結果)を、元データの変化に応じて全体再計算ではなく差分だけで更新する技術、Incremental View Maintenance(IVM)を確認した結果(Materialize社ブログ<https://materialize.com/blog/ivm-database-replica/>、RisingWaveブログ<https://risingwave.com/blog/what-is-incremental-view-maintenance/>)、IVMは**入力の変化ごとに、変化量(diff)だけをストリーミング的に伝播し、materialized viewを常に最新の状態に保つ**という設計を取る。Materialize社のdifferential dataflow、新興のDBSPベース実装(Feldera)は、いずれもこのpush型の増分更新を形式的な保証(完全再計算と一致する結果を返すこと)付きで実現している。
+
+これは参考事例13で確認したpush/pullの区別における、明確な**push型**の実例である。IVMが最適化しているのは「値が要求された時の計算コスト」ではなく「値が変化した時の更新コスト」であり、問題Fが要求する「要求されるまで計算しない」という性質とは**逆方向**を向いている。IVMの立場では、materialized viewは常に最新化されている(要求時に計算が発生することはない)ことが価値であり、これは`unified-symbol-graph`の現状の設計(節「まず自分自身の現状を確認する」で述べた、`declare_symbol`呼び出し時点で即座に機械語を確定させる、eagerな設計)に近い。IVMを参考事例として位置づける意義は、「成果物を状態として保持する」という要件だけならpush型でも満たせてしまうことを対照的に示す点にある — 問題Fが単なる「状態としての保持」ではなく、pull型(デマンド駆動)という性質を明示的に要求していることの重要性を、この対照によって確認できる。
+
+参照: Materialize, "Incremental View Maintenance Replicas"(<https://materialize.com/blog/ivm-database-replica/>)、RisingWave, "What Is Incremental View Maintenance (IVM) and Why It Matters"(<https://risingwave.com/blog/what-is-incremental-view-maintenance/>)。
+
 #### この設計が要求する具体的な変更
 
 以上を踏まえ、LAMINARIAが取るべき設計の要件を次のように整理する。
@@ -242,6 +300,8 @@ Microsoft Learn "Native AOT vs ReadyToRun vs JIT"、および.NETランタイム
 3. **ソースコードとコンパイル結果を、別々のファイル・別々のプロセスの入出力としてではなく、単一の永続状態の中で常に対にして保持する。** Smalltalk(参考事例5)の`CompiledMethod`が示す通り、この対応関係(あるシンボルの機械語は、どのソース・どの意味解析結果から生成されたか)自体を構造として持つことが、変更単位での差し替え(クレート全体の再ビルドではなく、変更されたシンボルだけの再生成)を可能にする前提になる。
 4. **`SharedSymbolGraph`の`AddressState`を、「未解決」「意味解析済みだが機械語は未生成」「機械語生成済み・状態として保持」という3値以上の設計へ拡張する必要がある。** 現状は後者2つを区別していない(`Committed`は常に機械語を伴う)。
 5. **検証済み(問題E)と未検証のシンボルが、異なる品質のコンパイル結果として同時に共存できる必要がある。** .NETのReadyToRun/Dynamic PGO(参考事例8)が示す「事前生成された保守的なコード」と「要求に応じて生成される最適化版」の共存モデル、Erlangのホットコードロード(参考事例6)が示す新旧バージョンの共存モデルは、問題Eが要求する「未検証アイテムは保守的に、検証済みアイテムは最適化ヒント付きで」という要件の具体的な実装パターンになり得る。
+6. **状態化(参考事例5・11・12)と遅延(参考事例2・4・10)は、別々に満たしてよい2つの性質ではなく、同じ識別子で同時に満たす必要がある。** Unison(参考事例12)が示す通り、シンボルの識別子(`unified-symbol-graph`では`SymbolId`)が、その意味解析結果・機械語の内容と不可分に結びついていれば、「状態として保持されている」ことと「要求されるまで再計算されない」ことは、2つの独立した仕組みではなく1つの仕組みの両面になる。参考事例5(Smalltalk)が「状態化はできるが遅延は満たさない」という限界を示したのに対し、Unisonはこの2つを統合する具体的な道筋(内容アドレス指定)を示している。
+7. **問題Fが要求するのはpull型(要求駆動)であり、push型(変化駆動)ではない。** 参考事例13(FRP/スプレッドシート)・参考事例14(Incremental View Maintenance)は、いずれも「入力の変化を即座に依存先へ伝播し、常に最新状態を保つ」というpush型の設計であり、問題Fの要件とは逆方向である。`unified-symbol-graph`が将来、実行時プロファイルや外部トリガーに基づいて機械語を先回りして再生成する最適化を検討する場合、それは意図的にpush型を採用する例外的な設計判断として明示する必要があり、既定のモデル(pull型)へ暗黙に混ぜてはならない。
 
 ## 4. 現時点の仮説アーキテクチャ: `unified-symbol-graph`
 
