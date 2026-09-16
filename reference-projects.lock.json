@@ -15,6 +15,7 @@
     {"name": "linux", "url": "https://github.com/torvalds/linux.git", "revision": "893e11787f78e43b534e252249ac3fff4d1333f8", "requires_case_sensitive_fs": true},
     {"name": "llvm-project", "url": "https://github.com/llvm/llvm-project.git", "revision": "4f1d2ab0a9e57909a30b9fdce73afb00d7e7d686"},
     {"name": "miri", "url": "https://github.com/rust-lang/miri.git", "revision": "8f64757126b2f095705100b301b162d89db5f8d7"},
+    {"name": "moka", "url": "https://github.com/moka-rs/moka.git", "revision": "a616ec19e8d4ed938caf8b2c88090331d778d5da"},
     {"name": "nimony", "url": "https://github.com/nim-lang/nimony.git", "revision": "1b592f15c934aedad87e11df0cc6047c88b353d1"},
     {"name": "nlvm", "url": "https://github.com/arnetheduck/nlvm.git", "revision": "a9c33970768a5a706d4e7d97bb3f892bc734b684"},
     {"name": "nx", "url": "https://github.com/nrwl/nx.git", "revision": "9e9dbb256b7ad774fc58b22b991fc785ae03fd9e"},
