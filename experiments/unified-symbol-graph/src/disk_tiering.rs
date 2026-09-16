@@ -43,15 +43,32 @@
 //!   promotion, just crossing a memory/disk boundary instead of a
 //!   analyzed/committed one.
 //!
+//! ## Compaction (added in the cycle that closed the previous cycle's
+//! open item)
+//!
+//! `multiple_flushes_leave_multiple_small_files_on_disk` confirmed
+//! fragmentation actually occurs. `compact_sstables` addresses it with a
+//! single flat merge (read every existing flush file, dedup by
+//! `SymbolId` with newest-flush-wins, write one new file, delete the
+//! old ones) -- deliberately NOT a leveled/universal strategy choice,
+//! per the task instructions to keep this minimal.
+//! `compact_if_over_file_threshold` triggers it once the flush file
+//! count exceeds a caller-supplied threshold, mirroring RocksDB's own
+//! "compact once too many SSTables have piled up" trigger shape (a
+//! simplified stand-in for RocksDB's real level/size-based triggers).
+//! Compaction's own write cost (it always rewrites every live record it
+//! merges) is tracked via `total_bytes_written`/`CompactionReport::
+//! bytes_rewritten` so a caller can measure real write amplification
+//! instead of assuming a number.
+//!
 //! ## What this module explicitly does NOT do
 //!
-//! - **No compaction**: RocksDB's Leveled Compaction (merging small
-//!   SSTables into larger ones, reclaiming space from overwritten/deleted
-//!   keys) is not implemented. `multiple_flushes_leave_multiple_small_files_on_disk`
-//!   below confirms the fragmentation this would exist to fix actually
-//!   occurs, but merging those files back into one is left as the
-//!   documented next step, per the task instructions (do not over-build
-//!   this).
+//! - **No leveled/universal strategy selection**: RocksDB chooses between
+//!   multiple compaction strategies and organizes SSTables into levels
+//!   with per-level size targets. This module has exactly one strategy
+//!   (merge everything, unconditionally, into one file) and no levels --
+//!   per the task instructions, an over-engineered strategy switch was
+//!   explicitly out of scope.
 //! - **No WAL / crash recovery**: RocksDB pairs its MemTable with a
 //!   write-ahead log so an unflushed MemTable survives a crash. This
 //!   experiment has no crash-recovery goal (issue #67's four questions
@@ -91,6 +108,13 @@ pub struct DiskTieredGraph {
     dir: PathBuf,
     flushes: std::sync::Mutex<Vec<FlushFile>>,
     flush_seq: std::sync::atomic::AtomicU64,
+    /// Total bytes this instance has ever written to disk across every
+    /// `flush_committed_to_disk` call AND every `compact_sstables` call
+    /// (compaction rewrites the same records again, so it counts here
+    /// too) -- the numerator this module's write-amplification report
+    /// divides by "bytes written by the original flushes alone" to get a
+    /// real, measured amplification factor, not an assumed one.
+    total_bytes_written: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Debug)]
@@ -134,7 +158,18 @@ impl DiskTieredGraph {
             dir: dir.into(),
             flushes: std::sync::Mutex::new(Vec::new()),
             flush_seq: std::sync::atomic::AtomicU64::new(0),
+            total_bytes_written: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    /// Total bytes this instance has physically written to disk across
+    /// every flush and every compaction so far -- the write-amplification
+    /// numerator/denominator source. Measured with `std::fs::metadata`
+    /// after each write (see `flush_committed_to_disk` and
+    /// `compact_sstables`), never estimated.
+    pub fn total_bytes_written(&self) -> u64 {
+        self.total_bytes_written
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Mirrors `durability::estimate_graph_bytes(&self.graph)` -- exposed
@@ -203,6 +238,8 @@ impl DiskTieredGraph {
             file.sync_all()?;
         }
         let bytes_on_disk = fs::metadata(&path)?.len();
+        self.total_bytes_written
+            .fetch_add(bytes_on_disk, std::sync::atomic::Ordering::Relaxed);
 
         // Hand the bytes to disk, then let memory forget them -- the
         // close-mmap-then-write step this module's own doc comment
@@ -290,6 +327,129 @@ impl DiskTieredGraph {
             .map(|f| f.path.clone())
             .collect()
     }
+
+    /// Leveled-Compaction-equivalent, deliberately minimal per issue #67's
+    /// own "do not over-build this" instruction: read every existing flush
+    /// file's records, deduplicate by `SymbolId` (last-flushed copy of a
+    /// given id wins -- a later flush can only exist if `declare_symbol`
+    /// overwrote and re-committed a symbol after an earlier flush already
+    /// evicted it, so "newest wins" matches RocksDB's own "last write
+    /// wins across SSTables" rule), write ONE new merged file, delete the
+    /// old ones, and replace `self.flushes` with the single merged entry.
+    /// No leveled/universal strategy selection -- one flat merge of
+    /// everything that currently exists on disk, exactly what the task
+    /// asked for and nothing more.
+    ///
+    /// Returns `Err(FlushError::NothingToFlush)` if there are 0 or 1
+    /// flush files (nothing to merge).
+    pub fn compact_sstables(&self) -> Result<CompactionReport, FlushError> {
+        let mut flushes = self.flushes.lock().expect("flushes lock poisoned");
+        if flushes.len() < 2 {
+            return Err(FlushError::NothingToFlush);
+        }
+
+        let files_before = flushes.len();
+        let mut bytes_before_on_disk = 0u64;
+        // Newest-wins dedup: iterate oldest -> newest so a later
+        // insertion overwrites an earlier one in the map, matching
+        // "the most recent flush of a given symbol is authoritative."
+        let mut merged: std::collections::HashMap<SymbolId, CodeBody> = std::collections::HashMap::new();
+        for flush in flushes.iter() {
+            bytes_before_on_disk += fs::metadata(&flush.path)?.len();
+            let bytes = fs::read(&flush.path)?;
+            let nodes = decode_all_nodes(&bytes).ok_or_else(|| {
+                FlushError::Io(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("corrupt flush file during compaction: {:?}", flush.path),
+                ))
+            })?;
+            for (id, body) in nodes {
+                merged.insert(id, body);
+            }
+        }
+
+        let symbols_merged = merged.len();
+        let seq = self
+            .flush_seq
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let compacted_path = self.dir.join(format!("compacted-{seq:08}.sst"));
+
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(merged.len() as u32).to_le_bytes());
+        // Deterministic ordering (by name) so re-running compaction on the
+        // same input is reproducible -- HashMap iteration order is not.
+        let mut entries: Vec<(SymbolId, CodeBody)> = merged.into_iter().collect();
+        entries.sort_by(|(a, _), (b, _)| a.name.cmp(&b.name));
+        for (id, body) in &entries {
+            encode_committed_node(&mut buf, id, body);
+        }
+        {
+            let mut file = fs::File::create(&compacted_path)?;
+            file.write_all(&buf)?;
+            file.sync_all()?;
+        }
+        let bytes_rewritten = fs::metadata(&compacted_path)?.len();
+        self.total_bytes_written
+            .fetch_add(bytes_rewritten, std::sync::atomic::Ordering::Relaxed);
+
+        // Delete the old, now-superseded files -- an SSTable that
+        // survives compaction is exactly the fragmentation this method
+        // exists to remove.
+        for flush in flushes.iter() {
+            let _ = fs::remove_file(&flush.path);
+        }
+
+        let symbol_ids: Vec<SymbolId> = entries.iter().map(|(id, _)| id.clone()).collect();
+        *flushes = vec![FlushFile {
+            path: compacted_path.clone(),
+            symbol_ids,
+        }];
+
+        Ok(CompactionReport {
+            file: compacted_path,
+            files_before,
+            files_after: 1,
+            symbols_merged,
+            bytes_before_on_disk,
+            bytes_after_on_disk: bytes_rewritten,
+            bytes_rewritten,
+        })
+    }
+
+    /// RocksDB-style trigger: compact once the number of flush files
+    /// exceeds `file_count_threshold`. A plain file-count threshold, not
+    /// a leveled/universal strategy -- exactly the minimal design the
+    /// task instructions ask for.
+    pub fn compact_if_over_file_threshold(
+        &self,
+        file_count_threshold: usize,
+    ) -> Result<Option<CompactionReport>, FlushError> {
+        if self.flush_file_count() <= file_count_threshold {
+            return Ok(None);
+        }
+        self.compact_sstables().map(Some)
+    }
+}
+
+/// What one compaction actually did, measured (not assumed) -- the same
+/// "report honestly, do not trust an unverified success" discipline as
+/// `FlushReport`.
+#[derive(Debug)]
+pub struct CompactionReport {
+    pub file: PathBuf,
+    pub files_before: usize,
+    pub files_after: usize,
+    pub symbols_merged: usize,
+    /// Sum of `fs::metadata(...).len()` across every file that existed
+    /// before compaction.
+    pub bytes_before_on_disk: u64,
+    /// `fs::metadata(...).len()` of the single merged file after
+    /// compaction.
+    pub bytes_after_on_disk: u64,
+    /// Bytes physically rewritten by this compaction call (== the merged
+    /// file's size, since compaction always writes one fresh file) -- the
+    /// write-amplification numerator contribution from this one call.
+    pub bytes_rewritten: u64,
 }
 
 /// Minimal length-prefixed binary encoding for one `(SymbolId, CodeBody)`
@@ -689,6 +849,195 @@ mod tests {
         assert!(
             report.bytes_on_disk >= report.estimated_memory_bytes as u64,
             "on-disk format has framing overhead the in-memory estimate does not count, so disk bytes should be >= the estimate"
+        );
+    }
+
+    /// Correctness requirement (a): compaction must not lose data. Flush
+    /// several distinct symbols across several separate flush calls, then
+    /// compact, then confirm every single one is still readable via the
+    /// disk-fallback read path -- and with its original bytes intact, not
+    /// just "found."
+    #[test]
+    fn compaction_preserves_every_symbol_readable_via_disk_fallback() {
+        let scratch = ScratchDir::new();
+        let tiered = DiskTieredGraph::new(&scratch.path);
+
+        let mut expected = Vec::new();
+        for i in 0..12 {
+            let realm = match i % 3 {
+                0 => Realm::C,
+                1 => Realm::Cpp,
+                _ => Realm::Nimble,
+            };
+            let name = format!("sym_{i}");
+            let code = vec![(i % 256) as u8; 64 + i];
+            declare_committed(&tiered.graph, realm, &name, code.clone());
+            expected.push((SymbolId { realm, name }, code));
+            // Flush every 3 symbols, so several small files accumulate
+            // before compaction, matching the fragmentation this method
+            // exists to fix.
+            if i % 3 == 2 {
+                tiered.flush_committed_to_disk().expect("flush must succeed");
+            }
+        }
+
+        assert_eq!(tiered.flush_file_count(), 4, "12 symbols flushed 3-at-a-time must leave 4 files before compaction");
+
+        let report = tiered.compact_sstables().expect("compaction must succeed with 4 files present");
+        assert_eq!(report.files_before, 4);
+        assert_eq!(report.files_after, 1);
+        assert_eq!(report.symbols_merged, 12);
+        assert_eq!(tiered.flush_file_count(), 1, "(b) file count must actually drop to 1 after compaction");
+
+        for (id, code) in &expected {
+            let found = tiered
+                .require_symbol_with_disk_fallback(Realm::Cargo, id.clone(), id.realm)
+                .expect("disk read must not error");
+            assert!(found, "{id:?} must still be found after compaction -- (a) no data loss");
+
+            let nodes = tiered.graph.nodes.read().expect("nodes lock poisoned");
+            let node = nodes.get(id).expect("must be re-inserted into memory");
+            match &node.address {
+                AddressState::Committed(body) => {
+                    assert_eq!(&body.code, code, "{id:?} bytes must round-trip exactly through compaction, not just be present");
+                }
+                other => panic!("expected Committed for {id:?}, got {other:?}"),
+            }
+        }
+
+        eprintln!(
+            "[disk_tiering][compaction] files: {} -> {}, symbols_merged={}, bytes_before_on_disk={}, bytes_after_on_disk={} (ratio after/before={:.3})",
+            report.files_before,
+            report.files_after,
+            report.symbols_merged,
+            report.bytes_before_on_disk,
+            report.bytes_after_on_disk,
+            report.bytes_after_on_disk as f64 / report.bytes_before_on_disk as f64
+        );
+    }
+
+    /// Compaction must correctly resolve the case that motivates
+    /// "newest flush wins": the same `SymbolId` flushed twice (once,
+    /// evicted from memory, then redeclared and flushed again) must
+    /// compact down to exactly one copy -- the most recently flushed
+    /// one -- not two, and not the stale one.
+    #[test]
+    fn compaction_keeps_the_newest_flushed_copy_when_a_symbol_was_flushed_twice() {
+        let scratch = ScratchDir::new();
+        let tiered = DiskTieredGraph::new(&scratch.path);
+
+        declare_committed(&tiered.graph, Realm::C, "c_add", vec![0xAAu8; 32]);
+        tiered.flush_committed_to_disk().expect("first flush");
+
+        // Redeclare the same id with different bytes and flush again --
+        // the in-memory HashMap overwrite plus a second flush is exactly
+        // how two on-disk copies of one SymbolId can legitimately exist.
+        declare_committed(&tiered.graph, Realm::C, "c_add", vec![0xBBu8; 32]);
+        tiered.flush_committed_to_disk().expect("second flush");
+
+        assert_eq!(tiered.flush_file_count(), 2);
+        let report = tiered.compact_sstables().expect("compaction must succeed");
+        assert_eq!(report.symbols_merged, 1, "two flushed copies of the same id must merge into exactly one entry");
+        assert_eq!(tiered.flush_file_count(), 1);
+
+        let found = tiered
+            .require_symbol_with_disk_fallback(
+                Realm::Cargo,
+                SymbolId { realm: Realm::C, name: "c_add".to_string() },
+                Realm::C,
+            )
+            .expect("disk read must not error");
+        assert!(found);
+        let nodes = tiered.graph.nodes.read().expect("nodes lock poisoned");
+        let node = nodes
+            .get(&SymbolId { realm: Realm::C, name: "c_add".to_string() })
+            .expect("must be resident after disk fallback");
+        match &node.address {
+            AddressState::Committed(body) => {
+                assert_eq!(body.code, vec![0xBBu8; 32], "compaction must keep the newest flushed copy, not the stale first one");
+            }
+            other => panic!("expected Committed, got {other:?}"),
+        }
+    }
+
+    /// Trigger condition: `compact_if_over_file_threshold` must be a
+    /// no-op while the file count is at or below the threshold, and must
+    /// actually compact once it is exceeded -- the RocksDB-style
+    /// "too many SSTables piled up" trigger this module models.
+    #[test]
+    fn compact_if_over_file_threshold_only_compacts_once_file_count_threshold_is_exceeded() {
+        let scratch = ScratchDir::new();
+        let tiered = DiskTieredGraph::new(&scratch.path);
+
+        for i in 0..4 {
+            declare_committed(&tiered.graph, Realm::C, &format!("sym_{i}"), vec![i as u8; 20]);
+            tiered.flush_committed_to_disk().expect("flush must succeed");
+        }
+        assert_eq!(tiered.flush_file_count(), 4);
+
+        let below = tiered
+            .compact_if_over_file_threshold(4)
+            .expect("threshold check must not error");
+        assert!(below.is_none(), "must not compact when file count is at (not over) the threshold");
+        assert_eq!(tiered.flush_file_count(), 4);
+
+        declare_committed(&tiered.graph, Realm::C, "sym_4", vec![9u8; 20]);
+        tiered.flush_committed_to_disk().expect("fifth flush");
+        assert_eq!(tiered.flush_file_count(), 5);
+
+        let above = tiered
+            .compact_if_over_file_threshold(4)
+            .expect("threshold check must not error")
+            .expect("must compact once file count exceeds the threshold");
+        assert_eq!(above.files_before, 5);
+        assert_eq!(tiered.flush_file_count(), 1, "must compact down to 1 file once the threshold (4) is exceeded");
+    }
+
+    /// Write amplification, measured honestly: total bytes physically
+    /// written by the original flushes vs. total bytes physically
+    /// written once compaction also runs. Compaction rewrites every live
+    /// record again, so `total_bytes_written()` after compaction must
+    /// exceed the flush-only total -- the real cost RocksDB's own docs
+    /// describe as the trade-off for eliminating fragmentation. No
+    /// asserted "improvement" here, only the measured amplification
+    /// factor, printed for honest reporting.
+    #[test]
+    fn compaction_rewrites_bytes_already_written_by_flushes_a_real_write_amplification_factor() {
+        let scratch = ScratchDir::new();
+        let tiered = DiskTieredGraph::new(&scratch.path);
+
+        for i in 0..8 {
+            declare_committed(&tiered.graph, Realm::C, &format!("sym_{i}"), vec![i as u8; 128]);
+            tiered.flush_committed_to_disk().expect("flush must succeed");
+        }
+        let bytes_from_flushes_alone = tiered.total_bytes_written();
+        assert!(bytes_from_flushes_alone > 0, "flushes must have written real bytes");
+        assert_eq!(tiered.flush_file_count(), 8);
+
+        let report = tiered.compact_sstables().expect("compaction must succeed");
+        let bytes_after_compaction = tiered.total_bytes_written();
+
+        assert!(
+            bytes_after_compaction > bytes_from_flushes_alone,
+            "compaction must add its own rewritten bytes on top of what flushes already wrote: before={bytes_from_flushes_alone} after={bytes_after_compaction}"
+        );
+        assert_eq!(
+            bytes_after_compaction - bytes_from_flushes_alone,
+            report.bytes_rewritten,
+            "the increase in total_bytes_written must equal exactly what this one compaction call physically wrote"
+        );
+
+        let write_amplification = bytes_after_compaction as f64 / bytes_from_flushes_alone as f64;
+        eprintln!(
+            "[disk_tiering][write_amplification] bytes_written_by_flushes_alone={} bytes_rewritten_by_compaction={} total_bytes_written_after_compaction={} write_amplification_factor={:.3} files_before_compaction={} files_after_compaction={} bytes_before_on_disk={} bytes_after_on_disk={}",
+            bytes_from_flushes_alone,
+            report.bytes_rewritten,
+            bytes_after_compaction,
+            write_amplification,
+            report.files_before,
+            report.files_after,
+            report.bytes_before_on_disk,
+            report.bytes_after_on_disk,
         );
     }
 }
