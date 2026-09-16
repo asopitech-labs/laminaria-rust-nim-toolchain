@@ -406,6 +406,10 @@ use std::sync::RwLock;
 /// and does not claim.
 pub mod durability;
 
+/// Issue #67 second-generation harness (pre-classification by `Realm`,
+/// binary-heap eviction). See `durability_v2`'s own module doc comment.
+pub mod durability_v2;
+
 /// The four ecosystems this hypothesis is scoped to (matching this repo's
 /// own `cadd`/`app` fixture: Cargo, Nimble, C, C++). Not meant to be an
 /// exhaustive or permanent list -- a placeholder for "whichever realms a
@@ -510,11 +514,45 @@ pub struct CodeBody {
     pub relocations: Vec<ElfX86_64PendingReloc>,
 }
 
+/// Issue #67 problem F experiment: the minimal facts about a boundary
+/// symbol that another realm's frontend can act on (register a
+/// requirement against, check a signature) *before* that symbol's own
+/// machine code exists -- directly modeling what Cargo's own pipelining
+/// exposes via `rmeta` (a crate's public interface, available to
+/// downstream crates before the crate's own full codegen finishes).
+/// Deliberately minimal per the task instructions (not over-designed):
+/// just the two pieces of information a real FFI declaration
+/// (`extern "C" fn c_add(a: i32, b: i32) -> i32;`) already carries before
+/// any code generation happens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SemanticFacts {
+    /// A human-readable stand-in for a real signature (this hypothesis
+    /// has no type system of its own -- see this crate's own scope
+    /// note); e.g. `"(i32, i32) -> i32"`.
+    pub signature: String,
+    /// Which other boundary symbols this symbol's own eventual code body
+    /// is already known to call, discovered during semantic analysis
+    /// (before codegen) -- the same information `ElfX86_64PendingReloc::target`
+    /// records post-hoc, but available earlier here.
+    pub depends_on: Vec<SymbolId>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AddressState {
     /// Declared, but this realm's own frontend has not yet finished
     /// enough of its local analysis to assign a definite address.
     Unresolved,
+    /// This realm's own frontend has finished **semantic analysis** for
+    /// this symbol (signature known, dependency list known) but has not
+    /// yet generated machine code -- directly modeling Cargo's own
+    /// pipelining split (rmeta ready, full codegen still pending).
+    /// Issue #67 problem F: does exposing this intermediate state let a
+    /// *different* realm's `require_symbol` call proceed usefully before
+    /// `Committed` exists? See `SharedSymbolGraph::require_symbol`'s own
+    /// demand-driven promotion behavior below, and
+    /// `demand_driven_promotion_from_analyzed_to_committed_on_require`
+    /// in this module's own tests.
+    Analyzed(SemanticFacts),
     /// This realm's own frontend has finished this symbol's own machine
     /// code (`CodeBody`), but that code may still contain unresolved
     /// `ElfX86_64PendingReloc` entries referencing other boundary symbols -- this
@@ -568,6 +606,20 @@ pub struct SharedSymbolGraph {
     /// wall-clock time (which is not comparable across threads reliably
     /// enough for this purpose).
     mutation_seq: AtomicU64,
+    /// Issue #67 problem F: a realm's own frontend registers *how* to
+    /// finish codegen for a symbol it has only analyzed so far (still in
+    /// `AddressState::Analyzed`), without being forced to do that
+    /// (possibly expensive) work up front. `require_symbol` calls
+    /// `promote_analyzed_to_committed_if_needed` below, which looks this
+    /// map up and runs it *only* on actual demand -- mirroring Cargo's
+    /// own pipelining, where a downstream crate consuming rmeta does not
+    /// itself force the upstream crate's full codegen; only when
+    /// something needs the finished object does codegen become
+    /// necessary. Kept as a boxed closure (not a trait object registry)
+    /// since this hypothesis has exactly one use of it and does not need
+    /// a plugin system.
+    #[allow(clippy::type_complexity)]
+    pending_codegen: RwLock<HashMap<SymbolId, Box<dyn Fn(&SemanticFacts) -> CodeBody + Send + Sync>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -593,7 +645,95 @@ impl SharedSymbolGraph {
             nodes: RwLock::new(HashMap::new()),
             edges: RwLock::new(HashMap::new()),
             mutation_seq: AtomicU64::new(0),
+            pending_codegen: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Issue #67 problem F: declare a symbol as `Analyzed` (semantic
+    /// facts known, no machine code yet), and register the closure that
+    /// will produce its real `CodeBody` *if and when* something actually
+    /// requires it. Never runs `finish_codegen` itself -- that only
+    /// happens inside `require_symbol`'s own demand-driven promotion, or
+    /// via `force_commit` for a caller that wants eager codegen anyway
+    /// (kept for backward compatibility: existing callers that always
+    /// went straight to `Committed` are unaffected by this addition).
+    pub fn declare_analyzed_symbol(
+        &self,
+        declaring_realm: Realm,
+        id: SymbolId,
+        facts: SemanticFacts,
+        finish_codegen: impl Fn(&SemanticFacts) -> CodeBody + Send + Sync + 'static,
+    ) -> Result<(), RegisterError> {
+        if id.realm != declaring_realm {
+            return Err(RegisterError::RealmMismatch {
+                declared_by: declaring_realm,
+                node_realm: id.realm,
+            });
+        }
+        self.mutation_seq.fetch_add(1, Ordering::Relaxed);
+        {
+            let mut nodes = self.nodes.write().expect("nodes lock poisoned");
+            nodes.insert(
+                id.clone(),
+                SymbolNode {
+                    id: id.clone(),
+                    address: AddressState::Analyzed(facts),
+                },
+            );
+        }
+        let mut pending = self
+            .pending_codegen
+            .write()
+            .expect("pending_codegen lock poisoned");
+        pending.insert(id, Box::new(finish_codegen));
+        Ok(())
+    }
+
+    /// If `id` is currently `Analyzed` and has a registered codegen
+    /// closure, runs it now and promotes the node to `Committed` in
+    /// place -- the actual demand-driven transition. A no-op (not an
+    /// error) if `id` is not `Analyzed`, has no registered closure, or
+    /// does not exist yet at all: those are all legitimate states this
+    /// hypothesis already tolerates elsewhere (e.g. `resolve_all`
+    /// already treats "not found" as `None`, never an error).
+    fn promote_analyzed_to_committed_if_needed(&self, id: &SymbolId) {
+        let facts = {
+            let nodes = self.nodes.read().expect("nodes lock poisoned");
+            match nodes.get(id).map(|n| &n.address) {
+                Some(AddressState::Analyzed(facts)) => facts.clone(),
+                _ => return,
+            }
+        };
+        let codegen = {
+            let mut pending = self
+                .pending_codegen
+                .write()
+                .expect("pending_codegen lock poisoned");
+            pending.remove(id)
+        };
+        let Some(codegen) = codegen else { return };
+        let body = codegen(&facts);
+        self.mutation_seq.fetch_add(1, Ordering::Relaxed);
+        let mut nodes = self.nodes.write().expect("nodes lock poisoned");
+        // Re-check: another thread could have raced this promotion
+        // between the read above and this write (declare_symbol could
+        // also have overwritten the node entirely in the meantime).
+        // Only commit if it is still exactly the Analyzed state we
+        // promoted from -- never clobber a concurrent, possibly newer
+        // write.
+        if let Some(node) = nodes.get_mut(id) {
+            if matches!(node.address, AddressState::Analyzed(_)) {
+                node.address = AddressState::Committed(body);
+            }
+        }
+    }
+
+    /// Eagerly force codegen for an `Analyzed` symbol, without waiting
+    /// for a `require_symbol` call to demand it -- useful for a caller
+    /// (or a test) that wants to confirm codegen behavior independent of
+    /// the demand-driven path `require_symbol` exercises.
+    pub fn force_commit(&self, id: &SymbolId) {
+        self.promote_analyzed_to_committed_if_needed(id);
     }
 
     /// A realm's own frontend declares that it owns (will eventually
@@ -632,6 +772,15 @@ impl SharedSymbolGraph {
         expected_provider: Realm,
     ) {
         self.mutation_seq.fetch_add(1, Ordering::Relaxed);
+        // Issue #67 problem F: a requirement is exactly the "something
+        // now needs this symbol's real code" event that should trigger
+        // an Analyzed -> Committed promotion, if one is pending -- the
+        // demand-driven step Cargo's own pipelining models as "a
+        // downstream crate's full build finally needs the upstream
+        // crate's real object, not just its rmeta." No-op if `symbol`
+        // is not currently Analyzed (already Committed, still
+        // Unresolved, or not declared at all yet).
+        self.promote_analyzed_to_committed_if_needed(&symbol);
         let edge = RequiresEdge {
             requiring_realm,
             symbol,
@@ -1192,5 +1341,173 @@ mod tests {
             result,
             Err(LinkError::UnresolvedRelocationTarget { .. })
         ));
+    }
+
+    /// Issue #67 problem F, the core experiment: a symbol declared only
+    /// as `Analyzed` (facts known, no machine code) must stay in that
+    /// state -- codegen must NOT run -- until something actually calls
+    /// `require_symbol` on it. This directly tests the demand-driven
+    /// claim, not just that the enum variant compiles: a shared counter
+    /// records whether the registered codegen closure has run, and the
+    /// test asserts it is still zero right after `declare_analyzed_symbol`,
+    /// then exactly one after the first `require_symbol` call, and stays
+    /// at one (not re-run) after a second `require_symbol` call on the
+    /// same symbol -- matching Cargo's own pipelining, where a second
+    /// downstream consumer of an already-built crate does not trigger a
+    /// second build.
+    #[test]
+    fn demand_driven_promotion_from_analyzed_to_committed_on_require() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AOrdering};
+        use std::sync::Arc;
+
+        let graph = SharedSymbolGraph::new();
+        let codegen_run_count = Arc::new(AtomicUsize::new(0));
+        let counter_for_closure = Arc::clone(&codegen_run_count);
+
+        let c_add_id = SymbolId {
+            realm: Realm::C,
+            name: "c_add".to_string(),
+        };
+
+        graph
+            .declare_analyzed_symbol(
+                Realm::C,
+                c_add_id.clone(),
+                SemanticFacts {
+                    signature: "(i32, i32) -> i32".to_string(),
+                    depends_on: vec![],
+                },
+                move |_facts| {
+                    counter_for_closure.fetch_add(1, AOrdering::SeqCst);
+                    CodeBody {
+                        code: real_c_add_code(),
+                        relocations: vec![],
+                    }
+                },
+            )
+            .unwrap();
+
+        // Right after declaration: still Analyzed, codegen has not run.
+        {
+            let nodes = graph.nodes.read().unwrap();
+            let node = nodes.get(&c_add_id).expect("declared node must exist");
+            assert!(
+                matches!(node.address, AddressState::Analyzed(_)),
+                "symbol must remain Analyzed until something requires it, got {:?}",
+                node.address
+            );
+        }
+        assert_eq!(
+            codegen_run_count.load(AOrdering::SeqCst),
+            0,
+            "codegen closure must not run merely from declare_analyzed_symbol"
+        );
+
+        // First require_symbol call: this is the demand that must
+        // trigger promotion.
+        graph.require_symbol(Realm::Cargo, c_add_id.clone(), Realm::C);
+        {
+            let nodes = graph.nodes.read().unwrap();
+            let node = nodes.get(&c_add_id).expect("node must still exist");
+            assert!(
+                matches!(node.address, AddressState::Committed(_)),
+                "symbol must be Committed immediately after the first require_symbol call, got {:?}",
+                node.address
+            );
+            if let AddressState::Committed(body) = &node.address {
+                assert_eq!(
+                    body.code,
+                    real_c_add_code(),
+                    "promoted CodeBody must be exactly what the registered codegen closure produced"
+                );
+            }
+        }
+        assert_eq!(
+            codegen_run_count.load(AOrdering::SeqCst),
+            1,
+            "codegen closure must run exactly once after the first require_symbol call"
+        );
+
+        // Second require_symbol call on the same, already-Committed
+        // symbol: must NOT re-run codegen (already committed, nothing
+        // left to promote) -- this is the "no duplicate work for a
+        // second consumer" property pipelining is supposed to give.
+        graph.require_symbol(Realm::Nimble, c_add_id.clone(), Realm::C);
+        assert_eq!(
+            codegen_run_count.load(AOrdering::SeqCst),
+            1,
+            "a second require_symbol call on an already-Committed symbol must not re-run codegen"
+        );
+
+        // End-to-end: resolve_all must see this symbol as resolved,
+        // exactly as if it had been declared Committed directly from the
+        // start -- confirms this new path does not require any special
+        // handling from resolve_all/assign_layout/apply_elf_x86_64_relocations.
+        graph.require_symbol(
+            Realm::Cargo,
+            SymbolId {
+                realm: Realm::C,
+                name: "c_add".to_string(),
+            },
+            Realm::C,
+        );
+        let resolved = graph.resolve_all();
+        let c_add_resolution = resolved
+            .iter()
+            .find(|r| r.requirement.symbol == c_add_id)
+            .expect("a requirement on c_add must exist");
+        assert!(
+            c_add_resolution.is_resolved(),
+            "c_add must resolve once promoted to Committed via demand-driven require_symbol"
+        );
+    }
+
+    /// Backward compatibility: existing callers that go straight to
+    /// `AddressState::Committed(..)` via `declare_symbol` (never touching
+    /// `declare_analyzed_symbol`/`Analyzed` at all) must keep working
+    /// exactly as before -- `require_symbol`'s new
+    /// `promote_analyzed_to_committed_if_needed` call must be a true
+    /// no-op for a symbol that was never `Analyzed` in the first place.
+    #[test]
+    fn require_symbol_is_a_no_op_promotion_for_symbols_that_go_straight_to_committed() {
+        let graph = SharedSymbolGraph::new();
+        graph
+            .declare_symbol(
+                Realm::C,
+                SymbolNode {
+                    id: SymbolId {
+                        realm: Realm::C,
+                        name: "c_add".to_string(),
+                    },
+                    address: AddressState::Committed(CodeBody {
+                        code: real_c_add_code(),
+                        relocations: vec![],
+                    }),
+                },
+            )
+            .unwrap();
+
+        graph.require_symbol(
+            Realm::Cargo,
+            SymbolId {
+                realm: Realm::C,
+                name: "c_add".to_string(),
+            },
+            Realm::C,
+        );
+
+        let nodes = graph.nodes.read().unwrap();
+        let node = nodes
+            .get(&SymbolId {
+                realm: Realm::C,
+                name: "c_add".to_string(),
+            })
+            .unwrap();
+        assert!(
+            matches!(node.address, AddressState::Committed(ref body) if body.code == real_c_add_code()),
+            "a directly-Committed symbol must be completely unaffected by require_symbol's new \
+             promotion logic, got {:?}",
+            node.address
+        );
     }
 }

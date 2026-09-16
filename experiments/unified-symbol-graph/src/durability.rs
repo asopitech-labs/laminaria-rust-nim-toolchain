@@ -84,6 +84,19 @@ pub fn estimate_graph_bytes(graph: &SharedSymbolGraph) -> usize {
             let key_bytes = estimate_symbol_id_bytes(id);
             let value_bytes = match &node.address {
                 AddressState::Unresolved => 0,
+                // Analyzed carries a SemanticFacts (signature string +
+                // dependency list) instead of a CodeBody -- estimate its
+                // bytes the same honest, field-size-derived way rather
+                // than treating it as free (see durability_v2.rs for the
+                // Analyzed-state experiment this variant belongs to).
+                AddressState::Analyzed(facts) => {
+                    facts.signature.capacity()
+                        + facts
+                            .depends_on
+                            .iter()
+                            .map(estimate_symbol_id_bytes)
+                            .sum::<usize>()
+                }
                 AddressState::Committed(body) => estimate_code_body_bytes(body),
             };
             key_bytes + value_bytes
