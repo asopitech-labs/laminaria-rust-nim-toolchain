@@ -149,6 +149,14 @@ LAMINARIAの成果物は「ビルドできる」だけでは不十分であり�
 
 `assign_layout`が現状、決定性のためだけに`SymbolId`のソート順で配置している(`experiments/unified-symbol-graph/src/lib.rs`の該当コード参照)のは、この2つの信号を使っていない**未解決の設計課題**として明記されている。これを両方使う配置関数を実装することが、問題B×Cを1つの問題として解く最初の具体的なステップになる。
 
+**issue #69で最初の実装・実測が行われた** (`experiments/unified-symbol-graph/src/layout_scheduling.rs`)。`assign_layout`自体は置き換えず、並行する`assign_layout_scheduling_aware`として実装した。要点:
+
+- `mutation_seq`はグローバルな単調カウンタのみで、シンボル単位の到着順を記録していなかったため、`SharedSymbolGraph`に`declared_at_seq`(宣言時点の`mutation_seq`値をシンボルごとに記録するサイドマップ)を追加した。
+- issueは`RequiresEdge`を呼び出し関係の信号として名指ししているが、`RequiresEdge`は`requiring_realm -> symbol`(realm単位)しか記録せず、実際にどのシンボルが呼び出したかを特定できない。直接使うと同一realm内の無関係なシンボル間に疑似的な近接性が生じることを実装中に確認したため、より精密な`CodeBody::relocations`(`ElfX86_64PendingReloc::target`、シンボル単位で厳密)から呼び出し近接性を導出する設計に変更した。
+- アルゴリズムは貪欲法の1パス(critical-path順で歩きながら、直後に最高近接度の未配置シンボルを1つ引き込む)であり、問題B×Cの厳密な同時最適化ではない(NP-hardである以上、この実験のスコープでは扱わない)。
+- 3シンボルの合成fixtureで実測した結果: (a) critical-path inversion(到着順に反する配置)はベースライン比で確実に減少するが、ゼロにはならない — 近接度シグナルによる「引き込み」自体が新たなinversionを生むケースがあることを実測で確認した(当初の設計時点での「ゼロになるはず」という想定は誤りだった)。(b) 呼び出し近接シンボル間のバイト距離はベースラインより確実に短縮される。(c) 2つのシグナルが実際に矛盾する具体例(3シンボルの合成グラフでも再現)を`two_signals_can_disagree`テストとして記録し、この貪欲実装が「実装上たまたま先に処理する方のシグナル」を優先する(原理的なトレードオフ規則ではない)ことを正直に示した。
+- 実データ(実際の`unified-symbol-graph`ビルド、または既存fixture)での測定はまだ行っておらず、issue #69自身が求める「1パス同時最適化 vs 2パス分離」の判断はこの合成fixtureの結果だけでは下せない。次サイクルへの引き継ぎ事項。
+
 問題Dが要求する「汎用中間表現を経由しない」という制約自体の詳細な検証(Rust IR→LLVM IR→バイナリの実際の変換過程で何が削除可能で何が削除不可能かの一次資料+実装コード裏取り)は[意味論から「中間表現」を削除する](../02-research-areas/compiler/removing-intermediate-representation_ja.md)に記録する。
 
 ### 問題E: 検査の失敗単位とビルドの失敗単位を分離する — クレート全体を止めない
@@ -333,9 +341,9 @@ Unison公式ドキュメント"The big idea"(<https://www.unison-lang.org/docs/t
 
 ## 5. まだ解けていないこと(次の設計課題)
 
-- `assign_layout`を、`mutation_seq`と`RequiresEdge`の両方を使う結合最適化関数へ置き換える具体的なアルゴリズムはまだ実装されていない(節3で述べた通り、設計課題として明記されているのみ)。
+- `assign_layout`を`mutation_seq`と(`RequiresEdge`が本来意図した信号を、より精密な`CodeBody::relocations`から導出した)呼び出し近接度の両方を使う配置関数(`assign_layout_scheduling_aware`)へ、issue #69で初めて実装・実測した(節3参照)。ただし合成fixtureでの実測のみで、実データでの検証、および1パス同時最適化 vs 2パス分離のどちらが妥当かの判断はまだ行われていない。
 - ARM64(Mach-O/ELF双方)、Windows COFF(MSVC ABI)は、リロケーション適用関数がまだ実装されていない(文献調査は完了、実機検証は未実施)。
-- 問題A(境界シンボル解決)は実験レベルで動作確認済みだが、問題B×C(スケジュール×配置の結合最適化)はまだアルゴリズムの実装に着手していない。
+- 問題A(境界シンボル解決)は実験レベルで動作確認済み。問題B×C(スケジュール×配置の結合最適化)はissue #69で最初の実装・合成fixtureでの実測に着手したが、実データでの検証と1パス/2パスの判断はまだ残っている。
 - Craneliftの実測失敗(節2.3)が示す「既存分離構造への継ぎ足しは整合性が壊れる」という一般則が、LAMINARIA自身の設計(Rust/Nimランタイムスケジューラ+Nimプランニングカーネルという2言語構成)にも当てはまらないことを、今後LAMINARIA自身の実装が育つ過程で継続的に検証する必要がある。
 - 問題D(節3)で示した「target固有の専用コンパイラを作る/既存専用コンパイラを束ねる」の2つの道のうち、どちらを取るか、あるいはtargetごとに使い分けるかはまだ決定していない。8つの宣言済みtarget(節4)それぞれについて、実機/実行環境上でのビルド直後テスト実行能力の現状評価(クロスコンパイルの可否、対象OS上でのネイティブ実行環境の可用性、既存専用コンパイラの成熟度)を一つずつ棚卸しする作業が未着手である。
 - Lane C([Testable Native Artifactと第一級Test Harness](../02-research-areas/toolchains/testable-native-artifact-harness_ja.md))が既に持つ`target execution capability`という概念と、本書の問題Dが要求する「ビルド直後のtarget上テスト実行」制約との関係を、両文書間で整合させる具体的な統合作業がまだ行われていない。

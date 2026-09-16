@@ -391,10 +391,12 @@
 //! relationship, the same shape a call-graph profile encodes). A
 //! layout function that used both would be attempting the joint
 //! problem directly, in one pass, instead of reproducing Cargo's
-//! schedule-only pass followed by lld's placement-only pass. This is
-//! not yet implemented -- flagged here as the concrete next design
-//! question, not a design already answered by `assign_layout`'s current
-//! sorted-`SymbolId` body.
+//! schedule-only pass followed by lld's placement-only pass. Issue #69
+//! implements and measures exactly this variant -- see
+//! `layout_scheduling`'s own module doc comment for the algorithm and
+//! its honestly-reported results; `assign_layout` itself is left
+//! unchanged (see that module doc for why a parallel function was added
+//! instead of a replacement).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -427,6 +429,13 @@ pub mod cost_correlation;
 /// See `target_ir`'s own module doc comment and
 /// `docs/02-research-areas/compiler/target-specific-ir-without-llvm_ja.md`.
 pub mod target_ir;
+
+/// Issue #69: whether an `assign_layout` variant that actually uses
+/// `mutation_seq` (build-time critical-path proxy) and `RequiresEdge`
+/// (call-affinity proxy) measurably beats the current deterministic-only
+/// `SymbolId` sort on either signal. See `layout_scheduling`'s own module
+/// doc comment.
+pub mod layout_scheduling;
 
 /// The four ecosystems this hypothesis is scoped to (matching this repo's
 /// own `cadd`/`app` fixture: Cargo, Nimble, C, C++). Not meant to be an
@@ -647,6 +656,19 @@ pub struct SharedSymbolGraph {
     /// to avoid; order is retained only as evidence, never as a tie-break
     /// rule).
     pub(crate) edges: RwLock<HashMap<RequiresEdge, Vec<Realm>>>,
+    /// Issue #69: the `mutation_seq` value at the moment each symbol was
+    /// first declared (`declare_symbol`/`declare_analyzed_symbol`), kept
+    /// as its own side map rather than a new field on `SymbolNode` --
+    /// `SymbolNode` is constructed directly at ~18 call sites across
+    /// `durability.rs`/`durability_v2.rs`/`disk_tiering.rs`/`target_ir.rs`
+    /// (issue #67/#68 experiments unrelated to this issue's scope), and
+    /// none of that unrelated code needs to know about or thread through
+    /// a layout-scheduling concern. Never updated on re-declaration or
+    /// `Analyzed`->`Committed` promotion: this is "when did this symbol
+    /// first enter the graph," the same arrival-order proxy for
+    /// build-time critical-path position the module doc comment
+    /// describes, not "when was it last touched."
+    pub(crate) declared_at_seq: RwLock<HashMap<SymbolId, u64>>,
     /// Monotonic counter so every mutation this graph accepts can be
     /// ordered for later inspection/debugging without relying on
     /// wall-clock time (which is not comparable across threads reliably
@@ -691,6 +713,7 @@ impl SharedSymbolGraph {
         SharedSymbolGraph {
             nodes: RwLock::new(HashMap::new()),
             edges: RwLock::new(HashMap::new()),
+            declared_at_seq: RwLock::new(HashMap::new()),
             mutation_seq: AtomicU64::new(0),
             pending_codegen: RwLock::new(HashMap::new()),
         }
@@ -717,7 +740,7 @@ impl SharedSymbolGraph {
                 node_realm: id.realm,
             });
         }
-        self.mutation_seq.fetch_add(1, Ordering::Relaxed);
+        let seq = self.mutation_seq.fetch_add(1, Ordering::Relaxed);
         {
             let mut nodes = self.nodes.write().expect("nodes lock poisoned");
             nodes.insert(
@@ -728,6 +751,11 @@ impl SharedSymbolGraph {
                 },
             );
         }
+        self.declared_at_seq
+            .write()
+            .expect("declared_at_seq lock poisoned")
+            .entry(id.clone())
+            .or_insert(seq);
         let mut pending = self
             .pending_codegen
             .write()
@@ -798,9 +826,17 @@ impl SharedSymbolGraph {
                 node_realm: node.id.realm,
             });
         }
-        self.mutation_seq.fetch_add(1, Ordering::Relaxed);
-        let mut nodes = self.nodes.write().expect("nodes lock poisoned");
-        nodes.insert(node.id.clone(), node);
+        let seq = self.mutation_seq.fetch_add(1, Ordering::Relaxed);
+        let id = node.id.clone();
+        {
+            let mut nodes = self.nodes.write().expect("nodes lock poisoned");
+            nodes.insert(id.clone(), node);
+        }
+        self.declared_at_seq
+            .write()
+            .expect("declared_at_seq lock poisoned")
+            .entry(id)
+            .or_insert(seq);
         Ok(())
     }
 
