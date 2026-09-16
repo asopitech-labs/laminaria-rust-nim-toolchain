@@ -68,7 +68,12 @@ fn compile_pointer_function_respecting_borrowck_gate(
         .map(|(_, _, ownership)| *ownership)?;
     let target_ir_ownership = match param_ownership {
         Ownership::Unique | Ownership::Boxed => unified_symbol_graph::target_ir::Ownership::Unique,
-        Ownership::Shared => unified_symbol_graph::target_ir::Ownership::Shared,
+        // Fifth-round critical review correction: `frozen` is now real
+        // data from `Ty::is_freeze`, not assumed -- pass it through
+        // rather than discarding it as the pre-correction code did.
+        Ownership::Shared { frozen } => {
+            unified_symbol_graph::target_ir::Ownership::Shared { frozen }
+        }
         Ownership::NotAReference => return None,
     };
 
@@ -109,7 +114,15 @@ fn compile_load_or_reload_function_respecting_borrowck_gate(
         .map(|(_, _, ownership)| *ownership)?;
     let target_ir_ownership = match param_ownership {
         Ownership::Unique => unified_symbol_graph::target_ir::Ownership::Unique,
-        Ownership::Shared => unified_symbol_graph::target_ir::Ownership::Shared,
+        // Fifth-round critical review, the decisive fix: `frozen` (real
+        // data from the real `Ty::is_freeze` query, confirmed against
+        // `compiler/rustc_middle/src/ty/util.rs`) is now threaded through
+        // rather than discarded -- a `&Cell<i32>` (frozen: false) must
+        // reach `lower_load_or_reload_to_code_body`'s own no-cache path,
+        // not be silently treated the same as a truly frozen `&i32`.
+        Ownership::Shared { frozen } => {
+            unified_symbol_graph::target_ir::Ownership::Shared { frozen }
+        }
         Ownership::Boxed => unified_symbol_graph::target_ir::Ownership::Boxed,
         Ownership::NotAReference => unified_symbol_graph::target_ir::Ownership::NotAReference,
     };
@@ -362,7 +375,12 @@ mod tests {
             .find(|(_, ty_debug, _)| ty_debug.contains('&') && !ty_debug.contains("mut"))
             .map(|(_, _, ownership)| *ownership)
             .expect("a &i32 parameter local must exist in the real MIR locals");
-        assert_eq!(param_ownership, Ownership::Shared);
+        assert_eq!(
+            param_ownership,
+            Ownership::Shared { frozen: true },
+            "&i32 has no UnsafeCell anywhere in its pointee, so the real Ty::is_freeze query \
+             must report frozen: true"
+        );
     }
 
     /// A parameter with no reference at all (plain `i32`) must not be
@@ -614,6 +632,51 @@ pub fn violates_borrow_checking(x: &mut i32) -> i32 {
             raw_ptr_code, expected_cached,
             "a raw *const i32 (no compiler-checked aliasing guarantee) must reach different \
              codegen from real &mut/&/Box types"
+        );
+    }
+
+    /// Issue #68, fifth-round critical review, the decisive integration
+    /// test: a real `&Cell<i32>` parameter (a shared reference whose
+    /// pointee genuinely contains an `UnsafeCell`, confirmed via the
+    /// real `Ty::is_freeze` query returning `false` for it) must reach
+    /// **different** codegen from a real `&i32` (a shared reference that
+    /// genuinely is frozen) -- proving the `frozen` field, threaded all
+    /// the way from `ownership_from_real_ty`'s own real query through
+    /// this crate's own borrowck-gated integration into
+    /// `unified_symbol_graph::target_ir`'s own codegen, actually changes
+    /// which of two correctness-preserving code shapes is emitted for
+    /// two real Rust types that both classify as `Ownership::Shared` but
+    /// differ in exactly the condition rustc itself checks before
+    /// granting `noalias`.
+    #[test]
+    fn real_cell_shared_reference_reaches_different_codegen_than_a_real_frozen_shared_reference() {
+        let frozen_shared_code = compile_load_or_reload_function_respecting_borrowck_gate(
+            "pub fn f(p: &i32) -> i32 { if *p != 0 { *p } else { -*p } }",
+            "f",
+            &["f"],
+        )
+        .expect("a valid &i32 function must reach codegen");
+
+        let unfrozen_shared_code = compile_load_or_reload_function_respecting_borrowck_gate(
+            "\
+use std::cell::Cell;
+pub fn f(p: &Cell<i32>) -> i32 {
+    let v = p.get();
+    if v != 0 { v } else { -v }
+}
+",
+            "f",
+            &["f"],
+        )
+        .expect("a valid &Cell<i32> function must reach codegen");
+
+        assert_ne!(
+            frozen_shared_code, unfrozen_shared_code,
+            "a real &Cell<i32> (frozen: false, contains an UnsafeCell) must reach different \
+             codegen from a real &i32 (frozen: true) -- treating them identically, as this \
+             crate's own Ownership enum did before this correction, would be unsound: a second \
+             alias's write through the Cell can be observed between a cached read and its later \
+             use"
         );
     }
 }

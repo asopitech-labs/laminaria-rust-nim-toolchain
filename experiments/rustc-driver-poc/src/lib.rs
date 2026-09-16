@@ -53,15 +53,76 @@ use std::sync::{Arc, Mutex};
 /// Rust -- `Box<T>` is Rust's own unique-ownership *heap* type, detected
 /// here via the real `Ty::is_box()` query (`compiler/rustc_middle/src/ty/sty.rs`),
 /// not a name-string comparison against `"Box"`.
+///
+/// Issue #68, fifth-round critical review, the decisive correction this
+/// enum's own earlier shape was missing: a hypothesis-testing reviewer
+/// pointed out that `Ownership::Shared` (mapped from any `&T`
+/// unconditionally) is a **narrower, more dangerous vocabulary than the
+/// exact real rustc mechanism** it was supposed to demonstrate an
+/// improvement over. Confirmed directly against
+/// `compiler/rustc_abi/src/lib.rs`'s real `PointerKind` enum:
+///
+/// ```text
+/// pub enum PointerKind {
+///     /// Shared reference. `frozen` indicates the absence of any `UnsafeCell`.
+///     SharedRef { frozen: bool },
+///     MutableRef { unpin: bool },
+///     Box { unpin: bool, global: bool },
+/// }
+/// ```
+///
+/// and against the real consumer, `arg_attrs_for_rust_scalar`
+/// (`compiler/rustc_ty_utils/src/abi.rs`, lines 366-370, confirmed this
+/// session):
+///
+/// ```text
+/// let no_alias = match kind {
+///     PointerKind::SharedRef { frozen } => frozen,
+///     PointerKind::MutableRef { unpin } => unpin,
+///     PointerKind::Box { unpin, global } => unpin && global && noalias_for_box,
+/// };
+/// ```
+///
+/// i.e. rustc itself **never** grants `noalias` to a bare `&T` -- only to
+/// a `&T` that is additionally `frozen` (contains no `UnsafeCell`
+/// anywhere in its pointee, confirmed via the real, public
+/// `Ty::is_freeze` query, `compiler/rustc_middle/src/ty/util.rs`).
+/// `Ownership::Shared` previously had no equivalent of this condition at
+/// all, and this crate's earlier `lower_load_or_reload_to_code_body`
+/// integration (`main.rs`) treated *every* `&T` as safe to cache across
+/// a branch -- which is unsound for `&Cell<i32>` specifically, since a
+/// `Cell` write through a second alias can observe or change the cached
+/// value. `Shared` is now `Shared { frozen: bool }`, carrying the exact
+/// condition rustc itself requires before treating a shared reference as
+/// safe to alias-optimize -- narrower vocabulary was the reviewer's
+/// finding, not narrower reality; this fixes it to match reality.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ownership {
     Unique,
-    Shared,
+    /// `frozen: true` means this reference's own real `Ty<'tcx>` passed
+    /// `Ty::is_freeze` (no `UnsafeCell` anywhere in the pointee) --
+    /// exactly the condition `arg_attrs_for_rust_scalar` requires before
+    /// treating a `&T` as `noalias`-safe. `frozen: false` (e.g. `&Cell<i32>`)
+    /// must never be treated the same as a genuinely frozen `&T`.
+    Shared {
+        frozen: bool,
+    },
     Boxed,
     NotAReference,
 }
 
-pub fn ownership_from_real_ty(ty: rustc_middle::ty::Ty<'_>) -> Ownership {
+/// Derives `Ownership` from a real `Ty<'tcx>`, now including the real
+/// `Freeze`/`UnsafeCell` check `arg_attrs_for_rust_scalar` itself
+/// performs (via the real, public `Ty::is_freeze` query) rather than
+/// treating every `&T` identically. `tcx`/`typing_env` are required
+/// (unlike the earlier, `Ty`-only signature) because `is_freeze` is
+/// itself a real query against the type-checking context, not something
+/// derivable from `Ty` alone.
+pub fn ownership_from_real_ty<'tcx>(
+    ty: rustc_middle::ty::Ty<'tcx>,
+    tcx: TyCtxt<'tcx>,
+    typing_env: rustc_middle::ty::TypingEnv<'tcx>,
+) -> Ownership {
     if ty.is_box() {
         return Ownership::Boxed;
     }
@@ -69,8 +130,10 @@ pub fn ownership_from_real_ty(ty: rustc_middle::ty::Ty<'_>) -> Ownership {
         rustc_middle::ty::TyKind::Ref(_, _, rustc_middle::mir::Mutability::Mut) => {
             Ownership::Unique
         }
-        rustc_middle::ty::TyKind::Ref(_, _, rustc_middle::mir::Mutability::Not) => {
-            Ownership::Shared
+        rustc_middle::ty::TyKind::Ref(_, referent_ty, rustc_middle::mir::Mutability::Not) => {
+            Ownership::Shared {
+                frozen: referent_ty.is_freeze(tcx, typing_env),
+            }
         }
         _ => Ownership::NotAReference,
     }
@@ -152,6 +215,7 @@ impl Callbacks for Inspect {
             let borrowck_succeeded = tcx.mir_borrowck(local_def_id).is_ok();
 
             let body = tcx.optimized_mir(local_def_id.to_def_id());
+            let typing_env = rustc_middle::ty::TypingEnv::fully_monomorphized();
             let locals = body
                 .local_decls
                 .iter_enumerated()
@@ -159,7 +223,7 @@ impl Callbacks for Inspect {
                     (
                         idx.index(),
                         format!("{:?}", decl.ty),
-                        ownership_from_real_ty(decl.ty),
+                        ownership_from_real_ty(decl.ty, tcx, typing_env),
                     )
                 })
                 .collect();

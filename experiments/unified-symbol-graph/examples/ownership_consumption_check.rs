@@ -50,7 +50,7 @@ unsafe fn make_callable(code: &[u8]) -> extern "C" fn(*const i32) -> i32 {
 
 fn main() {
     let unique_code = lower_double_load_to_code_body(Ownership::Unique);
-    let shared_code = lower_double_load_to_code_body(Ownership::Shared);
+    let shared_code = lower_double_load_to_code_body(Ownership::Shared { frozen: true });
     eprintln!(
         "Unique code ({} bytes): {:02x?}",
         unique_code.len(),
@@ -109,7 +109,13 @@ fn main() {
     let mut reload_failures = 0;
     for ownership in [
         Ownership::Unique,
-        Ownership::Shared,
+        Ownership::Shared { frozen: true },
+        // Fifth-round critical review addition: `frozen: false` (the
+        // real classification for `&Cell<i32>`) must also execute
+        // correctly (using the no-cache reload path), not just produce
+        // different bytes -- correctness, not merely a differently-sized
+        // output, is what this whole file exists to check.
+        Ownership::Shared { frozen: false },
         Ownership::Boxed,
         Ownership::NotAReference,
     ] {

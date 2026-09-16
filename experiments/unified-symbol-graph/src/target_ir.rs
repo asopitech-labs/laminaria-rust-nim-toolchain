@@ -62,9 +62,44 @@
 pub enum Ownership {
     /// No other live value may alias this one -- the analogue of `&mut T`.
     Unique,
-    /// Aliasing is permitted, but no live reference can observe a change
-    /// (Rust's own `&T` immutability guarantee) -- the analogue of `&T`.
-    Shared,
+    /// The analogue of `&T` -- but see `frozen`'s own doc comment for
+    /// the decisive correction a hypothesis-testing critical review
+    /// forced onto this variant: a bare `&T` is **not** unconditionally
+    /// safe to alias-optimize.
+    ///
+    /// **Fifth-round critical review, decisive correction**: this
+    /// variant previously carried no `frozen` field at all and this
+    /// module's own lowering functions (`lower_load_or_reload_to_code_body`)
+    /// treated every `Shared` value identically to `Unique`/`Boxed`,
+    /// asserting (in that function's own now-corrected doc comment)
+    /// "Rust's own `&T` immutability guarantee" licenses the same
+    /// caching `&mut T` gets. Confirmed directly against rustc's own
+    /// real `PointerKind` (`compiler/rustc_abi/src/lib.rs`: `SharedRef {
+    /// frozen: bool }`, "frozen indicates the absence of any
+    /// `UnsafeCell`") and its real consumer
+    /// (`compiler/rustc_ty_utils/src/abi.rs`'s `arg_attrs_for_rust_scalar`,
+    /// lines 366-370: `PointerKind::SharedRef { frozen } => frozen` --
+    /// rustc itself **never** grants `noalias` to a bare `&T`, only to a
+    /// `&T` whose pointee also passes the real `Ty::is_freeze` query),
+    /// this module's own prior claim was a narrower, more dangerous
+    /// vocabulary than the exact mechanism it was supposed to improve
+    /// on: `&Cell<i32>` is a real, common Rust type where `frozen` is
+    /// `false` (a `Cell` contains an `UnsafeCell`), and caching a load
+    /// across a branch the way `Unique`/`Boxed`/a truly-frozen `Shared`
+    /// license is unsound for it -- a second alias's write through the
+    /// `Cell` can change the value between the cached read and its
+    /// later use. `experiments/rustc-driver-poc`'s own
+    /// `ownership_from_real_ty` now derives this field from the real,
+    /// public `Ty::is_freeze` query rather than assuming every `&T`
+    /// passes it.
+    Shared {
+        /// `true` only when the referent type's own real `Ty::is_freeze`
+        /// query (confirmed public in `compiler/rustc_middle/src/ty/util.rs`)
+        /// returns `true` -- i.e. no `UnsafeCell` anywhere in the
+        /// pointee. `&i32` is `frozen: true`; `&Cell<i32>` is
+        /// `frozen: false`.
+        frozen: bool,
+    },
     /// A heap-owning handle -- the analogue of `Box<T>`. Added alongside
     /// `experiments/rustc-driver-poc`'s own `Ownership::Boxed` (derived
     /// there from the real `Ty::is_box()` query) so this crate's
@@ -341,7 +376,15 @@ pub fn lower_double_load_to_code_body(ownership: Ownership) -> Vec<u8> {
             0x01, 0xC0, // add eax, eax
             0xC3, // ret
         ],
-        Ownership::Shared => vec![
+        // `frozen`'s own value is deliberately not consulted here: this
+        // function is kept as fixed, unmodified evidence of the
+        // reviewer's critique (see this function's own doc comment
+        // above and `Ownership::Shared`'s own doc comment for the
+        // decisive correction) -- the two-load pessimization was already
+        // documented as unjustified for a truly frozen `&T` before
+        // `frozen` even existed as a field, so its addition does not
+        // change this function's already-acknowledged flaw.
+        Ownership::Shared { frozen: _ } => vec![
             0x8B, 0x07, // mov eax, [rdi]
             0x8B, 0x0F, // mov ecx, [rdi]
             0x01, 0xC8, // add eax, ecx
@@ -380,8 +423,10 @@ pub fn lower_double_load_to_code_body(ownership: Ownership) -> Vec<u8> {
 /// from memory **once** if the compiler can prove nothing else can have
 /// written to `*p` between the reads:
 ///
-/// - `Ownership::Unique` (the checked case: a `&i32`/`&mut i32` with no
-///   other live alias, or `Ownership::Boxed`, confirmed via real
+/// - `Ownership::Unique` (a `&mut i32` with no other live alias), a
+///   truly-`frozen` `Ownership::Shared { frozen: true }` (e.g. `&i32`,
+///   confirmed via the real `Ty::is_freeze` query, no `UnsafeCell`
+///   anywhere in the pointee), or `Ownership::Boxed` (confirmed via real
 ///   `experiments/rustc-driver-poc` `Ty::is_box()`/`TyKind::Ref` data):
 ///   the compiler-verified absence of aliasing writes licenses caching
 ///   the loaded value in a register across the branch. Emits exactly one
@@ -391,23 +436,40 @@ pub fn lower_double_load_to_code_body(ownership: Ownership) -> Vec<u8> {
 /// - `NotAReference` (this crate's stand-in for an untyped raw pointer
 ///   with no compiler-checked provenance at all -- e.g. a `*const i32`
 ///   obtained via `as` from an arbitrary integer, which Rust's type
-///   system makes zero aliasing promises about): nothing licenses
-///   caching, so this path re-issues the memory load on **every** access
-///   -- three separate `mov [rdi]` instructions, one per textual read,
-///   matching what a correctness-preserving compiler must do without the
-///   ownership information the `Unique` path had.
+///   system makes zero aliasing promises about) **and now also**
+///   `Ownership::Shared { frozen: false }` (e.g. `&Cell<i32>`, which
+///   *is* a shared reference but whose pointee contains an `UnsafeCell`):
+///   nothing licenses caching for either, so this path re-issues the
+///   memory load on **every** access -- three separate `mov [rdi]`
+///   instructions, one per textual read, matching what a
+///   correctness-preserving compiler must do without a proven-safe
+///   aliasing guarantee.
 ///
-/// `Shared` is deliberately not given a third, different branch here --
-/// unlike the previous function's now-documented defect, this function
-/// does not manufacture an artificial distinction where none exists: a
-/// real `&i32` genuinely licenses the same single-load caching a
-/// `Unique`/`&mut i32` does (Rust's immutability guarantee for `&T` means
-/// no live reference, shared or unique, can observe the value changing
-/// between these reads), so `Shared` is treated identically to `Unique`
-/// below -- the *sound* answer, not a manufactured one.
+/// **Fifth-round critical review, decisive correction**: an earlier
+/// version of this function's own doc comment claimed "a real `&i32`
+/// genuinely licenses the same single-load caching a `Unique`/`&mut i32`
+/// does (Rust's immutability guarantee for `&T` means no live reference,
+/// shared or unique, can observe the value changing between these
+/// reads)" and treated *every* `Shared` value identically to `Unique`.
+/// This was confirmed false by a hypothesis-testing reviewer: rustc's
+/// own real `PointerKind::SharedRef { frozen }` (`compiler/rustc_abi/src/lib.rs`)
+/// and its real consumer `arg_attrs_for_rust_scalar`
+/// (`compiler/rustc_ty_utils/src/abi.rs`, lines 366-370, confirmed this
+/// session) grant `noalias` to a `&T` **only** when `frozen` -- i.e. only
+/// when the pointee contains no `UnsafeCell` anywhere. `&Cell<i32>` is a
+/// real, common counterexample: it is `Ownership::Shared` but
+/// `frozen: false`, and a second alias's write through the `Cell` can
+/// change the value between this function's cached read and its later
+/// use -- caching it the way the old code did was **unsound**, not
+/// merely suboptimal. This function now checks `frozen` explicitly.
 pub fn lower_load_or_reload_to_code_body(ownership: Ownership) -> Vec<u8> {
-    match ownership {
-        Ownership::Unique | Ownership::Shared | Ownership::Boxed => {
+    let can_cache = match ownership {
+        Ownership::Unique | Ownership::Boxed => true,
+        Ownership::Shared { frozen } => frozen,
+        Ownership::NotAReference => false,
+    };
+    match can_cache {
+        true => {
             // Layout: mov eax,[rdi] (2) ; test eax,eax (2) ; je +1 (2) ; ret (1) ; neg eax (2) ; ret (1)
             //
             // `je`'s rel8 is measured from the end of the `je` instruction
@@ -426,10 +488,15 @@ pub fn lower_load_or_reload_to_code_body(ownership: Ownership) -> Vec<u8> {
                 0xC3, // ret (taken when *p == 0: return -*p, still from the cached register)
             ]
         }
-        Ownership::NotAReference => {
+        false => {
             // No aliasing guarantee at all -- reload from [rdi] on every
             // textual access, since nothing licenses trusting a
             // previously-loaded register still reflects *p's live value.
+            // Reached by both `NotAReference` (no compiler-checked
+            // provenance) and `Shared { frozen: false }` (e.g.
+            // `&Cell<i32>` -- a real shared reference, but one whose
+            // pointee may be mutated through another alias, per this
+            // function's own doc comment above).
             //
             // `je`'s rel8 is measured from the end of the `je` instruction
             // (offset 6): the then-arm's `mov eax,[rdi]` (2 bytes) + `ret`
@@ -1245,7 +1312,7 @@ mod tests {
         let ir = TargetIr {
             entry: BlockId(0),
             param0: Value {
-                ownership: Ownership::Shared,
+                ownership: Ownership::Shared { frozen: true }, // mir_text cannot determine Freeze from text alone; assumed frozen as a stated limitation
             },
             blocks: vec![
                 BasicBlock {
@@ -1326,7 +1393,7 @@ mod tests {
         let ir = TargetIr {
             entry: BlockId(0),
             param0: Value {
-                ownership: Ownership::Shared,
+                ownership: Ownership::Shared { frozen: true }, // mir_text cannot determine Freeze from text alone; assumed frozen as a stated limitation
             },
             blocks: vec![BasicBlock {
                 terminator: Terminator::Branch {
@@ -1395,7 +1462,7 @@ mod tests {
     #[test]
     fn ownership_actually_changes_the_emitted_bytes_for_a_double_load() {
         let unique_code = lower_double_load_to_code_body(Ownership::Unique);
-        let shared_code = lower_double_load_to_code_body(Ownership::Shared);
+        let shared_code = lower_double_load_to_code_body(Ownership::Shared { frozen: true });
 
         assert_eq!(
             unique_code,
@@ -1415,21 +1482,22 @@ mod tests {
     }
 
     /// Issue #68 third-round critical review, the corrected contrast:
-    /// `Unique`/`Shared`/`Boxed` (all provably non-aliased across these
-    /// reads, per Rust's own type system) must all take the *same*,
-    /// shorter single-load-plus-cache path, while `NotAReference` (no
-    /// compiler-checked aliasing guarantee at all) must reload from
-    /// memory on every textual access and therefore produce strictly
-    /// more bytes -- proving the tag drives a genuinely sound
-    /// distinction (checked-aliasing vs. no-guarantee), not an arbitrary
-    /// one manufactured only to make two branches look different (the
-    /// defect `lower_double_load_to_code_body`'s own doc comment now
-    /// documents about itself).
+    /// `Unique`/`Boxed`/a truly-`frozen` `Shared` (all provably
+    /// non-aliased across these reads, per Rust's own type system) must
+    /// all take the *same*, shorter single-load-plus-cache path, while
+    /// `NotAReference` (no compiler-checked aliasing guarantee at all)
+    /// must reload from memory on every textual access and therefore
+    /// produce strictly more bytes -- proving the tag drives a genuinely
+    /// sound distinction (checked-aliasing vs. no-guarantee), not an
+    /// arbitrary one manufactured only to make two branches look
+    /// different (the defect `lower_double_load_to_code_body`'s own doc
+    /// comment now documents about itself).
     #[test]
     fn load_or_reload_treats_all_checked_ownership_variants_identically_and_only_reloads_for_untyped_pointers(
     ) {
         let unique_code = lower_load_or_reload_to_code_body(Ownership::Unique);
-        let shared_code = lower_load_or_reload_to_code_body(Ownership::Shared);
+        let frozen_shared_code =
+            lower_load_or_reload_to_code_body(Ownership::Shared { frozen: true });
         let boxed_code = lower_load_or_reload_to_code_body(Ownership::Boxed);
         let raw_code = lower_load_or_reload_to_code_body(Ownership::NotAReference);
 
@@ -1439,9 +1507,10 @@ mod tests {
             "Unique must cache the single load across both branch arms"
         );
         assert_eq!(
-            shared_code, expected_cached,
-            "Shared must be treated identically to Unique -- &T's immutability guarantee \
-             licenses the same caching, not a manufactured pessimization"
+            frozen_shared_code, expected_cached,
+            "Shared{{frozen: true}} (e.g. &i32, no UnsafeCell anywhere in the pointee, confirmed \
+             via the real Ty::is_freeze query) must be treated identically to Unique -- rustc's \
+             own real arg_attrs_for_rust_scalar grants noalias to exactly this case"
         );
         assert_eq!(
             boxed_code, expected_cached,
@@ -1459,6 +1528,49 @@ mod tests {
         assert!(
             raw_code.len() > unique_code.len(),
             "the no-guarantee path must be strictly longer, since it cannot cache the load"
+        );
+    }
+
+    /// Issue #68, fifth-round critical review, the decisive test this
+    /// whole correction exists for: `Ownership::Shared { frozen: false }`
+    /// (the real classification for `&Cell<i32>` -- a shared reference
+    /// whose pointee contains an `UnsafeCell`, confirmed against
+    /// `experiments/rustc-driver-poc`'s own `ownership_from_real_ty`,
+    /// which derives this field from the real, public `Ty::is_freeze`
+    /// query) must be treated **identically to `NotAReference`**, not to
+    /// `Unique`/`Boxed`/a truly-frozen `Shared`. Before this correction,
+    /// this crate's own `Ownership::Shared` had no `frozen` field at all
+    /// and every `&T` (including `&Cell<i32>`) was cached the same way
+    /// `&mut T`/`Box<T>` are -- confirmed by this session's own reading
+    /// of `compiler/rustc_ty_utils/src/abi.rs`'s real
+    /// `arg_attrs_for_rust_scalar` (lines 366-370) to be **unsound**: a
+    /// second alias's write through the `Cell` can change the value
+    /// between the cached read and its later use, so caching it the way
+    /// a genuinely unaliased value is cached would silently return a
+    /// stale result -- not merely a missed optimization, a real
+    /// correctness bug this test exists to prevent from being
+    /// reintroduced.
+    #[test]
+    fn unfrozen_shared_ownership_is_treated_identically_to_not_a_reference_never_cached() {
+        let unfrozen_shared_code =
+            lower_load_or_reload_to_code_body(Ownership::Shared { frozen: false });
+        let raw_code = lower_load_or_reload_to_code_body(Ownership::NotAReference);
+        let frozen_shared_code =
+            lower_load_or_reload_to_code_body(Ownership::Shared { frozen: true });
+
+        assert_eq!(
+            unfrozen_shared_code, raw_code,
+            "Shared{{frozen: false}} (e.g. &Cell<i32>) must reload from memory on every access, \
+             exactly like NotAReference -- caching it the way a truly-frozen &T is cached would \
+             be unsound, since a second alias's write through the Cell can be observed between \
+             the cached read and its later use"
+        );
+        assert_ne!(
+            unfrozen_shared_code, frozen_shared_code,
+            "Shared{{frozen: false}} must NOT be treated the same as Shared{{frozen: true}} -- \
+             this is the exact distinction rustc's own real PointerKind::SharedRef{{frozen}} \
+             makes and this crate's earlier Ownership enum (with no frozen field at all) could \
+             not represent"
         );
     }
 
@@ -1705,7 +1817,7 @@ pub mod mir_text {
             return Ok(TargetIr {
                 entry: BlockId(0),
                 param0: Value {
-                    ownership: Ownership::Shared,
+                    ownership: Ownership::Shared { frozen: true }, // mir_text cannot determine Freeze from text alone; assumed frozen as a stated limitation
                 },
                 blocks: vec![BasicBlock {
                     terminator: Terminator::Return(operand),
@@ -1731,7 +1843,7 @@ pub mod mir_text {
         Ok(TargetIr {
             entry: BlockId(0),
             param0: Value {
-                ownership: Ownership::Shared,
+                ownership: Ownership::Shared { frozen: true }, // mir_text cannot determine Freeze from text alone; assumed frozen as a stated limitation
             },
             blocks: vec![
                 BasicBlock {

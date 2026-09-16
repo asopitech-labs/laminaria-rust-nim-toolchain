@@ -477,8 +477,58 @@ bb5: { _6 = copy _2; ...(_6 * 2)...; return; }
 - オーバーフローチェック(実MIRの`AddWithOverflow`+`assert`)は意図的にモデル化せず、算術は無条件にラップする——この点はテスト自体のドキュメントコメントで明記している。
 - `Ownership`タグとの統合(diamond/ループの値がOwnership情報を持つケース)はまだ実装していない。
 
+## 5.10 H2(所有権情報の再エンコード回避)の検証: `Ownership::Shared`の反証と修正
+
+節5.9の分解に従い、H2(所有権をタグとして保持すればnoalias再エンコードの欠陥を回避できるか)を検証した。結論: **反証された**。前回までの`Ownership::Shared`は、置き換え対象であるLLVMのnoalias導出よりも貧弱な語彙で同じ問題を再生産していた。
+
+### 5.10.1 反証の内容: rustc自身の`PointerKind`との実データ比較
+
+`compiler/rustc_abi/src/lib.rs`で実際の`PointerKind`定義を確認した:
+
+```rust
+pub enum PointerKind {
+    /// Shared reference. `frozen` indicates the absence of any `UnsafeCell`.
+    SharedRef { frozen: bool },
+    /// Mutable reference. `unpin` indicates the absence of any pinned data.
+    MutableRef { unpin: bool },
+    Box { unpin: bool, global: bool },
+}
+```
+
+さらに、この情報を実際に消費する`arg_attrs_for_rust_scalar`(`compiler/rustc_ty_utils/src/abi.rs`366-370行)を確認した:
+
+```rust
+let no_alias = match kind {
+    PointerKind::SharedRef { frozen } => frozen,
+    PointerKind::MutableRef { unpin } => unpin,
+    PointerKind::Box { unpin, global } => unpin && global && noalias_for_box,
+};
+```
+
+**rustc自身は、素の`&T`に対して無条件に`noalias`を付与しない**。`frozen`(pointeeのどこにも`UnsafeCell`が存在しないこと)が真である場合のみである。前回までの`target_ir::Ownership::Shared`はこの条件を一切持たず、全ての`&T`を無条件にキャッシュ可能とみなしていた——これは`&Cell<i32>`(`UnsafeCell`を内部に持つ)のケースで**不健全**(誤った結果を生みうる)であり、単なる非効率ではない、実際の正しさの欠陥だった。この事実は`lower_load_or_reload_to_code_body`(節5.6.2)の当時のdoc comment自身が「Rust's own `&T` immutability guarantee」と誤って一般化して書いていたことでも裏付けられる。
+
+### 5.10.2 修正: `Ownership::Shared`を`Shared { frozen: bool }`へ拡張
+
+`experiments/unified-symbol-graph/src/target_ir.rs`の`Ownership::Shared`を`Shared { frozen: bool }`へ拡張し、`experiments/rustc-driver-poc/src/lib.rs`の`ownership_from_real_ty`を、実際の公開API`Ty::is_freeze(tcx, typing_env)`(`compiler/rustc_middle/src/ty/util.rs`で公開が確認済み)から`frozen`値を取得するよう修正した。`lower_load_or_reload_to_code_body`のロジックも修正し、`frozen: true`の場合のみ`Unique`/`Boxed`と同じキャッシュパスを取り、`frozen: false`の場合は`NotAReference`と同じ再ロードパスを取るようにした。
+
+### 5.10.3 実証: 実際の`&Cell<i32>`が異なる(かつ正しい)コードへ到達する
+
+`experiments/rustc-driver-poc/src/main.rs`に、実際の`&i32`関数と実際の`&Cell<i32>`関数(`p.get()`経由でCellから値を読む)を両方ともrustc内部API経由でborrow check・型検査し、`unified-symbol-graph`のコード生成へ渡すテストを実装した。結果: **`&i32`(frozen: true)と`&Cell<i32>`(frozen: false)は異なるバイト列のコードへ到達する**ことを確認した(`real_cell_shared_reference_reaches_different_codegen_than_a_real_frozen_shared_reference`テスト)。
+
+さらに`examples/ownership_consumption_check.rs`に`Ownership::Shared { frozen: false }`のケースを追加し、`mmap`実行で正しい結果(`i32::MIN`を含む5入力)を返すことを確認した。
+
+### 5.10.4 この修正が示すこと、示さないこと
+
+**示すこと**: 本設計の`Ownership`タグは、少なくとも`frozen`という1つの軸について、rustc自身が実際に使う語彙と同等の精度を持つよう修正できた。これは節5.9が指摘した「置き換え対象より貧弱な語彙で同じ再エンコード問題を縮小再生産している」という反証への直接的な応答である。
+
+**示さないこと**: 
+- 前回研究(節3.3)が代替として挙げたStacked/Tree Borrowsのタグ+木構造は、依然として実装していない。今回の修正は「`frozen`という1ビットの情報を追加した」だけであり、Tree Borrowsが提供するような、借用の生存期間・階層関係を追跡する仕組みには程遠い。
+- `MutableRef { unpin }`の`unpin`条件、`Box { unpin, global }`の`unpin`/`global`条件は、まだ`Ownership::Unique`/`Boxed`に反映していない——これらも同様の反証を受ける可能性がある(例えば`Pin<&mut T>`のケース)。
+- `frozen`の判定は`Ty::is_freeze`という1つのクエリ呼び出しのみに依存しており、このクエリ自体がどこまで正確か(例えば、ジェネリック型パラメータを含む型に対する`is_freeze`の挙動)は検証していない。
+
 ## 6. まだ解けていないこと
 
+- 節5.10で修正した`Ownership::Shared { frozen }`は`UnsafeCell`の有無のみを追跡する。`MutableRef`/`Box`が実際に持つ`unpin`条件(`Pin<&mut T>`等)は未反映であり、同様の反証が存在する可能性が高い。前回研究が挙げたStacked/Tree Borrowsのタグ+木構造という、より豊かな代替への道筋もまだない。
 - 節5.9で実装した`diamond_and_loop_cfg`は、既存の`Terminator`/`lower_target_ir_to_code_body`(2ブロック限定)、`lower_load_or_reload_to_code_body`(Ownership統合)、`lower_bounds_checked_slice_index_to_code_body`(境界チェック)とは独立した、別々の型体系・別々の関数として存在する。「1つの汎用IRが、分岐+ループ+所有権+境界チェックを同時に扱う」という統合はまだ行っていない——これはH3(単一層のtarget固有表現で済むか)の判定に直接関わる未解決事項であり、節5.9.1で確認した通り、機能を追加するたびに別関数を書いている現状は、H3への否定的な材料になりうる。
 - `diamond_and_loop_cfg`はレジスタ割り当てを一切行わず、全ての値を毎回メモリ(スタックスロット)へ読み書きする素朴な方式である。これはSSA構築・mem2reg相当の最適化を意図的に持たないという設計判断だが、この方式のままでは前回研究が指摘したLLVMとの実行時性能差(節5.2.3、節5.8.3)がさらに拡大する可能性が高い。
 - 節5.8.3で実測した通り、`get_elem`関数では本設計とLLVMの成功パス命令列がバイト単位で完全一致しているにもかかわらず、実行時性能に約1.15〜1.25倍の差が観測された。これが「ベンチマーク手法(関数ポインタ経由の間接呼び出し vs. 直接call)に起因する測定誤差」なのか、「本設計側に何らかの実質的な追加コストがある」のかは切り分けていない。同一の呼び出し方式(例えば両方とも関数ポインタ経由にする、あるいは両方ともバイナリに直接リンクする)で再測定する必要がある。
