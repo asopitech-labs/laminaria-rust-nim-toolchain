@@ -205,6 +205,88 @@ LAMINARIAが目指す設計(target固有専用コンパイラ、汎用中間表�
 
 参照: mrustc README(<https://raw.githubusercontent.com/thepowersgang/mrustc/master/README.md>)、gccrs README(<https://raw.githubusercontent.com/rust-gcc/gccrs/master/README.md>)、gccrsディレクトリ構造(`https://api.github.com/repos/rust-gcc/gccrs/contents/gcc/rust`)、rustc_codegen_gcc README(<https://raw.githubusercontent.com/rust-lang/rustc_codegen_gcc/master/Readme.md>)、Miri README(<https://raw.githubusercontent.com/rust-lang/miri/master/README.md>)。
 
+## 5.6 borrow checkingは「省略可能な診断」か「後続処理をブロックするゲート」か
+
+節5.1でmrustcが「borrow checkingを行わない」設計を採ることを確認した。本節では、この判断が実際に何を犠牲にしているかを、rustc本体のコンパイルパイプライン(ゲート条件)とmrustc自身の設計判断の両方から確定する。
+
+### 5.6.1 borrow checkingはコンパイラドライバレベルで明示的なゲートとして実装されている
+
+`compiler/rustc_interface/src/passes.rs`の`run_required_analyses`関数(1149-1187行)を確認した結果、`mir_borrowck`は`tcx.ensure_ok().mir_borrowck(def_id)`という形で、クレート内の全アイテムに対し**強制実行**される(1160行)。
+
+決定的なのは、この関数を呼び出す`analysis`関数(1195行)の直後、および`start_codegen`関数(同ファイル1281行)冒頭に置かれたゲートである。
+
+```rust
+// analysis() 内、run_required_analyses() 呼び出し直後
+if let Some(guar) = sess.dcx().has_errors_excluding_lint_errors() {
+    guar.raise_fatal();
+}
+```
+
+```rust
+// start_codegen() 冒頭
+if let Some(guar) = tcx.sess.dcx().has_errors_or_delayed_bugs() {
+    guar.raise_fatal();
+}
+```
+
+borrow checkingが失敗すると`ErrorGuaranteed`という型でエラーが記録され(`rustc_borrowck/src/lib.rs`117-148行の`mir_borrowck`関数のシグネチャ自体が`Result<_, ErrorGuaranteed>`を返す)、この記録は`dcx()`(診断コンテキスト)に蓄積される。`start_codegen`はコード生成を始める前に必ずこのエラー蓄積を確認し、1件でもあれば`raise_fatal()`で**コード生成そのものに到達せず**コンパイルを打ち切る。
+
+**判定**: borrow checkingは「診断だけを出して処理は続行する」ものではない。コンパイラドライバの制御フロー上に明示的に置かれた、**コード生成へ進む前提条件を検査するゲート**である。エラーがあればcodegenのエントリポイント(`codegen_backend.codegen_crate(tcx)`、同ファイル1336行)自体が呼ばれない。
+
+さらに、節2.2で確認したdrop elaboration(`mir_drops_elaborated_and_const_checked`)は、同じ`run_required_analyses`内で**`tcx.sess.opts.output_types.should_codegen()`の場合のみ**呼ばれる(1172-1176行)という条件分岐がある。これは「コード生成する場合に限り、drop情報を要求する」という設計であり、borrow checking自体(1160行)はcodegenの有無にかかわらず常に実行される、という非対称性がある。
+
+### 5.6.2 `noalias`属性は、borrow checker自身の解析結果ではなく、型情報だけから独立に導出される — 重要な区別
+
+節3.2で確認した`arg_attrs_for_rust_scalar`関数(`compiler/rustc_ty_utils/src/abi.rs`322-411行)を再確認した結果、この関数は`layout.pointee_info_at`という**型のレイアウト情報(`PointerKind::MutableRef { unpin }`等)だけ**から`NoAlias`属性を導出しており、**`mir_borrowck`クエリの解析結果(実際の借用の生存期間、実際に競合する借用があったかどうか)を一切参照していない**。
+
+これは重要な区別である。`&mut T`という**型注釈そのもの**から`noalias`が導出されるのであって、「このコードが実際にborrow checkを通過した」という事実からではない。つまり、もしborrow checking自体をスキップしても、型システム(型注釈)さえ残っていれば`arg_attrs_for_rust_scalar`は変わらず`NoAlias`を出力してしまう。**borrow checkingは、`noalias`という危険な最適化ヒントを「安全に」出すための前提条件を実際に検証している唯一の場所であり、それをスキップすることは、noaliasという主張の裏付けを失ったまま同じ属性を出し続けることを意味する。**
+
+節5.6.1で確認した「codegenの前にborrow checkが成功していなければならない」というドライバレベルのゲートは、この危険性への実質的な防波堤になっている。ゲートが機能する限り、`arg_attrs_for_rust_scalar`が呼ばれる時点(コード生成中)では、borrow checkが既に成功していることが型システムのクエリ依存とは無関係に、**コンパイラドライバの制御フロー**によって保証されている。
+
+### 5.6.3 `unsafe`はborrow checkingを無効化しない — 別々の独立したクエリ
+
+`compiler/rustc_mir_build/src/check_unsafety.rs`(1118行)と`run_required_analyses`(節5.6.1、1154行・1160行)を確認した結果、`check_unsafety(def_id)`と`mir_borrowck(def_id)`は**完全に独立した2つのクエリ**として、同じループ内で別々に`ensure_ok()`される。`unsafe`ブロックが無効化するのは生ポインタのデリファレンスや`unsafe fn`呼び出しといった、`check_unsafety`が個別に許可する限定的な操作だけであり、**borrow checking自体は`unsafe`ブロックの中でも通常通り動作する**(`&mut`の一意性違反は`unsafe`ブロック内でも依然としてエラーになる)。
+
+これはmrustcとの対比で重要である。Rust本体の`unsafe`は「一部の操作の検査を免除する」局所的な仕組みであり、「borrow checking全体を止める」仕組みではない。mrustcが行っているのは、`unsafe`ブロックのような局所的な除外ではなく、**クレート全体に対してborrow checkingという検査クエリそのものを実行しない**という、質的に異なる、より広範な省略である。
+
+### 5.6.4 mrustc自身の設計判断: 「検証済みの入力」という前提の上に成り立つ安全性
+
+mrustc自身のREADME(<https://raw.githubusercontent.com/thepowersgang/mrustc/master/README.md>)を確認した結果、次の記述がある。
+
+> As `mrustc`'s primary goal is bootstrapping `rustc`, and as such it tends to assume that the code it's compiling is valid (and any errors in the generated code are mrustc bugs).
+
+これは仮説通りの確認である。mrustcが安全に動作できているのは、**mrustcが処理する入力(rustc自身のソースコード)が、既にrustc本体でborrow checkを通過済みのコードである**という前提の上に成り立っている。mrustcは「borrow checkingをしなくても安全である」ことを一般的に証明したのではなく、「検証済みの入力だけを扱うクローズドな用途(セルフブートストラップ)に限れば、再検証を省略しても実害が出ない」という、**適用範囲を限定した実用的な妥協**である。
+
+さらに同READMEには次の2点も明記されている。
+
+- 「Optional exhaustive MIR validation(`MRUSTC_FULL_VALIDATE`環境変数)」— MIR相当の中間表現に対する**構造的整合性チェック**(型の一致、CFGの妥当性)は、borrow checkingとは別に、オプトインの独立した検証として存在する。これは節「まだ解けていないこと」で述べた「borrow checkingを省略しても、MIRの構造的正しさ自体は別の独立したチェックで保たれる」という安全網の実例である。ただしこれは**構造的整合性**(型が合っているか、制御フローが妥当か)のチェックであり、借用の意味論的な正しさ(一意性、生存期間の重なり)は検査しない。
+- 「Implement MIR borrow checker」が**未実装のTODOリスト項目**として明記されている(131行目)。つまりmrustcは「borrow checkingをしない」ことを恒久的な設計目標として選んだのではなく、実装コストの高さゆえに後回しにしている未完の機能である。
+
+### 5.6.5 NLL導入がborrow checkingをMIRに縛り付けた経緯 — ゲート条件という観点から
+
+節2.1・2.2で確認した通り、borrow checkingは元々HIRベースの字句的生存期間(lexical lifetime)で実装されていたが、NLL(Non-Lexical Lifetimes)導入によりMIRベースへ移行した。rustc-dev-guide(<https://rustc-dev-guide.rust-lang.org/borrow-check.html>)を再確認した結果、この移行理由は次の2点に整理される。
+
+1. MIRはHIRより遥かに単純(「radical desugaring」)であり、borrow checker自体のバグを減らす。
+2. NLLが要求する「制御フローグラフから導出される領域(regions derived from the control-flow graph)」は、HIRの字句的構造では表現できず、MIRのCFG構造を前提としなければ成立しない。
+
+これは節2.2の判定(CFG上の不動点計算という計算モデルは、木構造のASTでは表現できない)と完全に一致する。「MIRという層」を経由する必要が生じたのは、borrow checkingが要求する計算がCFG上の解析であるという構造的事実からであり、MIRという名前・データ型自体に本質があるわけではない — この点は節2で既に判定済みだが、**borrow checkingの結果がコード生成へ渡すゲート条件として機能している(節5.6.1)という追加の事実により、この計算モデルを省略する場合の影響範囲がより具体的に確定した**: 省略すれば、コード生成の前提条件検査自体が消え、型情報だけから導出される`noalias`のような最適化ヒントの安全性根拠が失われる。
+
+### 5.6.6 総合判定: borrow checkingは省略可能な診断ではなく、ゲートである
+
+以上を総合すると、borrow checkingは次の性質を持つ。
+
+| 問い | 判定 | 根拠 |
+| --- | --- | --- |
+| コード生成をブロックする明示的なゲートか | **はい** | `run_required_analyses`→`analysis`→`start_codegen`の各段階に`raise_fatal()`が配置されている(節5.6.1) |
+| 診断専用(結果を後続処理が使わない)か | **いいえ、ただし間接的** | `noalias`(`arg_attrs_for_rust_scalar`)は型情報から独立に導出されるため、borrow checker自身の解析結果を直接消費してはいない。ただし、この属性が「安全である」という主張の妥当性は、borrow checkingがゲートとして機能し続けることに依存している(節5.6.2) |
+| `unsafe`で無効化できるか | **いいえ** | `check_unsafety`とは独立したクエリであり、`unsafe`ブロック内でも通常通り動作する(節5.6.3) |
+| 省略しても構造的正しさは別のチェックで保たれるか | **部分的に、はい** | mrustcの`MRUSTC_FULL_VALIDATE`のようなMIR構造検証(型の一致、CFGの妥当性)は独立に存在し得るが、これは借用の意味論的正しさ(一意性、生存期間)を検査しない(節5.6.4) |
+| 省略が実用上「安全」だった実例はあるか | **限定的に、はい** | mrustcは実際に省略して動作しているが、それは「既にborrow check済みの入力だけを扱う」という閉じた前提の上でのみ成立する妥協であり、一般的な安全性の証明ではない(節5.6.4) |
+
+**LAMINARIAへの示唆**: LAMINARIAが将来「borrow checking相当の処理を一時的に省略する」実装段階を持つ場合、mrustcと同じ前提(検証済みの入力だけを扱う、という閉じたスコープ)を明示的に置かない限り、noaliasに相当する最適化ヒント(あるいはtarget固有バックエンドが同種の一意性仮定に基づく最適化を行う場合の、その仮定)を安全に出せなくなる。これは節3.3で確認した`noalias`ミスコンパイル問題の**逆方向の教訓**である: 節3.3は「borrow checkingの結果を貧弱な属性へ再エンコードすることが危険」と示したが、節5.6は「borrow checkingそのものを省略した状態で、型情報だけから同種の最適化ヒントを出し続けることはより直接的に危険」であることを示す。両者を合わせると、LAMINARIAがtarget固有バックエンドで一意性に基づく最適化を行う場合、(a) borrow checking相当の検証を実際に実行してから、(b) その検証結果に基づいてのみ一意性ヒントを生成する、という2段階を両方満たす必要があり、どちらか一方を欠いても正しさが崩れる。
+
+参照: `compiler/rustc_interface/src/passes.rs`(1088-1191行`run_required_analyses`、1195-1211行`analysis`冒頭のゲート、1281-1305行`start_codegen`冒頭のゲート)、`compiler/rustc_borrowck/src/lib.rs`(110-149行`provide`/`mir_borrowck`)、`compiler/rustc_ty_utils/src/abi.rs`(322-411行`arg_attrs_for_rust_scalar`)、`compiler/rustc_mir_build/src/check_unsafety.rs`(冒頭の`UnsafetyVisitor`構造体定義)、mrustc README(<https://raw.githubusercontent.com/thepowersgang/mrustc/master/README.md>、12行目の前提記述、114行目`MRUSTC_FULL_VALIDATE`、131行目未実装TODO)、rustc-dev-guide "MIR borrow check"(<https://raw.githubusercontent.com/rust-lang/rustc-dev-guide/master/src/borrow-check.md>)。
+
 ## 6. 先行事例(非Rust系): 「完全にゼロの中間表現」は実在するか
 
 Web一次資料と実装コード(GitHub)の両方で調査した結果、**完全にゼロの中間表現を持つコンパイラは実在しない**。すべての実例は次のいずれかに分類される。
@@ -251,6 +333,7 @@ V8はAST→Ignitionバイトコード(汎用中間表現)→Sparkplug/Maglev/Tur
 | 「意味論を1箇所に確定させる」という設計要求 | **削除不可能** | 複数の専用バックエンドを束ねる場合でも、意味論の重複実装を避けるためにはどこかで一度確定させる必要がある(RFC 1211理由6と同じ問題) |
 | `noalias`という特定の再エンコード形式 | **削除すべき(より正確な代替の実在が確認できた)** | Stacked Borrows/Tree Borrowsが、より豊かな操作的意味論(タグ+木構造)を形式化しており、LLVM属性への再エンコードを経由しない代替設計の実在証拠になる |
 | CFG上の不動点計算を「木/CFG構造」に固定する必要性 | **削除可能(より一般的な形へ置換可能)** | rustc自身のPolonius実装(`LocalizedConstraintGraph`)がborrow checkingをグラフ到達可能性問題として定式化しており、`SharedSymbolGraph`と同型の頂点+エッジ抽象の上に統合できる可能性がある(節2.5) |
+| borrow checkingという検査工程自体 | **削除不可能(削除するとゲートが機能しなくなる)** | コンパイラドライバの制御フロー上でcodegenへ進む前提条件として明示的に配置されており(`raise_fatal`によるゲート)、省略すると型情報だけから独立に導出される`noalias`のような最適化ヒントの安全性根拠が失われる(節5.6) |
 
 したがって、LAMINARIAが実際に削除すべきは「**LLVM IRのような、target非依存を標榜しながらtarget依存の意味論(panic/unwind等)を扱いきれず、かつRustの型システムが持つ豊かな意味論を限定的な属性語彙に再エンコードすることで正しさを脅かす、単一の汎用中間表現という層**」である。
 
@@ -271,7 +354,7 @@ V8はAST→Ignitionバイトコード(汎用中間表現)→Sparkplug/Maglev/Tur
 - 「意味論を確定させる1箇所の境界」を`SharedSymbolGraph`とどう統合するか(あるいは別の構造にするか)は未設計。
 - panic/unwind lowering のようなtarget固有の分岐処理を、node 4で示した「target固有専用コンパイラ」それぞれにどう実装させるか(重複実装を許容するか、共通実装をどこかに置くか)は未設計。
 - Zigの並列化モデル(意味解析1スレッド+コード生成複数スレッド+リンク1スレッド)と、LAMINARIAの`SharedSymbolGraph`が想定する並列モデル(各realmフロントエンドが独立して書き込む)の異同を、具体的な比較実験としてまだ検証していない。
-- LAMINARIA自身がborrow checking相当の検証をどこまで・どの段階で行うか(mrustcのように単純化して実用性を優先するか、rustc同等の厳密さを保つか)は、正しさの保証範囲を左右する未決定の設計判断であり、まだ議論していない。
+- LAMINARIA自身がborrow checking相当の検証をどこまで・どの段階で行うか(mrustcのように単純化して実用性を優先するか、rustc同等の厳密さを保つか)は、正しさの保証範囲を左右する未決定の設計判断であり、まだ議論していない。節5.6の発見により、この判断は「診断の丁寧さ」の問題ではなく「一意性に基づく最適化ヒントを安全に出せるかどうか」を左右する具体的なゲート設計の問題であることが確定したが、LAMINARIA自身が(a)検証を実行する段階と(b)一意性ヒントを生成する段階をどう結びつけるか(mrustcのような「検証済み入力だけを扱う」閉じたスコープに頼るのか、rustcのような`raise_fatal`型の明示的ゲートを自前で持つのか)はまだ設計していない。
 - Stacked/Tree Borrowsの操作的意味論(タグ+木構造)を、`ElfX86_64PendingReloc`のようなtarget固有の実データ型へどう落とし込むかの具体設計はまだ無い — 現状`unified-symbol-graph`は所有権・エイリアシング情報を一切保持していない(`CodeBody`は機械語バイト列+再配置のみ)。
 - RustBelt/Oxideが示した「型付け規則としての定式化」と、Polonius/`SharedSymbolGraph`が示した「グラフ到達可能性としての定式化」は、異なる形式化の階層(型の健全性 vs. 実行時パス依存の状態計算)にあり、両者をLAMINARIAの設計の中でどう役割分担させるかはまだ整理していない。
 
