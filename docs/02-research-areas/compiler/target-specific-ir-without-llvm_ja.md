@@ -665,10 +665,10 @@ x86_64ホスト上ではAArch64バイナリを直接実行できないため、D
 | 仮説 | 内容 | 状況 |
 | --- | --- | --- |
 | H1 | LLVM IRを経由せず`TargetIr`から直接コード生成に接続できる | 支持(節5.1〜5.4、自明の範囲で決着済み) |
-| H2 | 所有権情報(`Ownership`)がtarget固有コード生成に必要十分な精度で再エンコードできる | 部分的支持。`frozen`(UnsafeCell)軸のみ解決(節5.10)。`unpin`(`Pin<&mut T>`)軸、単相化前の`Ty::is_freeze`精度は未着手(節6参照) |
+| H2 | 所有権情報(`Ownership`)がtarget固有コード生成に必要十分な精度で再エンコードできる | 部分的支持。`frozen`(UnsafeCell)軸の解決(節5.10)に加え、CFG内での実際のコード生成判断としての機能も実証(節5.16)。`unpin`(`Pin<&mut T>`)軸、単相化前の`Ty::is_freeze`精度は未着手(節6参照) |
 | H3 | target非依存の中間表現1つで、Craneliftの`InstructionData`/`MachInst`という2層構造を消せる | 部分的棄却(節5.12)。表現は共有できるが、変換ロジックは共有できない。Assert/Call未統合のまま判定した点は事前登録からの逸脱(節5.12.3の方法論上の注記参照) |
 | H4 | 分岐+ループを含む実CFG(diamond・back-edge)の不動点計算モデルを正しく実装できる | 支持(節5.9)。独立レビュアーによる自作CFG・境界値での再現でも全件一致を確認 |
-| H5 | `AddressState`(このIR設計の別の柱)へ`CfgBody`をどう統合するか | 支持(節5.15)。`SemanticFacts`に`control_flow: Option<Box<ControlFlowFacts>>`を追加し、`declare_analyzed_symbol`/`require_symbol`の実デマンド駆動パイプラインを通してH4の`CfgBody`が実際に`lower_cfg_body_to_code_body`へ到達することを実証 |
+| H5 | `AddressState`(このIR設計の別の柱)へ`CfgBody`をどう統合するか | 支持(節5.15)。`SemanticFacts`に`control_flow: Option<Box<ControlFlowFacts>>`を追加し、`declare_analyzed_symbol`/`require_symbol`の実デマンド駆動パイプラインを通してH4の`CfgBody`が実際に`lower_cfg_body_to_code_body`へ到達することを実証。H2との同時統合も節5.16で検証済み(支持、ブロック単位キャッシュ限定) |
 | H6 | 8個の実targetそれぞれへの分岐可能性 | 未着手(AArch64のみ、8個中1個の部分的前進、かつH3の判定通り共有ロジックはほぼゼロ) |
 
 ## 5.15 H5(`CfgBody`の`AddressState`統合)の実装と検証
@@ -694,11 +694,52 @@ x86_64ホスト上ではAArch64バイナリを直接実行できないため、D
 
 `CfgBody`を`AddressState`(正確には`AddressState::Analyzed`が保持する`SemanticFacts`)へ統合するというH5の問いは、実際に統合可能であることを実データで示せた。統合に際して`AddressState`型自体の変更は不要であり、`SemanticFacts`への加法的なフィールド追加のみで、issue #67のデマンド駆動promotion機構(`declare_analyzed_symbol`→`require_symbol`→`promote_analyzed_to_committed_if_needed`)をそのまま再利用できた。
 
-ただし、この支持は限定的な範囲に留まることを正直に記録する: 検証したのはCFGを1つ`SemanticFacts`に載せて1回lowerする最小構成のみであり、以下は未検証のまま残る。
+ただし、この支持は限定的な範囲に留まることを正直に記録する: 検証したのはCFGを1つ`SemanticFacts`に載せて1回lowerする最小構成のみであり、以下は未検証のまま残る(所有権タグとの同時統合は節5.16で別途検証済み)。
 
-- 所有権タグ(`Ownership`)を同時に`SemanticFacts`へ載せ、CFG+所有権を同時にlowerする統合(H2とH5の統合)。
 - 複数のシンボルが互いに`depends_on`で参照し合い、CFG越しの呼び出し(`Terminator::Call`相当、まだ`diamond_and_loop_cfg`には存在しない)を解決する経路。
 - `ControlFlowFacts`が保持する`CfgBody`のクローンコストがスケールする実装かどうか(現状は`Box`で1段抑えているのみで、大きなCFGでのメモリ効率は未計測)。
+
+## 5.16 H2+H5の同時統合検証: `Ownership`タグ付き`LoadOrReload`を実CFG内で
+
+節5.15.3が未検証として残した「所有権タグ(`Ownership`)を同時に`SemanticFacts`へ載せ、CFG+所有権を同時にlowerする統合」を検証した。
+
+### 5.16.1 構造的な出発点: `Ownership`と`CfgBody`は別の型体系だった
+
+調査の結果、H2の`Ownership`(`TargetIr`/`Value`/`Operand`を使う2ブロック限定のbranch専用IR)と、H4/H5の`CfgBody`(`LocalId`/`Rvalue::Add`等を使う一般CFG)は、実装上完全に独立した型体系であり、所有権タグを持つ値は`CfgBody`側に一切存在しなかった。`lower_load_or_reload_to_code_body`(H2の所有権駆動キャッシュ判定)も、分岐を含まない独立した2アーム関数であり、`CfgBody`の分岐・ステートメント機構を一切使っていなかった。この構造的分離自体が、H2とH5が「本当に統合されているか」を検証する必要性の直接の根拠になった。
+
+### 5.16.2 実装: `Rvalue::LoadOrReload { ptr: LocalId, ownership: Ownership }`
+
+`diamond_and_loop_cfg::Rvalue`に新しいvariant`LoadOrReload`を追加し、`emit_statement`(x86_64版)にその所有権駆動のキャッシュ/リロード判定ロジックを実装した。判定基準は`lower_load_or_reload_to_code_body`と同一(`Unique`/`Boxed`/`Shared { frozen: true }`はキャッシュ可、`Shared { frozen: false }`/`NotAReference`は毎回`*ptr`を再読込)。
+
+キャッシュ状態(`cached_ptr: Option<LocalId>`)は、ブロック単位でリセットする設計にした——`eax`は`Add`/`Sub`/`Copy`/`Const`等の他の全`Rvalue`が共有して使うスクラッチレジスタであり、ブロック境界を跨いだキャッシュの健全性を保証するには実際のliveness解析が必要で、それはこのサブモジュール自身が明言する最小主義の範囲外である。この制約は正直に文書化し、テスト自体も1ブロック内での2回読み込みという範囲に限定した。
+
+AArch64側(`lower_cfg_body_to_aarch64_code_body`)は今回のスコープに含めず、`LoadOrReload`に遭遇すると明示的に`LowerError::UnsupportedOnThisTarget`を返す(H3は既に「変換ロジックは共有できない」と判定済みの別仮説であり、今回のH2+H5統合はx86_64限定と最初から宣言した)。
+
+### 5.16.3 発見した実バグ: ポインタの値と、ポインタが指す先の値の取り違え
+
+実装の初期バージョンは、`[rbp-ptr_off]`から読んだ値をそのまま「読み込んだ値」として扱っていた。これは**ポインタ自身の数値**を読むだけで、**ポインタが指すメモリの内容**への間接参照になっていなかった(`mov eax,[rbp-ptr_off]`だけで終わり、`mov eax,[rax]`という真の間接参照ステップが欠落)。
+
+このバグは、バイト列だけを検証する単体テストでは検出できなかった——バイト列は「短い」か「長い」かの違いとして現れるだけで、意味的に正しいかは分からない。実際に`mmap`実行して具体的なポインタ値を渡すテスト(`ownership_tagged_load_or_reload_executes_correctly_for_both_cache_decisions`)を書いて初めて、返り値が期待値と一致しないという形で発見できた。修正は`mov eax,[rbp-ptr_off]`(ポインタ値をロード、eax書き込みでraxの上位32bitは自動ゼロ拡張)の直後に`mov eax,[rax]`(間接参照)を追加する形で行い、`aarch64-linux-gnu-as`と同じ「実データ照合」の規律に従い、この2バイト(`8B 00`)がAT&T構文`movl (%rax),%eax`をアセンブル→逆アセンブルした結果と一致することを独立確認した。
+
+この経緯自体が、H2+H5統合検証で最も価値のある副産物である: 「バイト列が変化した」ことと「意味的に正しく動作する」ことは別の主張であり、後者を検証するmmap実行テストを用意していなければ、この取り違えバグは見過ごされたまま「支持」と誤判定していた可能性が高い。
+
+### 5.16.4 検証: 静的差分・実行時正しさ・デマンド駆動パイプラインの3層
+
+1. **静的バイト列差分**(`ownership_tag_changes_the_second_load_inside_a_real_branching_cfg`): `Ownership::Unique`と`Ownership::NotAReference`で同一のdiamond風CFG(1ブロック内で同じポインタを2回`LoadOrReload`し加算)をlowerし、生成バイト列が異なること、かつその差分が「2回目の読み込みにおける`mov eax,[rbp-ptr_off]; mov eax,[rax]`(8バイト)の有無」に正確に一致することを確認した。
+2. **実行時の意味的正しさ**(`ownership_tagged_load_or_reload_executes_correctly_for_both_cache_decisions`): 上記のCFGを`mmap`実行し、`Ownership`の5バリアント全て×6種のポインティー値(`0, 1, -1, 42, i32::MAX, i32::MIN`)で`*ptr + *ptr`の正しい値を返すことを確認した。ポインタの値自体をこのサブモジュールの32bit限定のx86_64呼び出し規約(`param0`は`edi`にのみスピルされる、`mov [rbp-8],edi`)経由で渡す都合上、テスト自体は`mmap`の`MAP_32BIT`フラグで確保した下位2GB以内のアドレスのみを使う——これはこのサブモジュール自身の元々のスコープ(全ての値がi32)からの直接の帰結であり、本統合検証固有の制約として文書化した。
+3. **`SemanticFacts`/`AddressState`パイプライン統合**(`ownership_tagged_cfg_survives_the_semantic_facts_demand_driven_pipeline`): `Ownership::Shared { frozen: false }`(H2自身がキャッシュ禁止と結論した、最も慎重に扱うべきバリアント)でタグ付けした`LoadOrReload`を含む`CfgBody`を`SemanticFacts::control_flow`に載せ、`declare_analyzed_symbol`/`require_symbol`のデマンド駆動昇格を経由したlowering結果が、直接呼び出しした場合とバイト単位で完全一致することを確認した。
+
+全23件の`target_ir`テスト(既存20件+新規3件)がパスし、`cargo fmt --check`/`cargo clippy --all-targets`は新規警告を追加していない(既存の1件のdocコメント警告はこの変更と無関係)。
+
+### 5.16.5 判定: 支持
+
+`Ownership`タグ(H2)が、`CfgBody`の分岐・ステートメント機構(H4/H5)の内部で、実際のコード生成判断として機能することを実データで示せた。`SemanticFacts::control_flow`経由のデマンド駆動パイプラインとも問題なく合成される。
+
+この支持もなお限定的であることを記録する:
+
+- キャッシュはブロック単位に限定されており、ブロック境界を跨いだ所有権駆動キャッシュ(実際のliveness解析が必要)は未実装・未検証。
+- AArch64側は明示的にスコープ外とした(`LowerError::UnsupportedOnThisTarget`)。H3が既に判定した「変換ロジックの非共有」を踏まえれば、AArch64版の`LoadOrReload`実装は別途ゼロから行う必要がある。
+- ポインタは32bit範囲に収まる値のみを正しく扱える(このサブモジュール自身の元々のi32限定スコープの直接の帰結であり、H2+H5統合そのものの限界ではない)。
 
 ## 6. まだ解けていないこと
 

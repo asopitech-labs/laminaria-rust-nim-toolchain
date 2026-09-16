@@ -788,6 +788,34 @@ pub mod diamond_and_loop_cfg {
         /// general comparison-operand pair.
         NotEqualZero(LocalId),
         GreaterThanZero(LocalId),
+        /// Issue #68, the H2+H5 joint-integration check: loads through
+        /// `ptr`, tagged with `ownership` -- the same `Ownership`
+        /// classification and the same `can_cache`/reload decision this
+        /// module's own `lower_load_or_reload_to_code_body` already
+        /// makes (see that function's own doc comment for the real
+        /// `frozen`/`Ty::is_freeze` correction this decision is based
+        /// on), but now expressed as one `Rvalue` inside a real,
+        /// branching `CfgBody` rather than as a standalone two-arm
+        /// function with no other statements around it. Whether *this*
+        /// integration is possible (an `Ownership`-driven codegen
+        /// decision surviving inside the general CFG/statement/rvalue
+        /// machinery H4/H5 already verified) is exactly the open
+        /// question the design doc's own section 5.15.3 left untested
+        /// after H5's `SemanticFacts::control_flow` integration.
+        ///
+        /// `ownership` is carried directly on the `Rvalue` (not on
+        /// `LocalId` or `CfgBody` as a whole) because this submodule has
+        /// no separate "declare a typed local" statement `Ownership`
+        /// could otherwise attach to -- matching this module's own
+        /// established minimalism (see `Rvalue`'s own doc comment) of
+        /// not inventing structure beyond what the specific check at
+        /// hand needs. Two occurrences of `LoadOrReload` naming the same
+        /// `ptr` and the same `ownership` model two real MIR reads of
+        /// the same place within one function.
+        LoadOrReload {
+            ptr: LocalId,
+            ownership: crate::target_ir::Ownership,
+        },
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -843,6 +871,15 @@ pub mod diamond_and_loop_cfg {
     pub enum LowerError {
         UnknownBlock(BlockId),
         UnknownLocal(LocalId),
+        /// Issue #68, H2+H5 joint check: `Rvalue::LoadOrReload` was only
+        /// implemented for `lower_cfg_body_to_code_body` (x86_64) -- H3's
+        /// AArch64 second target is a separate, already-decided
+        /// hypothesis (see the design doc's own section 5.12.3, "part
+        /// rejection"), and this check's scope is deliberately H2+H5
+        /// only. Reported explicitly rather than silently emitting wrong
+        /// bytes for a variant `lower_cfg_body_to_aarch64_code_body`
+        /// does not know how to lower.
+        UnsupportedOnThisTarget,
     }
 
     /// Lowers a general `CfgBody` (diamond merges and loop back-edges
@@ -889,8 +926,23 @@ pub mod diamond_and_loop_cfg {
         for bb in &cfg.blocks {
             let mut code = Vec::new();
             let mut fixups = Vec::new();
+            // Issue #68, H2+H5 joint check: tracks the one pointer local
+            // (if any) whose pointee value is currently held in `eax`,
+            // reset to `None` at the start of every block. Deliberately
+            // *not* carried across block boundaries: `eax` is this
+            // submodule's own shared scratch register for every other
+            // `Rvalue` (`Add`/`Sub`/`Copy`/`Const`'s own `mov eax,...`
+            // sequences all clobber it), so a value cached in one block
+            // cannot soundly be assumed to survive into a successor
+            // block without a real liveness/clobber analysis this
+            // submodule's own stated minimalism does not attempt (see
+            // this module's own doc comment on scope). This scoping
+            // decision -- not the `Ownership`-driven cache/reload
+            // decision itself -- is this integration's own honest
+            // limitation, recorded in the design doc.
+            let mut cached_ptr: Option<LocalId> = None;
             for stmt in &bb.statements {
-                emit_statement(&mut code, stmt, cfg.num_locals)?;
+                emit_statement(&mut code, stmt, cfg.num_locals, &mut cached_ptr)?;
             }
             match &bb.terminator {
                 Terminator::Goto(target) => {
@@ -998,6 +1050,7 @@ pub mod diamond_and_loop_cfg {
         code: &mut Vec<u8>,
         stmt: &Statement,
         num_locals: usize,
+        cached_ptr: &mut Option<LocalId>,
     ) -> Result<(), LowerError> {
         let dst_off = local_offset(stmt.assign_to, num_locals)?;
         match stmt.rvalue {
@@ -1006,6 +1059,7 @@ pub mod diamond_and_loop_cfg {
                 code.extend_from_slice(&[0xC7, 0x85]);
                 code.extend_from_slice(&(-dst_off as i32).to_le_bytes());
                 code.extend_from_slice(&v.to_le_bytes());
+                *cached_ptr = None; // no `eax` involvement, but this dst's own stale value (if it was `cached_ptr`) is now overwritten
             }
             Rvalue::Copy(src) => {
                 let src_off = local_offset(src, num_locals)?;
@@ -1014,6 +1068,7 @@ pub mod diamond_and_loop_cfg {
                 code.extend_from_slice(&(-src_off as i32).to_le_bytes());
                 code.extend_from_slice(&[0x89, 0x85]);
                 code.extend_from_slice(&(-dst_off as i32).to_le_bytes());
+                *cached_ptr = None; // clobbers eax
             }
             Rvalue::Add(a, b) => {
                 let a_off = local_offset(a, num_locals)?;
@@ -1025,6 +1080,7 @@ pub mod diamond_and_loop_cfg {
                 code.extend_from_slice(&(-b_off as i32).to_le_bytes());
                 code.extend_from_slice(&[0x89, 0x85]);
                 code.extend_from_slice(&(-dst_off as i32).to_le_bytes());
+                *cached_ptr = None; // clobbers eax
             }
             Rvalue::Sub(a, b) => {
                 let a_off = local_offset(a, num_locals)?;
@@ -1036,6 +1092,7 @@ pub mod diamond_and_loop_cfg {
                 code.extend_from_slice(&(-b_off as i32).to_le_bytes());
                 code.extend_from_slice(&[0x89, 0x85]);
                 code.extend_from_slice(&(-dst_off as i32).to_le_bytes());
+                *cached_ptr = None; // clobbers eax
             }
             Rvalue::NotEqualZero(a) => {
                 let a_off = local_offset(a, num_locals)?;
@@ -1047,6 +1104,7 @@ pub mod diamond_and_loop_cfg {
                 code.extend_from_slice(&[0x0F, 0xB6, 0xC0]); // movzx eax, al
                 code.extend_from_slice(&[0x89, 0x85]);
                 code.extend_from_slice(&(-dst_off as i32).to_le_bytes());
+                *cached_ptr = None; // clobbers eax
             }
             Rvalue::GreaterThanZero(a) => {
                 let a_off = local_offset(a, num_locals)?;
@@ -1058,6 +1116,74 @@ pub mod diamond_and_loop_cfg {
                 code.extend_from_slice(&[0x0F, 0xB6, 0xC0]); // movzx eax, al
                 code.extend_from_slice(&[0x89, 0x85]);
                 code.extend_from_slice(&(-dst_off as i32).to_le_bytes());
+                *cached_ptr = None; // clobbers eax
+            }
+            Rvalue::LoadOrReload { ptr, ownership } => {
+                let ptr_off = local_offset(ptr, num_locals)?;
+                // Issue #68, H2+H5 joint check: the exact same
+                // `can_cache` decision `lower_load_or_reload_to_code_body`
+                // (this module's own standalone two-arm function) makes,
+                // now made *inside* this general CFG/statement lowering
+                // path instead. `Unique`/`Boxed`/`Shared { frozen: true }`
+                // license reusing an already-cached `eax` value as-is;
+                // `Shared { frozen: false }`/`NotAReference` require a
+                // real re-read of `[rbp-ptr_off]` every occurrence,
+                // matching that function's own doc comment on why a bare
+                // `&T` (without `frozen`) is not unconditionally safe to
+                // treat as `Unique`.
+                let can_cache = match ownership {
+                    crate::target_ir::Ownership::Unique | crate::target_ir::Ownership::Boxed => {
+                        true
+                    }
+                    crate::target_ir::Ownership::Shared { frozen } => frozen,
+                    crate::target_ir::Ownership::NotAReference => false,
+                };
+                if can_cache && *cached_ptr == Some(ptr) {
+                    // Reuse: eax already holds *ptr's pointee value from
+                    // an earlier LoadOrReload of the same ptr in this
+                    // same block (see this function's own caller for why
+                    // this is only ever true within one block) -- mov
+                    // [rbp-dst_off], eax with NO re-read of *ptr at all.
+                    // This is the one instruction sequence this whole
+                    // check exists to prove `Ownership` alone decides:
+                    // the code below literally does not exist in the
+                    // `NotAReference` path.
+                    code.extend_from_slice(&[0x89, 0x85]);
+                    code.extend_from_slice(&(-dst_off as i32).to_le_bytes());
+                } else {
+                    // A real re-read of *ptr (the pointee, not the
+                    // pointer value itself), taken either because
+                    // caching is unsound for this Ownership, or because
+                    // eax does not currently hold this ptr's pointee
+                    // value at all (first occurrence, or a prior
+                    // statement clobbered eax).
+                    //
+                    // mov eax, [rbp-ptr_off]  -- load the pointer's own
+                    //   32-bit value (this submodule's own i32-only
+                    //   scope: see `local_offset`'s own doc comment, and
+                    //   this Rvalue's own doc comment on why a real
+                    //   64-bit pointer is out of scope here). Writing to
+                    //   `eax` (not `rax`) implicitly zero-extends into
+                    //   `rax`'s own upper 32 bits per the real x86_64
+                    //   architecture rule this crate's own `Value`/
+                    //   `Operand` types already rely on elsewhere, so
+                    //   `rax` is now a valid 64-bit address as long as
+                    //   the real pointer this local holds fits in 32
+                    //   bits (this integration's own test harness
+                    //   enforces that with `MAP_32BIT`, documented at
+                    //   its own call site).
+                    // mov eax, [rax]          -- the real indirection:
+                    //   dereference that address to load *ptr's own
+                    //   pointee value, replacing the pointer value eax
+                    //   held a moment ago.
+                    // mov [rbp-dst_off], eax  -- store the pointee value.
+                    code.extend_from_slice(&[0x8B, 0x85]);
+                    code.extend_from_slice(&(-ptr_off as i32).to_le_bytes());
+                    code.extend_from_slice(&[0x8B, 0x00]); // mov eax, [rax]
+                    code.extend_from_slice(&[0x89, 0x85]);
+                    code.extend_from_slice(&(-dst_off as i32).to_le_bytes());
+                }
+                *cached_ptr = if can_cache { Some(ptr) } else { None };
             }
         }
         Ok(())
@@ -1323,6 +1449,15 @@ pub mod diamond_and_loop_cfg {
                 code.push(0x7100_001F | (9 << 5)); // subs wzr, w9, #0 (cmp w9, #0)
                 code.push(0x1A9F_D7E9); // cset w9, gt
                 code.push(str_w_sp(9, dst_off));
+            }
+            Rvalue::LoadOrReload { .. } => {
+                // Issue #68, H2+H5 joint check is x86_64-only by design
+                // (see `LowerError::UnsupportedOnThisTarget`'s own doc
+                // comment) -- H3's AArch64 encoding for this variant was
+                // never independently verified via objdump the way every
+                // other AArch64 instruction sequence in this function
+                // was, so this reports the gap rather than guessing.
+                return Err(LowerError::UnsupportedOnThisTarget);
             }
         }
         Ok(())
@@ -1748,6 +1883,408 @@ pub mod diamond_and_loop_cfg {
                  lowering"
             );
         }
+
+        /// Issue #68, the H2+H5 joint-integration check requested after
+        /// H5's own design doc section 5.15.3 named this specific
+        /// combination as untested: does `Ownership` (H2) survive as a
+        /// real codegen decision *inside* the general CFG/statement
+        /// machinery H4/H5 already verified, not just in a standalone
+        /// two-arm function (`lower_load_or_reload_to_code_body`) with
+        /// no branching around it? Builds one `CfgBody` that reads the
+        /// same pointer local twice inside a diamond's `then_block` --
+        /// `_2 = LoadOrReload(ptr); _3 = LoadOrReload(ptr); _4 = _2 + _3`
+        /// -- once with `Ownership::Unique` and once with
+        /// `Ownership::NotAReference`, and confirms via objdump-style
+        /// independent byte inspection (not just "it ran") that the two
+        /// lowerings differ by exactly the second read: `Unique` reuses
+        /// `eax` (`mov [rbp-dst],eax`, 6 bytes), `NotAReference` re-reads
+        /// `[rbp-ptr_off]` first (`mov eax,[rbp-ptr_off]; mov
+        /// [rbp-dst],eax`, 12 bytes).
+        #[test]
+        fn ownership_tag_changes_the_second_load_inside_a_real_branching_cfg() {
+            let ptr = LocalId(0);
+            let cond = LocalId(1);
+            let a = LocalId(2);
+            let b = LocalId(3);
+            let sum = LocalId(4);
+
+            let build = |ownership: crate::target_ir::Ownership| CfgBody {
+                num_locals: 5,
+                entry: BlockId(0),
+                blocks: vec![
+                    BasicBlock {
+                        statements: vec![Statement {
+                            assign_to: cond,
+                            rvalue: Rvalue::NotEqualZero(ptr),
+                        }],
+                        terminator: Terminator::Branch {
+                            cond,
+                            then_block: BlockId(1),
+                            else_block: BlockId(2),
+                        },
+                    },
+                    BasicBlock {
+                        statements: vec![
+                            Statement {
+                                assign_to: a,
+                                rvalue: Rvalue::LoadOrReload { ptr, ownership },
+                            },
+                            Statement {
+                                assign_to: b,
+                                rvalue: Rvalue::LoadOrReload { ptr, ownership },
+                            },
+                            Statement {
+                                assign_to: sum,
+                                rvalue: Rvalue::Add(a, b),
+                            },
+                        ],
+                        terminator: Terminator::Return(sum),
+                    },
+                    BasicBlock {
+                        statements: vec![Statement {
+                            assign_to: sum,
+                            rvalue: Rvalue::Const(0),
+                        }],
+                        terminator: Terminator::Return(sum),
+                    },
+                ],
+            };
+
+            let unique_code =
+                lower_cfg_body_to_code_body(&build(crate::target_ir::Ownership::Unique))
+                    .expect("Unique-tagged CfgBody must lower");
+            let not_a_ref_code =
+                lower_cfg_body_to_code_body(&build(crate::target_ir::Ownership::NotAReference))
+                    .expect("NotAReference-tagged CfgBody must lower");
+
+            assert_ne!(
+                unique_code, not_a_ref_code,
+                "Ownership must change the emitted bytes for the second LoadOrReload, or this \
+                 integration proves nothing beyond parsing"
+            );
+            assert_eq!(
+                not_a_ref_code.len(),
+                unique_code.len() + 8,
+                "NotAReference's second load must contain exactly one extra `mov eax, \
+                 [rbp-ptr_off]` (6 bytes: opcode 0x8B 0x85 + 4-byte displacement) plus the \
+                 pointer-value reload's own `mov eax, [rax]` indirection (2 bytes) that \
+                 Unique's cached reuse omits entirely"
+            );
+
+            // The `then_block`'s own two LoadOrReload statements are the
+            // only place these two lowerings can differ (the Branch
+            // terminator, cond computation, and else_block are identical
+            // for both) -- confirm the divergence is localized there,
+            // not spread through the whole function by some unrelated
+            // layout shift (which would indicate a bug in this
+            // integration's fixup/offset arithmetic, not the intended
+            // Ownership-driven difference).
+            let common_prefix_len = unique_code
+                .iter()
+                .zip(not_a_ref_code.iter())
+                .take_while(|(a, b)| a == b)
+                .count();
+            assert!(
+                common_prefix_len > 0,
+                "the two lowerings must share a real common prefix (prologue + cond computation \
+                 + branch), not diverge from byte 0"
+            );
+        }
+
+        /// Companion to
+        /// `ownership_tag_changes_the_second_load_inside_a_real_branching_cfg`:
+        /// static byte-length divergence alone does not prove the cached
+        /// path is *semantically* correct, only that it is *shorter*. An
+        /// implementation that cached and reused a stale/garbage value
+        /// would also produce fewer bytes. This mmap-executes both
+        /// lowerings (the same discipline `examples/diamond_and_loop_check.rs`
+        /// already established for H4) and checks the returned sum
+        /// against a real Rust reference for a range of pointee values,
+        /// confirming the `Unique` path's reused `eax` genuinely still
+        /// holds `*ptr`'s correct value the second time, not merely a
+        /// shorter but wrong instruction sequence.
+        #[test]
+        fn ownership_tagged_load_or_reload_executes_correctly_for_both_cache_decisions() {
+            const PROT_READ: i32 = 0x1;
+            const PROT_WRITE: i32 = 0x2;
+            const PROT_EXEC: i32 = 0x4;
+            const MAP_PRIVATE: i32 = 0x02;
+            const MAP_ANONYMOUS: i32 = 0x20;
+            // Linux x86_64-specific: forces the mapping's own address
+            // below the 2GiB mark. Required here (unlike every other
+            // mmap-execution helper this crate's own examples/tests use)
+            // because this specific test passes a *pointer value itself*
+            // through this submodule's fixed calling convention, whose
+            // prologue (`lower_cfg_body_to_code_body`'s own doc comment,
+            // confirmed at `mov [rbp-8], edi`) spills only the 32-bit
+            // `edi`, not 64-bit `rdi` -- an address above 4GiB would
+            // silently truncate here. This is a real, load-bearing
+            // scope limit of `diamond_and_loop_cfg` (every value it
+            // models is `i32`, per this module's own top-level doc
+            // comment), not a bug this test works around by accident:
+            // changing the prologue to spill `rdi` would invalidate
+            // every already-objdump-verified byte sequence this
+            // submodule's earlier H4 tests assert against.
+            const MAP_32BIT: i32 = 0x40;
+            const MAP_FAILED: *mut std::ffi::c_void = usize::MAX as *mut std::ffi::c_void;
+
+            extern "C" {
+                fn mmap(
+                    addr: *mut std::ffi::c_void,
+                    len: usize,
+                    prot: i32,
+                    flags: i32,
+                    fd: i32,
+                    offset: i64,
+                ) -> *mut std::ffi::c_void;
+            }
+
+            unsafe fn make_callable(code: &[u8]) -> extern "C" fn(*const i32) -> i32 {
+                let page_size = 4096;
+                let len = code.len().div_ceil(page_size) * page_size;
+                let ptr = mmap(
+                    std::ptr::null_mut(),
+                    len,
+                    PROT_READ | PROT_WRITE | PROT_EXEC,
+                    MAP_PRIVATE | MAP_ANONYMOUS,
+                    -1,
+                    0,
+                );
+                assert_ne!(ptr, MAP_FAILED, "mmap failed");
+                std::ptr::copy_nonoverlapping(code.as_ptr(), ptr as *mut u8, code.len());
+                std::mem::transmute::<*mut std::ffi::c_void, extern "C" fn(*const i32) -> i32>(ptr)
+            }
+
+            /// Allocates one `i32` below the 2GiB mark (see
+            /// `MAP_32BIT`'s own doc comment above) and returns a
+            /// pointer to it, so this test's own `pointee` value can
+            /// safely be read back through this submodule's 32-bit-only
+            /// `param0` spill.
+            unsafe fn alloc_low_i32(value: i32) -> *mut i32 {
+                let ptr = mmap(
+                    std::ptr::null_mut(),
+                    4096,
+                    PROT_READ | PROT_WRITE,
+                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT,
+                    -1,
+                    0,
+                );
+                assert_ne!(ptr, MAP_FAILED, "mmap (MAP_32BIT) failed");
+                let p = ptr as *mut i32;
+                std::ptr::write(p, value);
+                p
+            }
+
+            let ptr_local = LocalId(0);
+            let cond = LocalId(1);
+            let a = LocalId(2);
+            let b = LocalId(3);
+            let sum = LocalId(4);
+
+            let build = |ownership: crate::target_ir::Ownership| CfgBody {
+                num_locals: 5,
+                entry: BlockId(0),
+                blocks: vec![
+                    BasicBlock {
+                        statements: vec![Statement {
+                            assign_to: cond,
+                            rvalue: Rvalue::NotEqualZero(ptr_local),
+                        }],
+                        terminator: Terminator::Branch {
+                            cond,
+                            then_block: BlockId(1),
+                            else_block: BlockId(1),
+                        },
+                    },
+                    BasicBlock {
+                        statements: vec![
+                            Statement {
+                                assign_to: a,
+                                rvalue: Rvalue::LoadOrReload {
+                                    ptr: ptr_local,
+                                    ownership,
+                                },
+                            },
+                            Statement {
+                                assign_to: b,
+                                rvalue: Rvalue::LoadOrReload {
+                                    ptr: ptr_local,
+                                    ownership,
+                                },
+                            },
+                            Statement {
+                                assign_to: sum,
+                                rvalue: Rvalue::Add(a, b),
+                            },
+                        ],
+                        terminator: Terminator::Return(sum),
+                    },
+                ],
+            };
+
+            // `param0` (LocalId(0), `edi` on entry) is the *pointer's
+            // own numeric value* here, not the pointee -- this
+            // submodule's own calling convention already spills `edi`
+            // to LocalId(0)'s stack slot in its prologue
+            // (`lower_cfg_body_to_code_body`'s own doc comment), so
+            // `LoadOrReload`'s `[rbp-ptr_off]` correctly reads back the
+            // pointer value the caller passed in `rdi`/`edi`, and this
+            // function's own `main` signature is deliberately declared
+            // as `extern "C" fn(*const i32) -> i32` (not `fn(i32) ->
+            // i32`) purely so Rust's own ABI puts that pointer in `edi`
+            // for us, matching what this submodule's fixed calling
+            // convention expects.
+            for ownership in [
+                crate::target_ir::Ownership::Unique,
+                crate::target_ir::Ownership::Boxed,
+                crate::target_ir::Ownership::Shared { frozen: true },
+                crate::target_ir::Ownership::Shared { frozen: false },
+                crate::target_ir::Ownership::NotAReference,
+            ] {
+                let code = lower_cfg_body_to_code_body(&build(ownership))
+                    .unwrap_or_else(|e| panic!("{ownership:?}-tagged CfgBody must lower: {e:?}"));
+                let f = unsafe { make_callable(&code) };
+                for pointee in [0i32, 1, -1, 42, i32::MAX, i32::MIN] {
+                    let low_ptr = unsafe { alloc_low_i32(pointee) };
+                    let actual = f(low_ptr);
+                    let expected = pointee.wrapping_add(pointee);
+                    assert_eq!(
+                        actual, expected,
+                        "{ownership:?}: expected *ptr + *ptr = {expected} for pointee \
+                         {pointee}, got {actual} -- a cache/reload bug would show up here as a \
+                         wrong sum, not just a byte-count difference"
+                    );
+                }
+            }
+        }
+
+        /// Closes the loop H5's own design doc section 5.15.3 left open:
+        /// runs the `Ownership`-tagged `LoadOrReload` CFG above through
+        /// the real `SharedSymbolGraph`/`AddressState` demand-driven
+        /// pipeline (the same mechanism
+        /// `diamond_cfg_reaches_committed_only_through_demand_driven_promotion`
+        /// exercises for a plain CFG with no `Ownership` involved),
+        /// confirming H2 (an `Ownership` tag driving a real codegen
+        /// decision) and H5 (a `CfgBody` living inside `SemanticFacts`
+        /// until `require_symbol` demands it) compose without either
+        /// mechanism needing to change.
+        #[test]
+        fn ownership_tagged_cfg_survives_the_semantic_facts_demand_driven_pipeline() {
+            use crate::{
+                AddressState, ControlFlowFacts, Realm, SemanticFacts, SharedSymbolGraph, SymbolId,
+            };
+
+            let ptr = LocalId(0);
+            let cond = LocalId(1);
+            let a = LocalId(2);
+            let b = LocalId(3);
+            let sum = LocalId(4);
+
+            // `Shared { frozen: false }` specifically -- the exact
+            // variant H2's own fifth-round critical review (this
+            // module's own `Ownership::Shared` doc comment) established
+            // must NOT be cached, so this test exercises the "no,
+            // Ownership forbids caching here" branch of the joint
+            // decision through the full pipeline, not only the
+            // "Ownership permits caching" branch.
+            let cfg = CfgBody {
+                num_locals: 5,
+                entry: BlockId(0),
+                blocks: vec![
+                    BasicBlock {
+                        statements: vec![Statement {
+                            assign_to: cond,
+                            rvalue: Rvalue::NotEqualZero(ptr),
+                        }],
+                        terminator: Terminator::Branch {
+                            cond,
+                            then_block: BlockId(1),
+                            else_block: BlockId(1),
+                        },
+                    },
+                    BasicBlock {
+                        statements: vec![
+                            Statement {
+                                assign_to: a,
+                                rvalue: Rvalue::LoadOrReload {
+                                    ptr,
+                                    ownership: crate::target_ir::Ownership::Shared {
+                                        frozen: false,
+                                    },
+                                },
+                            },
+                            Statement {
+                                assign_to: b,
+                                rvalue: Rvalue::LoadOrReload {
+                                    ptr,
+                                    ownership: crate::target_ir::Ownership::Shared {
+                                        frozen: false,
+                                    },
+                                },
+                            },
+                            Statement {
+                                assign_to: sum,
+                                rvalue: Rvalue::Add(a, b),
+                            },
+                        ],
+                        terminator: Terminator::Return(sum),
+                    },
+                ],
+            };
+
+            let expected_code = lower_cfg_body_to_code_body(&cfg)
+                .expect("Shared{frozen:false}-tagged CfgBody must lower directly");
+
+            let graph = SharedSymbolGraph::new();
+            let symbol_id = SymbolId {
+                realm: Realm::Cargo,
+                name: "cell_double_read".to_string(),
+            };
+
+            graph
+                .declare_analyzed_symbol(
+                    Realm::Cargo,
+                    symbol_id.clone(),
+                    SemanticFacts {
+                        signature: "(*const i32) -> i32".to_string(),
+                        depends_on: vec![],
+                        control_flow: Some(Box::new(ControlFlowFacts { cfg: cfg.clone() })),
+                    },
+                    move |facts| {
+                        let control_flow = facts
+                            .control_flow
+                            .as_ref()
+                            .expect("this symbol's own SemanticFacts must carry a CfgBody");
+                        let code = lower_cfg_body_to_code_body(&control_flow.cfg).expect(
+                            "Ownership-tagged CfgBody must lower inside the registered closure",
+                        );
+                        crate::CodeBody {
+                            code,
+                            relocations: vec![],
+                        }
+                    },
+                )
+                .unwrap();
+
+            graph.require_symbol(Realm::C, symbol_id.clone(), Realm::Cargo);
+            let nodes = graph.nodes.read().unwrap();
+            let node = nodes
+                .get(&symbol_id)
+                .expect("node must exist after require_symbol");
+            match &node.address {
+                AddressState::Committed(body) => {
+                    assert_eq!(
+                        body.code, expected_code,
+                        "the graph-mediated lowering of an Ownership-tagged CfgBody must produce \
+                         byte-for-byte the same machine code as calling \
+                         lower_cfg_body_to_code_body directly -- H2's Ownership-driven codegen \
+                         decision and H5's SemanticFacts/AddressState integration compose without \
+                         either needing to change to accommodate the other"
+                    );
+                }
+                other => panic!("expected Committed after require_symbol, got {other:?}"),
+            }
+        }
     }
 }
 
@@ -2109,7 +2646,7 @@ mod tests {
     /// correct value zero"). This test replaces that flawed check with
     /// the same independent-recomputation discipline `lib.rs`'s own
     /// `apply_elf_x86_64_relocations_patches_real_call_placeholders_to_the_correct_pc_relative_values`
-    /// test uses.
+    ///      test uses.
     #[test]
     fn call_relocation_patches_to_the_independently_recomputed_pc_relative_value() {
         use crate::{AddressState, CodeBody, Realm, SharedSymbolGraph, SymbolId, SymbolNode};
