@@ -95,6 +95,8 @@ C++ adds overload resolution, name mangling, constructors/destructors, class lay
 
 Guessing a mangled name or silently treating a C++ construct as C is not acceptable.
 
+**`AdapterUnit` granularity** (settled in issue #73): one adapter/instantiation unit per unsupported C++ construct (a template instantiation, a header-only API call, ...) — a 1:0..1 relationship between `ForeignDecl` and `AdapterUnit`. Aggregating multiple unsupported constructs into one unit is not done — this is not derived from measurement but deduced from the boundary-elimination principle established elsewhere (do not reintroduce a post-hoc, back-filled grouping into the entity model). Real-world verification (issue #44) confirmed that the existing `nim cpp` never generates a standalone adapter unit at all: template instantiation is inlined directly into the calling module's generated `.cpp` file, so this granularity policy is a new LAMINARIA design decision, not a reuse of `nim cpp`'s own behavior. See [the LAMINARIA entity model](laminaria-entity-model.md) for detail.
+
 ## Identity, cache and evidence
 
 Foreign-native identity includes all semantic inputs that can change behavior or bytes:
@@ -148,3 +150,5 @@ Use a real maintained C++ library and cover:
 ## Current status
 
 The delegated `NimBuild` baseline may inherit these capabilities opaquely from the real Nim compiler, and the existing Nim wrapper observes native compiler/linker invocations. The owned Nim subset currently rejects pragmas and does not yet model foreign declarations or native dependency/link actions. Therefore this document states required work; it does not describe a completed implementation.
+
+**Real-world verification (issue #44).** Real `nim c`/`nim cpp`/`nim objc` invocations were compiled and inspected. `importc` directly `#include`s the declared header and lowers each call transparently, but it manages no explicit link input (foreign-library resolution) — it relies on the system's default link behavior. `importcpp` generates no standalone adapter unit; template instantiation is inlined directly into the calling module's own generated code. `importobjc` is a pre-existing implementation defect in Nim itself: even basic usage produces syntactically invalid generated code that fails to compile under a real Objective-C compiler (`gobjc`) — this is recorded as a known Nim-side limitation only and does not change this document's scope (C/C++ only). See [the LAMINARIA entity model](laminaria-entity-model.md) for detail.
