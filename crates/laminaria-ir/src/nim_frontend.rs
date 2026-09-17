@@ -466,6 +466,19 @@ pub fn lower_nim_source(
                         .map(|e| Diagnostic::from_lowering_error(e, SourceLanguage::Nim)),
                 ),
             }
+        } else if is_top_level_macro_or_template(&parser) {
+            if let Some(name) =
+                reject_macro_or_template(&mut parser, &declared_functions, &mut diagnostics)
+            {
+                // A requested name was declared via `macro`/`template`
+                // rather than `proc` -- mark it found so the generic
+                // "not declared in this file" pass below (which fires for
+                // every requested name `found` never reached) doesn't also
+                // fire and produce a second, misleading diagnostic for the
+                // same name. The real, explicit reason is already pushed
+                // into `diagnostics` by `reject_macro_or_template`.
+                found.insert(name);
+            }
         } else {
             parser.bump();
         }
@@ -501,6 +514,91 @@ pub fn lower_nim_source(
     }
 
     Ok(program)
+}
+
+/// True when the parser is positioned at a top-level (`indent == Some(1)`)
+/// `macro` or `template` keyword -- real Nim's other two routine kinds
+/// (`parser.nim`'s `parseRoutine` handles `proc`/`func`/`macro`/`template`/
+/// `iterator`/`converter`/`method` alike as one grammar production; this
+/// subset's own `parse_proc` only ever implements the `proc` case). Issue
+/// #72 (compile-time metaprogramming, out of `compiler-ownership-contract.md`'s
+/// "just parsing" boundary): this frontend does not expand macros/templates
+/// at all, so detecting one by name here is strictly about diagnosing it
+/// correctly -- reporting "this construct is a macro/template, unsupported"
+/// -- rather than letting it fall through to the generic "sibling
+/// declarations get skipped" path and later, if the caller happened to
+/// request that exact name, produce the misleading "not declared in this
+/// file" diagnostic (issue #72's own finding: that used to be this
+/// frontend's actual behavior for a `template`).
+fn is_top_level_macro_or_template(p: &Parser) -> bool {
+    (p.is_ident("macro") || p.is_ident("template")) && p.tok().indent == Some(1)
+}
+
+/// Consumes a top-level `macro`/`template` declaration this frontend does
+/// not support (its full body, however many lines, since neither this
+/// function nor its caller has any use for that text once rejected).
+/// Returns `Some(name)` when the declared name is one the caller actually
+/// requested -- in which case a real [`LoweringError::UnsupportedConstruct`]
+/// diagnostic explaining exactly why (it's a macro/template, not a proc) is
+/// pushed onto `diagnostics` -- and `None` for an irrelevant declaration,
+/// silently skipped exactly like any other unrequested top-level content
+/// this subset was never asked to lower (this module's own stated
+/// "top-level content that is not a `proc` declaration...is skipped rather
+/// than rejected" policy, applied consistently here: a macro/template this
+/// caller never asked about is not this frontend's business to reject).
+fn reject_macro_or_template(
+    p: &mut Parser,
+    declared_functions: &std::collections::BTreeSet<String>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<String> {
+    let start = p.span_here();
+    let TokenKind::Ident(keyword) = p.tok().kind.clone() else {
+        unreachable!("caller only calls this when is_top_level_macro_or_template() is true");
+    };
+    p.bump(); // "macro" or "template"
+
+    let name = match p.tok().kind.clone() {
+        TokenKind::Ident(n) => {
+            p.bump();
+            Some(n)
+        }
+        _ => None,
+    };
+
+    // Consume the rest of this declaration (everything up to, but not
+    // including, the next token whose own indent places it back at column
+    // 1 -- the same "this declaration is over" signal `parse_proc`'s own
+    // body relies on via `cur_indent`, applied here directly against raw
+    // indent rather than through the full statement grammar this subset
+    // never needs for a construct it will not lower).
+    while !matches!(p.tok().kind, TokenKind::Eof) {
+        if let Some(indent) = p.tok().indent {
+            if indent == 1 {
+                break;
+            }
+        }
+        p.bump();
+    }
+
+    let requested = name
+        .as_ref()
+        .is_some_and(|n| declared_functions.contains(n));
+    if requested {
+        let n = name.clone().unwrap();
+        diagnostics.push(Diagnostic::from_lowering_error(
+            LoweringError::UnsupportedConstruct {
+                construct: format!(
+                    "'{n}' is declared with '{keyword}', not 'proc' -- compile-time \
+                     metaprogramming (macro/template expansion) is not supported"
+                ),
+                span: start,
+            },
+            SourceLanguage::Nim,
+        ));
+        Some(n)
+    } else {
+        None
+    }
 }
 
 /// `proc name(params): int32 = <body>` -- real Nim's `parseRoutine`
@@ -951,6 +1049,69 @@ mod tests {
 
     fn path() -> PathBuf {
         PathBuf::from("test.nim")
+    }
+
+    /// Issue #72: a requested name declared via `template` must be
+    /// rejected with an explicit, correct reason (it's a template, not a
+    /// proc) -- not the generic "not declared in this file" diagnostic
+    /// this frontend produced before this change, which was misleading
+    /// (the name *is* declared, just not via a construct this frontend
+    /// lowers).
+    #[test]
+    fn a_requested_template_is_rejected_with_an_explicit_reason() {
+        let source = "template foo(x: int): int = x + 1";
+        let err = lower_nim_source(&path(), source, &["foo"]).unwrap_err();
+        assert_eq!(err.len(), 1);
+        assert!(
+            err[0].message.contains("'foo'")
+                && err[0].message.contains("template")
+                && err[0].message.contains("not supported"),
+            "unexpected diagnostic: {:?}",
+            err[0].message
+        );
+    }
+
+    /// Same as above for `macro`, real Nim's other compile-time-metaprogramming
+    /// routine kind (AST-rewriting, distinct from `template`'s
+    /// syntactic-substitution model, but this subset rejects both the same
+    /// way since it expands neither).
+    #[test]
+    fn a_requested_macro_is_rejected_with_an_explicit_reason() {
+        let source = "macro foo(x: untyped): untyped =\n  x";
+        let err = lower_nim_source(&path(), source, &["foo"]).unwrap_err();
+        assert_eq!(err.len(), 1);
+        assert!(
+            err[0].message.contains("'foo'")
+                && err[0].message.contains("macro")
+                && err[0].message.contains("not supported"),
+            "unexpected diagnostic: {:?}",
+            err[0].message
+        );
+    }
+
+    /// A `template`/`macro` the caller never requested must be silently
+    /// skipped, exactly like any other irrelevant top-level declaration --
+    /// this frontend's own stated "top-level content that is not a `proc`
+    /// declaration...is skipped rather than rejected" policy, preserved
+    /// for macro/template as much as for a `let`/`for` this subset already
+    /// skips.
+    #[test]
+    fn an_unrequested_template_is_silently_skipped_not_rejected() {
+        let source =
+            "template unrelated(x: int): int = x + 1\n\nproc double(x: int32): int32 =\n  x +% x\n";
+        let program = lower_nim_source(&path(), source, &["double"]).unwrap();
+        assert_eq!(program.functions.len(), 1);
+    }
+
+    /// A `proc` declared after an unrequested `template` must still lower
+    /// normally -- the macro/template detour must not desynchronize the
+    /// parser's position or indentation tracking for what follows.
+    #[test]
+    fn a_proc_after_an_unrequested_macro_still_lowers_and_evaluates() {
+        let source = "macro helper(x: untyped): untyped =\n  x\n\nproc triple(x: int32): int32 =\n  x +% x +% x\n";
+        let program = lower_nim_source(&path(), source, &["triple"]).unwrap();
+        let outcome = eval_function(&program, "triple", &[5]).unwrap();
+        assert_eq!(outcome.value, 15);
     }
 
     #[test]
