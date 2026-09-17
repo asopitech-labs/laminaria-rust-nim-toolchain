@@ -401,6 +401,37 @@ mod tests {
         );
     }
 
+    /// Issue #75's own acceptance criteria named three Rust<->Nim cases
+    /// explicitly: name match, arity mismatch, and "both disagree" (no
+    /// name match at all). The first two got dedicated unit tests above;
+    /// this closes the gap for the third -- previously only covered
+    /// indirectly inside the larger real-fixture-corpus test below, never
+    /// as its own assertion against a minimal, controlled input.
+    #[test]
+    fn a_rust_requirement_with_no_matching_nim_export_is_unmatched() {
+        let rust_src = r#"
+            extern "C" {
+                fn nim_does_not_exist(x: i32) -> i32;
+            }
+        "#;
+        let requirements = discover_foreign_function_requirements(rust_src).expect("must parse");
+        let declarations = vec![NimExportedProc {
+            declared_name: "add".to_string(),
+            exported_symbol: "nim_add".to_string(),
+            param_count: 2,
+            return_type: "cint".to_string(),
+        }];
+        let report = compute_ffi_reachability_nim(&requirements, &declarations);
+        assert_eq!(
+            report.verdicts,
+            vec![(
+                "nim_does_not_exist".to_string(),
+                ReachabilityVerdict::Unmatched
+            )]
+        );
+        assert_eq!(report.unreached_declarations, vec!["nim_add".to_string()]);
+    }
+
     /// A Nim proc's `declared_name` differing from its `exported_symbol`
     /// (`{.exportc: "other_name".}`) must not itself cause a spurious
     /// match or mismatch -- matching goes by `exported_symbol` only,
