@@ -736,36 +736,43 @@ pub fn ingest_fixture_input(
             id: format!("object:{}", cargo.package_name),
             package_id: cargo.package_name.clone(),
             kind: ArtifactOutputKind::RustObject,
+            source_ids: vec![],
         },
         ArtifactOutputFacts {
             id: format!("archive:{}", nimble.package_name),
             package_id: nimble.package_name.clone(),
             kind: ArtifactOutputKind::NimStaticLibrary,
+            source_ids: vec![],
         },
         ArtifactOutputFacts {
             id: "object:cadd".to_string(),
             package_id: "cadd".to_string(),
             kind: ArtifactOutputKind::CObject,
+            source_ids: vec![],
         },
         ArtifactOutputFacts {
             id: "archive:cadd".to_string(),
             package_id: "cadd".to_string(),
             kind: ArtifactOutputKind::CStaticArchive,
+            source_ids: vec![],
         },
         ArtifactOutputFacts {
             id: "object:cppmax".to_string(),
             package_id: "cppmax".to_string(),
             kind: ArtifactOutputKind::CppAdapterObject,
+            source_ids: vec![],
         },
         ArtifactOutputFacts {
             id: "archive:cppmax".to_string(),
             package_id: "cppmax".to_string(),
             kind: ArtifactOutputKind::CppStaticArchive,
+            source_ids: vec![],
         },
         ArtifactOutputFacts {
             id: format!("executable:{}", cargo.package_name),
             package_id: cargo.package_name.clone(),
             kind: ArtifactOutputKind::NativeExecutable,
+            source_ids: vec![],
         },
     ];
 

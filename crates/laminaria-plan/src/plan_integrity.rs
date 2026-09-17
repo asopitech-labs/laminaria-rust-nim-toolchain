@@ -439,26 +439,31 @@ mod tests {
                     id: "object:app".to_string(),
                     package_id: "app".to_string(),
                     kind: ArtifactOutputKind::RustObject,
+                    source_ids: vec![],
                 },
                 ArtifactOutputFacts {
                     id: "archive:doubler".to_string(),
                     package_id: "doubler".to_string(),
                     kind: ArtifactOutputKind::NimStaticLibrary,
+                    source_ids: vec![],
                 },
                 ArtifactOutputFacts {
                     id: "archive:cadd".to_string(),
                     package_id: "cadd".to_string(),
                     kind: ArtifactOutputKind::CStaticArchive,
+                    source_ids: vec![],
                 },
                 ArtifactOutputFacts {
                     id: "object:cadd".to_string(),
                     package_id: "cadd".to_string(),
                     kind: ArtifactOutputKind::CObject,
+                    source_ids: vec![],
                 },
                 ArtifactOutputFacts {
                     id: "executable:app".to_string(),
                     package_id: "app".to_string(),
                     kind: ArtifactOutputKind::NativeExecutable,
+                    source_ids: vec![],
                 },
             ],
             runtime_requirements: vec![RuntimeRequirementFacts {

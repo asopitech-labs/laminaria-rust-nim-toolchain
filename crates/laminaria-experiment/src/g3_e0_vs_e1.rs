@@ -68,7 +68,12 @@ pub const WORKLOAD_ID: &str = "issue47-g3-e0-vs-e1-cadd-app@v1";
 /// so this requirement, and the provider package id it names, are both
 /// correctly unreachable, while `resolve` (E0) still walks and correctly
 /// rejects-or-ignores them as ordinary (if never-selected) candidates.
-fn synthetic_unreachable_candidate(
+/// `pub` (not just crate-private) so `g3_peak_memory`'s out-of-process
+/// child binary (`src/bin/g3_e0_or_e1_child.rs`) can build the identical
+/// injected input this module's own in-process E0-vs-E1 comparison uses,
+/// rather than a second, divergent implementation of the same synthetic
+/// candidate shape.
+pub fn synthetic_unreachable_candidate(
     index: usize,
 ) -> (
     SourceModuleFacts,
@@ -116,7 +121,10 @@ fn synthetic_unreachable_candidate(
     (source, candidate, requirement)
 }
 
-fn inject_unreachable_candidates(
+/// `pub` for the same reason as `synthetic_unreachable_candidate` above:
+/// shared by both this module's in-process comparison and
+/// `g3_peak_memory`'s out-of-process child binary.
+pub fn inject_unreachable_candidates(
     mut input: DependencyResolutionInput,
     count: usize,
 ) -> DependencyResolutionInput {
