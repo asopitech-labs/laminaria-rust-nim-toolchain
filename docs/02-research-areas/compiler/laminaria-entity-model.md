@@ -34,9 +34,107 @@ Issue #76 decomposed `nim c`/`nim cpp` through real measurement (Nim 2.2.10, rea
 
 `NimblePackageManifest`, `NimBuildInvocation` (one `nim c` process invocation — a new concept with no direct Rust-side counterpart), `NimModuleUnit`, `ModuleImportEdge`, `StdlibModuleUnit`, `GeneratedCModule`, `GenericDeclaration`, `NimInstantiationKey`, `ExportedSymbol`, `CCompileCommand`, `CObjectFile`, `LinkCommand`/`NimExecutable`.
 
+### Real measurement backing the entities
+
+Real Nim 2.2.10 was run in a Docker container against real fixture source (`fixtures/rust-nim-c-abi-baseline/nim-lib/nimlib.nim` and the multi-module `fixtures/nim-heavy-workspace`).
+
+**`GeneratedCModule` (1 real module = 1 generated `.c` file, including transitive imports).** Compiling a ~20-line module with five `{.exportc.}` procs produced six `.c` files, not one:
+
+```
+nimcache/@mnimlib.nim.c              -- the module itself (592 lines)
+nimcache/@psystem.nim.c              -- Nim stdlib system (4886 lines)
+nimcache/@psystem@sdollars.nim.c     -- system/dollars (89 lines)
+nimcache/@psystem@sexceptions.nim.c  -- system/exceptions (443 lines)
+nimcache/@pstd@sassertions.nim.c     -- std/assertions (154 lines)
+nimcache/@pstd@sprivate@sdigitsutils.nim.c -- std/private/digitsutils (322 lines)
+```
+
+`fixtures/nim-heavy-workspace` (`fixture.nim` imports only `geometry.nim`, which in turn imports `primes.nim`) confirmed this 1:1 relationship holds through **transitive** imports too: all three of `@mfixture.nim.c`, `@mgeometry.nim.c`, and `@mprimes.nim.c` were generated, even though `fixture.nim` names only `geometry` directly.
+
+**`CCompileCommand`/`LinkCommand` (structured compile/link data, from `nimcache/*.json`).** `nim c` records the exact `gcc` invocations it issued:
+
+```json
+"compile": [
+  ["<path>/@psystem@sexceptions.nim.c", "gcc -c -w -fmax-errors=3 -fno-strict-aliasing -pthread -I<nimlib> -I<src> -o <obj> <c>"],
+  ... one entry per generated .c file
+],
+"link": [ <one .o path per compile entry> ],
+"linkcmd": "gcc -o <output> <all .o paths> -pthread -pthread -ldl"
+```
+
+**`ExportedSymbol` vs. internal symbols (real name vs. Nim's own mangling).** `{.exportc.}` procs keep their declared name verbatim; everything else is mangled with the declaring module name and a running counter:
+
+```c
+N_LIB_PRIVATE N_CDECL(int, laminaria_is_prime)(int n_p0);              // exportc: name preserved
+N_LIB_PRIVATE N_NIMCALL(NIM_BOOL, isPrimeImpl__nimlib_u1)(NI n_p0);     // non-exportc: module+counter mangling
+```
+
+**`NimInstantiationKey` — deduplicates within a single `NimBuildInvocation`.** A synthetic fixture calling a generic `maxVal[T]` with the same type argument (`int`) twice and a different type argument (`float`) once produced exactly two instances, with the two same-type calls sharing one:
+
+```c
+N_LIB_PRIVATE N_NIMCALL(NI, maxVal__generics_u12)(NI a_p0, NI b_p1);   // int -- generated once
+N_LIB_PRIVATE N_NIMCALL(NF, maxVal__generics_u23)(NF a_p0, NF b_p1);   // float -- separate instance
+...
+T2_ = maxVal__generics_u12(((NI)3), ((NI)5));   // call site 1
+T3_ = maxVal__generics_u12(((NI)10), ((NI)2));  // call site 2 -- reuses the same instance
+```
+
+const generics behave the same way: `arraySum[T; N: static int]` called with `array[3, int]` and `array[5, int]` produced two distinct instances and two distinct array `typedef`s, one per const-generic value (`N`).
+
+**`NimInstantiationKey` — duplicated across `NimBuildInvocation` boundaries.** The same `maxVal[int]` instance, called from two independent Nimble packages (`appone`/`apptwo`, each its own `nim c` process, both depending on a shared `libshared` package), was regenerated once per invocation, with the project name baked into the mangled name:
+
+```c
+// appone's own nimcache
+N_LIB_PRIVATE N_NIMCALL(NI, maxVal__appone_u2)(NI a_p0, NI b_p1) { ... }
+
+// apptwo's own nimcache -- an independent, byte-different copy of the same instance
+N_LIB_PRIVATE N_NIMCALL(NI, maxVal__apptwo_u2)(NI a_p0, NI b_p1) { ... }
+```
+
+`diff`ing the two generated files showed the *only* difference was the mangled-name prefix — everything else, including the function body logic, was identical. The same duplication was confirmed for multiple `bin` entries inside a *single* Nimble package (`nimble build` launches one independent `nim c` process per `bin` entry, each with its own `nimcache`).
+
+**Backtracking inspection found a deeper pathology: the instantiation key depends on caller order, not just declaration/type/const-generic value.** Within a single `NimBuildInvocation`, swapping the order of two `import` statements in an otherwise byte-identical program changed the generated symbol name for a shared generic instantiation:
+
+```
+import caller_a; import caller_b  →  maxVal__caller95a_u4
+import caller_b; import caller_a  →  maxVal__caller95b_u4
+```
+
+This is a stronger instability than the Rust-side `Cgu` problem (which was at least stable per crate boundary) — Nim's own instance identity here depends on an arbitrary factor (source order) rather than any semantic property of the program.
+
 ### Activities/state transitions (N1-N9)
 
 N1 (manifest construction) → N2 (dependency resolution) → N3 (`NimBuildInvocation` startup) → N4 (module reachability resolution) → N5 (per-module semantic analysis + C generation, 1:1) → N6 (monomorphization) → N7 (C compilation) → N8 (linking, the convergence point) → N9 (`{.exportc.}` registration).
+
+| Activity | Start condition | End condition | Responsibility |
+|---|---|---|---|
+| N1 | `.nimble` file changed | Package declaration (`srcDir`, `bin`, `requires`) confirmed | Guarantees one manifest per package; does not resolve dependencies (N2's job) |
+| N2 | `requires` declaration or a dependency's version changed | Each package's required external-package path is resolved | Guarantees single-solution consistency, Rust-side `PackageResolution`-equivalent; does not analyze modules (N3's job) |
+| N3 | Once per `bin` entry, or per explicit `nim c <file>` invocation | Entry-point module confirmed, semantic-analysis phase entered | Guarantees each invocation owns an independent semantic-analysis context (confirmed by measurement: no compiler state is shared across invocations); does not decide reachable modules (N4's job) |
+| N4 | `NimBuildInvocation` started | Reachable `NimModuleUnit` set confirmed (direct, transitive, and implicit stdlib imports) | Guarantees complete resolution of reachability including transitive imports; does not analyze individual modules (N5's job) |
+| N5 | Per module found reachable by N4 | One `GeneratedCModule` confirmed | Guarantees 1 module = 1 generated `.c` file within a single `NimBuildInvocation`; does not itself guarantee monomorphization deduplication (N6's job, treated as a separate concern from semantic analysis) |
+| N6 | A module uses a `GenericDeclaration` with concrete type arguments/const-generic values | `NimInstantiationKey` confirmed and its instance placed in the declaring module's `GeneratedCModule`; calling modules get an extern prototype only | Guarantees deduplication **only within the same `NimBuildInvocation`** (confirmed); does **not** guarantee deduplication across `NimBuildInvocation` boundaries (confirmed to be absent in existing `nim c` — this is exactly the boundary-elimination target LAMINARIA must resolve) |
+| N7 | `GeneratedCModule` confirmed | `CCompileCommand` (`gcc -c`) run, `CObjectFile` produced | Guarantees a deterministic 1:1 transform; does not link (N8's job) |
+| N8 | All `CObjectFile`s required by the same `NimBuildInvocation` are ready | `LinkCommand` run, `NimExecutable` produced | Guarantees it does not start until every part is ready (confirmed: `linkcmd` enumerates every `.o`); Rust-side A12-equivalent convergence point |
+| N9 | N5 (semantic analysis) detects a `{.exportc.}` declaration | Unmangled real name registered in the symbol table | Guarantees an `exportc` declaration always keeps an unmangled real name; the type/arity cross-check against the corresponding Rust-side symbol is out of scope here (owned by the existing `compute_ffi_reachability_nim`, same advisory-downstream framework confirmed in issue #74/#75) |
+
+### Multiplicity table (confirmed)
+
+| Relation | Multiplicity | Basis |
+|---|---|---|
+| `NimblePackageManifest` : `NimBuildInvocation` | 1 : 0..N | N equals the number of `bin` entries (confirmed against a real multi-`bin` package: `nimble build` launches one independent `nim c` per entry) |
+| `NimBuildInvocation` : `NimModuleUnit` (reachable set) | 1 : 1..N | One invocation semantically analyzes every module reachable from the entry point, including transitive imports |
+| `NimModuleUnit` : `ModuleImportEdge` | 1 : 0..N | The number of direct `import` statements a module has |
+| `NimBuildInvocation` + `NimModuleUnit` (reachable) : `GeneratedCModule` | 1 : 1 | Always 1:1 **within the same `NimBuildInvocation`** |
+| `NimModuleUnit` (declaring) : `GenericDeclaration` | 1 : 0..N | The number of generic declarations a module has |
+| `GenericDeclaration` : `NimInstantiationKey` | 1 : 0..N | The number of distinct type-argument/const-generic-value combinations |
+| `NimInstantiationKey` : generated function instance (**within the same `NimBuildInvocation`**) | 1 : 1 | Confirmed: deduplicated even across module boundaries, with the instance placed in the declaring module and callers holding only an extern declaration |
+| `NimInstantiationKey` : generated function instance (**across `NimBuildInvocation` boundaries**) | 1 : 0..N | Confirmed: N equals the number of independent `NimBuildInvocation`s that request the same key — **this is the Nim-side boundary-elimination target, structurally identical to the Rust-side `Cgu` problem** |
+| `GeneratedCModule` : `CCompileCommand` | 1 : 1 | One `gcc -c` per generated `.c` file |
+| `CCompileCommand` : `CObjectFile` | 1 : 1 | — |
+| `CObjectFile` (set) : `LinkCommand` | 0..N : 1 | One link combines every `.o` |
+| `LinkCommand` : `NimExecutable` | 1 : 1 | — |
+| `NimModuleUnit` + declaration : `ExportedSymbol` | 1 : 0..N | The number of `{.exportc.}`-annotated declarations |
 
 ### Structural differences from the Rust side (confirmed by measurement)
 
