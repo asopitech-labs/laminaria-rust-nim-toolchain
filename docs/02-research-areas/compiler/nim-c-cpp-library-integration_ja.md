@@ -95,6 +95,8 @@ C++にはoverload resolution、name mangling、constructor/destructor、class la
 
 mangled nameの推測や、C++構文のCとしての暗黙処理は認めない。
 
+**`AdapterUnit`の粒度**（issue #73で確定）: 1つの未対応C++構文（テンプレート実体化・header-only API呼び出し等）につき1つのadapter/instantiation unitとする（1:0..1）。複数の未対応構文を1つのunitに集約するグルーピングは行わない——これは実測データではなく、境界撤廃で確立した「後付けの人為的グルーピングをエンティティモデルに持ち込まない」原則からの演繹である。実測（issue #44）により、既存`nim cpp`はこの種の独立アダプタユニットを一切生成せず、テンプレート実体化を呼び出し元モジュールの生成`.cpp`ファイルに直接インライン埋め込みすることを確認済み——この粒度方針は既存`nim cpp`の挙動の流用ではなく、LAMINARIA独自の新規設計判断である。詳細は[LAMINARIAエンティティモデル](laminaria-entity-model_ja.md)を参照。
+
 ## identity、cache、evidence
 
 foreign-native identityには、振る舞いまたはbyte列を変え得るすべての意味入力を含める。
@@ -148,3 +150,5 @@ foreign-native identityには、振る舞いまたはbyte列を変え得るす�
 ## 現状
 
 外部委譲の`NimBuild` baselineは実Nim compilerからこれらの能力をopaqueに引き継げる。既存Nim wrapperはnative compiler/linker invocationを観測する。しかし現行のowned Nim subsetはpragmaを拒否し、foreign declarationやnative dependency/link Actionをまだモデル化していない。したがって本書は必要作業を定めるものであり、実装完了を示さない。
+
+**実機検証（issue #44）**: 既存`nim c`/`nim cpp`/`nim objc`を実際にコンパイルして検証した。`importc`はヘッダを直接`#include`し宣言を透過的に呼び出すが、リンク入力（foreign libraryの明示的解決）は管理せずシステムのデフォルトリンク挙動に依存する。`importcpp`は独立したadapter unitを生成せず、テンプレート実体化を呼び出し元モジュールの生成コードに直接埋め込む。`importobjc`は既存Nim自体の実装不備により、基本的な使用法でも生成コードが構文的に不正でコンパイルできない——これはNim側の既知の制限として記録するのみであり、本書のスコープ（C/C++のみ）を変更する理由にはならない。詳細は[LAMINARIAエンティティモデル](laminaria-entity-model_ja.md)を参照。
