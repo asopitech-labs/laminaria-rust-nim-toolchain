@@ -42,11 +42,25 @@
 //! off `PATH`.
 //!
 //! With Checkpoint 4, every compile-side `RequiredActionKind` this
-//! fixture's positive plan requires is done. The remaining variants
-//! (`LinkNativeExecutable`, `PreflightRuntimeContract`,
+//! fixture's positive plan requires was done.
+//!
+//! - Checkpoint 5: `link-native-executable` -- links the four real
+//!   artifacts from Checkpoints 1-4 into one real native executable
+//!   (via `rustc` re-invoked on the real `app/src/main.rs` with `-L`
+//!   pointed at the real archives -- see
+//!   `link_and_run_native_executable`'s own doc comment for exactly
+//!   why this is the real link mechanism, not a raw linker
+//!   invocation) and **actually runs it**, checking the real exit
+//!   code/stdout/stderr against the fixture's own declared expectation
+//!   (exit 0, stdout `"9\n"`, empty stderr).
+//!
+//! The remaining variants (`PreflightRuntimeContract`,
 //! `PublishProvenance`) are real, disclosed, not-yet-implemented gaps
 //! -- the rest of issue #46's own action chain, deliberately left for
-//! following checkpoints rather than claimed here.
+//! following checkpoints rather than claimed here. No native
+//! executable existed before Checkpoint 5; #46's own Direct-acceptance
+//! box 2 ("produce... and execute... the expected observable result")
+//! only becomes checkable from this checkpoint onward.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -97,6 +111,17 @@ pub enum G2Error {
     /// that only compiles in isolation, but fatal once a later
     /// checkpoint actually links these objects together.
     Toolchain(ToolchainResolutionError),
+    /// The linked executable was produced and actually run, but its
+    /// real exit code/stdout/stderr did not match the fixture's own
+    /// declared expected result -- the strongest possible signal that
+    /// linking did not actually produce a working program, not merely
+    /// that the link command itself exited 0.
+    UnexpectedExecutionResult {
+        path: PathBuf,
+        exit_code: Option<i32>,
+        stdout: String,
+        stderr: String,
+    },
     Discharge(LifecycleViolation),
 }
 
@@ -118,6 +143,16 @@ impl std::fmt::Display for G2Error {
                 path.display()
             ),
             G2Error::Toolchain(err) => write!(f, "G2 execution: toolchain resolution: {err}"),
+            G2Error::UnexpectedExecutionResult {
+                path,
+                exit_code,
+                stdout,
+                stderr,
+            } => write!(
+                f,
+                "G2 execution: running real executable '{}' gave exit={exit_code:?} stdout={stdout:?} stderr={stderr:?}, not the fixture's declared expected result",
+                path.display()
+            ),
             G2Error::Discharge(violation) => write!(f, "G2 execution: {violation}"),
         }
     }
@@ -598,6 +633,191 @@ pub fn compile_nim_static_library_for_doubler(
     Ok(evidence)
 }
 
+/// Real, observed evidence that the four ecosystems' real artifacts
+/// were actually linked into one native executable *and that executable
+/// was actually run* -- the strongest evidence this checkpoint can
+/// produce, matching issue #46's own Direct-acceptance box 2 ("produce
+/// an ordinary native executable and execute it with the expected
+/// observable result").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeExecutableEvidence {
+    pub executable_path: PathBuf,
+    pub executable_size_bytes: u64,
+    pub executable_sha256: String,
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+impl NativeExecutableEvidence {
+    fn as_discharge_evidence(&self) -> String {
+        format!(
+            "real link + real run: {} ({} bytes, sha256={}); exit={} stdout={:?} stderr={:?}",
+            self.executable_path.display(),
+            self.executable_size_bytes,
+            self.executable_sha256,
+            self.exit_code,
+            self.stdout,
+            self.stderr
+        )
+    }
+}
+
+/// Actually runs `program` with no arguments and captures its real
+/// exit code/stdout/stderr -- deliberately does not treat a non-zero
+/// exit as an `Err` (unlike `run_tool`): checking the *real* result
+/// against the fixture's own declared expectation is this function's
+/// caller's job, not this function's.
+fn run_and_capture(program: &Path) -> Result<(Option<i32>, String, String), G2Error> {
+    let output = Command::new(program)
+        .output()
+        .map_err(|e| G2Error::Io(format!("failed to run {}: {e}", program.display())))?;
+    Ok((
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    ))
+}
+
+/// Actually executes the real `link-native-executable` `RequiredAction`
+/// against the four real artifacts Checkpoints 1, 2, 3, and 4 already
+/// produced and independently verified (`archive:cadd`, `object:app`,
+/// `archive:doubler`, `archive:cppmax`), then actually **runs** the
+/// resulting executable and checks its real, observed exit
+/// code/stdout/stderr against the fixture's own declared expectation
+/// (exit 0, stdout `"9\n"`, empty stderr) -- not merely that the link
+/// command itself exited 0.
+///
+/// **How this reuses the real prior artifacts, and why it does not
+/// literally hand a `.o`/`.a` file to a raw linker**: `rustc`'s CLI has
+/// no clean way to link an externally-provided object plus
+/// automatically resolve Rust's own runtime (`std`/`core`, panic
+/// handling, the platform C runtime) without also compiling a crate --
+/// hand-deriving those low-level, per-platform linker flags would
+/// duplicate, fragilely, exactly what `rustc` itself already does
+/// correctly. Instead, this function re-invokes `rustc` on the real
+/// `app/src/main.rs` (the exact same real edition/active-feature facts
+/// as `compile_rust_object_for_app`, via the exact same
+/// `resolve_rustc`) with `-L` pointed at the real, already-built
+/// `cadd`/`cppmax`/`doubler` archive directories -- `main.rs`'s own
+/// `#[link(name = "...", kind = "static")]` attributes (already present
+/// in the fixture, read by `rustc` itself) are what actually pull the
+/// three real archives into the link, and `rustc`'s own internal linker
+/// invocation is what resolves Rust's own runtime, exactly as a normal
+/// `cargo build` would. This does re-run codegen for `app` (rather than
+/// reusing Checkpoint 2's literal `object:app` file byte-for-byte), a
+/// deliberate, disclosed choice, not an oversight -- the same real
+/// source, edition, and features, and the resulting linked program's
+/// own actual execution is this function's real evidence, not the
+/// object file's identity.
+///
+/// The three foreign static archives `link_and_run_native_executable`
+/// needs `-L` search directories for -- grouped into one type instead
+/// of three separate parameters (each is a distinct real file this
+/// checkpoint's own caller already produced via Checkpoints 1, 3, and
+/// 4's own evidence).
+pub struct NativeArchives<'a> {
+    pub cadd: &'a Path,
+    pub cppmax: &'a Path,
+    pub doubler: &'a Path,
+}
+
+/// Discharges all three obligations `link-native-executable` is
+/// declared to discharge: `FinalLink:native_executable`,
+/// `LinkOrder:native_executable`, and `ArtifactProduction:executable:app`.
+pub fn link_and_run_native_executable(
+    closure: &mut PositiveClosure,
+    fixture_root: &Path,
+    repo_root: &Path,
+    cargo: &CargoManifestFacts,
+    archives: &NativeArchives<'_>,
+    out_dir: &Path,
+) -> Result<NativeExecutableEvidence, G2Error> {
+    fs::create_dir_all(out_dir).map_err(|e| G2Error::Io(format!("{}: {e}", out_dir.display())))?;
+
+    let rustc = resolve_rustc(repo_root)?;
+    let main_rs = fixture_root.join("app/src/main.rs");
+    let executable_path = out_dir.join(&cargo.package_name);
+
+    let mut search_dirs: Vec<PathBuf> = Vec::new();
+    for archive_path in [archives.cadd, archives.cppmax, archives.doubler] {
+        let dir = archive_path
+            .parent()
+            .ok_or_else(|| {
+                G2Error::Io(format!(
+                    "archive path '{}' has no parent directory",
+                    archive_path.display()
+                ))
+            })?
+            .to_path_buf();
+        if !search_dirs.contains(&dir) {
+            search_dirs.push(dir);
+        }
+    }
+
+    let mut args: Vec<String> = vec![
+        "--edition".to_string(),
+        cargo.edition.clone(),
+        "--crate-name".to_string(),
+        cargo.package_name.clone(),
+        "--crate-type".to_string(),
+        "bin".to_string(),
+    ];
+    for feature in &cargo.active_features {
+        args.push("--cfg".to_string());
+        args.push(format!("feature=\"{feature}\""));
+    }
+    for dir in &search_dirs {
+        args.push("-L".to_string());
+        args.push(dir.to_string_lossy().into_owned());
+    }
+    args.push("-o".to_string());
+    args.push(executable_path.to_string_lossy().into_owned());
+    args.push(main_rs.to_string_lossy().into_owned());
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+
+    run_tool(&rustc.to_string_lossy(), &arg_refs)?;
+
+    let (exit_code, stdout, stderr) = run_and_capture(&executable_path)?;
+    if exit_code != Some(0) || stdout != "9\n" || !stderr.is_empty() {
+        return Err(G2Error::UnexpectedExecutionResult {
+            path: executable_path,
+            exit_code,
+            stdout,
+            stderr,
+        });
+    }
+
+    let executable_size_bytes = fs::metadata(&executable_path)
+        .map_err(|e| G2Error::Io(format!("{}: {e}", executable_path.display())))?
+        .len();
+    let executable_sha256 = sha256_file(&executable_path)?;
+
+    let evidence = NativeExecutableEvidence {
+        executable_path,
+        executable_size_bytes,
+        executable_sha256,
+        exit_code: exit_code.expect("checked Some(0) above"),
+        stdout,
+        stderr,
+    };
+
+    for obligation_id in [
+        "FinalLink:native_executable",
+        "LinkOrder:native_executable",
+        "ArtifactProduction:executable:app",
+    ] {
+        closure.discharge_obligation(
+            obligation_id,
+            "link-native-executable",
+            DischargeKind::StaticallyLinked,
+            evidence.as_discharge_evidence(),
+        )?;
+    }
+
+    Ok(evidence)
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -997,6 +1217,230 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains(&evidence.archive_sha256));
+
+        let _ = fs::remove_dir_all(&out_dir);
+    }
+
+    /// Checkpoint 5's end-to-end case, and this whole module's
+    /// capstone: resolve a real G1 positive closure, actually run every
+    /// prior checkpoint's real compile/archive action in order (exactly
+    /// as a real G2 pipeline would), then actually link and **run** the
+    /// resulting native executable, asserting the real, observed result
+    /// matches the fixture's own declared expectation
+    /// (`c_add(nim_double(cpp_max_i32(3, 4)), 1)` == 9) -- and that all
+    /// three obligations `link-native-executable` discharges reach
+    /// `Discharged` with real, consistent evidence.
+    #[test]
+    fn g2_really_links_and_runs_the_native_executable_with_the_expected_result() {
+        let layout = FixtureLayout::discover();
+        let runner = RecordingCommandRunner::new();
+        let input = ingest_fixture_input(&runner, &layout, &["1.0.0"])
+            .expect("must ingest the real positive fixture");
+        let mut closure = resolve(&input).expect("must resolve a positive closure");
+        let cargo = ingest_cargo_metadata(&runner, &layout.app_manifest())
+            .expect("must ingest the real app Cargo manifest");
+        let required_extern_symbols: BTreeSet<String> = input
+            .ffi_requirements
+            .iter()
+            .map(|r| r.symbol.clone())
+            .collect();
+        let doubler_exported_symbol = input
+            .package_candidates
+            .iter()
+            .find(|c| c.package_id == "doubler")
+            .and_then(|c| c.declared_exports.first())
+            .map(|e| e.symbol.clone())
+            .expect("the real doubler candidate must declare at least one export");
+
+        let out_dir = std::env::temp_dir().join(format!(
+            "laminaria-g2-checkpoint-5-{}-link",
+            std::process::id()
+        ));
+
+        let cadd_evidence = compile_and_archive_cadd_v1(&mut closure, &layout.root, &out_dir)
+            .expect("Checkpoint 1's own real compile+archive must still succeed");
+        let cppmax_evidence = compile_and_archive_cppmax(&mut closure, &layout.root, &out_dir)
+            .expect("Checkpoint 4's own real compile+archive must still succeed");
+        let doubler_evidence = compile_nim_static_library_for_doubler(
+            &mut closure,
+            &layout.root,
+            &repo_root(),
+            &doubler_exported_symbol,
+            &out_dir,
+        )
+        .expect("Checkpoint 3's own real nim compile must still succeed");
+        compile_rust_object_for_app(
+            &mut closure,
+            &layout.root,
+            &repo_root(),
+            &cargo,
+            &required_extern_symbols,
+            &out_dir,
+        )
+        .expect("Checkpoint 2's own real rustc --emit=obj compile must still succeed");
+
+        for obligation_id in [
+            "FinalLink:native_executable",
+            "LinkOrder:native_executable",
+            "ArtifactProduction:executable:app",
+        ] {
+            assert_eq!(
+                closure.obligations[obligation_id].state,
+                ObligationState::Satisfied,
+                "must start from G1's own terminal state for '{obligation_id}'"
+            );
+        }
+
+        let evidence = link_and_run_native_executable(
+            &mut closure,
+            &layout.root,
+            &repo_root(),
+            &cargo,
+            &NativeArchives {
+                cadd: &cadd_evidence.archive_path,
+                cppmax: &cppmax_evidence.archive_path,
+                doubler: &doubler_evidence.archive_path,
+            },
+            &out_dir,
+        )
+        .expect("real link + real run of the native executable must succeed");
+
+        assert!(
+            evidence.executable_path.is_file(),
+            "the real linked executable must exist on disk"
+        );
+        assert!(evidence.executable_size_bytes > 0);
+        assert_eq!(
+            evidence.executable_sha256.len(),
+            64,
+            "must be a real hex SHA-256"
+        );
+        assert_eq!(evidence.exit_code, 0);
+        assert_eq!(evidence.stdout, "9\n");
+        assert_eq!(evidence.stderr, "");
+
+        for obligation_id in [
+            "FinalLink:native_executable",
+            "LinkOrder:native_executable",
+            "ArtifactProduction:executable:app",
+        ] {
+            let obligation = &closure.obligations[obligation_id];
+            assert_eq!(obligation.state, ObligationState::Discharged);
+            assert_eq!(
+                obligation.discharge_kind,
+                Some(DischargeKind::StaticallyLinked)
+            );
+            assert_eq!(
+                obligation.required_action.as_deref(),
+                Some("link-native-executable")
+            );
+            assert!(obligation
+                .evidence
+                .as_deref()
+                .unwrap()
+                .contains(&evidence.executable_sha256));
+        }
+
+        let _ = fs::remove_dir_all(&out_dir);
+    }
+
+    /// A real, successfully linked executable that actually runs but
+    /// produces the wrong observable result must be refused by
+    /// `link_and_run_native_executable` itself -- not merely detectable
+    /// by some separate check -- exercised end-to-end with a genuinely
+    /// different `cadd` implementation (`a * b` instead of `a + b`, same
+    /// exported symbol, same header, so it links cleanly) standing in
+    /// for the real one.
+    #[test]
+    fn a_real_but_wrong_executable_result_is_refused_by_link_and_run() {
+        let layout = FixtureLayout::discover();
+        let runner = RecordingCommandRunner::new();
+        let input = ingest_fixture_input(&runner, &layout, &["1.0.0"])
+            .expect("must ingest the real positive fixture");
+        let cargo = ingest_cargo_metadata(&runner, &layout.app_manifest())
+            .expect("must ingest the real app Cargo manifest");
+
+        let out_dir = std::env::temp_dir().join(format!(
+            "laminaria-g2-checkpoint-5-negative-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&out_dir).unwrap();
+
+        // A real, linkable `cadd` that exports the same `c_add` symbol
+        // but computes a different result -- links cleanly (same
+        // symbol, same signature), only the *observed* result differs.
+        let wrong_cadd_dir = out_dir.join("wrong-cadd");
+        fs::create_dir_all(&wrong_cadd_dir).unwrap();
+        fs::copy(
+            layout.root.join("c/cadd/v1/cadd.h"),
+            wrong_cadd_dir.join("cadd.h"),
+        )
+        .unwrap();
+        fs::write(
+            wrong_cadd_dir.join("cadd.c"),
+            "#include \"cadd.h\"\nint c_add(int a, int b) { return a * b; }\n",
+        )
+        .unwrap();
+        let wrong_cadd_evidence = compile_and_archive_native_source(
+            "cc",
+            &wrong_cadd_dir.join("cadd.c"),
+            &wrong_cadd_dir,
+            &out_dir,
+            "wrong-cadd.o",
+            "libcadd.a",
+            "c_add",
+        )
+        .expect("the deliberately wrong but still valid cadd must still compile and archive");
+
+        let mut closure = resolve(&input).expect("must resolve a positive closure");
+        let cppmax_evidence = compile_and_archive_cppmax(&mut closure, &layout.root, &out_dir)
+            .expect("the real cppmax archive must still build");
+        let doubler_exported_symbol = input
+            .package_candidates
+            .iter()
+            .find(|c| c.package_id == "doubler")
+            .and_then(|c| c.declared_exports.first())
+            .map(|e| e.symbol.clone())
+            .expect("the real doubler candidate must declare at least one export");
+        let doubler_evidence = compile_nim_static_library_for_doubler(
+            &mut closure,
+            &layout.root,
+            &repo_root(),
+            &doubler_exported_symbol,
+            &out_dir,
+        )
+        .expect("the real doubler archive must still build");
+
+        let result = link_and_run_native_executable(
+            &mut closure,
+            &layout.root,
+            &repo_root(),
+            &cargo,
+            &NativeArchives {
+                cadd: &wrong_cadd_evidence.archive_path,
+                cppmax: &cppmax_evidence.archive_path,
+                doubler: &doubler_evidence.archive_path,
+            },
+            &out_dir,
+        );
+
+        match result {
+            Err(G2Error::UnexpectedExecutionResult {
+                exit_code, stdout, ..
+            }) => {
+                // cpp_max_i32(3, 4) = 4, nim_double(4) = 8, wrong
+                // c_add(8, 1) = 8 * 1 = 8, not 9 -- main.rs's own real
+                // `if result == 9 { 0 } else { 1 }` makes exit 1.
+                assert_eq!(exit_code, Some(1));
+                assert_eq!(stdout, "8\n");
+            }
+            other => panic!("expected UnexpectedExecutionResult, got {other:?}"),
+        }
+        // A refused link+run must never discharge anything.
+        assert_eq!(
+            closure.obligations["FinalLink:native_executable"].state,
+            ObligationState::Satisfied
+        );
 
         let _ = fs::remove_dir_all(&out_dir);
     }
