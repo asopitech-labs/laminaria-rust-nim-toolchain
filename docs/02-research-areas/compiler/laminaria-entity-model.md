@@ -18,13 +18,13 @@ All of these use the existing Rust MIR/LLVM IR representations as-is; none intro
 
 ### Activities/state transitions (A0-A12)
 
-- **A0**: `BuildStrategyContext` decision (most-likely strategy vs. environment-adaptive strategy, introduced in issue #52). An independent control entity decided from the build invocation context before A1. It affects only how target parameters are confirmed (apply a default immediately vs. detect), not A1-A8/A10-A12.
+- **A0**: `BuildStrategyContext` decision (most-likely strategy vs. environment-adaptive strategy, introduced in issue #52). **The single true starting point of the entire pipeline** — it depends only on external input (the build invocation context: presence of CI config files, presence of prior build history) and requires no other activity's output. A1 and N1 (→ N3) can start only after A0 completes; once A0 completes, they run fully in parallel with each other with no priority between languages (see the parallel-execution boundaries in the "Integration of the Rust/Nim/foreign-native chains" section below). It affects only how target parameters are confirmed (apply a default immediately vs. detect), not the output content of A1-A8/A10-A12.
 - **A1-A5**: Manifest construction (workspace hierarchy) → dependency resolution → feature-condition-graph construction → `SourceUnit` selection.
 - **A6**: Semantic analysis (`SourceUnit` → `SemanticFact`).
 - **A7**: Monomorphization (`GenericDefinition` → `InstantiationKey`). Shared as a globally unique key across the whole dependency closure, never duplicated — the core of boundary elimination.
 - **A8**: Optimization decision (`InstantiationKey` → `OptimizationDecision`).
 - **A9**: Code-generation preparation (`InstantiationKey` + target parameters → `LoweredModule`). **Corrected**: it was originally designed to "group multiple `InstantiationKey`s," but that reintroduced a `Cgu`-style post-hoc convergence point under a different name, so it was corrected to a **pure 1:1 function application**. How parallel-compilation execution units are cut is fully separated out as A10's scheduling concern.
-- **A10-A12**: Code generation → symbol registration → linking. **The only convergence point is A12 (linking)** — information fans out only at A7 (monomorphization) and A11 (symbol registration).
+- **A10-A12**: Code generation → symbol registration → linking. **The only convergence point is A12 (linking)** — information fans out only at A7 (monomorphization) and A11 (symbol registration). **A11's own guarantee**: it carries the same deduplication guarantee as A7 — registering the same `(identifier, linkage)` is idempotent, and when multiple A10 outputs produced in parallel arrive at once, insertion into the `LinkSymbol` store resolves to exactly one confirmed entry under that unique key (the final state is independent of insertion order; a later registration under an already-registered key never creates a duplicate). This closes the gap issue #82's verification found — A11 previously carried no documented idempotence guarantee — by extending A7's established design principle to A11.
 
 ## Nim-side entity chain (issue #76)
 
@@ -105,6 +105,10 @@ This is a stronger instability than the Rust-side `Cgu` problem (which was at le
 ### Activities/state transitions (N1-N9)
 
 N1 (manifest construction) → N2 (dependency resolution) → N3 (`NimBuildInvocation` startup) → N4 (module reachability resolution) → N5 (per-module semantic analysis + C generation, 1:1) → N6 (monomorphization) → N7 (C compilation) → N8 (linking, the convergence point) → N9 (`{.exportc.}` registration).
+
+**N1's start condition**: N1 starts only after A0 (`BuildStrategyContext` decision) completes — A0 is the single true starting point of the entire pipeline, and N1 depends on its output (the strategy decision) exactly as A1 does on the Rust side. After A0 completes, N1 (proceeding through N2-N3 to `NimBuildInvocation` startup) and A1 have no priority between them and run fully in parallel.
+
+**N6's own guarantee**: within a single `NimBuildInvocation`, it carries the same deduplication guarantee as A7 — a given `NimInstantiationKey`'s instance is placed exactly once, and is handled idempotently even when requested simultaneously by multiple callers (confirmed by [Measurement 6](https://github.com/asopitech-labs/laminaria-rust-nim-toolchain/issues/76#issuecomment-5713582004)). Deduplication across `NimBuildInvocation` boundaries is not guaranteed (see "Structural differences from the Rust side" above) — note this is a different-scoped guarantee from A11's `LinkSymbol` insertion guarantee (unique across the whole dependency closure, regardless of language or execution boundary).
 
 | Activity | Start condition | End condition | Responsibility |
 |---|---|---|---|
