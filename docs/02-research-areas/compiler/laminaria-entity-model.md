@@ -174,6 +174,32 @@ Corrected, by real measurement, the insertion point issue #74 provisionally plac
 
 This confirms, by measurement, that existing `nim c` uses a "transparent preprocessing" approach rather than "hold pre-expansion and post-expansion syntax trees as separate entities." Whether LAMINARIA's own macro/template expansion implementation should follow this existing fused approach is a separate design decision (Nim's own approach is not necessarily best for correctness or maintainability). Cache-invalidation conditions were also confirmed to follow N5's existing invalidation axis (a change to the content of the target `SourceUnit` itself) without needing a new axis.
 
+## State-retention layer design principle: the "code double" only holds at the IR layer (issue #67/#83/#84/#85)
+
+While working through A9-A10's (code generation) demand-driven decoupling in issue #83, it became clear that a question issue #67 is verifying — "can source code and its IR be held as two parallel, persistent representations (a 'double'), with only the changed delta propagated to the double?" (Problem F, `AddressState`'s state-holding + demand-driven evaluation) — runs through the entire physical design, not just A9-A10.
+
+### The Nim compiler's own implementation history is a real-world test: backend-output-level state holding failed, semantic-IR-level state holding succeeded
+
+Investigating the official Nim repository as a primary source found that the Nim compiler implemented "a double" at **two different layers** in its history — one was abandoned, the other shipped as production.
+
+| | Nim's old `ccgmerge` (abandoned 2021) | Nim's new IC (RFC #46, production) |
+|---|---|---|
+| Layer holding the "double" | Backend output (already-generated C code) | AST / semantically-analyzed intermediate representation |
+| How the delta is applied | Partial merge of old/new sections in the C file | Whole-module AST replay |
+| Outcome | High implementation difficulty; fully replaced and abandoned | Ships as a standard Nim feature, in active use |
+
+The old `ccgmerge` (still present as `compiler/ccgmerge_unused.nim`, confirmed to be referenced nowhere in the codebase) attempted state retention close to backend output — partially merging generated C files section-by-section. PR #17311 in 2021 replaced it entirely with the new IC (Incremental Compilation, RFC #46), which persists a module's whole AST to a SQLite database and replays a changed module wholesale, rather than applying a low-level partial merge.
+
+**What this contrast establishes**: Nim's own implementation history leaves a real-world result — delta retention at a low layer (closer to compiled output) failed, while state retention at a higher layer (an intermediate representation that preserves semantics) proved sustainable.
+
+### Reflecting this into LAMINARIA's own design
+
+- Issue #83's A9-A10 demand-driven decoupling design (holding an intermediate state — "semantically analyzed (A6/A7 done) but machine code (A9-A10's output) not yet generated") sits at the same layer as Nim's new IC (semantically-analyzed IR — the `SemanticFact`/`InstantiationKey` layer), matching the pattern Nim's history shows succeeding. **A design that delta-merges backend output itself (LLVM IR or machine code) is not being considered** — that would repeat the failure pattern of Nim's old `ccgmerge`.
+- Issue #84's Nim-side shared cache store design had initially considered `GeneratedCModule` (C-file granularity, the same granularity as the old `ccgmerge`) — this real-world evidence gives a stronger basis for the conclusion that `NimInstantiationKey` (semantically-analyzed-IR granularity, the three-element key: declaration identifier, type arguments, const generic values) should be preferred instead.
+- Issue #85's finding (provenance-only durability classification is insufficient) shows that layer selection alone is not sufficient either — an observation-based classification mechanism is still needed. Choosing the right layer does not by itself guarantee that IR-level state retention "just works."
+
+Adoption itself, in every case, remains on hold until issue #67's feasibility verification completes — what this section confirms is "which layer to place it at, if adopted," not "whether to adopt it."
+
 ## Integration of the Rust/Nim/foreign-native chains (issue #74)
 
 The three chains were integrated into one flow diagram, with confirmed parallel-execution boundaries and merge points.
@@ -214,18 +240,23 @@ Web research confirmed Nim supports Objective-C as a third FFI language, but rea
 
 **Conclusion**: this is a pre-existing implementation defect in Nim itself, not a design problem LAMINARIA needs to solve. [The Nim C/C++ library integration document's](nim-c-cpp-library-integration.md) scope (C/C++ only) remains correct and unchanged. Should Objective-C support ever be considered in the future, this is recorded as the fact that the existing `nim objc` cannot serve as a reference implementation (because it does not work).
 
-## Source issues (all closed)
+## Source issues
 
-- Issue #52: real-measurement decomposition of Cargo/rustc/LLVM, provisional ERD
-- Issue #71: entity model confirmation (10 entities, multiplicities, A0-A12, Nim-side mapping, foreign-native chain)
-- Issue #72: macro/template expansion support-scope confirmation (both Rust and Nim currently reject all such constructs; explicit detection added on the Nim side)
-- Issue #73: `AdapterUnit` granularity confirmation (1:0..1)
-- Issue #74: build-flow-diagram integration, advisory downgrade of type/ABI matching, matching granularity/failure-category confirmation
-- Issue #75: type/ABI-level extension of FFI boundary matching (arity detection), new Rust<->Nim matching implementation
-- Issue #76: real-measurement decomposition of the Nim build path, N1-N9 confirmation, backtracking inspection
-- Issue #44: real-world verification of importc/importcpp/importobjc
-- Issue #77: real-measurement of Nimble's dependency resolution (single-solution verification achieved via issue #79; found a structural constraint on package-name resolution)
-- Issue #78: real-measurement confirmation of the `when defined(...)` condition graph (no combinatorial explosion; linear in declaration count)
-- Issue #79: real-measurement of cross-package version-constraint conflicts in Nimble (fail-fast; no multi-version coexistence)
-- Issue #80: confirmation of macro/template expansion's concrete insertion point (fused into N5; a transparent-preprocessing approach)
-- Issue #81: scale-dependent real-measurement of Nim's duplicate-compilation cost (negligible at small scale but scale-dependent; reaches the low-seconds range at more realistic scale)
+- Issue #52: real-measurement decomposition of Cargo/rustc/LLVM, provisional ERD (closed)
+- Issue #71: entity model confirmation (10 entities, multiplicities, A0-A12, Nim-side mapping, foreign-native chain) (closed)
+- Issue #72: macro/template expansion support-scope confirmation (both Rust and Nim currently reject all such constructs; explicit detection added on the Nim side) (closed)
+- Issue #73: `AdapterUnit` granularity confirmation (1:0..1) (closed)
+- Issue #74: build-flow-diagram integration, advisory downgrade of type/ABI matching, matching granularity/failure-category confirmation (closed)
+- Issue #75: type/ABI-level extension of FFI boundary matching (arity detection), new Rust<->Nim matching implementation (closed)
+- Issue #76: real-measurement decomposition of the Nim build path, N1-N9 confirmation, backtracking inspection (closed)
+- Issue #44: real-world verification of importc/importcpp/importobjc (closed)
+- Issue #77: real-measurement of Nimble's dependency resolution (single-solution verification achieved via issue #79; found a structural constraint on package-name resolution) (closed)
+- Issue #78: real-measurement confirmation of the `when defined(...)` condition graph (no combinatorial explosion; linear in declaration count) (closed)
+- Issue #79: real-measurement of cross-package version-constraint conflicts in Nimble (fail-fast; no multi-version coexistence) (closed)
+- Issue #80: confirmation of macro/template expansion's concrete insertion point (fused into N5; a transparent-preprocessing approach) (closed)
+- Issue #81: scale-dependent real-measurement of Nim's duplicate-compilation cost (negligible at small scale but scale-dependent; reaches the low-seconds range at more realistic scale) (closed)
+- Issue #67: whether Rust IR can be held as persistent state is realistically achievable -- feasibility verification of the "code double" (in progress; the basis for the state-retention layer design principle)
+- Issue #82: write-conflict/cyclic-dependency check across the integrated Rust/Nim/foreign-native flow (closed; confirmed startup ordering and A11/N6's idempotence guarantees)
+- Issue #83: physical design starting from A0 (corrected: A0/A1/N1 are three independent actions) -- real-measurement estimates for data volume, execution time, parallel width, and CPU-load reduction (in progress)
+- Issue #84: design of a shared cache store crossing `NimBuildInvocation` boundaries on the Nim side (in progress; subordinate to issue #67)
+- Issue #85: limits of durability classification -- provenance alone is insufficient; considering a hybrid design with observation-based classification (in progress)
