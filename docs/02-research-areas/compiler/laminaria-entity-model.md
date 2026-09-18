@@ -143,9 +143,32 @@ N1 (manifest construction) → N2 (dependency resolution) → N3 (`NimBuildInvoc
 3. **A pathology found by backtracking inspection**: the key `nim c` actually uses to identify a monomorphized instance mixes in the "module that first, syntactically, requested it" — information semantically unrelated to the declaration identifier, type arguments, or const generic values. Demonstrated concretely: for the identical program, merely swapping the order of two `import` statements changes the generated symbol name. This is worse than the Rust-side `Cgu` problem in that it depends on a more arbitrary factor (import order). LAMINARIA's own `NimInstantiationKey` design must use exactly the same three elements as the Rust side (declaration identifier, type arguments, const generic values) and deliberately exclude caller-dependence.
 4. **The `{.exportc.}` boundary is stable and caller-independent** — unlike the instability of non-exportc internal symbols, FFI-boundary symbol names are never mangled and stay stable.
 
-### Cost-scale judgment
+### Cost-scale judgment (corrected by issue #76 and issue #81)
 
-The Nim-side duplicate-compilation problem is structurally real, but the measured cost (tens to hundreds of milliseconds per duplicated site) is two to three orders of magnitude smaller than the scale issue #52 confirmed on the Rust side (45 seconds out of 215 seconds, Phase-2 cost). Given [project_laminaria_goal_and_bottleneck] (LAMINARIA's primary goal is build-time speedup, and the main front is Rust-side LLVM), the structure should be designed correctly, but measurement gave no basis to treat it as an optimization target at the same priority as the Rust side.
+Issue #76's initial measurement (a small fixture with one function and three stdlib imports) found the duplicate-compilation cost (tens to hundreds of milliseconds per duplicated site) two to three orders of magnitude smaller than the scale issue #52 confirmed on the Rust side (45 seconds out of 215 seconds, Phase-2 cost). Issue #81 re-measured against a fixture closer to real scale (a library using ten standard-library modules), and found the redundant cost non-negligible: **1.339 seconds for the `gcc -c` phase alone.**
+
+**Correction**: the generalization "the duplication cost is small because the scale is small" is wrong — it is a scale-dependent judgment. That said, the 1.3 seconds measured here is still more than an order of magnitude below the Rust side's 45 seconds (issue #52), so [project_laminaria_goal_and_bottleneck]'s conclusion (LAMINARIA's primary goal is build-time speedup, and the main front is Rust-side LLVM; current priority is low) is not overturned. How far this duplicated cost actually accumulates at LAMINARIA's own real dependency-closure scale remains an open question requiring further measurement.
+
+### The `when defined(...)` condition graph, measured (issue #78)
+
+Confirmed by real measurement the property issue #71's Nim-side mapping evaluated ("`when defined(...)` is structurally the same as Rust's `cfg` attribute"). A fixture with 50 independent `when defined(featureN)` branches (each conditionally declaring one function) was compiled with all branches inactive and all branches active; compile time was nearly identical (0.278s vs. 0.287s) — **no exponential cost increase tied to the number of combinations (2^50); it scales linearly with the number of declarations (50)**. Issue #71's `SourceUnitGraph` design principle (the graph's node count is linear in declaration count, not exponential in feature combinations) holds on the Nim side too.
+
+One difference from Rust's `cfg` attribute, however: whether a define is active changes what actually gets semantically analyzed. A declaration disabled by `when` is not merely "kept in the syntax tree but never selected" — **it never receives a mangled-name counter at all and is never a semantic-analysis subject in the first place** (confirmed: whether an earlier branch was active affects the mangled-name counter assigned to later declarations).
+
+### Nimble's dependency resolution in practice (issue #77/#79)
+
+Confirmed by real measurement the property issue #71 established for the Rust-side `PackageResolution` ("produces a single, consistent solution across the whole dependency graph"), on the Nim side. Against a real, published package (`zero_functional`), a deliberately contradictory constraint (`>= 1.0.0` and `< 1.0.0` simultaneously) was rejected outright as `Unsatisfiable dependencies`. A non-contradictory constraint (`>= 1.0.0`) resolved deterministically to a single version (`1.3.0`). **Nimble never allows multiple versions to coexist** — unlike Cargo, which can permit multi-version coexistence in some cases. Given this property, `NimInstantiationKey` was confirmed not to need version information (each package always resolves to exactly one version across the whole dependency closure).
+
+The originally attempted verification path (issue #77: give a single local package two git-tagged versions and resolve directly) could not be carried out, due to structural constraints in Nimble (an unregistered package name cannot be resolved by name at all; the `file://` scheme does not support tag selection) — itself a finding: only packages registered in the official package index are eligible for name-based dependency resolution, unlike Cargo's `path = "../local-crate"` construct.
+
+### Macro/template expansion in practice (issue #80)
+
+Corrected, by real measurement, the insertion point issue #74 provisionally placed macro/template expansion at ("between N2 and N4"). Using a fixture combining a `template` declaration with a `when defined` branch:
+
+- The template declaration itself is always semantically analyzed regardless of whether it is actually used (inside an active `when` branch) — an `XDeclaredButNotUsed` diagnostic fires even when unused.
+- Template-call expansion happens **transparently inside N5 (semantic analysis + C generation), fused with optimizations such as constant folding** — a call to `double(21)` appeared in the generated C code fully folded to the constant `42`, with no trace of an independently held pre-expansion/post-expansion intermediate state.
+
+This confirms, by measurement, that existing `nim c` uses a "transparent preprocessing" approach rather than "hold pre-expansion and post-expansion syntax trees as separate entities." Whether LAMINARIA's own macro/template expansion implementation should follow this existing fused approach is a separate design decision (Nim's own approach is not necessarily best for correctness or maintainability). Cache-invalidation conditions were also confirmed to follow N5's existing invalidation axis (a change to the content of the target `SourceUnit` itself) without needing a new axis.
 
 ## Integration of the Rust/Nim/foreign-native chains (issue #74)
 
@@ -197,3 +220,8 @@ Web research confirmed Nim supports Objective-C as a third FFI language, but rea
 - Issue #75: type/ABI-level extension of FFI boundary matching (arity detection), new Rust<->Nim matching implementation
 - Issue #76: real-measurement decomposition of the Nim build path, N1-N9 confirmation, backtracking inspection
 - Issue #44: real-world verification of importc/importcpp/importobjc
+- Issue #77: real-measurement of Nimble's dependency resolution (single-solution verification achieved via issue #79; found a structural constraint on package-name resolution)
+- Issue #78: real-measurement confirmation of the `when defined(...)` condition graph (no combinatorial explosion; linear in declaration count)
+- Issue #79: real-measurement of cross-package version-constraint conflicts in Nimble (fail-fast; no multi-version coexistence)
+- Issue #80: confirmation of macro/template expansion's concrete insertion point (fused into N5; a transparent-preprocessing approach)
+- Issue #81: scale-dependent real-measurement of Nim's duplicate-compilation cost (negligible at small scale but scale-dependent; reaches the low-seconds range at more realistic scale)
