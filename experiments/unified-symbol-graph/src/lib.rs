@@ -412,6 +412,13 @@ pub mod durability;
 /// binary-heap eviction). See `durability_v2`'s own module doc comment.
 pub mod durability_v2;
 
+/// Issue #85: hybrid durability classification (Realm pre-classification
+/// corrected by observed redeclare behavior), addressing the 4/4
+/// misprediction `durability_v2::RealmDurabilityPolicy` alone showed on a
+/// reversed-churn scenario. See `durability_hybrid`'s own module doc
+/// comment.
+pub mod durability_hybrid;
+
 /// Issue #67 third harness: the actual memory-to-disk MemTable/SSTable
 /// layer `durability.rs` explicitly left out of scope. See
 /// `disk_tiering`'s own module doc comment.
