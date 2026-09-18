@@ -424,6 +424,14 @@ pub mod disk_tiering;
 /// See `cost_correlation`'s own module doc comment.
 pub mod cost_correlation;
 
+/// Follow-up to `cost_correlation`: quantifies per-crate measurement
+/// noise across repeated runs (coefficient of variation), and tests
+/// whether a `degree * static-complexity-proxy` weighted estimate
+/// predicts real compile time better than bare degree, per issue #67's
+/// own hand-off ("次数×平均コード行数"). See `cost_correlation_noise`'s
+/// own module doc comment.
+pub mod cost_correlation_noise;
+
 /// Issue #68: a minimal, x86_64-unknown-linux-gnu-only target-specific IR
 /// that lowers directly to `CodeBody` without ever materializing LLVM IR.
 /// See `target_ir`'s own module doc comment and
