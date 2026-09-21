@@ -70,7 +70,8 @@ use laminaria_plan::dependency_graph::{
 };
 use laminaria_plan::obligation_lifecycle::{
     ArtifactManifest, LifecycleError, OperationEvidence, OperationOutcome, ProducedFact,
-    ProductionGraph, PublicationBlocker, ResolutionEvidence,
+    ProductionGraph, PublicationBlocker, ResolutionEvidence, RuntimeContractEvidence,
+    RuntimeProviderEvidence,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -726,7 +727,7 @@ pub struct RuntimePreflightEvidence {
     pub executable_sha256: String,
     pub target_triple: String,
     pub interpreter: PathBuf,
-    pub shared_library_bindings: Vec<String>,
+    pub shared_library_bindings: Vec<RuntimeProviderEvidence>,
     pub exit_code: i32,
     pub stdout: String,
     pub stderr: String,
@@ -739,7 +740,14 @@ impl RuntimePreflightEvidence {
             self.executable_sha256,
             self.target_triple,
             self.interpreter.display(),
-            self.shared_library_bindings.join(", "),
+            self.shared_library_bindings
+                .iter()
+                .map(|provider| match &provider.path {
+                    Some(path) => format!("{}=>{}", provider.provider_id, path),
+                    None => format!("{}=>kernel", provider.provider_id),
+                })
+                .collect::<Vec<_>>()
+                .join(", "),
             self.exit_code,
             self.stdout,
             self.stderr
@@ -759,7 +767,9 @@ fn require_runtime_path(path: &Path, contract: &str) -> Result<(), G2Error> {
 }
 
 #[cfg(target_os = "linux")]
-fn inspect_linux_runtime(executable: &Path) -> Result<(PathBuf, Vec<String>), G2Error> {
+fn inspect_linux_runtime(
+    executable: &Path,
+) -> Result<(PathBuf, Vec<RuntimeProviderEvidence>), G2Error> {
     let program_headers = run_tool(
         "readelf",
         &["--program-headers", &executable.to_string_lossy()],
@@ -802,14 +812,23 @@ fn inspect_linux_runtime(executable: &Path) -> Result<(PathBuf, Vec<String>), G2
                     detail: format!("ldd reported no provider for {name:?}"),
                 })?;
             require_runtime_path(Path::new(provider), name.trim())?;
-            bindings.push(format!("{}=>{}", name.trim(), provider));
+            bindings.push(RuntimeProviderEvidence {
+                provider_id: name.trim().to_owned(),
+                path: Some(provider.to_owned()),
+            });
         } else {
             let provider = line.split_whitespace().next().unwrap_or_default();
             if provider.starts_with('/') {
                 require_runtime_path(Path::new(provider), "ELF runtime provider")?;
-                bindings.push(format!("{}=>{}", provider, provider));
+                bindings.push(RuntimeProviderEvidence {
+                    provider_id: provider.to_owned(),
+                    path: Some(provider.to_owned()),
+                });
             } else if provider == "linux-vdso.so.1" {
-                bindings.push("linux-vdso.so.1=>kernel".to_owned());
+                bindings.push(RuntimeProviderEvidence {
+                    provider_id: "linux-vdso.so.1".to_owned(),
+                    path: None,
+                });
             }
         }
     }
@@ -1084,6 +1103,7 @@ struct ProvenanceStatement<'a> {
     contract_version: u32,
     subject_artifact: &'a ProducedFact,
     completed_operations: &'a [OperationEvidence],
+    runtime_contracts: &'a [RuntimeContractEvidence],
     obligation_histories:
         &'a BTreeMap<String, Vec<laminaria_plan::obligation_lifecycle::StateTransition>>,
     publication_action_id: &'a str,
@@ -1267,11 +1287,11 @@ fn execute_fixed_m1_graph_with_seed(
     let staged_manifest_path = out_dir.join(".laminaria-artifact-manifest.json.staging");
     let actions = production.closure.required_actions.clone();
     let mut requested_artifact = None;
-    for (offset, action) in actions.into_iter().enumerate() {
+    let mut sequence = 2_u64;
+    for action in actions {
         if seeded_gap.omits(action.kind) {
             continue;
         }
-        let sequence = offset as u64 + 2;
         let base_fact = if action.kind == RequiredActionKind::PublishProvenance {
             let subject_artifact = requested_artifact.as_ref().ok_or_else(|| {
                 G2Error::Io("provenance publication has no linked artifact identity".to_owned())
@@ -1280,6 +1300,7 @@ fn execute_fixed_m1_graph_with_seed(
                 contract_version: production.contract_version,
                 subject_artifact,
                 completed_operations: &production.operations,
+                runtime_contracts: &production.runtime_contracts,
                 obligation_histories: &production.histories,
                 publication_action_id: &action.id,
                 publication_discharges: &action.discharges,
@@ -1328,30 +1349,56 @@ fn execute_fixed_m1_graph_with_seed(
             RequiredActionKind::PreflightRuntimeContract => DischargeKind::ExternalRuntimeContract,
             RequiredActionKind::PublishProvenance => DischargeKind::Embedded,
         };
-        production.record_operation(
-            OperationEvidence {
-                operation_id: format!("m1-run/{}", action.id),
-                action_id: action.id.clone(),
-                action_kind: action.kind,
-                run_id: "m1-fixed-graph".to_owned(),
-                producer_identity: action.toolchain.clone(),
-                sequence,
-                inputs: action.inputs.clone(),
-                outputs,
-                outcome: OperationOutcome::Succeeded,
-                structurally_verified: true,
-                detail: match action.kind {
-                    RequiredActionKind::PreflightRuntimeContract => {
-                        runtime_preflight.as_operation_detail()
-                    }
-                    RequiredActionKind::PublishProvenance => {
-                        "serialized operation trace and obligation histories".to_owned()
-                    }
-                    _ => "real output digest and structure verified".to_owned(),
-                },
+        let operation = OperationEvidence {
+            operation_id: format!("m1-run/{}", action.id),
+            action_id: action.id.clone(),
+            action_kind: action.kind,
+            run_id: "m1-fixed-graph".to_owned(),
+            producer_identity: action.toolchain.clone(),
+            sequence,
+            inputs: action.inputs.clone(),
+            outputs,
+            outcome: OperationOutcome::Succeeded,
+            structurally_verified: true,
+            detail: match action.kind {
+                RequiredActionKind::PreflightRuntimeContract => {
+                    runtime_preflight.as_operation_detail()
+                }
+                RequiredActionKind::PublishProvenance => {
+                    "serialized operation trace and obligation histories".to_owned()
+                }
+                _ => "real output digest and structure verified".to_owned(),
             },
-            discharge_kind,
-        )?;
+        };
+        if action.kind == RequiredActionKind::PreflightRuntimeContract {
+            let contract_sequence = sequence + 1;
+            production.record_runtime_operation(
+                operation.clone(),
+                RuntimeContractEvidence {
+                    contract_id: format!("runtime:elf:{}", runtime_preflight.target_triple),
+                    operation_id: operation.operation_id.clone(),
+                    run_id: operation.run_id.clone(),
+                    producer_identity: operation.producer_identity.clone(),
+                    sequence: contract_sequence,
+                    target_triple: runtime_preflight.target_triple.clone(),
+                    loader_requirement: runtime_preflight
+                        .interpreter
+                        .to_string_lossy()
+                        .into_owned(),
+                    required_providers: runtime_preflight.shared_library_bindings.clone(),
+                    version_requirement: format!(
+                        "OS ABI compatible with {}",
+                        runtime_preflight.target_triple
+                    ),
+                    verification: "independently observable ELF interpreter and provider paths"
+                        .to_owned(),
+                },
+            )?;
+            sequence += 2;
+        } else {
+            production.record_operation(operation, discharge_kind)?;
+            sequence += 1;
+        }
     }
     let requested_artifact = requested_artifact
         .ok_or_else(|| G2Error::Io("link action produced no executable identity".to_owned()))?;
@@ -1510,6 +1557,18 @@ mod tests {
                     | ObligationState::Externalized
                     | ObligationState::ProvenIrrelevant
             )));
+        let runtime_decision = publication
+            .manifest
+            .decisions
+            .iter()
+            .find(|decision| decision.kind == ObligationKind::Runtime)
+            .expect("published manifest must contain the runtime obligation");
+        assert_eq!(runtime_decision.state, ObligationState::Externalized);
+        assert_eq!(publication.manifest.runtime_contracts.len(), 1);
+        assert_eq!(
+            publication.manifest.runtime_contracts[0].operation_id,
+            "m1-run/preflight-runtime-contract"
+        );
         let observed_kinds: BTreeSet<ObligationKind> = publication
             .manifest
             .decisions

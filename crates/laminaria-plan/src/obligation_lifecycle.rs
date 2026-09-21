@@ -14,7 +14,7 @@ use crate::dependency_graph::{
     RequiredActionKind,
 };
 
-pub const OBLIGATION_CONTRACT_VERSION: u32 = 1;
+pub const OBLIGATION_CONTRACT_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -62,12 +62,21 @@ pub struct ResolutionEvidence {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeContractEvidence {
     pub contract_id: String,
+    pub operation_id: String,
     pub run_id: String,
     pub producer_identity: String,
     pub sequence: u64,
+    pub target_triple: String,
     pub loader_requirement: String,
+    pub required_providers: Vec<RuntimeProviderEvidence>,
     pub version_requirement: String,
     pub verification: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeProviderEvidence {
+    pub provider_id: String,
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,6 +131,7 @@ pub struct ArtifactManifest {
     pub requested_artifact: ProducedFact,
     pub decisions: Vec<ObligationDecision>,
     pub operations: Vec<OperationEvidence>,
+    pub runtime_contracts: Vec<RuntimeContractEvidence>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -197,6 +207,70 @@ pub struct ProductionGraph {
 }
 
 impl ProductionGraph {
+    fn validate_operation(
+        &self,
+        evidence: &OperationEvidence,
+    ) -> Result<crate::dependency_graph::RequiredAction, LifecycleError> {
+        if evidence.operation_id.is_empty()
+            || evidence.run_id.is_empty()
+            || evidence.producer_identity.is_empty()
+            || evidence.detail.is_empty()
+            || evidence.outcome != OperationOutcome::Succeeded
+            || !evidence.structurally_verified
+        {
+            return Err(LifecycleError::InvalidOperationEvidence(
+                evidence.operation_id.clone(),
+            ));
+        }
+        if self.operation_id_used(&evidence.operation_id) || self.sequence_used(evidence.sequence) {
+            return Err(LifecycleError::DuplicateOperation(
+                evidence.operation_id.clone(),
+            ));
+        }
+        let action = self
+            .closure
+            .required_actions
+            .iter()
+            .find(|action| action.id == evidence.action_id)
+            .cloned()
+            .ok_or_else(|| LifecycleError::UnknownAction(evidence.action_id.clone()))?;
+        if action.kind != evidence.action_kind {
+            return Err(LifecycleError::ActionKindMismatch);
+        }
+        if action.toolchain != evidence.producer_identity {
+            return Err(LifecycleError::ProducerIdentityMismatch);
+        }
+        if as_set(&action.inputs) != as_set(&evidence.inputs) {
+            return Err(LifecycleError::ActionInputsMismatch);
+        }
+        let output_ids: Vec<_> = evidence
+            .outputs
+            .iter()
+            .map(|output| output.identity.clone())
+            .collect();
+        if as_set(&action.outputs) != as_set(&output_ids)
+            || evidence
+                .outputs
+                .iter()
+                .any(|output| output.digest.is_empty() || output.size_bytes == 0)
+        {
+            return Err(LifecycleError::ActionOutputsMismatch);
+        }
+        for dependency in &action.depends_on {
+            if !self
+                .operations
+                .iter()
+                .any(|operation| operation.action_id == *dependency)
+            {
+                return Err(LifecycleError::ActionDependencyNotCompleted {
+                    action_id: action.id.clone(),
+                    dependency: dependency.clone(),
+                });
+            }
+        }
+        Ok(action)
+    }
+
     pub fn new(closure: PositiveClosure) -> Result<Self, LifecycleError> {
         for (key, obligation) in &closure.obligations {
             if key != &obligation.id {
@@ -362,61 +436,7 @@ impl ProductionGraph {
         evidence: OperationEvidence,
         discharge_kind: DischargeKind,
     ) -> Result<(), LifecycleError> {
-        if evidence.operation_id.is_empty()
-            || evidence.run_id.is_empty()
-            || evidence.producer_identity.is_empty()
-            || evidence.detail.is_empty()
-            || evidence.outcome != OperationOutcome::Succeeded
-            || !evidence.structurally_verified
-        {
-            return Err(LifecycleError::InvalidOperationEvidence(
-                evidence.operation_id,
-            ));
-        }
-        if self.operation_id_used(&evidence.operation_id) || self.sequence_used(evidence.sequence) {
-            return Err(LifecycleError::DuplicateOperation(evidence.operation_id));
-        }
-        let action = self
-            .closure
-            .required_actions
-            .iter()
-            .find(|action| action.id == evidence.action_id)
-            .cloned()
-            .ok_or_else(|| LifecycleError::UnknownAction(evidence.action_id.clone()))?;
-        if action.kind != evidence.action_kind {
-            return Err(LifecycleError::ActionKindMismatch);
-        }
-        if action.toolchain != evidence.producer_identity {
-            return Err(LifecycleError::ProducerIdentityMismatch);
-        }
-        if as_set(&action.inputs) != as_set(&evidence.inputs) {
-            return Err(LifecycleError::ActionInputsMismatch);
-        }
-        let output_ids: Vec<_> = evidence
-            .outputs
-            .iter()
-            .map(|output| output.identity.clone())
-            .collect();
-        if as_set(&action.outputs) != as_set(&output_ids)
-            || evidence
-                .outputs
-                .iter()
-                .any(|output| output.digest.is_empty() || output.size_bytes == 0)
-        {
-            return Err(LifecycleError::ActionOutputsMismatch);
-        }
-        for dependency in &action.depends_on {
-            if !self
-                .operations
-                .iter()
-                .any(|operation| operation.action_id == *dependency)
-            {
-                return Err(LifecycleError::ActionDependencyNotCompleted {
-                    action_id: action.id.clone(),
-                    dependency: dependency.clone(),
-                });
-            }
-        }
+        let action = self.validate_operation(&evidence)?;
         for obligation_id in &action.discharges {
             let from = self
                 .closure
@@ -445,15 +465,44 @@ impl ProductionGraph {
         Ok(())
     }
 
+    pub fn record_runtime_operation(
+        &mut self,
+        operation: OperationEvidence,
+        contract: RuntimeContractEvidence,
+    ) -> Result<(), LifecycleError> {
+        let action = self.validate_operation(&operation)?;
+        if action.kind != RequiredActionKind::PreflightRuntimeContract
+            || action.discharges.len() != 1
+            || contract.operation_id != operation.operation_id
+            || contract.run_id != operation.run_id
+            || contract.producer_identity != operation.producer_identity
+            || contract.sequence <= operation.sequence
+        {
+            return Err(LifecycleError::InvalidRuntimeContract(contract.contract_id));
+        }
+        let mut staged = self.clone();
+        staged.operations.push(operation);
+        staged.externalize_runtime(&action.discharges[0], contract)?;
+        *self = staged;
+        Ok(())
+    }
+
     pub fn externalize_runtime(
         &mut self,
         obligation_id: &str,
         evidence: RuntimeContractEvidence,
     ) -> Result<(), LifecycleError> {
         if evidence.contract_id.is_empty()
+            || evidence.operation_id.is_empty()
             || evidence.run_id.is_empty()
             || evidence.producer_identity.is_empty()
+            || evidence.target_triple.is_empty()
             || evidence.loader_requirement.is_empty()
+            || evidence.required_providers.is_empty()
+            || evidence.required_providers.iter().any(|provider| {
+                provider.provider_id.is_empty()
+                    || provider.path.as_ref().is_some_and(|path| path.is_empty())
+            })
             || evidence.version_requirement.is_empty()
             || evidence.verification.is_empty()
             || self.sequence_used(evidence.sequence)
@@ -662,6 +711,7 @@ impl ProductionGraph {
             requested_artifact,
             decisions,
             operations: self.operations.clone(),
+            runtime_contracts: self.runtime_contracts.clone(),
         })
     }
 
@@ -815,10 +865,16 @@ mod tests {
                 "runtime",
                 RuntimeContractEvidence {
                     contract_id: "glibc-loader".to_owned(),
+                    operation_id: "op-runtime-preflight".to_owned(),
                     run_id: "run-1".to_owned(),
                     producer_identity: "runtime-preflight@sha256:cafe".to_owned(),
                     sequence: 3,
+                    target_triple: "x86_64-unknown-linux-gnu".to_owned(),
                     loader_requirement: "ld-linux-x86-64.so.2".to_owned(),
+                    required_providers: vec![RuntimeProviderEvidence {
+                        provider_id: "libc.so.6".to_owned(),
+                        path: Some("/lib/libc.so.6".to_owned()),
+                    }],
                     version_requirement: "GLIBC >= 2.31".to_owned(),
                     verification: "loader and version inspected".to_owned(),
                 },
@@ -855,6 +911,7 @@ mod tests {
         let manifest = graph.publication_manifest(artifact.clone()).unwrap();
         assert_eq!(manifest.contract_version, OBLIGATION_CONTRACT_VERSION);
         assert_eq!(manifest.requested_artifact, artifact);
+        assert_eq!(manifest.runtime_contracts, graph.runtime_contracts);
         assert!(manifest.decisions.iter().all(|decision| matches!(
             decision.state,
             ObligationState::Discharged
@@ -984,10 +1041,16 @@ mod tests {
                         &id,
                         RuntimeContractEvidence {
                             contract_id: format!("invalid-runtime-{kind:?}"),
+                            operation_id: "invalid-runtime-operation".to_owned(),
                             run_id: "run-invalid-transition".to_owned(),
                             producer_identity: "runtime-preflight@verified".to_owned(),
                             sequence: 1,
+                            target_triple: "x86_64-unknown-linux-gnu".to_owned(),
                             loader_requirement: "loader".to_owned(),
+                            required_providers: vec![RuntimeProviderEvidence {
+                                provider_id: "provider".to_owned(),
+                                path: Some("/provider".to_owned()),
+                            }],
                             version_requirement: "version".to_owned(),
                             verification: "verified".to_owned(),
                         },
