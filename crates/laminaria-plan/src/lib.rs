@@ -6,6 +6,7 @@ pub mod compiler_work;
 pub mod dependency_graph;
 pub mod incremental;
 pub mod nim_planner_client;
+pub mod obligation_lifecycle;
 pub mod plan_integrity;
 pub mod rust_cross_layer;
 pub mod types;

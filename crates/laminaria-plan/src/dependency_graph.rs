@@ -122,6 +122,9 @@ pub enum ObligationState {
     Satisfied,
     Discharged,
     Externalized,
+    /// Outside the retained artifact closure with explicit conservative
+    /// reachability evidence. Pruning remains visible in the graph.
+    ProvenIrrelevant,
     Rejected,
 }
 

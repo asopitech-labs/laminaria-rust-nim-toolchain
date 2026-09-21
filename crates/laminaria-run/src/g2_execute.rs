@@ -62,15 +62,24 @@
 //! box 2 ("produce... and execute... the expected observable result")
 //! only becomes checkable from this checkpoint onward.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use laminaria_plan::dependency_graph::{DischargeKind, LifecycleViolation, PositiveClosure};
+use laminaria_plan::dependency_graph::{
+    resolve, DischargeKind, LifecycleViolation, PositiveClosure, RequiredActionKind,
+};
+use laminaria_plan::obligation_lifecycle::{
+    ArtifactManifest, LifecycleError, OperationEvidence, OperationOutcome, ProducedFact,
+    ProductionGraph, ResolutionEvidence,
+};
 use sha2::{Digest, Sha256};
 
-use crate::cross_ecosystem_ingest::CargoManifestFacts;
+use crate::command_runner::RealCommandRunner;
+use crate::cross_ecosystem_ingest::{
+    ingest_cargo_metadata, ingest_fixture_input, CargoManifestFacts, FixtureLayout,
+};
 use crate::toolchain_resolve::{
     self, resolve_verified_nim, resolve_verified_rust, ToolchainResolutionError,
 };
@@ -123,6 +132,7 @@ pub enum G2Error {
         stderr: String,
     },
     Discharge(LifecycleViolation),
+    ProductionLifecycle(LifecycleError),
 }
 
 impl std::fmt::Display for G2Error {
@@ -154,6 +164,9 @@ impl std::fmt::Display for G2Error {
                 path.display()
             ),
             G2Error::Discharge(violation) => write!(f, "G2 execution: {violation}"),
+            G2Error::ProductionLifecycle(error) => {
+                write!(f, "G2 production lifecycle: {error:?}")
+            }
         }
     }
 }
@@ -163,6 +176,12 @@ impl std::error::Error for G2Error {}
 impl From<LifecycleViolation> for G2Error {
     fn from(violation: LifecycleViolation) -> Self {
         G2Error::Discharge(violation)
+    }
+}
+
+impl From<LifecycleError> for G2Error {
+    fn from(error: LifecycleError) -> Self {
+        G2Error::ProductionLifecycle(error)
     }
 }
 
@@ -818,6 +837,262 @@ pub fn link_and_run_native_executable(
     Ok(evidence)
 }
 
+/// Result of the fixed M1 production entry point: the exact executable
+/// evidence and the publication manifest that closes the same graph.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FixedGraphPublication {
+    pub executable: NativeExecutableEvidence,
+    pub manifest: ArtifactManifest,
+}
+
+/// Executes the fixed Cargo/Nimble/C/C++ M1 graph and admits the executable
+/// only through issue #88's common lifecycle gate.
+///
+/// The existing real compilers/linker remain the only artifact producers.
+/// This function adds the lossless operation records and terminal-closure
+/// check around them; it does not duplicate their implementation.
+pub fn execute_fixed_m1_graph(
+    repo_root: &Path,
+    out_dir: &Path,
+) -> Result<FixedGraphPublication, G2Error> {
+    let layout = FixtureLayout::discover();
+    let runner = RealCommandRunner;
+    let input = ingest_fixture_input(&runner, &layout, &["1.0.0"])
+        .map_err(|error| G2Error::Io(format!("fixture ingestion: {error}")))?;
+    let closure = resolve(&input)
+        .map_err(|error| G2Error::Io(format!("dependency resolution: {error:?}")))?;
+    let mut execution_closure = closure.clone();
+    let mut production = ProductionGraph::new(closure)?;
+    let cargo = ingest_cargo_metadata(&runner, &layout.app_manifest())
+        .map_err(|error| G2Error::Io(format!("Cargo metadata ingestion: {error}")))?;
+    let required_extern_symbols: BTreeSet<String> = input
+        .ffi_requirements
+        .iter()
+        .map(|requirement| requirement.symbol.clone())
+        .collect();
+    let doubler_symbol = input
+        .package_candidates
+        .iter()
+        .find(|candidate| candidate.package_id == "doubler")
+        .and_then(|candidate| candidate.declared_exports.first())
+        .map(|export| export.symbol.clone())
+        .ok_or_else(|| G2Error::Io("doubler has no declared export".to_owned()))?;
+
+    fs::create_dir_all(out_dir)
+        .map_err(|error| G2Error::Io(format!("{}: {error}", out_dir.display())))?;
+    let cadd = compile_and_archive_cadd_v1(&mut execution_closure, &layout.root, out_dir)?;
+    let cppmax = compile_and_archive_cppmax(&mut execution_closure, &layout.root, out_dir)?;
+    let doubler = compile_nim_static_library_for_doubler(
+        &mut execution_closure,
+        &layout.root,
+        repo_root,
+        &doubler_symbol,
+        out_dir,
+    )?;
+    let rust = compile_rust_object_for_app(
+        &mut execution_closure,
+        &layout.root,
+        repo_root,
+        &cargo,
+        &required_extern_symbols,
+        out_dir,
+    )?;
+    let executable = link_and_run_native_executable(
+        &mut execution_closure,
+        &layout.root,
+        repo_root,
+        &cargo,
+        &NativeArchives {
+            cadd: &cadd.archive_path,
+            cppmax: &cppmax.archive_path,
+            doubler: &doubler.archive_path,
+        },
+        out_dir,
+    )?;
+
+    let resolver_owned: Vec<String> = production
+        .closure
+        .obligations
+        .values()
+        .filter(|obligation| {
+            matches!(
+                obligation.state,
+                laminaria_plan::dependency_graph::ObligationState::Selected
+                    | laminaria_plan::dependency_graph::ObligationState::Satisfied
+            )
+        })
+        .map(|obligation| obligation.id.clone())
+        .collect();
+    production.record_resolution(ResolutionEvidence {
+        operation_id: "m1-resolution".to_owned(),
+        run_id: "m1-fixed-graph".to_owned(),
+        producer_identity: "laminaria dependency resolver".to_owned(),
+        sequence: 1,
+        input_identities: input
+            .sources
+            .iter()
+            .map(|source| source.id.clone())
+            .collect(),
+        resolved_obligations: resolver_owned,
+        outcome: OperationOutcome::Succeeded,
+        structurally_verified: true,
+    })?;
+
+    let physical_facts = BTreeMap::from([
+        (
+            "compile-c-object:cadd@1.0.0",
+            observed_file(&cadd.object_path)?,
+        ),
+        (
+            "archive-static-library:cadd@1.0.0",
+            ProducedFact {
+                identity: String::new(),
+                digest: cadd.archive_sha256.clone(),
+                size_bytes: cadd.archive_size_bytes,
+            },
+        ),
+        (
+            "compile-cpp-adapter-object:cppmax@1.0.0",
+            observed_file(&cppmax.object_path)?,
+        ),
+        (
+            "archive-static-library:cppmax@1.0.0",
+            ProducedFact {
+                identity: String::new(),
+                digest: cppmax.archive_sha256.clone(),
+                size_bytes: cppmax.archive_size_bytes,
+            },
+        ),
+        (
+            "compile-nim-static-library:doubler",
+            ProducedFact {
+                identity: String::new(),
+                digest: doubler.archive_sha256.clone(),
+                size_bytes: doubler.archive_size_bytes,
+            },
+        ),
+        (
+            "compile-rust-object:app",
+            ProducedFact {
+                identity: String::new(),
+                digest: rust.object_sha256.clone(),
+                size_bytes: rust.object_size_bytes,
+            },
+        ),
+        (
+            "link-native-executable",
+            ProducedFact {
+                identity: String::new(),
+                digest: executable.executable_sha256.clone(),
+                size_bytes: executable.executable_size_bytes,
+            },
+        ),
+    ]);
+
+    let actions = production.closure.required_actions.clone();
+    let mut requested_artifact = None;
+    for (offset, action) in actions.into_iter().enumerate() {
+        let sequence = offset as u64 + 2;
+        let base_fact = if action.kind == RequiredActionKind::PublishProvenance {
+            let bytes = serde_json::to_vec(&production)
+                .map_err(|error| G2Error::Io(format!("serialize provenance: {error}")))?;
+            ProducedFact {
+                identity: String::new(),
+                digest: sha256_bytes(&bytes),
+                size_bytes: bytes.len() as u64,
+            }
+        } else if action.outputs.is_empty() {
+            ProducedFact {
+                identity: String::new(),
+                digest: "no-material-output".to_owned(),
+                size_bytes: 1,
+            }
+        } else {
+            physical_facts
+                .get(action.id.as_str())
+                .cloned()
+                .ok_or_else(|| {
+                    G2Error::Io(format!(
+                        "production action '{}' has no observed output evidence",
+                        action.id
+                    ))
+                })?
+        };
+        let outputs: Vec<ProducedFact> = action
+            .outputs
+            .iter()
+            .map(|identity| ProducedFact {
+                identity: identity.clone(),
+                digest: base_fact.digest.clone(),
+                size_bytes: base_fact.size_bytes,
+            })
+            .collect();
+        if action.kind == RequiredActionKind::LinkNativeExecutable {
+            requested_artifact = outputs.first().cloned();
+        }
+        let discharge_kind = match action.kind {
+            RequiredActionKind::CompileRustObject
+            | RequiredActionKind::CompileNimStaticLibrary
+            | RequiredActionKind::CompileCObject
+            | RequiredActionKind::CompileCppAdapterObject => DischargeKind::Generated,
+            RequiredActionKind::ArchiveStaticLibrary | RequiredActionKind::LinkNativeExecutable => {
+                DischargeKind::StaticallyLinked
+            }
+            RequiredActionKind::PreflightRuntimeContract => DischargeKind::ExternalRuntimeContract,
+            RequiredActionKind::PublishProvenance => DischargeKind::Embedded,
+        };
+        production.record_operation(
+            OperationEvidence {
+                operation_id: format!("m1-run/{}", action.id),
+                action_id: action.id.clone(),
+                action_kind: action.kind,
+                run_id: "m1-fixed-graph".to_owned(),
+                producer_identity: action.toolchain.clone(),
+                sequence,
+                inputs: action.inputs.clone(),
+                outputs,
+                outcome: OperationOutcome::Succeeded,
+                structurally_verified: true,
+                detail: match action.kind {
+                    RequiredActionKind::PreflightRuntimeContract => format!(
+                        "exact executable ran with exit={} stdout={:?}",
+                        executable.exit_code, executable.stdout
+                    ),
+                    RequiredActionKind::PublishProvenance => {
+                        "serialized operation trace and obligation histories".to_owned()
+                    }
+                    _ => "real output digest and structure verified".to_owned(),
+                },
+            },
+            discharge_kind,
+        )?;
+    }
+    let requested_artifact = requested_artifact
+        .ok_or_else(|| G2Error::Io("link action produced no executable identity".to_owned()))?;
+    let manifest = production.publication_manifest(requested_artifact)?;
+    Ok(FixedGraphPublication {
+        executable,
+        manifest,
+    })
+}
+
+fn observed_file(path: &Path) -> Result<ProducedFact, G2Error> {
+    let size_bytes = fs::metadata(path)
+        .map_err(|error| G2Error::Io(format!("{}: {error}", path.display())))?
+        .len();
+    Ok(ProducedFact {
+        identity: String::new(),
+        digest: sha256_file(path)?,
+        size_bytes,
+    })
+}
+
+fn sha256_bytes(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -838,6 +1113,33 @@ mod tests {
             .join("../..")
             .canonicalize()
             .unwrap()
+    }
+
+    #[test]
+    fn fixed_m1_production_entry_point_publishes_only_the_fully_closed_exact_artifact() {
+        let out_dir = std::env::temp_dir().join(format!(
+            "laminaria-issue-88-production-{}",
+            std::process::id()
+        ));
+        let publication = execute_fixed_m1_graph(&repo_root(), &out_dir)
+            .expect("the fixed production graph must execute and close");
+        assert_eq!(publication.executable.exit_code, 0);
+        assert_eq!(publication.executable.stdout, "9\n");
+        assert_eq!(
+            publication.manifest.requested_artifact.digest,
+            publication.executable.executable_sha256
+        );
+        assert!(publication
+            .manifest
+            .decisions
+            .iter()
+            .all(|decision| matches!(
+                decision.state,
+                ObligationState::Discharged
+                    | ObligationState::Externalized
+                    | ObligationState::ProvenIrrelevant
+            )));
+        let _ = fs::remove_dir_all(&out_dir);
     }
 
     /// The end-to-end Checkpoint 1 case: resolve a real G1 positive
