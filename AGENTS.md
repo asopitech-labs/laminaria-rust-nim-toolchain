@@ -67,11 +67,13 @@ in the history, not GitHub Actions as the first check.
   does this automatically). This activates two tracked hooks
   (`.githooks/pre-commit`, `.githooks/commit-msg`):
   - `pre-commit` runs `cargo fmt --all -- --check` and
-    `cargo clippy --workspace --all-targets -- -D warnings` on every
-    commit, rejecting it on failure.
+    `cargo clippy --workspace --all-targets -- -D warnings` on native hosts.
+    On Windows it validates the source-bound receipt produced by the serialized
+    WSLC owner harness instead of starting a second WSLC client.
   - `commit-msg` requires a `Tests-Run:` trailer on every commit message
-    and executes what it names, rejecting the commit if the trailer is
-    missing or the named tests fail. See `.githooks/commit-msg`'s own
+    and executes what it names on native hosts. On Windows it requires a full
+    owner-harness receipt for the exact source fingerprint. See
+    `.githooks/commit-msg`'s own
     header comment for the exact convention
     (`Tests-Run: workspace` / `Tests-Run: <filter> [<filter> ...]` /
     `Tests-Run: none (<reason>)`).
@@ -92,15 +94,20 @@ in the history, not GitHub Actions as the first check.
   test, lint, format-check, and toolchain diagnostic inside the `wslc`
   container. Do not invoke host Windows `cargo`, `rustc`, `nim`, `nimble`, or
   the bootstrap script for project development.
-- Build or refresh the development image from the repository root with:
+- Treat the default per-user `wslc` session as one shared singleton across all
+  processes and worktrees. Do not launch independent build/test clients in
+  parallel. Run the repository-owned owner harness from the repository root:
 
   ```powershell
-  wslc build --progress plain -f docker/bootstrap.Dockerfile -t laminaria-bootstrap .
+  scripts/windows-wslc-ci.ps1
   ```
 
-- Run commands with `wslc run --rm --pull never`. Override the image entrypoint
-  when invoking tools other than the LAMINARIA CLI. The canonical commands and
-  lifecycle are documented in `docs/04-guides/windows-wslc-development.md`.
+- The harness holds a per-user host mutex across image build, execution, owned
+  container cleanup, and receipt publication. It executes the exact image ID
+  emitted by that build; the mutable `laminaria-bootstrap` tag is not an
+  execution identity. Git hooks on Windows consume the matching receipt and
+  must not start another `wslc` client. The canonical modes and lifecycle are
+  documented in `docs/04-guides/windows-wslc-development.md`.
 - Keep the image's default unprivileged `laminaria` user. Do not add
   `--user root` to normal build or test commands.
 - For the Nim planning-kernel test on Windows, use the documented direct

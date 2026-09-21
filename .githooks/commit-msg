@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Enforces a `Tests-Run:` trailer on every commit to this repo, and
-# actually executes what it names before letting the commit land --
-# not just checking the trailer's presence as a formality. Rationale:
+# actually executes what it names before letting the commit land. On Windows,
+# it instead validates a full, source-bound receipt produced by the serialized
+# WSLC owner harness; the hook must not become a competing WSLC consumer.
+# This is not just checking the trailer's presence as a formality. Rationale:
 # pushing straight to `origin main` with no PR gate means a broken or
 # untested commit is live on the trunk the instant it's pushed; "I'll
 # let GitHub Actions find out" is not an acceptable substitute for
@@ -80,6 +82,18 @@ if [[ "$VALUE" == none* ]]; then
   fi
   echo "commit-msg: rejected -- 'Tests-Run: none' requires a reason in parentheses, e.g. 'Tests-Run: none (docs-only change)'." >&2
   exit 1
+fi
+
+# Windows development has one persistent per-user WSLC VM/daemon/VHD. Do not
+# create a second independent consumer from this hook: consume the receipt from
+# the canonical, mutex-protected full run instead. A full receipt is required
+# even for a named filter because the receipt is the independently bound proof
+# that the exact repository fingerprint completed its declared verification.
+if [[ "${OS:-}" == "Windows_NT" ]]; then
+  echo "commit-msg: validating the full serialized WSLC verification receipt ..."
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/windows-wslc-ci.ps1 \
+    -VerifyReceipt -RequiredCoverage full
+  exit $?
 fi
 
 if [[ "$VALUE" == "workspace" ]]; then

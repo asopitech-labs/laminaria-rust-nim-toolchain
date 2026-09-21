@@ -5,7 +5,7 @@
 Windowsホストからこのプロジェクトを開発する場合、ビルド、テスト、lint、
 format check、toolchain診断はすべて `wslc` コンテナ内で実行する。
 Windowsホストにある `cargo`、`rustc`、`nim`、`nimble` を直接使用しない。
-標準イメージ名は `laminaria-bootstrap:latest` とする。
+標準イメージtagは `laminaria-bootstrap:latest` とするが、実行identityには使用しない。
 イメージのbuildおよび実行は既定で専用の非rootユーザー `laminaria`
 （UID/GID 1000）として行い、root所有の成果物を作らない。
 
@@ -19,51 +19,58 @@ Windowsホストにある `cargo`、`rustc`、`nim`、`nimble` を直接使用�
 
 ```powershell
 wslc version
-wslc build --progress plain -f docker/bootstrap.Dockerfile -t laminaria-bootstrap .
-wslc run --rm --pull never laminaria-bootstrap doctor
+scripts/windows-wslc-ci.ps1
 ```
 
 Dockerfile、`Cargo.toml`、`Cargo.lock`、Nimソース、Rustソース、toolchain lock、
-またはビルドに影響するfixtureを変更した後は、コマンド実行前に同じ
-`wslc build` を再実行する。Docker layer cacheは利用してよい。
+またはビルドに影響するfixtureを変更した後はowner harnessを再実行する。
+Docker layer cacheは利用してよい。
 
-`.dockerignore` は `.git/`、`.reference/`、`target/` をbuild contextから除外する。
+`.dockerignore` はGit metadata、参照clone、build/cache/trace出力をbuild contextから除外する。
 参照プロジェクトのcloneやホスト側の生成物をイメージへ混入させない。
 
 ## 標準コマンド
 
-イメージのentrypointはLAMINARIA CLIである。CLI以外のツールを実行するときは
-`--entrypoint` を明示する。
+full modeはfmt、clippy、workspace test、Nim planning-kernel testを同一containerで
+逐次実行する。fast/test-onlyは開発中の限定確認であり、full receiptの代替ではない。
 
 ```powershell
 # Toolchain診断
-wslc run --rm --pull never laminaria-bootstrap doctor
+scripts/windows-wslc-ci.ps1 -Mode doctor
 
-# Rust workspace
-wslc run --rm --pull never --entrypoint cargo laminaria-bootstrap build --workspace
-wslc run --rm --pull never --entrypoint cargo laminaria-bootstrap test --workspace
-wslc run --rm --pull never --entrypoint cargo laminaria-bootstrap clippy --workspace --all-targets -- -D warnings
-wslc run --rm --pull never --entrypoint cargo laminaria-bootstrap fmt --all -- --check
-
-# Nim planning kernels（固定済みNimを直接使用し、production実装を直接検証）
-wslc run --rm --pull never --entrypoint nim -w /workspace/nim-planner laminaria-bootstrap c -r --path:src --hints:off -o:bin/test_planning_kernel tests/test_planning_kernel.nim
-wslc run --rm --pull never --entrypoint nim -w /workspace/nim-planner laminaria-bootstrap c -r --path:src --hints:off -o:bin/test_incremental_kernel tests/test_incremental_kernel.nim
+# Repository verification
+scripts/windows-wslc-ci.ps1
+scripts/windows-wslc-ci.ps1 -Mode fast
+scripts/windows-wslc-ci.ps1 -Mode test-only -TestFilter <cargo-test-filter>
 ```
 
-コンテナは実行ごとに `--rm` で破棄し、ツールや依存を対話的に追加して
-状態を残さない。恒久的に必要なツールはDockerfileまたはrepository-owned lockへ
-追加し、イメージを再構築する。
+WSLCの既定sessionは、全terminal・全worktreeが共有するper-userの永続
+VM/daemon/VHDである。`laminaria-bootstrap` を各process固有の資源として扱っては
+ならない。repository automationは必ず `scripts/windows-wslc-ci.ps1` を使用し、
+独立した `wslc build` / `wslc run` を並行起動してはならない。
+
+owner harnessは、build・run・cleanup・receipt発行の全区間をnamed per-user mutexで
+直列化する。buildが出力したimmutable image IDをそのままrunへ渡し、呼出しごとに
+一意なcontainer名を割り当てる。owner processが強制終了した場合は、次のownerが
+共有leaseに記録された厳密なcontainer名だけを回収する。Windowsの
+Git hookは同一source fingerprintのreceiptを検査し、新たなWSLC consumerを起動しない。
+`--rm`、mutable tag、`wsl --shutdown`、`wslcsession` kill、`WSLService` stopは
+synchronizationまたは通常cleanupの手段ではない。
+
+恒久的に必要なツールはDockerfileまたはrepository-owned lockへ追加し、owner
+harnessからイメージを再構築する。
 `--user root` を指定して通常のbuild/testを実行してはならない。
 `nimble test` はdependency解決によって別のNim compilerを取得する場合があるため、
-標準のNimテスト経路では使用せず、上記の `nim c -r` で固定済み2.2.10を直接使う。
-fixture専用validatorではなく、この2つのテストがproduction planning実装を直接検証する。
+標準のNimテスト経路では使用せず、`scripts/local-ci.sh` が固定済み2.2.10を
+`nim c -r` で直接使う。fixture専用validatorではなく、これらのテストがproduction
+planning実装を直接検証する。
 
 ## ソース変更を反映する方法
 
-標準手順は、現在のcheckoutを `COPY` する `wslc build` を再実行してから、
-生成されたイメージに対して `wslc run` を実行する方式である。ホストcheckoutの
-bind mountを標準経路にはしない。これにより、テスト対象のソースとイメージ内の
-ビルド済み成果物が同じbuild contextに由来することを保つ。
+標準手順はowner harnessが現在のcheckoutを `COPY` してbuildし、`--iidfile` が
+返したexact imageを同じlock ownership内で実行する方式である。ホストcheckoutの
+bind mountを標準経路にはしない。harnessはlock取得後と実行後にもsource fingerprintを
+検査し、途中で入力が変わったrunにはreceiptを発行しない。
 
 ## 性能計測の扱い
 

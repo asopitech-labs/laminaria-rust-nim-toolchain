@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Fast structural gate, run on every commit before the message is even
-# written: `cargo fmt --check` and `cargo clippy`. Cheap (seconds) and
+# written: native hosts execute `cargo fmt --check` and `cargo clippy`;
+# Windows validates the matching receipt from the serialized WSLC owner
+# harness, avoiding a second client against the shared session. This gate
 # catches the large majority of what would otherwise only surface on
 # GitHub Actions minutes later. The heavier, test-execution half of
 # this repo's local verification lives in the `commit-msg` hook (it
@@ -19,6 +21,13 @@ MERGE_HEAD_PATH="$(git rev-parse --git-path MERGE_HEAD 2>/dev/null || true)"
 if [[ -n "$MERGE_HEAD_PATH" && -f "$MERGE_HEAD_PATH" ]]; then
   echo "pre-commit: merge commit detected, skipping fmt/clippy gate."
   exit 0
+fi
+
+if [[ "${OS:-}" == "Windows_NT" ]]; then
+  echo "pre-commit: validating the serialized WSLC fmt/clippy receipt ..."
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/windows-wslc-ci.ps1 \
+    -VerifyReceipt -RequiredCoverage structural
+  exit $?
 fi
 
 if ! command -v cargo >/dev/null 2>&1; then

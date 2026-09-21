@@ -70,9 +70,14 @@ builds, tests, checks, linting, formatting checks, and toolchain diagnostics.
 Do not run the host Windows Rust or Nim toolchain directly for this project.
 
 ```powershell
-wslc build --progress plain -f docker/bootstrap.Dockerfile -t laminaria-bootstrap .
-wslc run --rm --pull never laminaria-bootstrap doctor
+scripts/windows-wslc-ci.ps1
 ```
+
+This owner harness serializes every repository build/test use of the shared
+per-user WSLC session, runs the exact image ID produced by its build, cleans up
+only its uniquely named container, and publishes a source-bound verification
+receipt for the Windows Git hooks. Do not run independent `wslc build`/`run`
+clients in parallel from other terminals or worktrees.
 
 The complete lifecycle and canonical commands are in the
 [Windows `wslc` container development procedure](docs/04-guides/windows-wslc-development.md).
