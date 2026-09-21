@@ -937,4 +937,76 @@ mod tests {
             Err(LifecycleError::DuplicateOperation(_))
         ));
     }
+
+    #[test]
+    fn every_obligation_kind_rejects_a_kind_invalid_terminal_transition() {
+        let kinds = [
+            ObligationKind::NativeExecutableDemand,
+            ObligationKind::PackageSelection,
+            ObligationKind::SourceModule,
+            ObligationKind::SemanticFfi,
+            ObligationKind::Lowering,
+            ObligationKind::AbiTarget,
+            ObligationKind::ArtifactProduction,
+            ObligationKind::Symbol,
+            ObligationKind::LinkOrder,
+            ObligationKind::FinalLink,
+            ObligationKind::Runtime,
+            ObligationKind::Provenance,
+        ];
+        for kind in kinds {
+            let id = format!("kind-{kind:?}");
+            let closure = PositiveClosure {
+                obligations: BTreeMap::from([(
+                    id.clone(),
+                    obligation(&id, kind, vec![], ObligationState::Satisfied, None),
+                )]),
+                required_actions: vec![],
+                rejected_alternatives: BTreeMap::new(),
+            };
+            let mut graph = ProductionGraph::new(closure).unwrap();
+            let error = if kind == ObligationKind::Runtime {
+                graph
+                    .record_resolution(ResolutionEvidence {
+                        operation_id: format!("invalid-resolution-{kind:?}"),
+                        run_id: "run-invalid-transition".to_owned(),
+                        producer_identity: "resolver@verified".to_owned(),
+                        sequence: 1,
+                        input_identities: vec!["input".to_owned()],
+                        resolved_obligations: vec![id.clone()],
+                        outcome: OperationOutcome::Succeeded,
+                        structurally_verified: true,
+                    })
+                    .unwrap_err()
+            } else {
+                graph
+                    .externalize_runtime(
+                        &id,
+                        RuntimeContractEvidence {
+                            contract_id: format!("invalid-runtime-{kind:?}"),
+                            run_id: "run-invalid-transition".to_owned(),
+                            producer_identity: "runtime-preflight@verified".to_owned(),
+                            sequence: 1,
+                            loader_requirement: "loader".to_owned(),
+                            version_requirement: "version".to_owned(),
+                            verification: "verified".to_owned(),
+                        },
+                    )
+                    .unwrap_err()
+            };
+            assert!(
+                matches!(
+                    error,
+                    LifecycleError::InvalidTransition { .. }
+                        | LifecycleError::InvalidRuntimeContract(_)
+                ),
+                "{kind:?} admitted an invalid terminal transition: {error:?}"
+            );
+            assert_eq!(
+                graph.closure.obligations[&id].state,
+                ObligationState::Satisfied
+            );
+            assert!(!graph.histories.contains_key(&id));
+        }
+    }
 }

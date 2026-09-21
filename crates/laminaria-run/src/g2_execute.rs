@@ -54,13 +54,10 @@
 //!   code/stdout/stderr against the fixture's own declared expectation
 //!   (exit 0, stdout `"9\n"`, empty stderr).
 //!
-//! The remaining variants (`PreflightRuntimeContract`,
-//! `PublishProvenance`) are real, disclosed, not-yet-implemented gaps
-//! -- the rest of issue #46's own action chain, deliberately left for
-//! following checkpoints rather than claimed here. No native
-//! executable existed before Checkpoint 5; #46's own Direct-acceptance
-//! box 2 ("produce... and execute... the expected observable result")
-//! only becomes checkable from this checkpoint onward.
+//! `execute_fixed_m1_graph` connects those physical operations to the
+//! common obligation lifecycle. It uses the successful execution as the
+//! runtime preflight, writes a real provenance statement, admits the graph
+//! through the publication gate, and only then publishes the final manifest.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -72,8 +69,9 @@ use laminaria_plan::dependency_graph::{
 };
 use laminaria_plan::obligation_lifecycle::{
     ArtifactManifest, LifecycleError, OperationEvidence, OperationOutcome, ProducedFact,
-    ProductionGraph, ResolutionEvidence,
+    ProductionGraph, PublicationBlocker, ResolutionEvidence,
 };
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::command_runner::RealCommandRunner;
@@ -133,6 +131,11 @@ pub enum G2Error {
     },
     Discharge(LifecycleViolation),
     ProductionLifecycle(LifecycleError),
+    PublicationBlocked {
+        blockers: Vec<PublicationBlocker>,
+        executed_actions: Vec<String>,
+        unpublished_paths: Vec<PathBuf>,
+    },
 }
 
 impl std::fmt::Display for G2Error {
@@ -167,6 +170,14 @@ impl std::fmt::Display for G2Error {
             G2Error::ProductionLifecycle(error) => {
                 write!(f, "G2 production lifecycle: {error:?}")
             }
+            G2Error::PublicationBlocked {
+                blockers,
+                executed_actions,
+                unpublished_paths,
+            } => write!(
+                f,
+                "G2 publication blocked: {blockers:?}; executed actions: {executed_actions:?}; unpublished paths: {unpublished_paths:?}"
+            ),
         }
     }
 }
@@ -843,6 +854,36 @@ pub fn link_and_run_native_executable(
 pub struct FixedGraphPublication {
     pub executable: NativeExecutableEvidence,
     pub manifest: ArtifactManifest,
+    pub provenance_path: PathBuf,
+    pub manifest_path: PathBuf,
+}
+
+#[derive(Debug, Serialize)]
+struct ProvenanceStatement<'a> {
+    contract_version: u32,
+    subject_artifact: &'a ProducedFact,
+    completed_operations: &'a [OperationEvidence],
+    obligation_histories:
+        &'a BTreeMap<String, Vec<laminaria_plan::obligation_lifecycle::StateTransition>>,
+    publication_action_id: &'a str,
+    publication_discharges: &'a [String],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SeededGap {
+    None,
+    #[cfg(test)]
+    Omit(RequiredActionKind),
+}
+
+impl SeededGap {
+    fn omits(self, _kind: RequiredActionKind) -> bool {
+        match self {
+            Self::None => false,
+            #[cfg(test)]
+            Self::Omit(omitted) => omitted == _kind,
+        }
+    }
 }
 
 /// Executes the fixed Cargo/Nimble/C/C++ M1 graph and admits the executable
@@ -854,6 +895,14 @@ pub struct FixedGraphPublication {
 pub fn execute_fixed_m1_graph(
     repo_root: &Path,
     out_dir: &Path,
+) -> Result<FixedGraphPublication, G2Error> {
+    execute_fixed_m1_graph_with_seed(repo_root, out_dir, SeededGap::None)
+}
+
+fn execute_fixed_m1_graph_with_seed(
+    repo_root: &Path,
+    out_dir: &Path,
+    seeded_gap: SeededGap,
 ) -> Result<FixedGraphPublication, G2Error> {
     let layout = FixtureLayout::discover();
     let runner = RealCommandRunner;
@@ -989,18 +1038,33 @@ pub fn execute_fixed_m1_graph(
         ),
     ]);
 
+    let provenance_path = out_dir.join("laminaria-provenance.json");
+    let staged_provenance_path = out_dir.join(".laminaria-provenance.json.staging");
+    let manifest_path = out_dir.join("laminaria-artifact-manifest.json");
+    let staged_manifest_path = out_dir.join(".laminaria-artifact-manifest.json.staging");
     let actions = production.closure.required_actions.clone();
     let mut requested_artifact = None;
     for (offset, action) in actions.into_iter().enumerate() {
+        if seeded_gap.omits(action.kind) {
+            continue;
+        }
         let sequence = offset as u64 + 2;
         let base_fact = if action.kind == RequiredActionKind::PublishProvenance {
-            let bytes = serde_json::to_vec(&production)
+            let subject_artifact = requested_artifact.as_ref().ok_or_else(|| {
+                G2Error::Io("provenance publication has no linked artifact identity".to_owned())
+            })?;
+            let statement = ProvenanceStatement {
+                contract_version: production.contract_version,
+                subject_artifact,
+                completed_operations: &production.operations,
+                obligation_histories: &production.histories,
+                publication_action_id: &action.id,
+                publication_discharges: &action.discharges,
+            };
+            let bytes = serde_json::to_vec_pretty(&statement)
                 .map_err(|error| G2Error::Io(format!("serialize provenance: {error}")))?;
-            ProducedFact {
-                identity: String::new(),
-                digest: sha256_bytes(&bytes),
-                size_bytes: bytes.len() as u64,
-            }
+            write_staged_file(&staged_provenance_path, &bytes)?;
+            observed_file(&staged_provenance_path)?
         } else if action.outputs.is_empty() {
             ProducedFact {
                 identity: String::new(),
@@ -1069,10 +1133,59 @@ pub fn execute_fixed_m1_graph(
     }
     let requested_artifact = requested_artifact
         .ok_or_else(|| G2Error::Io("link action produced no executable identity".to_owned()))?;
-    let manifest = production.publication_manifest(requested_artifact)?;
+    let manifest = match production.publication_manifest(requested_artifact) {
+        Ok(manifest) => manifest,
+        Err(LifecycleError::PublicationBlocked(blockers)) => {
+            remove_staging_file(&staged_provenance_path)?;
+            remove_staging_file(&staged_manifest_path)?;
+            return Err(G2Error::PublicationBlocked {
+                blockers,
+                executed_actions: production
+                    .operations
+                    .iter()
+                    .map(|operation| operation.action_id.clone())
+                    .collect(),
+                unpublished_paths: vec![provenance_path, manifest_path],
+            });
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let manifest_bytes = serde_json::to_vec_pretty(&manifest)
+        .map_err(|error| G2Error::Io(format!("serialize artifact manifest: {error}")))?;
+    write_staged_file(&staged_manifest_path, &manifest_bytes)?;
+    publish_staged_file(&staged_provenance_path, &provenance_path)?;
+    publish_staged_file(&staged_manifest_path, &manifest_path)?;
     Ok(FixedGraphPublication {
         executable,
         manifest,
+        provenance_path,
+        manifest_path,
+    })
+}
+
+fn write_staged_file(path: &Path, bytes: &[u8]) -> Result<(), G2Error> {
+    fs::write(path, bytes).map_err(|error| G2Error::Io(format!("{}: {error}", path.display())))?;
+    let file = fs::File::open(path)
+        .map_err(|error| G2Error::Io(format!("{}: {error}", path.display())))?;
+    file.sync_all()
+        .map_err(|error| G2Error::Io(format!("{}: {error}", path.display())))
+}
+
+fn remove_staging_file(path: &Path) -> Result<(), G2Error> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(G2Error::Io(format!("{}: {error}", path.display()))),
+    }
+}
+
+fn publish_staged_file(staged: &Path, published: &Path) -> Result<(), G2Error> {
+    fs::rename(staged, published).map_err(|error| {
+        G2Error::Io(format!(
+            "publish {} as {}: {error}",
+            staged.display(),
+            published.display()
+        ))
     })
 }
 
@@ -1087,12 +1200,6 @@ fn observed_file(path: &Path) -> Result<ProducedFact, G2Error> {
     })
 }
 
-fn sha256_bytes(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
-}
-
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -1100,7 +1207,7 @@ mod tests {
     use crate::cross_ecosystem_ingest::{
         ingest_cargo_metadata, ingest_fixture_input, FixtureLayout,
     };
-    use laminaria_plan::dependency_graph::{resolve, ObligationState};
+    use laminaria_plan::dependency_graph::{resolve, ObligationKind, ObligationState};
 
     /// Same computation `FixtureLayout::discover` uses for its own
     /// `root`, minus the `fixtures/cross-ecosystem-native-executable`
@@ -1129,6 +1236,23 @@ mod tests {
             publication.manifest.requested_artifact.digest,
             publication.executable.executable_sha256
         );
+        assert!(publication.provenance_path.is_file());
+        assert!(publication.manifest_path.is_file());
+        let persisted_manifest: ArtifactManifest = serde_json::from_slice(
+            &fs::read(&publication.manifest_path).expect("published manifest must be readable"),
+        )
+        .expect("published manifest must be valid JSON");
+        assert_eq!(persisted_manifest, publication.manifest);
+        let provenance_operation = publication
+            .manifest
+            .operations
+            .iter()
+            .find(|operation| operation.action_kind == RequiredActionKind::PublishProvenance)
+            .expect("publication must have causal provenance evidence");
+        let mut observed_provenance = observed_file(&publication.provenance_path)
+            .expect("published provenance must be observable");
+        observed_provenance.identity = provenance_operation.outputs[0].identity.clone();
+        assert_eq!(provenance_operation.outputs, vec![observed_provenance]);
         assert!(publication
             .manifest
             .decisions
@@ -1139,6 +1263,89 @@ mod tests {
                     | ObligationState::Externalized
                     | ObligationState::ProvenIrrelevant
             )));
+        let observed_kinds: BTreeSet<ObligationKind> = publication
+            .manifest
+            .decisions
+            .iter()
+            .map(|decision| decision.kind)
+            .collect();
+        assert_eq!(
+            observed_kinds,
+            BTreeSet::from([
+                ObligationKind::NativeExecutableDemand,
+                ObligationKind::PackageSelection,
+                ObligationKind::SourceModule,
+                ObligationKind::SemanticFfi,
+                ObligationKind::Lowering,
+                ObligationKind::AbiTarget,
+                ObligationKind::ArtifactProduction,
+                ObligationKind::Symbol,
+                ObligationKind::LinkOrder,
+                ObligationKind::FinalLink,
+                ObligationKind::Runtime,
+                ObligationKind::Provenance,
+            ])
+        );
+        assert!(publication.manifest.decisions.iter().all(|decision| {
+            decision
+                .history
+                .last()
+                .is_some_and(|transition| transition.to == decision.state)
+        }));
+        let _ = fs::remove_dir_all(&out_dir);
+    }
+
+    #[test]
+    fn fixed_m1_production_entry_point_blocks_a_seeded_missing_provenance_operation() {
+        let out_dir = std::env::temp_dir().join(format!(
+            "laminaria-issue-88-negative-{}",
+            std::process::id()
+        ));
+        let layout = FixtureLayout::discover();
+        let input = ingest_fixture_input(&RealCommandRunner, &layout, &["1.0.0"])
+            .expect("must ingest the fixed production graph");
+        let closure = resolve(&input).expect("must resolve the fixed production graph");
+        let expected_actions: Vec<String> = closure
+            .required_actions
+            .iter()
+            .filter(|action| action.kind != RequiredActionKind::PublishProvenance)
+            .map(|action| action.id.clone())
+            .collect();
+
+        let error = execute_fixed_m1_graph_with_seed(
+            &repo_root(),
+            &out_dir,
+            SeededGap::Omit(RequiredActionKind::PublishProvenance),
+        )
+        .expect_err("missing provenance must block publication");
+        let G2Error::PublicationBlocked {
+            blockers,
+            executed_actions,
+            unpublished_paths,
+        } = error
+        else {
+            panic!("expected a structured publication failure, got {error:?}")
+        };
+        assert_eq!(
+            blockers,
+            vec![PublicationBlocker::UnclosedObligation {
+                obligation_id: "Provenance:native_executable".to_owned(),
+                state: ObligationState::Satisfied,
+            }]
+        );
+        assert_eq!(executed_actions, expected_actions);
+        assert_eq!(
+            unpublished_paths,
+            vec![
+                out_dir.join("laminaria-provenance.json"),
+                out_dir.join("laminaria-artifact-manifest.json")
+            ]
+        );
+        assert!(unpublished_paths.iter().all(|path| !path.exists()));
+        assert!(!out_dir.join(".laminaria-provenance.json.staging").exists());
+        assert!(!out_dir
+            .join(".laminaria-artifact-manifest.json.staging")
+            .exists());
         let _ = fs::remove_dir_all(&out_dir);
     }
 
