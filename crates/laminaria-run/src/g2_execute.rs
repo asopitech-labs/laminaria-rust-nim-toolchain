@@ -66,6 +66,7 @@ use std::process::Command;
 
 use laminaria_plan::dependency_graph::{
     resolve, DischargeKind, LifecycleViolation, PositiveClosure, RequiredActionKind,
+    RuntimeRequirementFacts,
 };
 use laminaria_plan::obligation_lifecycle::{
     ArtifactManifest, LifecycleError, OperationEvidence, OperationOutcome, ProducedFact,
@@ -129,6 +130,10 @@ pub enum G2Error {
         stdout: String,
         stderr: String,
     },
+    RuntimeContractUnavailable {
+        contract: String,
+        detail: String,
+    },
     Discharge(LifecycleViolation),
     ProductionLifecycle(LifecycleError),
     PublicationBlocked {
@@ -165,6 +170,10 @@ impl std::fmt::Display for G2Error {
                 f,
                 "G2 execution: running real executable '{}' gave exit={exit_code:?} stdout={stdout:?} stderr={stderr:?}, not the fixture's declared expected result",
                 path.display()
+            ),
+            G2Error::RuntimeContractUnavailable { contract, detail } => write!(
+                f,
+                "G2 runtime preflight: contract {contract:?} is unavailable: {detail}"
             ),
             G2Error::Discharge(violation) => write!(f, "G2 execution: {violation}"),
             G2Error::ProductionLifecycle(error) => {
@@ -709,6 +718,217 @@ fn run_and_capture(program: &Path) -> Result<(Option<i32>, String, String), G2Er
     ))
 }
 
+/// Evidence that the exact linked bytes run without a build environment and
+/// that every retained platform dependency has an observed runtime provider.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimePreflightEvidence {
+    pub clean_executable_path: PathBuf,
+    pub executable_sha256: String,
+    pub target_triple: String,
+    pub interpreter: PathBuf,
+    pub shared_library_bindings: Vec<String>,
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+impl RuntimePreflightEvidence {
+    fn as_operation_detail(&self) -> String {
+        format!(
+            "exact sha256={} ran from artifact-only directory with an empty environment; target={}; interpreter={}; shared libraries=[{}]; exit={} stdout={:?} stderr={:?}",
+            self.executable_sha256,
+            self.target_triple,
+            self.interpreter.display(),
+            self.shared_library_bindings.join(", "),
+            self.exit_code,
+            self.stdout,
+            self.stderr
+        )
+    }
+}
+
+fn require_runtime_path(path: &Path, contract: &str) -> Result<(), G2Error> {
+    if path.is_file() {
+        Ok(())
+    } else {
+        Err(G2Error::RuntimeContractUnavailable {
+            contract: contract.to_owned(),
+            detail: format!("required runtime file '{}' is missing", path.display()),
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn inspect_linux_runtime(executable: &Path) -> Result<(PathBuf, Vec<String>), G2Error> {
+    let program_headers = run_tool(
+        "readelf",
+        &["--program-headers", &executable.to_string_lossy()],
+    )?;
+    let interpreter = program_headers
+        .lines()
+        .find_map(|line| {
+            let marker = "Requesting program interpreter: ";
+            let start = line.find(marker)? + marker.len();
+            Some(PathBuf::from(line[start..].trim().trim_end_matches(']')))
+        })
+        .ok_or_else(|| G2Error::RuntimeContractUnavailable {
+            contract: "OS ABI/dynamic loader".to_owned(),
+            detail: "ELF program headers declare no interpreter".to_owned(),
+        })?;
+    require_runtime_path(&interpreter, "ELF program interpreter")?;
+
+    let loader_output = run_tool("ldd", &[&executable.to_string_lossy()])?;
+    if let Some(missing) = loader_output
+        .lines()
+        .find(|line| line.contains("not found"))
+    {
+        return Err(G2Error::RuntimeContractUnavailable {
+            contract: "ELF shared-library closure".to_owned(),
+            detail: missing.trim().to_owned(),
+        });
+    }
+    let mut bindings = Vec::new();
+    for line in loader_output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        if let Some((name, provider_and_address)) = line.split_once("=>") {
+            let provider = provider_and_address
+                .split_whitespace()
+                .next()
+                .ok_or_else(|| G2Error::RuntimeContractUnavailable {
+                    contract: "ELF shared-library closure".to_owned(),
+                    detail: format!("ldd reported no provider for {name:?}"),
+                })?;
+            require_runtime_path(Path::new(provider), name.trim())?;
+            bindings.push(format!("{}=>{}", name.trim(), provider));
+        } else {
+            let provider = line.split_whitespace().next().unwrap_or_default();
+            if provider.starts_with('/') {
+                require_runtime_path(Path::new(provider), "ELF runtime provider")?;
+                bindings.push(format!("{}=>{}", provider, provider));
+            } else if provider == "linux-vdso.so.1" {
+                bindings.push("linux-vdso.so.1=>kernel".to_owned());
+            }
+        }
+    }
+    if bindings.is_empty() {
+        return Err(G2Error::RuntimeContractUnavailable {
+            contract: "ELF shared-library closure".to_owned(),
+            detail: "ldd reported no runtime bindings".to_owned(),
+        });
+    }
+    Ok((interpreter, bindings))
+}
+
+/// Copies only the exact production executable into a fresh consumption
+/// directory, proves its digest is unchanged, inspects the Linux loader
+/// closure, and runs it with an empty environment and that directory as cwd.
+/// Cargo, Nimble, compilers, sources, archives, and package caches are absent
+/// from both the directory and the process environment.
+#[cfg(target_os = "linux")]
+pub fn preflight_runtime_contract(
+    executable: &NativeExecutableEvidence,
+    requirements: &[RuntimeRequirementFacts],
+    out_dir: &Path,
+) -> Result<RuntimePreflightEvidence, G2Error> {
+    let requirement = requirements
+        .first()
+        .ok_or_else(|| G2Error::RuntimeContractUnavailable {
+            contract: "declared runtime contract".to_owned(),
+            detail: "the resolved graph declared no runtime requirement".to_owned(),
+        })?;
+    if requirements
+        .iter()
+        .any(|candidate| candidate.target_triple != requirement.target_triple)
+    {
+        return Err(G2Error::RuntimeContractUnavailable {
+            contract: "target runtime contract".to_owned(),
+            detail: "resolved runtime requirements disagree on target triple".to_owned(),
+        });
+    }
+
+    let clean_dir = out_dir.join("clean-runtime");
+    fs::create_dir_all(&clean_dir)
+        .map_err(|error| G2Error::Io(format!("{}: {error}", clean_dir.display())))?;
+    let clean_executable_path = clean_dir.join("app");
+    fs::copy(&executable.executable_path, &clean_executable_path).map_err(|error| {
+        G2Error::Io(format!(
+            "copy {} to {}: {error}",
+            executable.executable_path.display(),
+            clean_executable_path.display()
+        ))
+    })?;
+    let entries: Vec<PathBuf> = fs::read_dir(&clean_dir)
+        .map_err(|error| G2Error::Io(format!("{}: {error}", clean_dir.display())))?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<_, _>>()
+        .map_err(|error| G2Error::Io(format!("{}: {error}", clean_dir.display())))?;
+    if entries != vec![clean_executable_path.clone()] {
+        return Err(G2Error::RuntimeContractUnavailable {
+            contract: requirement.description.clone(),
+            detail: format!("clean consumption directory contains unexpected inputs: {entries:?}"),
+        });
+    }
+    let executable_sha256 = sha256_file(&clean_executable_path)?;
+    if executable_sha256 != executable.executable_sha256 {
+        return Err(G2Error::RuntimeContractUnavailable {
+            contract: "exact production artifact identity".to_owned(),
+            detail: format!(
+                "copied artifact digest {executable_sha256} differs from linked digest {}",
+                executable.executable_sha256
+            ),
+        });
+    }
+    let (interpreter, shared_library_bindings) = inspect_linux_runtime(&clean_executable_path)?;
+    let output = Command::new(&clean_executable_path)
+        .env_clear()
+        .current_dir(&clean_dir)
+        .output()
+        .map_err(|error| G2Error::RuntimeContractUnavailable {
+            contract: requirement.description.clone(),
+            detail: format!("failed to execute exact artifact: {error}"),
+        })?;
+    let exit_code = output.status.code();
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    if exit_code != Some(0) || stdout != "9\n" || !stderr.is_empty() {
+        return Err(G2Error::UnexpectedExecutionResult {
+            path: clean_executable_path,
+            exit_code,
+            stdout,
+            stderr,
+        });
+    }
+    Ok(RuntimePreflightEvidence {
+        clean_executable_path,
+        executable_sha256,
+        target_triple: requirement.target_triple.clone(),
+        interpreter,
+        shared_library_bindings,
+        exit_code: 0,
+        stdout,
+        stderr,
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn preflight_runtime_contract(
+    _executable: &NativeExecutableEvidence,
+    requirements: &[RuntimeRequirementFacts],
+    _out_dir: &Path,
+) -> Result<RuntimePreflightEvidence, G2Error> {
+    Err(G2Error::RuntimeContractUnavailable {
+        contract: requirements
+            .first()
+            .map(|requirement| requirement.description.clone())
+            .unwrap_or_else(|| "declared runtime contract".to_owned()),
+        detail: "the fixed M1 clean-runtime inspector currently supports ELF/Linux targets"
+            .to_owned(),
+    })
+}
+
 /// Actually executes the real `link-native-executable` `RequiredAction`
 /// against the four real artifacts Checkpoints 1, 2, 3, and 4 already
 /// produced and independently verified (`archive:cadd`, `object:app`,
@@ -853,6 +1073,7 @@ pub fn link_and_run_native_executable(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FixedGraphPublication {
     pub executable: NativeExecutableEvidence,
+    pub runtime_preflight: RuntimePreflightEvidence,
     pub manifest: ArtifactManifest,
     pub provenance_path: PathBuf,
     pub manifest_path: PathBuf,
@@ -958,6 +1179,8 @@ fn execute_fixed_m1_graph_with_seed(
         },
         out_dir,
     )?;
+    let runtime_preflight =
+        preflight_runtime_contract(&executable, &input.runtime_requirements, out_dir)?;
 
     let resolver_owned: Vec<String> = production
         .closure
@@ -1118,10 +1341,9 @@ fn execute_fixed_m1_graph_with_seed(
                 outcome: OperationOutcome::Succeeded,
                 structurally_verified: true,
                 detail: match action.kind {
-                    RequiredActionKind::PreflightRuntimeContract => format!(
-                        "exact executable ran with exit={} stdout={:?}",
-                        executable.exit_code, executable.stdout
-                    ),
+                    RequiredActionKind::PreflightRuntimeContract => {
+                        runtime_preflight.as_operation_detail()
+                    }
                     RequiredActionKind::PublishProvenance => {
                         "serialized operation trace and obligation histories".to_owned()
                     }
@@ -1157,6 +1379,7 @@ fn execute_fixed_m1_graph_with_seed(
     publish_staged_file(&staged_manifest_path, &manifest_path)?;
     Ok(FixedGraphPublication {
         executable,
+        runtime_preflight,
         manifest,
         provenance_path,
         manifest_path,
@@ -1232,6 +1455,30 @@ mod tests {
             .expect("the fixed production graph must execute and close");
         assert_eq!(publication.executable.exit_code, 0);
         assert_eq!(publication.executable.stdout, "9\n");
+        assert_eq!(
+            publication.runtime_preflight.executable_sha256,
+            publication.executable.executable_sha256
+        );
+        assert_eq!(publication.runtime_preflight.exit_code, 0);
+        assert_eq!(publication.runtime_preflight.stdout, "9\n");
+        assert_eq!(
+            fs::read_dir(
+                publication
+                    .runtime_preflight
+                    .clean_executable_path
+                    .parent()
+                    .unwrap()
+            )
+            .unwrap()
+            .count(),
+            1,
+            "the clean consumption directory must contain only the exact executable"
+        );
+        assert!(publication.runtime_preflight.interpreter.is_file());
+        assert!(!publication
+            .runtime_preflight
+            .shared_library_bindings
+            .is_empty());
         assert_eq!(
             publication.manifest.requested_artifact.digest,
             publication.executable.executable_sha256
@@ -1347,6 +1594,19 @@ mod tests {
             .join(".laminaria-artifact-manifest.json.staging")
             .exists());
         let _ = fs::remove_dir_all(&out_dir);
+    }
+
+    #[test]
+    fn runtime_preflight_rejects_a_missing_externalized_provider() {
+        let missing = Path::new("/laminaria-missing-runtime/ld-does-not-exist.so");
+        let error = require_runtime_path(missing, "seeded missing dynamic loader")
+            .expect_err("a missing runtime provider must fail preflight");
+        assert!(matches!(
+            error,
+            G2Error::RuntimeContractUnavailable { contract, detail }
+                if contract == "seeded missing dynamic loader"
+                    && detail.contains("ld-does-not-exist.so")
+        ));
     }
 
     /// The end-to-end Checkpoint 1 case: resolve a real G1 positive
