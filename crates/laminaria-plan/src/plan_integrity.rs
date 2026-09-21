@@ -29,11 +29,13 @@ use crate::dependency_graph::{
     discharge_kind_allowed, ArtifactOutputKind, DependencyResolutionInput, ObligationKind,
     PositiveClosure, RequiredAction, RequiredActionKind,
 };
+use crate::physical_work::{validate_physical_work_contract, PhysicalWorkViolation};
 
 /// One concrete way a plan can fail integrity -- always named with the
 /// exact identities involved, never a bare "invalid plan" signal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlanIntegrityViolation {
+    PhysicalWorkContract(PhysicalWorkViolation),
     DanglingObligationEdge {
         obligation_id: String,
         missing_dependency: String,
@@ -159,6 +161,12 @@ pub fn verify_plan_integrity(
     closure: &PositiveClosure,
 ) -> Vec<PlanIntegrityViolation> {
     let mut violations = Vec::new();
+
+    violations.extend(
+        validate_physical_work_contract(&closure.physical_work)
+            .into_iter()
+            .map(PlanIntegrityViolation::PhysicalWorkContract),
+    );
 
     // 1. Obligation depends_on referential integrity.
     for obligation in closure.obligations.values() {
@@ -485,6 +493,28 @@ mod tests {
             violations.is_empty(),
             "unexpected violations: {violations:#?}"
         );
+    }
+
+    #[test]
+    fn production_integrity_gate_rejects_a_disconnected_physical_work_map() {
+        let input = minimal_input();
+        let mut closure = resolve(&input).expect("must resolve");
+        closure.physical_work.units.retain(|unit| {
+            unit.id
+                != crate::physical_work::WorkUnitId::Logical(
+                    crate::physical_work::LogicalActivity::N9ExportRegistration,
+                )
+        });
+
+        let violations = verify_plan_integrity(&input, &closure);
+        assert!(violations.iter().any(|violation| matches!(
+            violation,
+            PlanIntegrityViolation::PhysicalWorkContract(
+                PhysicalWorkViolation::MissingLogicalActivity {
+                    activity: crate::physical_work::LogicalActivity::N9ExportRegistration
+                }
+            )
+        )));
     }
 
     #[test]

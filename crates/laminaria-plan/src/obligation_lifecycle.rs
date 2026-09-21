@@ -822,6 +822,7 @@ mod tests {
                 discharges: vec!["artifact".to_owned()],
                 depends_on: vec![],
             }],
+            physical_work: crate::physical_work::canonical_physical_work_contract(),
             rejected_alternatives: BTreeMap::new(),
         })
         .unwrap()
@@ -1019,6 +1020,7 @@ mod tests {
                     obligation(&id, kind, vec![], ObligationState::Satisfied, None),
                 )]),
                 required_actions: vec![],
+                physical_work: crate::physical_work::canonical_physical_work_contract(),
                 rejected_alternatives: BTreeMap::new(),
             };
             let mut graph = ProductionGraph::new(closure).unwrap();

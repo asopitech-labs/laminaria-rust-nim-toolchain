@@ -42,6 +42,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::physical_work::{canonical_physical_work_contract, PhysicalWorkContract};
+
 /// Which ecosystem an obligation, source, or candidate belongs to.
 /// `Cross` is for obligations owned by no single ecosystem (the final
 /// link, runtime preflight, provenance publication, and the top-level
@@ -559,6 +561,9 @@ pub struct RequiredAction {
 pub struct PositiveClosure {
     pub obligations: BTreeMap<String, Obligation>,
     pub required_actions: Vec<RequiredAction>,
+    /// The logical-activity-to-physical-work map consumed by the production
+    /// integrity gate and, in Checkpoint B, the common scheduler lifecycle.
+    pub physical_work: PhysicalWorkContract,
     /// Selected package id -> the alternative candidates considered and
     /// rejected for it, with typed reasons.
     pub rejected_alternatives: BTreeMap<String, Vec<RejectionDetail>>,
@@ -2153,6 +2158,7 @@ pub fn resolve(input: &DependencyResolutionInput) -> Result<PositiveClosure, Gra
     Ok(PositiveClosure {
         obligations,
         required_actions,
+        physical_work: canonical_physical_work_contract(),
         rejected_alternatives,
     })
 }
