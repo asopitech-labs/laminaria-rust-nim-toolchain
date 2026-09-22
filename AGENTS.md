@@ -94,20 +94,33 @@ in the history, not GitHub Actions as the first check.
   test, lint, format-check, and toolchain diagnostic inside the `wslc`
   container. Do not invoke host Windows `cargo`, `rustc`, `nim`, `nimble`, or
   the bootstrap script for project development.
-- Treat the default per-user `wslc` session as one shared singleton across all
-  processes and worktrees. Do not launch independent build/test clients in
-  parallel. Run the repository-owned owner harness from the repository root:
+- The sole native test exception is
+  `scripts/tests/test-windows-wslc-ci.ps1`: it validates the Windows host
+  mutex, service preflight, lease, and receipt control plane with a fake
+  `wslc` function and must never contact the real WSLC session.
+- Treat the CLI-created default per-user `wslc` session as one shared singleton
+  across all processes and worktrees. Do not launch independent build/test
+  clients in parallel. Run the repository-owned owner harness from the
+  repository root:
 
   ```powershell
   scripts/windows-wslc-ci.ps1
   ```
 
+- In a managed agent environment, the owner harness may need permission to run
+  outside the command sandbox because the sandbox job can make WSLC VM creation
+  fail with `E_ACCESSDENIED`. This is not UAC elevation: keep the caller at
+  medium integrity so it continues to use the same default per-user session.
+  Preserve the user's configured `session.storagePath`; an in-sandbox denial is
+  not evidence that the configured VHD location is invalid.
+
 - The harness holds a per-user host mutex across image build, execution, owned
-  container cleanup, and receipt publication. It executes the exact image ID
-  emitted by that build; the mutable `laminaria-bootstrap` tag is not an
-  execution identity. Git hooks on Windows consume the matching receipt and
-  must not start another `wslc` client. The canonical modes and lifecycle are
-  documented in `docs/04-guides/windows-wslc-development.md`.
+  container cleanup, and receipt publication. It refuses to call WSLC while
+  HCS is transitioning or another raw `wslc` client exists. It executes the
+  exact image ID emitted by that build; the mutable `laminaria-bootstrap` tag
+  is not an execution identity. Git hooks on Windows consume the matching
+  receipt and must not start another `wslc` client. The canonical modes and
+  lifecycle are documented in `docs/04-guides/windows-wslc-development.md`.
 - Keep the image's default unprivileged `laminaria` user. Do not add
   `--user root` to normal build or test commands.
 - For the Nim planning-kernel test on Windows, use the documented direct

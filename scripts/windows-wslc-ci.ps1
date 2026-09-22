@@ -18,7 +18,8 @@ param(
     [switch]$FingerprintOnly,
     [switch]$VerifyReceipt,
     [ValidateSet("structural", "full")]
-    [string]$RequiredCoverage = "structural"
+    [string]$RequiredCoverage = "structural",
+    [string]$StateDirectory = [System.IO.Path]::GetTempPath()
 )
 
 Set-StrictMode -Version Latest
@@ -69,10 +70,26 @@ function Invoke-Wslc {
         [switch]$IgnoreFailure
     )
 
-    & wslc @Arguments
+    & wslc @Arguments | ForEach-Object { Write-Host $_ }
     $exitCode = $LASTEXITCODE
     if (-not $IgnoreFailure -and $exitCode -ne 0) {
         throw "wslc $($Arguments -join ' ') failed with exit code $exitCode"
+    }
+    return $exitCode
+}
+
+function Assert-WslcHostReady {
+    foreach ($serviceName in @("vmcompute", "WSLService")) {
+        $service = Get-Service -Name $serviceName -ErrorAction Stop
+        if ($service.Status -in @("StartPending", "StopPending")) {
+            throw "Refusing to invoke WSLC while $serviceName is $($service.Status). Repair the existing host transition first."
+        }
+    }
+
+    $externalClients = @(Get-Process -Name "wslc" -ErrorAction SilentlyContinue)
+    if ($externalClients.Count -ne 0) {
+        $processIds = ($externalClients | ForEach-Object { $_.Id }) -join ", "
+        throw "Refusing to invoke WSLC while an external wslc client is already running (PID: $processIds)."
     }
 }
 
@@ -119,11 +136,11 @@ $sid = $identity.User.Value
 $mutexName = "Global\Asopitech.LaminariaBootstrap.Wslc.$sid"
 $mutex = [System.Threading.Mutex]::new($false, $mutexName)
 $lockTaken = $false
-$containerCreated = $false
+$runInvocationReturned = $false
 $containerName = "laminaria-ci-$([Guid]::NewGuid().ToString('N'))"
-$iidFile = Join-Path ([System.IO.Path]::GetTempPath()) "laminaria-$([Guid]::NewGuid().ToString('N')).iid"
-$cidFile = Join-Path ([System.IO.Path]::GetTempPath()) "laminaria-$([Guid]::NewGuid().ToString('N')).cid"
-$leasePath = Join-Path ([System.IO.Path]::GetTempPath()) "laminaria-wslc-owner-$sid.json"
+$iidFile = Join-Path $StateDirectory "laminaria-$([Guid]::NewGuid().ToString('N')).iid"
+$cidFile = Join-Path $StateDirectory "laminaria-$([Guid]::NewGuid().ToString('N')).cid"
+$leasePath = Join-Path $StateDirectory "laminaria-wslc-owner-$sid.json"
 
 try {
     Write-Host "Waiting for the per-user WSLC owner lock: $mutexName"
@@ -138,24 +155,24 @@ try {
         throw "Timed out waiting for the WSLC owner lock after $LockTimeoutSeconds seconds. Another repository process owns the shared WSLC session."
     }
 
+    Assert-WslcHostReady
+
     if (Test-Path -LiteralPath $leasePath -PathType Leaf) {
         $abandonedLease = Get-Content -LiteralPath $leasePath -Raw | ConvertFrom-Json
+        if ($abandonedLease.schema -ne "laminaria-wslc-owner/v2" -or $abandonedLease.session_identity -ne "default-per-user") {
+            throw "Refusing an incompatible WSLC owner lease at $leasePath."
+        }
         $abandonedContainer = [string]$abandonedLease.container_name
         if ($abandonedContainer -notmatch '^laminaria-ci-[0-9a-f]{32}$') {
             throw "Refusing an invalid abandoned WSLC owner lease at $leasePath."
         }
         Write-Warning "Recovering the exact container from an abandoned owner lease: $abandonedContainer"
-        Invoke-Wslc -Arguments @("container", "rm", "--force", $abandonedContainer) -IgnoreFailure | Out-Null
+        $recoveryExitCode = Invoke-Wslc -Arguments @("container", "rm", "--force", $abandonedContainer) -IgnoreFailure
+        if ($recoveryExitCode -ne 0) {
+            throw "The abandoned owner container could not be removed. The lease is retained and no new WSLC work will start."
+        }
         Remove-Item -LiteralPath $leasePath -Force
     }
-
-    [ordered]@{
-        schema = "laminaria-wslc-owner/v1"
-        container_name = $containerName
-        owner_pid = $PID
-        source_fingerprint = $sourceFingerprint
-        acquired_at_utc = [DateTimeOffset]::UtcNow.ToString("o")
-    } | ConvertTo-Json | Set-Content -LiteralPath $leasePath -Encoding utf8
 
     $lockedFingerprint = Get-SourceFingerprint
     if ($lockedFingerprint -ne $sourceFingerprint) {
@@ -173,7 +190,7 @@ try {
     )
     Push-Location $repositoryRoot
     try {
-        Invoke-Wslc -Arguments $buildArguments
+        $null = Invoke-Wslc -Arguments $buildArguments
     }
     finally {
         Pop-Location
@@ -186,6 +203,19 @@ try {
     if ([string]::IsNullOrWhiteSpace($imageId)) {
         throw "wslc build wrote an empty image ID."
     }
+
+    # A lease is needed only once a container invocation can outlive this owner.
+    # Build failures cannot leave a repository container behind. If the owner is
+    # terminated after this point, the next owner must remove this exact name
+    # before doing any new work.
+    [ordered]@{
+        schema = "laminaria-wslc-owner/v2"
+        session_identity = "default-per-user"
+        container_name = $containerName
+        owner_pid = $PID
+        source_fingerprint = $sourceFingerprint
+        acquired_at_utc = [DateTimeOffset]::UtcNow.ToString("o")
+    } | ConvertTo-Json | Set-Content -LiteralPath $leasePath -Encoding utf8
 
     $runArguments = @(
         "run", "--rm", "--pull", "never",
@@ -206,8 +236,14 @@ try {
         $runArguments += @("--test-only", $TestFilter)
     }
 
-    $containerCreated = $true
-    Invoke-Wslc -Arguments $runArguments
+    # --rm is the sole cleanup owner for a run that returns, including a test
+    # process that exits nonzero. Do not race it with a second explicit rm.
+    # Explicit rm is reserved for a later owner recovering an abandoned lease.
+    $runExitCode = Invoke-Wslc -Arguments $runArguments -IgnoreFailure
+    $runInvocationReturned = $true
+    if ($runExitCode -ne 0) {
+        throw "wslc $($runArguments -join ' ') failed with exit code $runExitCode"
+    }
 
     $finalFingerprint = Get-SourceFingerprint
     if ($finalFingerprint -ne $sourceFingerprint) {
@@ -229,11 +265,8 @@ try {
     }
 }
 finally {
-    if ($containerCreated) {
-        Invoke-Wslc -Arguments @("container", "rm", "--force", $containerName) -IgnoreFailure | Out-Null
-    }
     Remove-Item -LiteralPath $iidFile, $cidFile -Force -ErrorAction SilentlyContinue
-    if ($lockTaken) {
+    if ($lockTaken -and $runInvocationReturned) {
         Remove-Item -LiteralPath $leasePath -Force -ErrorAction SilentlyContinue
     }
     if ($lockTaken) {

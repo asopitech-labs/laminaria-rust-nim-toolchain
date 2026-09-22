@@ -44,18 +44,36 @@ scripts/windows-wslc-ci.ps1 -Mode fast
 scripts/windows-wslc-ci.ps1 -Mode test-only -TestFilter <cargo-test-filter>
 ```
 
-WSLCの既定sessionは、全terminal・全worktreeが共有するper-userの永続
-VM/daemon/VHDである。`laminaria-bootstrap` を各process固有の資源として扱っては
-ならない。repository automationは必ず `scripts/windows-wslc-ci.ps1` を使用し、
+host制御harness自身のテストだけはWindows上で直接実行する。このテストはfake `wslc`を
+注入し、実sessionへ接続せずmutex、service preflight、lease、receiptを検証する。
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/tests/test-windows-wslc-ci.ps1
+```
+
+WSLC sessionはVM/daemon/VHDを所有する。このrepositoryはCLIがon-demand作成する
+既定のper-user sessionを、全terminal・全worktreeで一つだけ使用する。このsessionを
+各process固有の資源として扱ってはならない。
+repository automationは必ず `scripts/windows-wslc-ci.ps1` を使用し、
 独立した `wslc build` / `wslc run` を並行起動してはならない。
 
-owner harnessは、build・run・cleanup・receipt発行の全区間をnamed per-user mutexで
-直列化する。buildが出力したimmutable image IDをそのままrunへ渡し、呼出しごとに
-一意なcontainer名を割り当てる。owner processが強制終了した場合は、次のownerが
-共有leaseに記録された厳密なcontainer名だけを回収する。Windowsの
+managed agentのcommand sandbox内では、sandbox job境界によりWSLC VM生成が
+`E_ACCESSDENIED`になる場合がある。この場合はowner harness全体をsandbox外で
+実行する許可を得る。これはUAC昇格ではなく、callerはmedium integrityのままにする。
+昇格すると別のdefault session identityになるため、同じsingletonの検証にならない。
+userが設定した `session.storagePath` は保持し、sandbox内だけの拒否をVHD配置不良の
+根拠にしてはならない。
+
+owner harnessは、HCS serviceが遷移中または外部`wslc` clientが存在する場合は
+WSLCを一度も呼ばずfail closedする。build・run・cleanup・receipt発行の全区間を
+named per-user mutexで直列化し、すべての呼出しを同じ既定sessionへ送る。buildが出力した
+immutable image IDをそのままrunへ渡し、呼出しごとに一意なcontainer名を割り当てる。
+正常に戻った`run --rm`だけが自身のcontainerを削除し、二重cleanupは行わない。
+owner processが強制終了した場合だけ、次のownerが共有leaseに記録された厳密な
+container名を回収する。回収に失敗したleaseは保持し、新しいworkを開始しない。Windowsの
 Git hookは同一source fingerprintのreceiptを検査し、新たなWSLC consumerを起動しない。
-`--rm`、mutable tag、`wsl --shutdown`、`wslcsession` kill、`WSLService` stopは
-synchronizationまたは通常cleanupの手段ではない。
+`--rm`はcontainer lifecycleでありsynchronizationではない。mutable tagは実行identity
+ではない。`wsl --shutdown`、`wslcsession` kill、`WSLService` stopは通常cleanupに使わない。
 
 恒久的に必要なツールはDockerfileまたはrepository-owned lockへ追加し、owner
 harnessからイメージを再構築する。

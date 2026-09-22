@@ -15,7 +15,8 @@
 # treat a container Run as comparable to a native one.
 #
 # Windows development uses wslc exclusively through the repository owner
-# harness, which serializes access and runs the exact image ID it built:
+# harness, which serializes the default per-user session and runs the exact
+# image ID it built:
 #   scripts/windows-wslc-ci.ps1
 FROM debian:bookworm-slim
 
