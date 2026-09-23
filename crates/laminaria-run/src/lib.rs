@@ -62,6 +62,7 @@ pub mod incremental_session_client;
 pub mod nim_telemetry;
 pub mod nim_wrapper;
 pub mod project_build;
+pub mod resource_scheduler;
 pub mod reuse;
 pub mod scenario;
 pub mod self_build;
