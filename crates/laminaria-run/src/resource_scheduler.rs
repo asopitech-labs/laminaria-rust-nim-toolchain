@@ -227,6 +227,7 @@ pub enum CommitStoreError {
 struct CommitStore {
     staged_by_writer: BTreeMap<String, Vec<StagedOutput>>,
     committed: BTreeMap<CommitTarget, CommittedOutput>,
+    committed_targets_by_writer: BTreeMap<String, Vec<CommitTarget>>,
 }
 
 impl CommitStore {
@@ -333,6 +334,7 @@ impl CommitStore {
         // Build the complete next visible state first. No consumer can observe
         // a prefix if a future validation step is added and rejects the batch.
         let mut committed = self.committed.clone();
+        let targets = staged.iter().map(|output| output.target.clone()).collect();
         for output in staged {
             committed
                 .entry(output.target.clone())
@@ -344,6 +346,8 @@ impl CommitStore {
                 });
         }
         self.committed = committed;
+        self.committed_targets_by_writer
+            .insert(writer.to_string(), targets);
         self.staged_by_writer.remove(writer);
         Ok(())
     }
@@ -358,6 +362,15 @@ impl CommitStore {
 
     fn has_staging(&self, writer: &str) -> bool {
         self.staged_by_writer.contains_key(writer)
+    }
+
+    fn outputs_for_writer(&self, writer: &str) -> Vec<CommittedOutput> {
+        self.committed_targets_by_writer
+            .get(writer)
+            .into_iter()
+            .flatten()
+            .filter_map(|target| self.committed.get(target).cloned())
+            .collect()
     }
 }
 
@@ -407,6 +420,30 @@ pub enum SchedulerContractError {
         instance_id: String,
         from: LifecycleState,
         operation: &'static str,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PhysicalWorkExecutionReport {
+    pub transitions: Vec<LifecycleTransition>,
+    pub states: BTreeMap<String, LifecycleState>,
+    pub executed: BTreeSet<String>,
+    pub completed: BTreeSet<String>,
+    /// Completed work whose complete committed output batch is consumer-visible.
+    pub reusable: BTreeSet<String>,
+    /// Work whose own computation failed; any staging it owned was discarded.
+    pub invalid: BTreeSet<String>,
+    /// Failed work plus downstream work cancelled by that failure.
+    pub rerun: BTreeSet<String>,
+    pub never_started: BTreeSet<String>,
+    pub committed_outputs: BTreeMap<CommitTarget, CommittedOutput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PhysicalWorkExecutionError {
+    Scheduler(SchedulerContractError),
+    Stalled {
+        states: BTreeMap<String, LifecycleState>,
     },
 }
 
@@ -600,6 +637,24 @@ impl ResourceScheduler {
                     instance_id: instance_id.to_string(),
                 })?;
         Ok(&self.units[&runtime.definition.work_unit].outputs)
+    }
+
+    fn dependency_outputs(
+        &self,
+        instance_id: &str,
+    ) -> Result<Vec<CommittedOutput>, SchedulerContractError> {
+        let runtime =
+            self.work
+                .get(instance_id)
+                .ok_or_else(|| SchedulerContractError::UnknownInstance {
+                    instance_id: instance_id.to_string(),
+                })?;
+        Ok(runtime
+            .definition
+            .dependencies
+            .iter()
+            .flat_map(|dependency| self.commit_store.outputs_for_writer(dependency))
+            .collect())
     }
 
     /// Admits every currently-ready instance that fits, without head-of-line
@@ -886,6 +941,113 @@ impl ResourceScheduler {
     }
 }
 
+/// Executes a planned physical graph through the production admission,
+/// lifecycle, and commit controls. The callback owns computation only: it can
+/// read committed dependency outputs and return the complete declared output
+/// batch, but cannot publish a partial result or make a consumer ready.
+pub fn execute_physical_work_graph<F>(
+    contract: &PhysicalWorkContract,
+    instances: Vec<PhysicalWorkInstance>,
+    budget: ResourceAmount,
+    mut compute: F,
+) -> Result<PhysicalWorkExecutionReport, PhysicalWorkExecutionError>
+where
+    F: FnMut(&PhysicalWorkInstance, &[CommittedOutput]) -> Result<Vec<CommitWrite>, String>,
+{
+    let mut scheduler = ResourceScheduler::new(contract, instances, budget)
+        .map_err(PhysicalWorkExecutionError::Scheduler)?;
+    let mut executed = BTreeSet::new();
+
+    while scheduler
+        .work
+        .values()
+        .any(|work| !work.state.is_terminal())
+    {
+        let admitted = scheduler
+            .admit_ready()
+            .map_err(PhysicalWorkExecutionError::Scheduler)?;
+        if admitted.is_empty() {
+            return Err(PhysicalWorkExecutionError::Stalled {
+                states: scheduler
+                    .work
+                    .iter()
+                    .map(|(id, work)| (id.clone(), work.state))
+                    .collect(),
+            });
+        }
+
+        for instance_id in admitted {
+            executed.insert(instance_id.clone());
+            let instance = scheduler.work[&instance_id].definition.clone();
+            let inputs = scheduler
+                .dependency_outputs(&instance_id)
+                .map_err(PhysicalWorkExecutionError::Scheduler)?;
+            match compute(&instance, &inputs) {
+                Ok(writes) => {
+                    scheduler
+                        .stage_outputs(&instance_id, writes)
+                        .map_err(PhysicalWorkExecutionError::Scheduler)?;
+                    scheduler
+                        .commit(&instance_id)
+                        .map_err(PhysicalWorkExecutionError::Scheduler)?;
+                }
+                Err(detail) => scheduler
+                    .fail(&instance_id, detail)
+                    .map_err(PhysicalWorkExecutionError::Scheduler)?,
+            }
+        }
+    }
+
+    let states: BTreeMap<_, _> = scheduler
+        .work
+        .iter()
+        .map(|(id, work)| (id.clone(), work.state))
+        .collect();
+    let completed = states
+        .iter()
+        .filter(|(_, state)| **state == LifecycleState::Completed)
+        .map(|(id, _)| id.clone())
+        .collect();
+    let reusable = states
+        .iter()
+        .filter(|(id, state)| {
+            **state == LifecycleState::Completed
+                && scheduler.commit_store.outputs_for_writer(id).len()
+                    == scheduler.units[&scheduler.work[*id].definition.work_unit]
+                        .outputs
+                        .len()
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
+    let invalid: BTreeSet<_> = states
+        .iter()
+        .filter(|(_, state)| **state == LifecycleState::Failed)
+        .map(|(id, _)| id.clone())
+        .collect();
+    let rerun = states
+        .iter()
+        .filter(|(_, state)| matches!(state, LifecycleState::Failed | LifecycleState::Cancelled))
+        .map(|(id, _)| id.clone())
+        .collect();
+    let never_started = states
+        .iter()
+        .filter(|(id, state)| **state == LifecycleState::Cancelled && !executed.contains(*id))
+        .map(|(id, _)| id.clone())
+        .collect();
+
+    Ok(PhysicalWorkExecutionReport {
+        transitions: scheduler.transitions,
+        states,
+        executed,
+        completed,
+        reusable,
+        invalid,
+        rerun,
+        never_started,
+        committed_outputs: scheduler.commit_store.committed,
+    })
+}
+
 fn has_dependency_cycle(work: &BTreeMap<String, RuntimeWork>) -> bool {
     fn visit(
         id: &str,
@@ -919,7 +1081,7 @@ fn has_dependency_cycle(work: &BTreeMap<String, RuntimeWork>) -> bool {
 mod tests {
     use super::*;
     use laminaria_plan::physical_work::{
-        canonical_physical_work_contract, LogicalActivity, WorkUnitId,
+        canonical_physical_work_contract, ExecutionGroup, InputSource, LogicalActivity, WorkUnitId,
     };
 
     fn amount(cpu: u32, memory: u64, io: u32, processes: u32) -> ResourceAmount {
@@ -964,6 +1126,109 @@ mod tests {
                 bytes: format!("{id}:{output_kind:?}").into_bytes(),
             })
             .collect()
+    }
+
+    fn canonical_instance_id(work_unit: WorkUnitId) -> String {
+        format!("{work_unit:?}")
+    }
+
+    fn canonical_mixed_instances(contract: &PhysicalWorkContract) -> Vec<PhysicalWorkInstance> {
+        let known: BTreeSet<_> = contract.units.iter().map(|unit| unit.id).collect();
+        contract
+            .units
+            .iter()
+            .map(|unit| {
+                let dependencies = unit
+                    .inputs
+                    .iter()
+                    .filter_map(|input| match input.source {
+                        InputSource::ExternalAuthority => None,
+                        InputSource::ProducedBy(producer) => {
+                            (!input.optional || known.contains(&producer)).then_some(producer)
+                        }
+                        // The concrete identity binds the either/or input to
+                        // one producer; it is not a barrier over both lanes.
+                        InputSource::ProducedByEither(producer, _) => Some(producer),
+                    })
+                    .map(canonical_instance_id)
+                    .collect();
+                let external_process_slots = u32::from(unit.resources.external_process_slots);
+                PhysicalWorkInstance {
+                    instance_id: canonical_instance_id(unit.id),
+                    work_unit: unit.id,
+                    dependencies,
+                    reservation: amount(
+                        u32::from(unit.resources.minimum_cpu_slots),
+                        1,
+                        u32::from(external_process_slots > 0),
+                        external_process_slots,
+                    ),
+                    nested_parallelism: NestedParallelism::Disabled,
+                }
+            })
+            .collect()
+    }
+
+    fn deterministic_computation(
+        contract: &PhysicalWorkContract,
+        instance: &PhysicalWorkInstance,
+        inputs: &[CommittedOutput],
+    ) -> Result<Vec<CommitWrite>, String> {
+        let unit = contract
+            .units
+            .iter()
+            .find(|unit| unit.id == instance.work_unit)
+            .unwrap();
+        let input_digests = inputs
+            .iter()
+            .map(|input| input.content_sha256.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        Ok(unit
+            .outputs
+            .iter()
+            .map(|output_kind| CommitWrite {
+                output_kind: *output_kind,
+                logical_key: format!("{}:{output_kind:?}", instance.instance_id),
+                bytes: format!(
+                    "work={:?};output={output_kind:?};inputs={input_digests}",
+                    instance.work_unit
+                )
+                .into_bytes(),
+            })
+            .collect())
+    }
+
+    fn peak_active_work(transitions: &[LifecycleTransition]) -> usize {
+        let mut active = 0;
+        let mut peak = 0;
+        for transition in transitions {
+            if transition.to == LifecycleState::Running {
+                active += 1;
+                peak = peak.max(active);
+            } else if transition.to.is_terminal()
+                && transition.from.is_some_and(|from| from.owns_resources())
+            {
+                active -= 1;
+            }
+        }
+        peak
+    }
+
+    fn descendants_of(root: &str, instances: &[PhysicalWorkInstance]) -> BTreeSet<String> {
+        let mut descendants = BTreeSet::new();
+        let mut frontier = vec![root.to_string()];
+        while let Some(producer) = frontier.pop() {
+            for consumer in instances
+                .iter()
+                .filter(|instance| instance.dependencies.contains(&producer))
+            {
+                if descendants.insert(consumer.instance_id.clone()) {
+                    frontier.push(consumer.instance_id.clone());
+                }
+            }
+        }
+        descendants
     }
 
     #[test]
@@ -1469,5 +1734,104 @@ mod tests {
             ResourceScheduler::new(&contract, vec![no_io], amount(3, 1, 1, 1)),
             Err(SchedulerContractError::ExternalProcessWithoutIoReservation { .. })
         ));
+    }
+
+    #[test]
+    fn canonical_mixed_graph_is_budget_invariant_and_exposes_parallel_timeline() {
+        let contract = canonical_physical_work_contract();
+        let instances = canonical_mixed_instances(&contract);
+        let run = |budget| {
+            execute_physical_work_graph(&contract, instances.clone(), budget, |instance, inputs| {
+                deterministic_computation(&contract, instance, inputs)
+            })
+            .unwrap()
+        };
+
+        let serial = run(amount(1, 64, 1, 1));
+        let parallel = run(amount(4, 64, 4, 4));
+        let expected_ids: BTreeSet<_> = instances
+            .iter()
+            .map(|instance| instance.instance_id.clone())
+            .collect();
+
+        assert_eq!(serial.completed, expected_ids);
+        assert_eq!(parallel.completed, expected_ids);
+        assert_eq!(serial.reusable, expected_ids);
+        assert_eq!(parallel.reusable, expected_ids);
+        assert!(serial.invalid.is_empty());
+        assert!(parallel.rerun.is_empty());
+        assert_eq!(serial.states, parallel.states);
+        assert_eq!(serial.committed_outputs, parallel.committed_outputs);
+        assert_eq!(peak_active_work(&serial.transitions), 1);
+        assert!(peak_active_work(&parallel.transitions) > 1);
+
+        for group in [
+            ExecutionGroup::CObjectCompilation,
+            ExecutionGroup::CppAdapterCompilation,
+            ExecutionGroup::ForeignArchive,
+        ] {
+            assert!(contract.units.iter().any(|unit| {
+                unit.execution_group == group
+                    && parallel.completed.contains(&canonical_instance_id(unit.id))
+            }));
+        }
+        for activity in LogicalActivity::ALL {
+            assert!(parallel
+                .completed
+                .contains(&canonical_instance_id(WorkUnitId::Logical(activity))));
+        }
+    }
+
+    #[test]
+    fn mixed_graph_fault_preserves_independent_commits_and_classifies_recovery() {
+        let contract = canonical_physical_work_contract();
+        let instances = canonical_mixed_instances(&contract);
+        let failed = canonical_instance_id(WorkUnitId::Logical(LogicalActivity::A10CodeGeneration));
+        let expected_never_started = descendants_of(&failed, &instances);
+        let mut expected_rerun = expected_never_started.clone();
+        expected_rerun.insert(failed.clone());
+        let all_ids: BTreeSet<_> = instances
+            .iter()
+            .map(|instance| instance.instance_id.clone())
+            .collect();
+        let expected_reusable: BTreeSet<_> = all_ids.difference(&expected_rerun).cloned().collect();
+
+        let report = execute_physical_work_graph(
+            &contract,
+            instances,
+            amount(4, 64, 4, 4),
+            |instance, inputs| {
+                if instance.instance_id == failed {
+                    Err("injected code generation fault".to_string())
+                } else {
+                    deterministic_computation(&contract, instance, inputs)
+                }
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.invalid, BTreeSet::from([failed.clone()]));
+        assert_eq!(report.rerun, expected_rerun);
+        assert_eq!(report.never_started, expected_never_started);
+        assert_eq!(report.completed, expected_reusable);
+        assert_eq!(report.reusable, expected_reusable);
+        assert!(report.executed.contains(&failed));
+        assert!(report.never_started.is_disjoint(&report.executed));
+        assert!(report
+            .committed_outputs
+            .values()
+            .all(|output| expected_reusable.contains(&output.writer_instance_id)));
+
+        for activity in [
+            LogicalActivity::N8NimLink,
+            LogicalActivity::N9ExportRegistration,
+        ] {
+            assert!(report
+                .reusable
+                .contains(&canonical_instance_id(WorkUnitId::Logical(activity))));
+        }
+        assert!(report
+            .reusable
+            .contains(&canonical_instance_id(WorkUnitId::ArchiveForeignObjects)));
     }
 }
