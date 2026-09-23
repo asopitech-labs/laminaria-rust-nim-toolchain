@@ -92,7 +92,7 @@ pub enum ExecutionGroup {
     NativeExecutableLink,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DataKind {
     WorkspaceManifest,
@@ -191,7 +191,7 @@ pub struct ResourceClaim {
     pub external_process_slots: u16,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KeySpace {
     DependencyClosureInstantiation,
@@ -217,7 +217,7 @@ pub enum Idempotency {
     OptionalDeterministicValue,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CommitBoundary {
     PlannerValue,

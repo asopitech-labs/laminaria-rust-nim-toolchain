@@ -10,8 +10,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use laminaria_plan::physical_work::{PhysicalWorkContract, WorkUnitId};
+use laminaria_plan::physical_work::{
+    CommitBoundary, DataKind, KeySpace, PhysicalWorkContract, PhysicalWorkUnit, SideEffect,
+    WorkUnitId,
+};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceAmount {
@@ -150,6 +154,218 @@ pub struct LifecycleTransition {
     pub reason: TransitionReason,
 }
 
+/// A concrete output offered by one physical work instance. `logical_key` is
+/// semantic identity supplied by the planner; it is deliberately independent
+/// of the writer instance, thread, process, or placement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitWrite {
+    pub output_kind: DataKind,
+    pub logical_key: String,
+    pub bytes: Vec<u8>,
+}
+
+/// The consumer-visible address of a committed value. The Checkpoint-A
+/// boundary and key space are part of the address, so a keyed merge cannot
+/// alias an artifact publication that happens to use the same text key.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct CommitTarget {
+    pub boundary: CommitBoundary,
+    pub key_space: Option<KeySpace>,
+    pub output_kind: DataKind,
+    pub logical_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommittedOutput {
+    pub target: CommitTarget,
+    pub content_sha256: String,
+    pub bytes: Vec<u8>,
+    /// The first successful writer. Later same-content writers are idempotent
+    /// confirmations and cannot rewrite lineage.
+    pub writer_instance_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StagedOutput {
+    target: CommitTarget,
+    content_sha256: String,
+    bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommitStoreError {
+    EmptyWriteSet {
+        instance_id: String,
+    },
+    MissingDeclaredOutput {
+        instance_id: String,
+        output_kind: DataKind,
+    },
+    UndeclaredOutput {
+        instance_id: String,
+        output_kind: DataKind,
+    },
+    DuplicateOutput {
+        instance_id: String,
+        output_kind: DataKind,
+    },
+    EmptyLogicalKey {
+        instance_id: String,
+        output_kind: DataKind,
+    },
+    ConflictingContent {
+        target: CommitTarget,
+        existing_sha256: String,
+        proposed_sha256: String,
+    },
+    MissingStaging {
+        instance_id: String,
+    },
+}
+
+#[derive(Default)]
+struct CommitStore {
+    staged_by_writer: BTreeMap<String, Vec<StagedOutput>>,
+    committed: BTreeMap<CommitTarget, CommittedOutput>,
+}
+
+impl CommitStore {
+    fn stage(
+        &mut self,
+        writer: &str,
+        unit: &PhysicalWorkUnit,
+        writes: Vec<CommitWrite>,
+    ) -> Result<Vec<CommitTarget>, CommitStoreError> {
+        if writes.is_empty() {
+            return Err(CommitStoreError::EmptyWriteSet {
+                instance_id: writer.to_string(),
+            });
+        }
+        let declared: BTreeSet<_> = unit.outputs.iter().copied().collect();
+        let mut seen = BTreeSet::new();
+        let mut staged = Vec::with_capacity(writes.len());
+        for write in writes {
+            if !declared.contains(&write.output_kind) {
+                return Err(CommitStoreError::UndeclaredOutput {
+                    instance_id: writer.to_string(),
+                    output_kind: write.output_kind,
+                });
+            }
+            if !seen.insert(write.output_kind) {
+                return Err(CommitStoreError::DuplicateOutput {
+                    instance_id: writer.to_string(),
+                    output_kind: write.output_kind,
+                });
+            }
+            if write.logical_key.is_empty() {
+                return Err(CommitStoreError::EmptyLogicalKey {
+                    instance_id: writer.to_string(),
+                    output_kind: write.output_kind,
+                });
+            }
+            let key_space = match unit.side_effect {
+                SideEffect::KeyedCompareAndCommit(key_space) => Some(key_space),
+                _ => None,
+            };
+            let target = CommitTarget {
+                boundary: unit.commit_boundary,
+                key_space,
+                output_kind: write.output_kind,
+                logical_key: write.logical_key,
+            };
+            let content_sha256 = sha256_bytes(&write.bytes);
+            self.reject_conflicting_content(&target, &content_sha256)?;
+            staged.push(StagedOutput {
+                target,
+                content_sha256,
+                bytes: write.bytes,
+            });
+        }
+        if let Some(output_kind) = declared.difference(&seen).next() {
+            return Err(CommitStoreError::MissingDeclaredOutput {
+                instance_id: writer.to_string(),
+                output_kind: *output_kind,
+            });
+        }
+        let targets = staged.iter().map(|output| output.target.clone()).collect();
+        self.staged_by_writer.insert(writer.to_string(), staged);
+        Ok(targets)
+    }
+
+    fn reject_conflicting_content(
+        &self,
+        target: &CommitTarget,
+        proposed_sha256: &str,
+    ) -> Result<(), CommitStoreError> {
+        let existing = self
+            .committed
+            .get(target)
+            .map(|output| output.content_sha256.as_str())
+            .or_else(|| {
+                self.staged_by_writer
+                    .values()
+                    .flatten()
+                    .find(|output| output.target == *target)
+                    .map(|output| output.content_sha256.as_str())
+            });
+        if let Some(existing_sha256) = existing {
+            if existing_sha256 != proposed_sha256 {
+                return Err(CommitStoreError::ConflictingContent {
+                    target: target.clone(),
+                    existing_sha256: existing_sha256.to_string(),
+                    proposed_sha256: proposed_sha256.to_string(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn commit(&mut self, writer: &str) -> Result<(), CommitStoreError> {
+        let staged = self.staged_by_writer.get(writer).cloned().ok_or_else(|| {
+            CommitStoreError::MissingStaging {
+                instance_id: writer.to_string(),
+            }
+        })?;
+        for output in &staged {
+            self.reject_conflicting_content(&output.target, &output.content_sha256)?;
+        }
+
+        // Build the complete next visible state first. No consumer can observe
+        // a prefix if a future validation step is added and rejects the batch.
+        let mut committed = self.committed.clone();
+        for output in staged {
+            committed
+                .entry(output.target.clone())
+                .or_insert_with(|| CommittedOutput {
+                    target: output.target,
+                    content_sha256: output.content_sha256,
+                    bytes: output.bytes,
+                    writer_instance_id: writer.to_string(),
+                });
+        }
+        self.committed = committed;
+        self.staged_by_writer.remove(writer);
+        Ok(())
+    }
+
+    fn discard(&mut self, writer: &str) {
+        self.staged_by_writer.remove(writer);
+    }
+
+    fn visible(&self, target: &CommitTarget) -> Option<&CommittedOutput> {
+        self.committed.get(target)
+    }
+
+    fn has_staging(&self, writer: &str) -> bool {
+        self.staged_by_writer.contains_key(writer)
+    }
+}
+
+fn sha256_bytes(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SchedulerContractError {
     DuplicateInstance {
@@ -183,6 +399,7 @@ pub enum SchedulerContractError {
         instance_id: String,
     },
     ResourceAccountingOverflow,
+    CommitStore(CommitStoreError),
     UnknownInstance {
         instance_id: String,
     },
@@ -207,8 +424,10 @@ struct RuntimeWork {
 pub struct ResourceScheduler {
     budget: ResourceAmount,
     allocated: ResourceAmount,
+    units: BTreeMap<WorkUnitId, PhysicalWorkUnit>,
     work: BTreeMap<String, RuntimeWork>,
     dependents: BTreeMap<String, BTreeSet<String>>,
+    commit_store: CommitStore,
     transitions: Vec<LifecycleTransition>,
     next_sequence: u64,
 }
@@ -219,10 +438,10 @@ impl ResourceScheduler {
         instances: Vec<PhysicalWorkInstance>,
         budget: ResourceAmount,
     ) -> Result<Self, SchedulerContractError> {
-        let unit_claims: BTreeMap<_, _> = contract
+        let units: BTreeMap<_, _> = contract
             .units
             .iter()
-            .map(|unit| (unit.id, unit.resources))
+            .map(|unit| (unit.id, unit.clone()))
             .collect();
         let mut work = BTreeMap::new();
         for instance in instances {
@@ -231,12 +450,13 @@ impl ResourceScheduler {
                     instance_id: instance.instance_id,
                 });
             }
-            let Some(claim) = unit_claims.get(&instance.work_unit) else {
+            let Some(unit) = units.get(&instance.work_unit) else {
                 return Err(SchedulerContractError::UnknownWorkUnit {
                     instance_id: instance.instance_id,
                     work_unit: instance.work_unit,
                 });
             };
+            let claim = unit.resources;
             if instance.reservation.cpu_slots == 0 {
                 return Err(SchedulerContractError::ZeroCpuReservation {
                     instance_id: instance.instance_id,
@@ -313,8 +533,10 @@ impl ResourceScheduler {
         let mut scheduler = Self {
             budget,
             allocated: ResourceAmount::default(),
+            units,
             work,
             dependents,
+            commit_store: CommitStore::default(),
             transitions: vec![],
             next_sequence: 0,
         };
@@ -357,6 +579,27 @@ impl ResourceScheduler {
 
     pub fn transitions(&self) -> &[LifecycleTransition] {
         &self.transitions
+    }
+
+    pub fn visible_output(&self, target: &CommitTarget) -> Option<&CommittedOutput> {
+        self.commit_store.visible(target)
+    }
+
+    pub fn has_staged_output(&self, instance_id: &str) -> bool {
+        self.commit_store.has_staging(instance_id)
+    }
+
+    pub fn declared_outputs(
+        &self,
+        instance_id: &str,
+    ) -> Result<&[DataKind], SchedulerContractError> {
+        let runtime =
+            self.work
+                .get(instance_id)
+                .ok_or_else(|| SchedulerContractError::UnknownInstance {
+                    instance_id: instance_id.to_string(),
+                })?;
+        Ok(&self.units[&runtime.definition.work_unit].outputs)
     }
 
     /// Admits every currently-ready instance that fits, without head-of-line
@@ -417,22 +660,35 @@ impl ResourceScheduler {
         Ok(admitted)
     }
 
-    /// Marks computation done but deliberately keeps the full reservation.
-    /// Publication visibility is Checkpoint C's concern; until `commit`, the
-    /// memory and other resources backing staged output remain accounted.
-    pub fn finish_computation(&mut self, instance_id: &str) -> Result<(), SchedulerContractError> {
-        self.require_state(instance_id, LifecycleState::Running, "finish_computation")?;
+    /// Atomically stages every declared output and marks computation done.
+    /// Staged bytes remain invisible and the full reservation remains owned
+    /// until [`Self::commit`] publishes the whole batch.
+    pub fn stage_outputs(
+        &mut self,
+        instance_id: &str,
+        writes: Vec<CommitWrite>,
+    ) -> Result<Vec<CommitTarget>, SchedulerContractError> {
+        self.require_state(instance_id, LifecycleState::Running, "stage_outputs")?;
+        let work_unit = self.work[instance_id].definition.work_unit;
+        let unit = &self.units[&work_unit];
+        let targets = self
+            .commit_store
+            .stage(instance_id, unit, writes)
+            .map_err(SchedulerContractError::CommitStore)?;
         self.set_state(
             instance_id,
             LifecycleState::Committing,
             None,
             TransitionReason::ComputationFinished,
         );
-        Ok(())
+        Ok(targets)
     }
 
     pub fn commit(&mut self, instance_id: &str) -> Result<(), SchedulerContractError> {
         self.require_state(instance_id, LifecycleState::Committing, "commit")?;
+        self.commit_store
+            .commit(instance_id)
+            .map_err(SchedulerContractError::CommitStore)?;
         self.release(instance_id)?;
         self.set_state(
             instance_id,
@@ -457,6 +713,7 @@ impl ResourceScheduler {
                 operation: "fail",
             });
         }
+        self.commit_store.discard(instance_id);
         self.release(instance_id)?;
         self.set_state(
             instance_id,
@@ -486,6 +743,7 @@ impl ResourceScheduler {
             });
         }
         if state.owns_resources() {
+            self.commit_store.discard(instance_id);
             self.release(instance_id)?;
         }
         self.set_state(
@@ -695,6 +953,19 @@ mod tests {
         ResourceScheduler::new(&canonical_physical_work_contract(), instances, budget).unwrap()
     }
 
+    fn writes_for(scheduler: &ResourceScheduler, id: &str, key_prefix: &str) -> Vec<CommitWrite> {
+        scheduler
+            .declared_outputs(id)
+            .unwrap()
+            .iter()
+            .map(|output_kind| CommitWrite {
+                output_kind: *output_kind,
+                logical_key: format!("{key_prefix}:{output_kind:?}"),
+                bytes: format!("{id}:{output_kind:?}").into_bytes(),
+            })
+            .collect()
+    }
+
     #[test]
     fn parallel_ready_instances_run_together_and_commit_independently() {
         let mut scheduler = scheduler(
@@ -721,7 +992,8 @@ mod tests {
         );
         assert_eq!(scheduler.state("rust-front"), Some(LifecycleState::Running));
         assert_eq!(scheduler.state("nim-front"), Some(LifecycleState::Running));
-        scheduler.finish_computation("rust-front").unwrap();
+        let writes = writes_for(&scheduler, "rust-front", "rust-front");
+        scheduler.stage_outputs("rust-front", writes).unwrap();
         scheduler.commit("rust-front").unwrap();
         assert_eq!(scheduler.state("nim-front"), Some(LifecycleState::Running));
     }
@@ -759,7 +1031,8 @@ mod tests {
                 }
             })
         );
-        scheduler.finish_computation("a").unwrap();
+        let writes = writes_for(&scheduler, "a", "a");
+        scheduler.stage_outputs("a", writes).unwrap();
         scheduler.commit("a").unwrap();
         assert_eq!(scheduler.admit_ready().unwrap(), vec!["b"]);
     }
@@ -865,7 +1138,8 @@ mod tests {
         );
 
         assert_eq!(scheduler.admit_ready().unwrap(), vec!["ir-a"]);
-        scheduler.finish_computation("ir-a").unwrap();
+        let writes = writes_for(&scheduler, "ir-a", "ir-a");
+        scheduler.stage_outputs("ir-a", writes).unwrap();
         assert_eq!(scheduler.allocated().memory_bytes, 8);
         assert!(scheduler.admit_ready().unwrap().is_empty());
         assert_eq!(
@@ -879,6 +1153,252 @@ mod tests {
         );
         scheduler.commit("ir-a").unwrap();
         assert_eq!(scheduler.admit_ready().unwrap(), vec!["ir-b"]);
+    }
+
+    #[test]
+    fn same_key_same_content_is_idempotent_but_different_content_conflicts() {
+        let instances = vec![
+            instance(
+                "writer-a",
+                LogicalActivity::A7Monomorphization,
+                &[],
+                amount(1, 1, 0, 0),
+            ),
+            instance(
+                "writer-b",
+                LogicalActivity::A7Monomorphization,
+                &[],
+                amount(1, 1, 0, 0),
+            ),
+            instance(
+                "writer-other-key",
+                LogicalActivity::A7Monomorphization,
+                &[],
+                amount(1, 1, 0, 0),
+            ),
+        ];
+        let mut idempotent = scheduler(instances, amount(3, 3, 0, 0));
+        assert_eq!(idempotent.admit_ready().unwrap().len(), 3);
+
+        let shared = CommitWrite {
+            output_kind: DataKind::InstantiationKey,
+            logical_key: "dep-closure/function<i32>".to_string(),
+            bytes: b"canonical-instantiation".to_vec(),
+        };
+        let target = idempotent
+            .stage_outputs("writer-a", vec![shared.clone()])
+            .unwrap()
+            .remove(0);
+        idempotent
+            .stage_outputs("writer-b", vec![shared])
+            .expect("same key and content is an idempotent concurrent writer");
+
+        let other_targets = idempotent
+            .stage_outputs(
+                "writer-other-key",
+                vec![CommitWrite {
+                    output_kind: DataKind::InstantiationKey,
+                    logical_key: "dep-closure/other-function<i32>".to_string(),
+                    bytes: b"other-instantiation".to_vec(),
+                }],
+            )
+            .unwrap();
+        idempotent.commit("writer-b").unwrap();
+        idempotent.commit("writer-a").unwrap();
+        idempotent.commit("writer-other-key").unwrap();
+        assert_eq!(
+            idempotent.visible_output(&target).unwrap().bytes,
+            b"canonical-instantiation"
+        );
+        assert!(idempotent.visible_output(&other_targets[0]).is_some());
+
+        let mut conflict = scheduler(
+            vec![
+                instance(
+                    "first",
+                    LogicalActivity::A7Monomorphization,
+                    &[],
+                    amount(1, 1, 0, 0),
+                ),
+                instance(
+                    "second",
+                    LogicalActivity::A7Monomorphization,
+                    &[],
+                    amount(1, 1, 0, 0),
+                ),
+            ],
+            amount(2, 2, 0, 0),
+        );
+        conflict.admit_ready().unwrap();
+        conflict
+            .stage_outputs(
+                "first",
+                vec![CommitWrite {
+                    output_kind: DataKind::InstantiationKey,
+                    logical_key: "same-key".to_string(),
+                    bytes: b"content-a".to_vec(),
+                }],
+            )
+            .unwrap();
+        assert!(matches!(
+            conflict.stage_outputs(
+                "second",
+                vec![CommitWrite {
+                    output_kind: DataKind::InstantiationKey,
+                    logical_key: "same-key".to_string(),
+                    bytes: b"content-b".to_vec(),
+                }]
+            ),
+            Err(SchedulerContractError::CommitStore(
+                CommitStoreError::ConflictingContent { .. }
+            ))
+        ));
+        assert_eq!(conflict.state("second"), Some(LifecycleState::Running));
+    }
+
+    #[test]
+    fn commit_before_failure_is_invisible_and_commit_then_enables_consumer() {
+        let graph = || {
+            vec![
+                instance(
+                    "object",
+                    LogicalActivity::A10CodeGeneration,
+                    &[],
+                    amount(1, 4, 1, 0),
+                ),
+                instance(
+                    "symbol-consumer",
+                    LogicalActivity::A11SymbolRegistration,
+                    &["object"],
+                    amount(1, 1, 0, 0),
+                ),
+            ]
+        };
+        let object_write = || CommitWrite {
+            output_kind: DataKind::NativeObject,
+            logical_key: "object:main".to_string(),
+            bytes: b"object-bytes".to_vec(),
+        };
+
+        let mut failed = scheduler(graph(), amount(1, 5, 1, 0));
+        assert_eq!(failed.admit_ready().unwrap(), vec!["object"]);
+        let target = failed
+            .stage_outputs("object", vec![object_write()])
+            .unwrap()
+            .remove(0);
+        assert!(failed.visible_output(&target).is_none());
+        assert!(failed.has_staged_output("object"));
+        failed
+            .fail("object", "fault immediately before commit")
+            .unwrap();
+        assert!(failed.visible_output(&target).is_none());
+        assert!(!failed.has_staged_output("object"));
+        assert_eq!(
+            failed.state("symbol-consumer"),
+            Some(LifecycleState::Cancelled)
+        );
+
+        let mut succeeded = scheduler(graph(), amount(1, 5, 1, 0));
+        succeeded.admit_ready().unwrap();
+        let target = succeeded
+            .stage_outputs("object", vec![object_write()])
+            .unwrap()
+            .remove(0);
+        succeeded.commit("object").unwrap();
+        assert_eq!(
+            succeeded.visible_output(&target).unwrap().content_sha256,
+            sha256_bytes(b"object-bytes")
+        );
+        assert_eq!(
+            succeeded.state("symbol-consumer"),
+            Some(LifecycleState::Ready)
+        );
+        assert_eq!(succeeded.admit_ready().unwrap(), vec!["symbol-consumer"]);
+    }
+
+    #[test]
+    fn multi_output_and_final_artifact_batches_publish_only_at_their_boundaries() {
+        let mut multi = scheduler(
+            vec![instance(
+                "analysis",
+                LogicalActivity::A6SemanticAnalysis,
+                &[],
+                amount(1, 2, 0, 0),
+            )],
+            amount(1, 2, 0, 0),
+        );
+        multi.admit_ready().unwrap();
+        assert!(matches!(
+            multi.stage_outputs(
+                "analysis",
+                vec![CommitWrite {
+                    output_kind: DataKind::SemanticFact,
+                    logical_key: "function:f".to_string(),
+                    bytes: b"semantic-fact".to_vec(),
+                }]
+            ),
+            Err(SchedulerContractError::CommitStore(
+                CommitStoreError::MissingDeclaredOutput {
+                    output_kind: DataKind::ForeignDecl,
+                    ..
+                }
+            ))
+        ));
+        assert_eq!(multi.state("analysis"), Some(LifecycleState::Running));
+        assert!(!multi.has_staged_output("analysis"));
+        let targets = multi
+            .stage_outputs(
+                "analysis",
+                vec![
+                    CommitWrite {
+                        output_kind: DataKind::SemanticFact,
+                        logical_key: "function:f".to_string(),
+                        bytes: b"semantic-fact".to_vec(),
+                    },
+                    CommitWrite {
+                        output_kind: DataKind::ForeignDecl,
+                        logical_key: "extern:c_add".to_string(),
+                        bytes: b"foreign-decl".to_vec(),
+                    },
+                ],
+            )
+            .unwrap();
+        assert!(targets
+            .iter()
+            .all(|target| multi.visible_output(target).is_none()));
+        multi.commit("analysis").unwrap();
+        assert!(targets
+            .iter()
+            .all(|target| multi.visible_output(target).is_some()));
+
+        let mut final_link = scheduler(
+            vec![instance(
+                "final",
+                LogicalActivity::A12FinalLink,
+                &[],
+                amount(1, 1, 1, 1),
+            )],
+            amount(1, 1, 1, 1),
+        );
+        final_link.admit_ready().unwrap();
+        let target = final_link
+            .stage_outputs(
+                "final",
+                vec![CommitWrite {
+                    output_kind: DataKind::LinkedArtifact,
+                    logical_key: "native:app".to_string(),
+                    bytes: b"executable".to_vec(),
+                }],
+            )
+            .unwrap()
+            .remove(0);
+        assert_eq!(
+            target.boundary,
+            CommitBoundary::FinalArtifactPublicationHandoff
+        );
+        assert!(final_link.visible_output(&target).is_none());
+        final_link.commit("final").unwrap();
+        assert!(final_link.visible_output(&target).is_some());
     }
 
     #[test]
