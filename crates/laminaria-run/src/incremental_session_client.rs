@@ -445,7 +445,7 @@ mod tests {
     // tests of the pure checkEnvelope logic, exactly as requested). ---
 
     #[cfg(unix)]
-    const EMPTY_GRAPH: &str = r#"{"schema_version":"0.3.0","demanded_artifacts":[],"actions":[]}"#;
+    const EMPTY_GRAPH: &str = r#"{"schema_version":"0.4.0","demanded_artifacts":[],"actions":[]}"#;
 
     #[test]
     #[cfg(unix)]

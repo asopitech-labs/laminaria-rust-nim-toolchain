@@ -229,8 +229,35 @@ proc plan*(input: PlanningInput): PlanOutcome =
   let ordered = topoSort(actionIds, deps)
 
   var neededActionsById = initTable[string, Action]()
+  var neededPhysicalWork = initTable[string, JsonNode]()
   for id in actionIds:
     neededActionsById[id] = actionsById[id]
+    if input.physicalWork.hasKey(id):
+      neededPhysicalWork[id] = input.physicalWork[id]
+
+  for id, declaration in input.physicalWork:
+    if not actionsById.hasKey(id):
+      return rejected(reject(
+        rrkUnsupportedInput,
+        "physical_work declaration '" & id & "' has no matching action",
+      ))
+    if actionsById[id].kind != akPhysicalWork:
+      return rejected(reject(
+        rrkUnsupportedInput,
+        "physical_work declaration '" & id & "' belongs to a non-physical action",
+      ))
+    if declaration{"instance_id"}.isNil or declaration{"instance_id"}.kind != JString or
+        declaration{"instance_id"}.getStr() != id:
+      return rejected(reject(
+        rrkUnsupportedInput,
+        "physical_work declaration '" & id & "' has a mismatched instance_id",
+      ))
+  for id, action in actionsById:
+    if action.kind == akPhysicalWork and not input.physicalWork.hasKey(id):
+      return rejected(reject(
+        rrkUnsupportedInput,
+        "physical action '" & id & "' has no physical_work declaration",
+      ))
 
   planned(ExecutionPlan(
     schemaVersion: PlanSchemaVersion,
@@ -239,6 +266,7 @@ proc plan*(input: PlanningInput): PlanOutcome =
     planId: computePlanId(input),
     orderedActions: ordered,
     actions: neededActionsById,
+    physicalWork: neededPhysicalWork,
   ))
 
 proc decodePlanningInputOrReject*(root: JsonNode): tuple[input: Option[PlanningInput], rejection: Option[PlanOutcome]] =

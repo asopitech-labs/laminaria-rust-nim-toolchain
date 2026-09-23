@@ -13,6 +13,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::{Action, ActionKind, ArtifactRef, ExecutionPlan, PlanningInput};
+
 pub const PHYSICAL_WORK_CONTRACT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -265,6 +267,308 @@ pub struct PhysicalWorkUnit {
 pub struct PhysicalWorkContract {
     pub contract_version: u32,
     pub units: Vec<PhysicalWorkUnit>,
+}
+
+/// The planner-visible reservation for one concrete physical-work identity.
+/// This is an accounted request, not an OS-enforced limit. The Rust executor
+/// converts it to its live resource accounting type without reinterpreting it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlannedResourceReservation {
+    pub cpu_slots: u32,
+    pub memory_bytes: u64,
+    pub io_slots: u32,
+    pub external_process_slots: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlannedNestedParallelism {
+    Disabled,
+    Accounted { additional_cpu_slots: u32 },
+}
+
+/// One concrete logical identity submitted to the production Nim planner.
+/// The work-unit id keeps semantic identity separate from process grouping;
+/// dependencies name other concrete identities, never execution order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlannedPhysicalWork {
+    pub instance_id: String,
+    pub work_unit: WorkUnitId,
+    pub execution_group: ExecutionGroup,
+    pub dependencies: BTreeSet<String>,
+    pub reservation: PlannedResourceReservation,
+    pub nested_parallelism: PlannedNestedParallelism,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PhysicalPlanningBridgeError {
+    InvalidContract(Vec<PhysicalWorkViolation>),
+    DuplicateInstance {
+        instance_id: String,
+    },
+    UnknownWorkUnit {
+        instance_id: String,
+        work_unit: WorkUnitId,
+    },
+    UnknownDependency {
+        instance_id: String,
+        dependency: String,
+    },
+    InvalidDependency {
+        instance_id: String,
+        dependency: String,
+    },
+    MissingDependency {
+        instance_id: String,
+        producer: WorkUnitId,
+    },
+    UndemandedInstance {
+        instance_id: String,
+    },
+    InvalidReservation {
+        instance_id: String,
+        detail: String,
+    },
+    UnexpectedActionKind {
+        action_id: String,
+        kind: ActionKind,
+    },
+    InvalidDescriptor {
+        action_id: String,
+        detail: String,
+    },
+    DescriptorMismatch {
+        action_id: String,
+        detail: String,
+    },
+    MissingPlannedAction {
+        action_id: String,
+    },
+}
+
+fn physical_result_artifact(instance_id: &str) -> String {
+    format!("physical-work-result:{instance_id}")
+}
+
+fn validate_planned_instance(
+    contract: &PhysicalWorkContract,
+    instance: &PlannedPhysicalWork,
+) -> Result<(), PhysicalPlanningBridgeError> {
+    let Some(unit) = contract
+        .units
+        .iter()
+        .find(|unit| unit.id == instance.work_unit)
+    else {
+        return Err(PhysicalPlanningBridgeError::UnknownWorkUnit {
+            instance_id: instance.instance_id.clone(),
+            work_unit: instance.work_unit,
+        });
+    };
+    if instance.execution_group != unit.execution_group {
+        return Err(PhysicalPlanningBridgeError::InvalidDescriptor {
+            action_id: instance.instance_id.clone(),
+            detail: "execution_group differs from the physical-work contract".to_string(),
+        });
+    }
+    let nested_cpu = match instance.nested_parallelism {
+        PlannedNestedParallelism::Disabled => 0,
+        PlannedNestedParallelism::Accounted {
+            additional_cpu_slots,
+        } => additional_cpu_slots,
+    };
+    let invalid = if instance.reservation.cpu_slots == 0 {
+        Some("cpu_slots must be non-zero")
+    } else if instance.reservation.memory_bytes == 0 {
+        Some("memory_bytes must be non-zero")
+    } else if instance.reservation.cpu_slots < 1_u32.saturating_add(nested_cpu) {
+        Some("nested parallelism is not included in cpu_slots")
+    } else if instance.reservation.cpu_slots < u32::from(unit.resources.minimum_cpu_slots) {
+        Some("cpu_slots is below the work-unit minimum")
+    } else if instance.reservation.external_process_slots
+        < u32::from(unit.resources.external_process_slots)
+    {
+        Some("external_process_slots is below the work-unit minimum")
+    } else if instance.reservation.external_process_slots > 0 && instance.reservation.io_slots == 0
+    {
+        Some("external process work must reserve an I/O slot")
+    } else {
+        None
+    };
+    if let Some(detail) = invalid {
+        return Err(PhysicalPlanningBridgeError::InvalidReservation {
+            instance_id: instance.instance_id.clone(),
+            detail: detail.to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Converts concrete physical identities into the existing production Nim
+/// planner's artifact graph without translating them into legacy build or
+/// compiler-work action kinds. The typed declaration is carried separately
+/// from the action's display-only command identity and must round-trip through
+/// Nim without reinterpretation.
+pub fn physical_planning_input(
+    contract: &PhysicalWorkContract,
+    instances: Vec<PlannedPhysicalWork>,
+    demanded_instances: Vec<String>,
+) -> Result<PlanningInput, PhysicalPlanningBridgeError> {
+    let violations = validate_physical_work_contract(contract);
+    if !violations.is_empty() {
+        return Err(PhysicalPlanningBridgeError::InvalidContract(violations));
+    }
+    let mut by_id = BTreeMap::new();
+    for instance in instances {
+        validate_planned_instance(contract, &instance)?;
+        let instance_id = instance.instance_id.clone();
+        if by_id.insert(instance_id.clone(), instance).is_some() {
+            return Err(PhysicalPlanningBridgeError::DuplicateInstance { instance_id });
+        }
+    }
+    for instance in by_id.values() {
+        for dependency in &instance.dependencies {
+            if !by_id.contains_key(dependency) {
+                return Err(PhysicalPlanningBridgeError::UnknownDependency {
+                    instance_id: instance.instance_id.clone(),
+                    dependency: dependency.clone(),
+                });
+            }
+        }
+        let unit = contract
+            .units
+            .iter()
+            .find(|unit| unit.id == instance.work_unit)
+            .expect("work unit was validated above");
+        let dependency_units: BTreeMap<_, _> = instance
+            .dependencies
+            .iter()
+            .map(|dependency| (dependency, by_id[dependency].work_unit))
+            .collect();
+        for (dependency, producer) in &dependency_units {
+            let accepted = unit
+                .inputs
+                .iter()
+                .any(|input| input_producers(input.source).any(|candidate| candidate == *producer));
+            if !accepted {
+                return Err(PhysicalPlanningBridgeError::InvalidDependency {
+                    instance_id: instance.instance_id.clone(),
+                    dependency: (*dependency).clone(),
+                });
+            }
+        }
+        for input in unit.inputs.iter().filter(|input| !input.optional) {
+            let producers: BTreeSet<_> = input_producers(input.source).collect();
+            if !producers.is_empty()
+                && !dependency_units
+                    .values()
+                    .any(|producer| producers.contains(producer))
+            {
+                return Err(PhysicalPlanningBridgeError::MissingDependency {
+                    instance_id: instance.instance_id.clone(),
+                    producer: *producers.iter().next().expect("non-empty producer set"),
+                });
+            }
+        }
+    }
+    for demanded in &demanded_instances {
+        if !by_id.contains_key(demanded) {
+            return Err(PhysicalPlanningBridgeError::UndemandedInstance {
+                instance_id: demanded.clone(),
+            });
+        }
+    }
+
+    let actions = by_id
+        .values()
+        .map(|instance| Action {
+            id: instance.instance_id.clone(),
+            kind: ActionKind::PhysicalWork,
+            command_identity: format!("physical-work:{}", instance.instance_id),
+            inputs: instance
+                .dependencies
+                .iter()
+                .map(|dependency| ArtifactRef::declared(physical_result_artifact(dependency)))
+                .collect(),
+            outputs: vec![ArtifactRef::declared(physical_result_artifact(
+                &instance.instance_id,
+            ))],
+            compiler_work: None,
+        })
+        .collect();
+    let mut input = PlanningInput::new(
+        demanded_instances
+            .iter()
+            .map(|id| physical_result_artifact(id))
+            .collect(),
+        actions,
+    );
+    input.physical_work = by_id;
+    Ok(input)
+}
+
+/// Recovers only physical-work actions selected by the real Nim planner and
+/// rejects any descriptor, dependency, or output mutation before execution.
+pub fn physical_work_from_execution_plan(
+    contract: &PhysicalWorkContract,
+    plan: &ExecutionPlan,
+) -> Result<Vec<PlannedPhysicalWork>, PhysicalPlanningBridgeError> {
+    let ordered_ids: BTreeSet<_> = plan.ordered_actions.iter().cloned().collect();
+    let declaration_ids: BTreeSet<_> = plan.physical_work.keys().cloned().collect();
+    if ordered_ids != declaration_ids {
+        return Err(PhysicalPlanningBridgeError::DescriptorMismatch {
+            action_id: "<plan>".to_string(),
+            detail: "physical-work declarations do not exactly match ordered_actions".to_string(),
+        });
+    }
+    let mut result = Vec::with_capacity(plan.ordered_actions.len());
+    for action_id in &plan.ordered_actions {
+        let action = plan.actions.get(action_id).ok_or_else(|| {
+            PhysicalPlanningBridgeError::MissingPlannedAction {
+                action_id: action_id.clone(),
+            }
+        })?;
+        if action.kind != ActionKind::PhysicalWork {
+            return Err(PhysicalPlanningBridgeError::UnexpectedActionKind {
+                action_id: action.id.clone(),
+                kind: action.kind,
+            });
+        }
+        let instance = plan.physical_work.get(action_id).cloned().ok_or_else(|| {
+            PhysicalPlanningBridgeError::InvalidDescriptor {
+                action_id: action.id.clone(),
+                detail: "missing typed physical-work declaration".to_string(),
+            }
+        })?;
+        validate_planned_instance(contract, &instance)?;
+        if instance.instance_id != action.id {
+            return Err(PhysicalPlanningBridgeError::DescriptorMismatch {
+                action_id: action.id.clone(),
+                detail: "descriptor instance_id differs from action id".to_string(),
+            });
+        }
+        let expected_inputs: Vec<_> = instance
+            .dependencies
+            .iter()
+            .map(|dependency| ArtifactRef::declared(physical_result_artifact(dependency)))
+            .collect();
+        let expected_outputs = vec![ArtifactRef::declared(physical_result_artifact(&action.id))];
+        if action.inputs != expected_inputs || action.outputs != expected_outputs {
+            return Err(PhysicalPlanningBridgeError::DescriptorMismatch {
+                action_id: action.id.clone(),
+                detail: "artifact edges differ from the physical descriptor".to_string(),
+            });
+        }
+        result.push(instance);
+    }
+    physical_planning_input(
+        contract,
+        result.clone(),
+        result
+            .iter()
+            .map(|instance| instance.instance_id.clone())
+            .collect(),
+    )?;
+    Ok(result)
 }
 
 const OWNER: WorkOwnership = WorkOwnership {
@@ -865,6 +1169,93 @@ pub fn validate_physical_work_contract(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn planned(
+        contract: &PhysicalWorkContract,
+        instance_id: &str,
+        work_unit: WorkUnitId,
+        dependencies: &[&str],
+    ) -> PlannedPhysicalWork {
+        let unit = contract
+            .units
+            .iter()
+            .find(|unit| unit.id == work_unit)
+            .unwrap();
+        let external_process_slots = u32::from(unit.resources.external_process_slots);
+        PlannedPhysicalWork {
+            instance_id: instance_id.to_string(),
+            work_unit,
+            execution_group: unit.execution_group,
+            dependencies: dependencies.iter().map(|id| (*id).to_string()).collect(),
+            reservation: PlannedResourceReservation {
+                cpu_slots: u32::from(unit.resources.minimum_cpu_slots),
+                memory_bytes: 1,
+                io_slots: u32::from(external_process_slots > 0),
+                external_process_slots,
+            },
+            nested_parallelism: PlannedNestedParallelism::Disabled,
+        }
+    }
+
+    #[test]
+    fn physical_planning_input_is_derived_from_typed_declarations() {
+        let contract = canonical_physical_work_contract();
+        let a2 = planned(
+            &contract,
+            "a2:crate-a",
+            WorkUnitId::Logical(LogicalActivity::A2MemberManifest),
+            &[],
+        );
+        let a3 = planned(
+            &contract,
+            "a3:crate-a",
+            WorkUnitId::Logical(LogicalActivity::A3PackageResolution),
+            &["a2:crate-a"],
+        );
+
+        let input = physical_planning_input(
+            &contract,
+            vec![a2.clone(), a3.clone()],
+            vec![a3.instance_id.clone()],
+        )
+        .unwrap();
+
+        assert_eq!(input.physical_work[&a2.instance_id], a2);
+        assert_eq!(input.physical_work[&a3.instance_id], a3);
+        assert_eq!(input.actions[1].kind, ActionKind::PhysicalWork);
+        assert_eq!(
+            input.actions[1].inputs,
+            vec![ArtifactRef::declared("physical-work-result:a2:crate-a")]
+        );
+    }
+
+    #[test]
+    fn physical_planning_input_rejects_dependencies_not_admitted_by_the_contract() {
+        let contract = canonical_physical_work_contract();
+        let a2 = planned(
+            &contract,
+            "a2",
+            WorkUnitId::Logical(LogicalActivity::A2MemberManifest),
+            &[],
+        );
+        let n2 = planned(
+            &contract,
+            "n2",
+            WorkUnitId::Logical(LogicalActivity::N2DependencyResolution),
+            &[],
+        );
+        let a3 = planned(
+            &contract,
+            "a3",
+            WorkUnitId::Logical(LogicalActivity::A3PackageResolution),
+            &["n2"],
+        );
+
+        assert!(matches!(
+            physical_planning_input(&contract, vec![a2, n2, a3], vec!["a3".to_string()]),
+            Err(PhysicalPlanningBridgeError::InvalidDependency { .. })
+        ));
+    }
 
     #[test]
     fn canonical_map_is_connected_complete_acyclic_and_has_only_a12_as_global_barrier() {

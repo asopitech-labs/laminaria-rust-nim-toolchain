@@ -26,8 +26,9 @@ import std/[json, tables, sequtils, options]
 ## see that crate's own `PLAN_SCHEMA_VERSION` doc comment for why this is
 ## bumped even though every existing field/variant is unchanged. Bumped
 ## again 0.2.0 -> 0.3.0 for issue #36 T0's fifth compiler-work kind,
-## `akDiscoverSourceDependencies` -- see that same doc comment.
-const PlanSchemaVersion* = "0.3.0"
+## `akDiscoverSourceDependencies`, and 0.3.0 -> 0.4.0 for #89's typed
+## physical-work planning declarations -- see that same doc comment.
+const PlanSchemaVersion* = "0.4.0"
 const ProducedBy* = "laminaria-nim-planning-kernel"
 const CompilerWorkSchemaVersion* = "0.1.0"
 
@@ -72,6 +73,7 @@ type
     ## `crates/laminaria-plan/src/types.rs`'s own doc comment on this
     ## variant.
     akDiscoverSourceDependencies = "discover_source_dependencies"
+    akPhysicalWork = "physical_work"
 
   TransformKind* = enum
     tkAnf = "anf"
@@ -128,6 +130,10 @@ type
       ## everything `actions` declares, so demand-driven pruning (issue
       ## #8's variant-explosion scope) is explicitly not implemented yet.
     actions*: seq[Action]
+    physicalWork*: Table[string, JsonNode]
+      ## Typed and validated by the Rust producer/consumer.  The Nim kernel
+      ## owns demand selection and preserves each declaration as structured
+      ## JSON; it never turns this contract into a command string.
 
   ExecutionPlan* = object
     schemaVersion*: string
@@ -147,6 +153,7 @@ type
     orderedActions*: seq[string]
       ## A deterministic topological order over `actions`' ids.
     actions*: Table[string, Action]
+    physicalWork*: Table[string, JsonNode]
 
   RejectionReasonKind* = enum
     rrkCycle = "cycle"
@@ -259,17 +266,22 @@ proc toJson*(a: Action): JsonNode =
     result["compiler_work"] = a.compilerWork.get.toJson
 
 proc toJson*(i: PlanningInput): JsonNode =
-  %*{
+  result = %*{
     "schema_version": i.schemaVersion,
     "demanded_artifacts": i.demandedArtifacts,
     "actions": i.actions.map_it(it.toJson),
   }
+  if i.physicalWork.len > 0:
+    var physicalNode = newJObject()
+    for id, declaration in i.physicalWork:
+      physicalNode[id] = declaration
+    result["physical_work"] = physicalNode
 
 proc toJson*(p: ExecutionPlan): JsonNode =
   var actionsNode = newJObject()
   for id, action in p.actions:
     actionsNode[id] = action.toJson
-  %*{
+  result = %*{
     "schema_version": p.schemaVersion,
     "produced_by": p.producedBy,
     "producer_version": p.producerVersion,
@@ -277,6 +289,11 @@ proc toJson*(p: ExecutionPlan): JsonNode =
     "ordered_actions": p.orderedActions,
     "actions": actionsNode,
   }
+  if p.physicalWork.len > 0:
+    var physicalNode = newJObject()
+    for id, declaration in p.physicalWork:
+      physicalNode[id] = declaration
+    result["physical_work"] = physicalNode
 
 proc toJson*(r: PlanRejection): JsonNode =
   %*{
@@ -414,6 +431,7 @@ proc actionFromJson*(node: JsonNode): Action =
     of "nim_build": akNimBuild
     of "cargo_build": akCargoBuild
     of "integrate": akIntegrate
+    of "physical_work": akPhysicalWork
     of "lower_source": akLowerSource
     of "validate_ir": akValidateIr
     of "transform_function": akTransformFunction
@@ -438,8 +456,17 @@ proc planningInputFromJson*(node: JsonNode): PlanningInput =
   let actionsNode = node.expectField("actions")
   if actionsNode.kind != JArray:
     raise newException(ContractError, "'actions' must be an array")
-  PlanningInput(
+  result = PlanningInput(
     schemaVersion: node.getStrField("schema_version"),
     demandedArtifacts: node.getStrSeqField("demanded_artifacts"),
     actions: actionsNode.elems.map_it(it.actionFromJson),
   )
+  result.physicalWork = initTable[string, JsonNode]()
+  if node.hasKey("physical_work"):
+    let physicalNode = node.expectField("physical_work")
+    if physicalNode.kind != JObject:
+      raise newException(ContractError, "field 'physical_work' must be an object")
+    for id, declaration in physicalNode:
+      if declaration.kind != JObject:
+        raise newException(ContractError, "physical_work declaration '" & id & "' must be an object")
+      result.physicalWork[id] = declaration

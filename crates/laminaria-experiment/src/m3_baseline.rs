@@ -75,7 +75,7 @@ pub const WORKLOAD_ID: &str = "M3-owned-independent-chains@issue35-d0-accepted-c
 
 const TELEMETRY_KIND: &str = "m3-owned-baseline-v1";
 const EXPECTED_CASE_ID: &str = "M3-owned-independent-chains";
-const EXPECTED_SCHEMA_VERSION: &str = "0.3.0";
+const EXPECTED_SCHEMA_VERSION: &str = "0.4.0";
 /// The exact CPU budget set this case's `pass_criteria.d1` requires --
 /// no missing, duplicate, or extra budget group is ever a valid baseline
 /// (a review round's own reproduction: mutating one budget's `cpu_budget`

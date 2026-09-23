@@ -15,11 +15,13 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::compiler_work::CompilerWorkDescriptor;
+use crate::physical_work::PlannedPhysicalWork;
 
 /// Bumped 0.1.0 -> 0.2.0 for issue #27's B: four new `ActionKind`
 /// variants and `Action`'s new optional `compiler_work` field. Bumped
 /// again 0.2.0 -> 0.3.0 for issue #36 T0's fifth compiler-work kind,
-/// `DiscoverSourceDependencies` -- `StartSession`'s `initial_graph`
+/// `DiscoverSourceDependencies`. Bumped 0.3.0 -> 0.4.0 for #89's typed
+/// physical-work planning declarations. `StartSession`'s `initial_graph`
 /// (`crates/laminaria-run/src/incremental_session_client.rs`) reuses this
 /// same `PlanningInput`/`Action` shape unchanged, so an `Action` carrying
 /// the new kind must decode on both sides of the wire. Backward
@@ -30,7 +32,7 @@ use crate::compiler_work::CompilerWorkDescriptor;
 /// updated together is still caught by the existing schema-version gate
 /// (`nim-planner/src/contract.nim`'s `planFromJson`) rather than silently
 /// running with a partially-understood contract.
-pub const PLAN_SCHEMA_VERSION: &str = "0.3.0";
+pub const PLAN_SCHEMA_VERSION: &str = "0.4.0";
 pub const PRODUCED_BY: &str = "laminaria-nim-planning-kernel";
 
 /// An external, pre-existing input (`Source`, a leaf with no producing
@@ -87,6 +89,11 @@ pub enum ActionKind {
     /// ([`crate::compiler_work::discover_source_dependencies_artifact_id`])
     /// mirrors `lower_source_artifact_id`'s shape exactly.
     DiscoverSourceDependencies,
+    /// A concrete instance of the canonical physical-work contract.
+    /// Its typed declaration is carried in `PlanningInput::physical_work`;
+    /// the Nim kernel selects it with the action's demanded artifact closure
+    /// and never infers it from a legacy action or process command.
+    PhysicalWork,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,6 +121,10 @@ pub struct PlanningInput {
     /// (issue #8's variant-explosion scope) is not implemented yet.
     pub demanded_artifacts: Vec<String>,
     pub actions: Vec<Action>,
+    /// Typed physical-work declarations keyed by their action id.  This is a
+    /// graph-level planning contract, not an executable command encoding.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub physical_work: BTreeMap<String, PlannedPhysicalWork>,
 }
 
 impl PlanningInput {
@@ -122,6 +133,7 @@ impl PlanningInput {
             schema_version: PLAN_SCHEMA_VERSION.to_string(),
             demanded_artifacts,
             actions,
+            physical_work: BTreeMap::new(),
         }
     }
 }
@@ -147,6 +159,10 @@ pub struct ExecutionPlan {
     /// A deterministic topological order over `actions`' ids.
     pub ordered_actions: Vec<String>,
     pub actions: BTreeMap<String, Action>,
+    /// The demanded subset of `PlanningInput::physical_work`, selected by the
+    /// Nim kernel together with the corresponding actions.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub physical_work: BTreeMap<String, PlannedPhysicalWork>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

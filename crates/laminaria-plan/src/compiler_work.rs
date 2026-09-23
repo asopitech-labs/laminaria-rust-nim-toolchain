@@ -636,7 +636,10 @@ fn recompute_work_id(
                 subset_version,
             ))
         }
-        ActionKind::NimBuild | ActionKind::CargoBuild | ActionKind::Integrate => {
+        ActionKind::NimBuild
+        | ActionKind::CargoBuild
+        | ActionKind::Integrate
+        | ActionKind::PhysicalWork => {
             unreachable!(
                 "recompute_work_id is only ever called after validate_compiler_work_action has \
                  already confirmed action.kind is one of the five compiler-work kinds"

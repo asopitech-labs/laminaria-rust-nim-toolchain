@@ -1573,6 +1573,7 @@ mod tests {
             plan_id: "test".to_string(),
             ordered_actions,
             actions,
+            physical_work: BTreeMap::new(),
         }
     }
 

@@ -60,6 +60,9 @@ pub enum ValidationError {
         action_id: String,
         detail: String,
     },
+    PhysicalWorkMismatch {
+        detail: String,
+    },
     /// An artifact `PlanningInput.demanded_artifacts` asked for is not
     /// produced by any action's declared outputs in the plan.
     UnmetDemand {
@@ -117,6 +120,10 @@ impl std::fmt::Display for ValidationError {
                 f,
                 "action {action_id:?} in the returned plan does not match what PlanningInput \
                  declared for it: {detail}"
+            ),
+            ValidationError::PhysicalWorkMismatch { detail } => write!(
+                f,
+                "ExecutionPlan physical-work declarations do not match the demanded input subset: {detail}"
             ),
             ValidationError::UnmetDemand { artifact_id } => write!(
                 f,
@@ -275,6 +282,20 @@ pub fn validate(plan: &ExecutionPlan, input: &PlanningInput) -> Result<(), Valid
             detail: format!(
                 "PlanningInput's demand closure requires actions {needed_action_ids:?} but \
                  ExecutionPlan.actions declares {plan_action_ids:?}"
+            ),
+        });
+    }
+    let expected_physical_work: BTreeMap<_, _> = input
+        .physical_work
+        .iter()
+        .filter(|(id, _)| needed_action_ids.contains(id.as_str()))
+        .map(|(id, declaration)| (id.clone(), declaration.clone()))
+        .collect();
+    if plan.physical_work != expected_physical_work {
+        return Err(ValidationError::PhysicalWorkMismatch {
+            detail: format!(
+                "expected {expected_physical_work:?}, got {:?}",
+                plan.physical_work
             ),
         });
     }
@@ -458,6 +479,7 @@ mod tests {
             plan_id: "test".to_string(),
             ordered_actions: vec!["a".to_string(), "b".to_string()],
             actions,
+            physical_work: BTreeMap::new(),
         }
     }
 
@@ -570,6 +592,7 @@ mod tests {
             plan_id: "test".to_string(),
             ordered_actions: vec![],
             actions: BTreeMap::new(),
+            physical_work: BTreeMap::new(),
         };
         assert!(matches!(
             validate(&empty_plan, &valid_input()),

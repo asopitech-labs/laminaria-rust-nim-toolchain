@@ -56,7 +56,7 @@ pub const WORKLOAD_ID: &str = "M8-many-unrequested-nim-planner@issue35-d0-accept
 
 const TELEMETRY_KIND: &str = "m8-owned-baseline-v1";
 const EXPECTED_CASE_ID: &str = "M8-many-unrequested-nim-planner";
-const EXPECTED_SCHEMA_VERSION: &str = "0.3.0";
+const EXPECTED_SCHEMA_VERSION: &str = "0.4.0";
 /// The exact `unused_actions` scale set this case's `pass_criteria.d1`
 /// requires -- no missing, duplicate, or extra scale group is ever a
 /// valid baseline (a review round's own reproduction: renaming one

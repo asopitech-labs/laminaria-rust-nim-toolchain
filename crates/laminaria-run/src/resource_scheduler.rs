@@ -11,9 +11,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use laminaria_plan::physical_work::{
-    CommitBoundary, DataKind, KeySpace, PhysicalWorkContract, PhysicalWorkUnit, SideEffect,
-    WorkUnitId,
+    physical_work_from_execution_plan, CommitBoundary, DataKind, KeySpace,
+    PhysicalPlanningBridgeError, PhysicalWorkContract, PhysicalWorkUnit, PlannedNestedParallelism,
+    SideEffect, WorkUnitId,
 };
+use laminaria_plan::ExecutionPlan;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -66,6 +68,39 @@ pub struct PhysicalWorkInstance {
     pub dependencies: BTreeSet<String>,
     pub reservation: ResourceAmount,
     pub nested_parallelism: NestedParallelism,
+}
+
+/// Converts the exact physical descriptors echoed by the production Nim
+/// planner into executor instances. No legacy `ActionKind` or process command
+/// is interpreted as a logical activity here.
+pub fn physical_instances_from_execution_plan(
+    contract: &PhysicalWorkContract,
+    plan: &ExecutionPlan,
+) -> Result<Vec<PhysicalWorkInstance>, PhysicalPlanningBridgeError> {
+    physical_work_from_execution_plan(contract, plan).map(|instances| {
+        instances
+            .into_iter()
+            .map(|instance| PhysicalWorkInstance {
+                instance_id: instance.instance_id,
+                work_unit: instance.work_unit,
+                dependencies: instance.dependencies,
+                reservation: ResourceAmount {
+                    cpu_slots: instance.reservation.cpu_slots,
+                    memory_bytes: instance.reservation.memory_bytes,
+                    io_slots: instance.reservation.io_slots,
+                    external_process_slots: instance.reservation.external_process_slots,
+                },
+                nested_parallelism: match instance.nested_parallelism {
+                    PlannedNestedParallelism::Disabled => NestedParallelism::Disabled,
+                    PlannedNestedParallelism::Accounted {
+                        additional_cpu_slots,
+                    } => NestedParallelism::Accounted {
+                        additional_cpu_slots,
+                    },
+                },
+            })
+            .collect()
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1081,7 +1116,8 @@ fn has_dependency_cycle(work: &BTreeMap<String, RuntimeWork>) -> bool {
 mod tests {
     use super::*;
     use laminaria_plan::physical_work::{
-        canonical_physical_work_contract, ExecutionGroup, InputSource, LogicalActivity, WorkUnitId,
+        canonical_physical_work_contract, physical_planning_input, ExecutionGroup, InputSource,
+        LogicalActivity, PlannedPhysicalWork, PlannedResourceReservation, WorkUnitId,
     };
 
     fn amount(cpu: u32, memory: u64, io: u32, processes: u32) -> ResourceAmount {
@@ -1090,6 +1126,33 @@ mod tests {
             memory_bytes: memory,
             io_slots: io,
             external_process_slots: processes,
+        }
+    }
+
+    fn planned_instance(
+        contract: &PhysicalWorkContract,
+        id: &str,
+        activity: LogicalActivity,
+        dependencies: &[&str],
+    ) -> PlannedPhysicalWork {
+        let work_unit = WorkUnitId::Logical(activity);
+        let unit = contract
+            .units
+            .iter()
+            .find(|unit| unit.id == work_unit)
+            .unwrap();
+        PlannedPhysicalWork {
+            instance_id: id.to_string(),
+            work_unit,
+            execution_group: unit.execution_group,
+            dependencies: dependencies.iter().map(|id| (*id).to_string()).collect(),
+            reservation: PlannedResourceReservation {
+                cpu_slots: 1,
+                memory_bytes: 8,
+                io_slots: 1,
+                external_process_slots: 0,
+            },
+            nested_parallelism: PlannedNestedParallelism::Disabled,
         }
     }
 
@@ -1229,6 +1292,87 @@ mod tests {
             }
         }
         descendants
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn real_nim_plan_drives_the_shared_resource_executor_without_legacy_action_mapping() {
+        let contract = canonical_physical_work_contract();
+        let declarations = vec![
+            planned_instance(
+                &contract,
+                "rust-root",
+                LogicalActivity::A2MemberManifest,
+                &[],
+            ),
+            planned_instance(
+                &contract,
+                "rust-dependent",
+                LogicalActivity::A3PackageResolution,
+                &["rust-root"],
+            ),
+            planned_instance(
+                &contract,
+                "nim-root",
+                LogicalActivity::N2DependencyResolution,
+                &[],
+            ),
+            planned_instance(
+                &contract,
+                "nim-dependent",
+                LogicalActivity::N3BuildInvocation,
+                &["nim-root"],
+            ),
+            planned_instance(
+                &contract,
+                "unused-rust-root",
+                LogicalActivity::A2MemberManifest,
+                &[],
+            ),
+        ];
+        let input = physical_planning_input(
+            &contract,
+            declarations,
+            vec!["rust-dependent".to_string(), "nim-dependent".to_string()],
+        )
+        .unwrap();
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap();
+        let planner = crate::test_support::real_planner_binary(&repo_root);
+        let outcome = laminaria_plan::call_planner(&planner, &input).unwrap();
+        let laminaria_plan::PlanOutcome::Planned(plan) = outcome else {
+            panic!("production Nim planner rejected a valid physical-work graph")
+        };
+        laminaria_plan::validate(&plan, &input).unwrap();
+        assert_eq!(input.physical_work.len(), 5);
+        assert_eq!(plan.physical_work.len(), 4);
+        assert!(!plan.physical_work.contains_key("unused-rust-root"));
+
+        let instances = physical_instances_from_execution_plan(&contract, &plan).unwrap();
+        assert_eq!(instances.len(), 4);
+        let report = execute_physical_work_graph(
+            &contract,
+            instances,
+            amount(1, 16, 1, 0),
+            |instance, inputs| deterministic_computation(&contract, instance, inputs),
+        )
+        .unwrap();
+
+        assert_eq!(
+            report.completed,
+            BTreeSet::from([
+                "nim-dependent".to_string(),
+                "nim-root".to_string(),
+                "rust-dependent".to_string(),
+                "rust-root".to_string(),
+            ])
+        );
+        assert!(report.transitions.iter().any(|transition| matches!(
+            transition.reason,
+            TransitionReason::Waiting(WaitReason::Resources { .. })
+        )));
     }
 
     #[test]
