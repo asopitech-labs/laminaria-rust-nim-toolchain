@@ -11,9 +11,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use laminaria_plan::physical_work::{
-    physical_work_from_execution_plan, CommitBoundary, DataKind, KeySpace,
-    PhysicalPlanningBridgeError, PhysicalWorkContract, PhysicalWorkUnit, PlannedNestedParallelism,
-    SideEffect, WorkUnitId,
+    physical_work_from_execution_plan, CommitBoundary, DataKind, ExecutionGroup, InputSource,
+    KeySpace, PhysicalPlanningBridgeError, PhysicalWorkContract, PhysicalWorkUnit,
+    PlannedNestedParallelism, SideEffect, WorkUnitId,
 };
 use laminaria_plan::ExecutionPlan;
 use serde::{Deserialize, Serialize};
@@ -65,6 +65,9 @@ pub struct PhysicalWorkInstance {
     /// Checkpoint-A work-unit kind without sharing cache or execution identity.
     pub instance_id: String,
     pub work_unit: WorkUnitId,
+    /// Checkpoint-A's physical execution grouping, available to the executor
+    /// when binding this identity to a shared process or in-memory stage.
+    pub execution_group: ExecutionGroup,
     pub dependencies: BTreeSet<String>,
     pub reservation: ResourceAmount,
     pub nested_parallelism: NestedParallelism,
@@ -83,6 +86,7 @@ pub fn physical_instances_from_execution_plan(
             .map(|instance| PhysicalWorkInstance {
                 instance_id: instance.instance_id,
                 work_unit: instance.work_unit,
+                execution_group: instance.execution_group,
                 dependencies: instance.dependencies,
                 reservation: ResourceAmount {
                     cpu_slots: instance.reservation.cpu_slots,
@@ -427,6 +431,19 @@ pub enum SchedulerContractError {
         instance_id: String,
         dependency: String,
     },
+    InvalidExecutionGroup {
+        instance_id: String,
+        expected: ExecutionGroup,
+        actual: ExecutionGroup,
+    },
+    InvalidDependencyOutputKind {
+        instance_id: String,
+        dependency: String,
+    },
+    MissingInputDependency {
+        instance_id: String,
+        kind: DataKind,
+    },
     DependencyCycle,
     ZeroCpuReservation {
         instance_id: String,
@@ -485,6 +502,7 @@ pub enum PhysicalWorkExecutionError {
 #[derive(Debug, Clone)]
 struct RuntimeWork {
     definition: PhysicalWorkInstance,
+    dependency_output_kinds: BTreeMap<String, BTreeSet<DataKind>>,
     state: LifecycleState,
     wait_reason: Option<WaitReason>,
 }
@@ -528,6 +546,13 @@ impl ResourceScheduler {
                     work_unit: instance.work_unit,
                 });
             };
+            if instance.execution_group != unit.execution_group {
+                return Err(SchedulerContractError::InvalidExecutionGroup {
+                    instance_id: instance.instance_id,
+                    expected: unit.execution_group,
+                    actual: instance.execution_group,
+                });
+            }
             let claim = unit.resources;
             if instance.reservation.cpu_slots == 0 {
                 return Err(SchedulerContractError::ZeroCpuReservation {
@@ -577,6 +602,7 @@ impl ResourceScheduler {
                 instance.instance_id.clone(),
                 RuntimeWork {
                     definition: instance,
+                    dependency_output_kinds: BTreeMap::new(),
                     state: LifecycleState::Blocked,
                     wait_reason: None,
                 },
@@ -597,6 +623,50 @@ impl ResourceScheduler {
                 };
                 consumers.insert(id.clone());
             }
+        }
+        let ids: Vec<_> = work.keys().cloned().collect();
+        for id in ids {
+            let runtime = &work[&id];
+            let consumer = &units[&runtime.definition.work_unit];
+            let mut bindings = BTreeMap::new();
+            for dependency in &runtime.definition.dependencies {
+                let producer_work = &work[dependency];
+                let producer = &units[&producer_work.definition.work_unit];
+                let kinds: BTreeSet<_> = consumer
+                    .inputs
+                    .iter()
+                    .filter(|input| {
+                        input_source_accepts(input.source, producer_work.definition.work_unit)
+                            && producer.outputs.contains(&input.kind)
+                    })
+                    .map(|input| input.kind)
+                    .collect();
+                if kinds.is_empty() {
+                    return Err(SchedulerContractError::InvalidDependencyOutputKind {
+                        instance_id: id.clone(),
+                        dependency: dependency.clone(),
+                    });
+                }
+                bindings.insert(dependency.clone(), kinds);
+            }
+            for input in consumer.inputs.iter().filter(|input| !input.optional) {
+                if matches!(input.source, InputSource::ExternalAuthority) {
+                    continue;
+                }
+                let supplied = bindings.iter().any(|(dependency, kinds)| {
+                    kinds.contains(&input.kind)
+                        && input_source_accepts(input.source, work[dependency].definition.work_unit)
+                });
+                if !supplied {
+                    return Err(SchedulerContractError::MissingInputDependency {
+                        instance_id: id.clone(),
+                        kind: input.kind,
+                    });
+                }
+            }
+            work.get_mut(&id)
+                .expect("instance exists")
+                .dependency_output_kinds = bindings;
         }
         if has_dependency_cycle(&work) {
             return Err(SchedulerContractError::DependencyCycle);
@@ -688,7 +758,13 @@ impl ResourceScheduler {
             .definition
             .dependencies
             .iter()
-            .flat_map(|dependency| self.commit_store.outputs_for_writer(dependency))
+            .flat_map(|dependency| {
+                let kinds = &runtime.dependency_output_kinds[dependency];
+                self.commit_store
+                    .outputs_for_writer(dependency)
+                    .into_iter()
+                    .filter(|output| kinds.contains(&output.target.output_kind))
+            })
             .collect())
     }
 
@@ -1083,6 +1159,14 @@ where
     })
 }
 
+fn input_source_accepts(source: InputSource, producer: WorkUnitId) -> bool {
+    match source {
+        InputSource::ExternalAuthority => false,
+        InputSource::ProducedBy(expected) => expected == producer,
+        InputSource::ProducedByEither(first, second) => first == producer || second == producer,
+    }
+}
+
 fn has_dependency_cycle(work: &BTreeMap<String, RuntimeWork>) -> bool {
     fn visit(
         id: &str,
@@ -1117,7 +1201,7 @@ mod tests {
     use super::*;
     use laminaria_plan::physical_work::{
         canonical_physical_work_contract, physical_planning_input, ExecutionGroup, InputSource,
-        LogicalActivity, PlannedPhysicalWork, PlannedResourceReservation, WorkUnitId,
+        LogicalActivity, PlannedPhysicalWork, PlannedResourceReservation, WorkInput, WorkUnitId,
     };
 
     fn amount(cpu: u32, memory: u64, io: u32, processes: u32) -> ResourceAmount {
@@ -1165,6 +1249,12 @@ mod tests {
         PhysicalWorkInstance {
             instance_id: id.to_string(),
             work_unit: WorkUnitId::Logical(activity),
+            execution_group: canonical_physical_work_contract()
+                .units
+                .into_iter()
+                .find(|unit| unit.id == WorkUnitId::Logical(activity))
+                .unwrap()
+                .execution_group,
             dependencies: dependencies.iter().map(|id| (*id).to_string()).collect(),
             reservation,
             nested_parallelism: NestedParallelism::Disabled,
@@ -1175,7 +1265,46 @@ mod tests {
         instances: Vec<PhysicalWorkInstance>,
         budget: ResourceAmount,
     ) -> ResourceScheduler {
-        ResourceScheduler::new(&canonical_physical_work_contract(), instances, budget).unwrap()
+        // Lifecycle-focused tests use small synthetic graphs. Give each
+        // supplied edge an explicit typed contract input instead of letting
+        // the tests depend on unrelated production graph predecessors.
+        let mut contract = canonical_physical_work_contract();
+        for unit in &mut contract.units {
+            unit.inputs.clear();
+        }
+        for consumer in &instances {
+            let inputs = consumer
+                .dependencies
+                .iter()
+                .map(|dependency_id| {
+                    let producer = instances
+                        .iter()
+                        .find(|instance| &instance.instance_id == dependency_id)
+                        .expect("test dependency has a producer instance");
+                    let producer_unit = contract
+                        .units
+                        .iter()
+                        .find(|unit| unit.id == producer.work_unit)
+                        .expect("test producer has a contracted work unit");
+                    let kind = *producer_unit
+                        .outputs
+                        .first()
+                        .expect("test producer declares an output");
+                    WorkInput {
+                        kind,
+                        source: InputSource::ProducedBy(producer.work_unit),
+                        optional: false,
+                    }
+                })
+                .collect::<Vec<_>>();
+            let consumer_unit = contract
+                .units
+                .iter_mut()
+                .find(|unit| unit.id == consumer.work_unit)
+                .expect("test instance has a contracted work unit");
+            consumer_unit.inputs.extend(inputs);
+        }
+        ResourceScheduler::new(&contract, instances, budget).unwrap()
     }
 
     fn writes_for(scheduler: &ResourceScheduler, id: &str, key_prefix: &str) -> Vec<CommitWrite> {
@@ -1219,6 +1348,7 @@ mod tests {
                 PhysicalWorkInstance {
                     instance_id: canonical_instance_id(unit.id),
                     work_unit: unit.id,
+                    execution_group: unit.execution_group,
                     dependencies,
                     reservation: amount(
                         u32::from(unit.resources.minimum_cpu_slots),
@@ -1356,7 +1486,16 @@ mod tests {
             &contract,
             instances,
             amount(1, 16, 1, 0),
-            |instance, inputs| deterministic_computation(&contract, instance, inputs),
+            |instance, inputs| {
+                let expected_group = contract
+                    .units
+                    .iter()
+                    .find(|unit| unit.id == instance.work_unit)
+                    .unwrap()
+                    .execution_group;
+                assert_eq!(instance.execution_group, expected_group);
+                deterministic_computation(&contract, instance, inputs)
+            },
         )
         .unwrap();
 
@@ -1373,6 +1512,75 @@ mod tests {
             transition.reason,
             TransitionReason::Waiting(WaitReason::Resources { .. })
         )));
+    }
+
+    #[test]
+    fn consumer_receives_only_the_declared_dependency_output_kind() {
+        let mut contract = canonical_physical_work_contract();
+        let n5 = WorkUnitId::Logical(LogicalActivity::N5SemanticAnalysisAndCGeneration);
+        let foreign_target = WorkUnitId::Logical(LogicalActivity::ForeignTargetResolution);
+        contract
+            .units
+            .iter_mut()
+            .find(|unit| unit.id == n5)
+            .unwrap()
+            .inputs
+            .clear();
+        contract
+            .units
+            .iter_mut()
+            .find(|unit| unit.id == foreign_target)
+            .unwrap()
+            .inputs = vec![laminaria_plan::physical_work::WorkInput {
+            kind: DataKind::ForeignDecl,
+            source: InputSource::ProducedBy(n5),
+            optional: false,
+        }];
+        let mut wrong_group = instance(
+            "wrong-group",
+            LogicalActivity::N5SemanticAnalysisAndCGeneration,
+            &[],
+            amount(1, 8, 0, 0),
+        );
+        wrong_group.execution_group = ExecutionGroup::NativeExecutableLink;
+        assert!(matches!(
+            ResourceScheduler::new(&contract, vec![wrong_group], amount(2, 16, 0, 0)),
+            Err(SchedulerContractError::InvalidExecutionGroup { .. })
+        ));
+
+        let producer_id = "nim-analysis";
+        let consumer_id = "foreign-target";
+        let mut scheduler = ResourceScheduler::new(
+            &contract,
+            vec![
+                instance(
+                    producer_id,
+                    LogicalActivity::N5SemanticAnalysisAndCGeneration,
+                    &[],
+                    amount(1, 8, 0, 0),
+                ),
+                instance(
+                    consumer_id,
+                    LogicalActivity::ForeignTargetResolution,
+                    &[producer_id],
+                    amount(1, 8, 0, 0),
+                ),
+            ],
+            amount(2, 16, 0, 0),
+        )
+        .unwrap();
+
+        assert_eq!(
+            scheduler.admit_ready().unwrap(),
+            vec![producer_id.to_string()]
+        );
+        let writes = writes_for(&scheduler, producer_id, producer_id);
+        scheduler.stage_outputs(producer_id, writes).unwrap();
+        scheduler.commit(producer_id).unwrap();
+
+        let inputs = scheduler.dependency_outputs(consumer_id).unwrap();
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].target.output_kind, DataKind::ForeignDecl);
     }
 
     #[test]
@@ -1812,7 +2020,14 @@ mod tests {
 
     #[test]
     fn external_compiler_must_reserve_its_process_and_total_nested_cpu() {
-        let contract = canonical_physical_work_contract();
+        let mut contract = canonical_physical_work_contract();
+        contract
+            .units
+            .iter_mut()
+            .find(|unit| unit.id == WorkUnitId::Logical(LogicalActivity::N7CCompilation))
+            .unwrap()
+            .inputs
+            .clear();
         let mut external = instance(
             "cc",
             LogicalActivity::N7CCompilation,

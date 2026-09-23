@@ -346,8 +346,75 @@ pub enum PhysicalPlanningBridgeError {
     },
 }
 
-fn physical_result_artifact(instance_id: &str) -> String {
-    format!("physical-work-result:{instance_id}")
+fn physical_result_artifact(instance_id: &str, kind: DataKind) -> String {
+    let kind = serde_json::to_value(kind)
+        .expect("DataKind serialization is infallible")
+        .as_str()
+        .expect("DataKind serializes as a string")
+        .to_string();
+    format!("physical-work-result:{instance_id}:{kind}")
+}
+
+fn dependency_output_kinds(
+    contract: &PhysicalWorkContract,
+    instance: &PlannedPhysicalWork,
+    dependencies: &BTreeMap<String, PlannedPhysicalWork>,
+) -> Result<BTreeMap<String, BTreeSet<DataKind>>, PhysicalPlanningBridgeError> {
+    let unit = contract
+        .units
+        .iter()
+        .find(|unit| unit.id == instance.work_unit)
+        .expect("work unit was validated above");
+    let mut bindings = BTreeMap::new();
+    for dependency_id in &instance.dependencies {
+        let dependency = &dependencies[dependency_id];
+        let producer = contract
+            .units
+            .iter()
+            .find(|unit| unit.id == dependency.work_unit)
+            .expect("dependency work unit was validated above");
+        let kinds: BTreeSet<_> = unit
+            .inputs
+            .iter()
+            .filter(|input| {
+                input_producers(input.source).any(|id| id == dependency.work_unit)
+                    && producer.outputs.contains(&input.kind)
+            })
+            .map(|input| input.kind)
+            .collect();
+        if kinds.is_empty() {
+            return Err(PhysicalPlanningBridgeError::InvalidDependency {
+                instance_id: instance.instance_id.clone(),
+                dependency: dependency_id.clone(),
+            });
+        }
+        bindings.insert(dependency_id.clone(), kinds);
+    }
+    for input in unit.inputs.iter().filter(|input| !input.optional) {
+        if matches!(input.source, InputSource::ExternalAuthority) {
+            continue;
+        }
+        let supplied = instance.dependencies.iter().any(|dependency_id| {
+            let dependency = &dependencies[dependency_id];
+            let producer = contract
+                .units
+                .iter()
+                .find(|unit| unit.id == dependency.work_unit)
+                .expect("dependency work unit was validated above");
+            input_producers(input.source).any(|id| id == dependency.work_unit)
+                && producer.outputs.contains(&input.kind)
+        });
+        if !supplied {
+            let producer = input_producers(input.source)
+                .next()
+                .expect("non-external input has a producer");
+            return Err(PhysicalPlanningBridgeError::MissingDependency {
+                instance_id: instance.instance_id.clone(),
+                producer,
+            });
+        }
+    }
+    Ok(bindings)
 }
 
 fn validate_planned_instance(
@@ -434,41 +501,7 @@ pub fn physical_planning_input(
                 });
             }
         }
-        let unit = contract
-            .units
-            .iter()
-            .find(|unit| unit.id == instance.work_unit)
-            .expect("work unit was validated above");
-        let dependency_units: BTreeMap<_, _> = instance
-            .dependencies
-            .iter()
-            .map(|dependency| (dependency, by_id[dependency].work_unit))
-            .collect();
-        for (dependency, producer) in &dependency_units {
-            let accepted = unit
-                .inputs
-                .iter()
-                .any(|input| input_producers(input.source).any(|candidate| candidate == *producer));
-            if !accepted {
-                return Err(PhysicalPlanningBridgeError::InvalidDependency {
-                    instance_id: instance.instance_id.clone(),
-                    dependency: (*dependency).clone(),
-                });
-            }
-        }
-        for input in unit.inputs.iter().filter(|input| !input.optional) {
-            let producers: BTreeSet<_> = input_producers(input.source).collect();
-            if !producers.is_empty()
-                && !dependency_units
-                    .values()
-                    .any(|producer| producers.contains(producer))
-            {
-                return Err(PhysicalPlanningBridgeError::MissingDependency {
-                    instance_id: instance.instance_id.clone(),
-                    producer: *producers.iter().next().expect("non-empty producer set"),
-                });
-            }
-        }
+        dependency_output_kinds(contract, instance, &by_id)?;
     }
     for demanded in &demanded_instances {
         if !by_id.contains_key(demanded) {
@@ -480,28 +513,54 @@ pub fn physical_planning_input(
 
     let actions = by_id
         .values()
-        .map(|instance| Action {
-            id: instance.instance_id.clone(),
-            kind: ActionKind::PhysicalWork,
-            command_identity: format!("physical-work:{}", instance.instance_id),
-            inputs: instance
-                .dependencies
+        .map(|instance| {
+            let unit = contract
+                .units
                 .iter()
-                .map(|dependency| ArtifactRef::declared(physical_result_artifact(dependency)))
-                .collect(),
-            outputs: vec![ArtifactRef::declared(physical_result_artifact(
-                &instance.instance_id,
-            ))],
-            compiler_work: None,
+                .find(|unit| unit.id == instance.work_unit)
+                .expect("work unit was validated above");
+            let bindings = dependency_output_kinds(contract, instance, &by_id)
+                .expect("dependencies were validated above");
+            Action {
+                id: instance.instance_id.clone(),
+                kind: ActionKind::PhysicalWork,
+                command_identity: format!("physical-work:{}", instance.instance_id),
+                inputs: bindings
+                    .iter()
+                    .flat_map(|(dependency, kinds)| {
+                        kinds.iter().map(|kind| {
+                            ArtifactRef::declared(physical_result_artifact(dependency, *kind))
+                        })
+                    })
+                    .collect(),
+                outputs: unit
+                    .outputs
+                    .iter()
+                    .map(|kind| {
+                        ArtifactRef::declared(physical_result_artifact(
+                            &instance.instance_id,
+                            *kind,
+                        ))
+                    })
+                    .collect(),
+                compiler_work: None,
+            }
         })
         .collect();
-    let mut input = PlanningInput::new(
-        demanded_instances
-            .iter()
-            .map(|id| physical_result_artifact(id))
-            .collect(),
-        actions,
-    );
+    let demanded_artifacts = demanded_instances
+        .iter()
+        .flat_map(|id| {
+            let unit = contract
+                .units
+                .iter()
+                .find(|unit| unit.id == by_id[id].work_unit)
+                .expect("work unit was validated above");
+            unit.outputs
+                .iter()
+                .map(|kind| physical_result_artifact(id, *kind))
+        })
+        .collect();
+    let mut input = PlanningInput::new(demanded_artifacts, actions);
     input.physical_work = by_id;
     Ok(input)
 }
@@ -546,12 +605,25 @@ pub fn physical_work_from_execution_plan(
                 detail: "descriptor instance_id differs from action id".to_string(),
             });
         }
-        let expected_inputs: Vec<_> = instance
-            .dependencies
+        let bindings = dependency_output_kinds(contract, &instance, &plan.physical_work)?;
+        let expected_inputs: Vec<_> = bindings
             .iter()
-            .map(|dependency| ArtifactRef::declared(physical_result_artifact(dependency)))
+            .flat_map(|(dependency, kinds)| {
+                kinds
+                    .iter()
+                    .map(|kind| ArtifactRef::declared(physical_result_artifact(dependency, *kind)))
+            })
             .collect();
-        let expected_outputs = vec![ArtifactRef::declared(physical_result_artifact(&action.id))];
+        let unit = contract
+            .units
+            .iter()
+            .find(|unit| unit.id == instance.work_unit)
+            .expect("work unit was validated above");
+        let expected_outputs: Vec<_> = unit
+            .outputs
+            .iter()
+            .map(|kind| ArtifactRef::declared(physical_result_artifact(&action.id, *kind)))
+            .collect();
         if action.inputs != expected_inputs || action.outputs != expected_outputs {
             return Err(PhysicalPlanningBridgeError::DescriptorMismatch {
                 action_id: action.id.clone(),
@@ -990,6 +1062,10 @@ pub enum PhysicalWorkViolation {
         consumer: WorkUnitId,
         producer: WorkUnitId,
     },
+    MissingInputOutput {
+        consumer: WorkUnitId,
+        kind: DataKind,
+    },
     DependencyCycle {
         cycle: Vec<WorkUnitId>,
     },
@@ -1079,15 +1155,26 @@ pub fn validate_physical_work_contract(
     }
 
     for unit in &contract.units {
-        for producer in unit
-            .inputs
-            .iter()
-            .flat_map(|input| input_producers(input.source))
-        {
-            if !by_id.contains_key(&producer) {
-                violations.push(PhysicalWorkViolation::UnknownProducer {
+        for input in &unit.inputs {
+            let producers: Vec<_> = input_producers(input.source).collect();
+            for producer in &producers {
+                if !by_id.contains_key(producer) {
+                    violations.push(PhysicalWorkViolation::UnknownProducer {
+                        consumer: unit.id,
+                        producer: *producer,
+                    });
+                }
+            }
+            if !producers.is_empty()
+                && !producers.iter().any(|producer| {
+                    by_id
+                        .get(producer)
+                        .is_some_and(|candidate| candidate.outputs.contains(&input.kind))
+                })
+            {
+                violations.push(PhysicalWorkViolation::MissingInputOutput {
                     consumer: unit.id,
-                    producer,
+                    kind: input.kind,
                 });
             }
         }
@@ -1225,7 +1312,17 @@ mod tests {
         assert_eq!(input.actions[1].kind, ActionKind::PhysicalWork);
         assert_eq!(
             input.actions[1].inputs,
-            vec![ArtifactRef::declared("physical-work-result:a2:crate-a")]
+            vec![ArtifactRef::declared(physical_result_artifact(
+                "a2:crate-a",
+                DataKind::MemberManifest,
+            ))]
+        );
+        assert_eq!(
+            input.actions[1].outputs,
+            vec![ArtifactRef::declared(physical_result_artifact(
+                "a3:crate-a",
+                DataKind::PackageResolution,
+            ))]
         );
     }
 
@@ -1254,6 +1351,54 @@ mod tests {
         assert!(matches!(
             physical_planning_input(&contract, vec![a2, n2, a3], vec!["a3".to_string()]),
             Err(PhysicalPlanningBridgeError::InvalidDependency { .. })
+        ));
+    }
+
+    #[test]
+    fn physical_planning_input_rejects_a_declared_input_with_no_matching_output_kind() {
+        let mut contract = canonical_physical_work_contract();
+        let a2_id = WorkUnitId::Logical(LogicalActivity::A2MemberManifest);
+        contract
+            .units
+            .iter_mut()
+            .find(|unit| unit.id == a2_id)
+            .unwrap()
+            .outputs = vec![DataKind::WorkspaceManifest];
+        let a2 = planned(&contract, "a2", a2_id, &[]);
+        let a3 = planned(
+            &contract,
+            "a3",
+            WorkUnitId::Logical(LogicalActivity::A3PackageResolution),
+            &["a2"],
+        );
+
+        assert!(matches!(
+            physical_planning_input(&contract, vec![a2, a3], vec!["a3".to_string()]),
+            Err(PhysicalPlanningBridgeError::InvalidContract(violations))
+                if violations.iter().any(|violation| matches!(
+                    violation,
+                    PhysicalWorkViolation::MissingInputOutput {
+                        consumer: WorkUnitId::Logical(LogicalActivity::A3PackageResolution),
+                        kind: DataKind::MemberManifest,
+                    }
+                ))
+        ));
+    }
+
+    #[test]
+    fn physical_planning_input_rejects_a_group_that_differs_from_the_contract() {
+        let contract = canonical_physical_work_contract();
+        let mut a2 = planned(
+            &contract,
+            "a2",
+            WorkUnitId::Logical(LogicalActivity::A2MemberManifest),
+            &[],
+        );
+        a2.execution_group = ExecutionGroup::NativeExecutableLink;
+
+        assert!(matches!(
+            physical_planning_input(&contract, vec![a2], vec!["a2".to_string()]),
+            Err(PhysicalPlanningBridgeError::InvalidDescriptor { .. })
         ));
     }
 
