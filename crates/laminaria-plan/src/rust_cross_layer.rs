@@ -56,6 +56,78 @@ pub enum RustCrossLayerReject {
     },
 }
 
+/// A demand-relative generic function instance. This is intentionally a
+/// planning identity, not evidence that the instance was compiled or emitted.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RustGenericInstance {
+    pub package: String,
+    pub function: String,
+    pub type_arguments: Vec<String>,
+}
+
+/// Compiler work scoped to one concrete generic instance.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RustGenericWork {
+    pub instance: RustGenericInstance,
+    pub stage: RustGenericWorkStage,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RustGenericWorkStage {
+    Monomorphize,
+    Codegen,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RustGenericWorkPlan {
+    pub eager_work: BTreeSet<RustGenericWork>,
+    pub feedback_work: BTreeSet<RustGenericWork>,
+    pub pruned_work: BTreeSet<RustGenericWork>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RustGenericWorkReject {
+    RequestedInstanceNotInEagerSet(RustGenericInstance),
+}
+
+/// Selects only generic instances demanded by the requested artifact from a
+/// conservative eager set. Rejecting a non-subset is important: an incomplete
+/// eager inventory must not be mistaken for successful pruning.
+pub fn plan_rust_generic_work(
+    eager_instances: &BTreeSet<RustGenericInstance>,
+    requested_instances: &BTreeSet<RustGenericInstance>,
+) -> Result<RustGenericWorkPlan, RustGenericWorkReject> {
+    if let Some(missing) = requested_instances.difference(eager_instances).next() {
+        return Err(RustGenericWorkReject::RequestedInstanceNotInEagerSet(
+            missing.clone(),
+        ));
+    }
+    let work_for = |instances: &BTreeSet<RustGenericInstance>| {
+        instances
+            .iter()
+            .flat_map(|instance| {
+                [
+                    RustGenericWorkStage::Monomorphize,
+                    RustGenericWorkStage::Codegen,
+                ]
+                .into_iter()
+                .map(move |stage| RustGenericWork {
+                    instance: instance.clone(),
+                    stage,
+                })
+            })
+            .collect::<BTreeSet<_>>()
+    };
+    let eager_work = work_for(eager_instances);
+    let feedback_work = work_for(requested_instances);
+    let pruned_work = eager_work.difference(&feedback_work).cloned().collect();
+    Ok(RustGenericWorkPlan {
+        eager_work,
+        feedback_work,
+        pruned_work,
+    })
+}
+
 fn crate_name(package: &str) -> String {
     package.replace('-', "_")
 }
@@ -201,6 +273,21 @@ mod tests {
             plan_rust_cross_layer(&input),
             Err(RustCrossLayerReject::MissingSemanticProvider(
                 "unused_pkg".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn generic_feedback_rejects_demands_missing_from_eager_inventory() {
+        let demanded = RustGenericInstance {
+            package: "provider".to_string(),
+            function: "convert".to_string(),
+            type_arguments: vec!["u8".to_string()],
+        };
+        assert_eq!(
+            plan_rust_generic_work(&BTreeSet::new(), &BTreeSet::from([demanded.clone()])),
+            Err(RustGenericWorkReject::RequestedInstanceNotInEagerSet(
+                demanded
             ))
         );
     }
