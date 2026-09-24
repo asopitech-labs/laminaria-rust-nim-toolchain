@@ -27,6 +27,8 @@ pub struct RustGenericInstance {
 #[derive(Debug)]
 pub enum RustGenericDemandError {
     Parse(syn::Error),
+    UnsupportedGenericSignature { function: String },
+    UnsupportedGenericArgumentArity { function: String, observed: usize },
     CannotInferGenericArgument { function: String },
     UnsupportedMacro { name: String },
 }
@@ -35,6 +37,14 @@ impl std::fmt::Display for RustGenericDemandError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Parse(error) => write!(f, "invalid Rust source: {error}"),
+            Self::UnsupportedGenericSignature { function } => write!(
+                f,
+                "generic function `{function}` does not have exactly one type parameter"
+            ),
+            Self::UnsupportedGenericArgumentArity { function, observed } => write!(
+                f,
+                "generic call to `{function}` has {observed} explicit type arguments; exactly one is supported"
+            ),
             Self::CannotInferGenericArgument { function } => write!(
                 f,
                 "cannot soundly infer the generic argument for call to `{function}`"
@@ -48,7 +58,9 @@ impl std::fmt::Display for RustGenericDemandError {
 
 impl std::error::Error for RustGenericDemandError {}
 
-/// Finds function declarations with at least one type/const/lifetime generic.
+/// Finds function declarations with exactly one type generic parameter.
+/// Other generic signatures fail closed because the current call-site fact
+/// model represents only one concrete type argument.
 pub fn discover_generic_functions(
     package: &str,
     source_text: &str,
@@ -57,26 +69,31 @@ pub fn discover_generic_functions(
     let mut collector = GenericFunctionCollector {
         package,
         functions: BTreeSet::new(),
+        error: None,
     };
     collector.visit_file(&file);
+    if let Some(error) = collector.error {
+        return Err(error);
+    }
     Ok(collector.functions)
 }
 
 struct GenericFunctionCollector<'a> {
     package: &'a str,
     functions: BTreeSet<RustGenericFunction>,
+    error: Option<RustGenericDemandError>,
 }
 
 impl<'ast> Visit<'ast> for GenericFunctionCollector<'_> {
     fn visit_item_fn(&mut self, function: &'ast syn::ItemFn) {
-        if !function.sig.generics.params.is_empty()
-            && function
-                .sig
-                .generics
-                .params
-                .iter()
-                .all(|parameter| matches!(parameter, syn::GenericParam::Type(_)))
-        {
+        let params = &function.sig.generics.params;
+        if !params.is_empty() && self.error.is_none() {
+            if params.len() != 1 || !matches!(params.first(), Some(syn::GenericParam::Type(_))) {
+                self.error = Some(RustGenericDemandError::UnsupportedGenericSignature {
+                    function: function.sig.ident.to_string(),
+                });
+                return;
+            }
             self.functions.insert(RustGenericFunction {
                 package: self.package.to_string(),
                 name: function.sig.ident.to_string(),
@@ -293,8 +310,14 @@ impl<'ast> Visit<'ast> for GenericCallCollector<'_> {
             return;
         }
         if let Some((package, function, explicit_types)) = self.resolve_call(call) {
-            let type_arguments = if !explicit_types.is_empty() {
+            let type_arguments = if explicit_types.len() == 1 {
                 explicit_types
+            } else if explicit_types.len() > 1 {
+                self.error = Some(RustGenericDemandError::UnsupportedGenericArgumentArity {
+                    function,
+                    observed: explicit_types.len(),
+                });
+                return;
             } else {
                 match call
                     .args
@@ -479,6 +502,30 @@ mod tests {
         assert!(matches!(
             error,
             RustGenericDemandError::UnsupportedMacro { .. }
+        ));
+
+        for source in [
+            "fn convert<T, U>(value: T) -> U { todo!() }",
+            "fn convert<const N: usize>(value: [u8; N]) { }",
+        ] {
+            let error = discover_generic_functions("core-lib", source)
+                .expect_err("generic signatures outside the one-type subset must reject");
+            assert!(matches!(
+                error,
+                RustGenericDemandError::UnsupportedGenericSignature { .. }
+            ));
+        }
+
+        let error = discover_generic_instances(
+            "app",
+            "use core_lib::convert; fn run() { convert::<u8, u16>(1); }",
+            &known,
+            false,
+        )
+        .expect_err("explicit generic arity outside the known function contract must reject");
+        assert!(matches!(
+            error,
+            RustGenericDemandError::UnsupportedGenericArgumentArity { .. }
         ));
     }
 }

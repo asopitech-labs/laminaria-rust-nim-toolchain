@@ -36,7 +36,8 @@ claimed to have been executed or avoided by a production executor.
 The source collector is a narrow `syn`-based recognizer, not Rust type
 checking. It currently handles the locked fixture's direct generic call,
 annotated `Vec<T>` argument, unsuffixed integer array literal, and its known
-expression macros. It fails closed for unrecognized macros and unsupported
+expression macros. It accepts functions with exactly one type parameter and
+fails closed for other generic signatures, unrecognized macros, and unsupported
 argument inference. Its `include_test_cfg` behavior is validated against the
 fixture's inline `#[cfg(test)]` module; it is not a general implementation of
 Rust cfg evaluation.
