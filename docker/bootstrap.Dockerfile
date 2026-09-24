@@ -68,7 +68,7 @@ RUN cargo build --workspace
 # not just run doctor — this is the real evidence for #18's acceptance
 # criterion that a fresh environment can reproduce the tool subsets a
 # fixture needs, rather than an assertion about it.
-RUN cd fixtures/rust-heavy-workspace && cargo build --workspace && cargo run -q -p fixture-bin
+RUN cd fixtures/rust-heavy-workspace && cargo build --workspace && cargo test --workspace && cargo run -q -p fixture-bin
 RUN cd fixtures/nim-heavy-workspace && nim c -o:fixture_out src/fixture.nim && ./fixture_out
 RUN cd fixtures/rust-nim-c-abi-baseline/rust-bin && cargo run
 RUN cd fixtures/wide-parallel-graph && cargo build --workspace && cargo test --workspace && cargo run -q -p aggregator

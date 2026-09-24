@@ -66,9 +66,18 @@ try {
     Copy-Item -LiteralPath $subject -Destination (Join-Path $testScripts "windows-wslc-ci.ps1")
     Set-Content -LiteralPath (Join-Path $testScripts "local-ci.sh") -Value "#!/usr/bin/env bash`nexit 0`n"
     Set-Content -LiteralPath (Join-Path $testRoot "input.txt") -Value "initial"
+    Set-Content -LiteralPath (Join-Path $testRoot "Cargo.lock") -Value "version = 4`n"
     & git -C $testRoot init --quiet
     if ($LASTEXITCODE -ne 0) {
         throw "git init failed"
+    }
+    & git -C $testRoot add -- Cargo.lock
+    if ($LASTEXITCODE -ne 0) {
+        throw "git add Cargo.lock failed"
+    }
+    & git -C $testRoot -c user.name="WSLC test" -c user.email="wslc-test@example.invalid" commit --quiet -m "test baseline"
+    if ($LASTEXITCODE -ne 0) {
+        throw "git baseline commit failed"
     }
 
     $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
@@ -164,6 +173,22 @@ try {
         $staleRejected = $_.Exception.Message -like "*receipt is stale*"
     }
     Assert-True $staleRejected "a source change must invalidate the receipt"
+
+    $receiptPath = Join-Path (& git -C $testRoot rev-parse --absolute-git-dir) "laminaria-wslc-verification.json"
+    Remove-Item -LiteralPath $receiptPath -Force
+    $global:FakeWslcCalls.Clear()
+    & (Join-Path $testScripts "windows-wslc-ci.ps1") -Mode lockfile-update -StateDirectory $testState
+    $lockfileRun = @($global:FakeWslcCalls | Where-Object { $_[0] -eq "run" })[0]
+    Assert-True ($null -ne $lockfileRun) "lockfile-update must run under the WSLC owner harness"
+    Assert-True ($lockfileRun -contains "--mount") "lockfile-update must bind only the repository into the owned container"
+    Assert-True ($lockfileRun -contains "cargo") "lockfile-update must invoke Cargo inside the container"
+    Assert-True ($lockfileRun -contains "update") "lockfile-update must use Cargo's lock updater"
+    Assert-True ($lockfileRun -contains "--package") "lockfile-update must scope updates to one package"
+    Assert-True ($lockfileRun -contains "cargo_metadata") "lockfile-update must scope updates to cargo_metadata"
+    Assert-True ($lockfileRun -contains "--precise") "lockfile-update must pin the selected MSRV-compatible release"
+    Assert-True ($lockfileRun -contains "0.18.1") "lockfile-update must use the declared compatible release"
+    Assert-True ($lockfileRun -contains "--offline") "lockfile-update must use dependencies cached by the preceding image build"
+    Assert-True (-not (Test-Path -LiteralPath $receiptPath)) "lockfile-update must not issue a verification receipt"
 
     $global:FakeWslcCalls.Clear()
     $global:FakeRunExitCode = 23

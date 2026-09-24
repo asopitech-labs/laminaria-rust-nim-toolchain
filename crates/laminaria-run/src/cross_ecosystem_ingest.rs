@@ -95,6 +95,21 @@ pub struct CargoManifestFacts {
     /// compile the exact same way `cargo build` would, never a
     /// hardcoded guess.
     pub edition: String,
+    /// Cargo's complete JSON metadata projection. The selected package
+    /// fields above are a convenience view; retaining the raw value
+    /// keeps every workspace member, target, dependency declaration,
+    /// feature map, and workspace identity available to later planning
+    /// instead of collapsing a workspace to one record. The typed view
+    /// is best-effort because a future Cargo metadata schema may add
+    /// fields or enum values that this MSRV-compatible crate version
+    /// does not understand; the raw JSON remains authoritative for
+    /// fields the typed projection cannot represent.
+    pub workspace: CargoWorkspaceMetadata,
+}
+
+pub struct CargoWorkspaceMetadata {
+    pub raw: serde_json::Value,
+    pub typed: Option<cargo_metadata::Metadata>,
 }
 
 /// Transitively expands the real default-activation closure from
@@ -136,39 +151,42 @@ pub fn ingest_cargo_metadata(
         ],
         None,
     )?;
-    let json: serde_json::Value =
+    let raw: serde_json::Value =
         serde_json::from_str(&stdout).map_err(|e| IngestError::Parse(e.to_string()))?;
-    let package = json["packages"]
-        .as_array()
-        .and_then(|arr| arr.first())
-        .ok_or_else(|| IngestError::Parse("cargo metadata reported no packages".to_string()))?;
+    let typed = cargo_metadata::MetadataCommand::parse(&stdout).ok();
+    let package = select_cargo_package(&raw, manifest_path)?;
     let package_name = package["name"]
         .as_str()
-        .ok_or_else(|| IngestError::Parse("package has no name".to_string()))?
+        .ok_or_else(|| IngestError::Parse("Cargo package has no name".to_string()))?
         .to_string();
-    let version = package["version"].as_str().unwrap_or_default().to_string();
+    let version = package["version"]
+        .as_str()
+        .ok_or_else(|| IngestError::Parse("Cargo package has no version".to_string()))?
+        .to_string();
     let edition = package["edition"]
         .as_str()
-        .ok_or_else(|| IngestError::Parse("package has no edition".to_string()))?
+        .ok_or_else(|| IngestError::Parse("Cargo package has no edition".to_string()))?
         .to_string();
-    let features_map: BTreeMap<String, Vec<String>> = package["features"]
+    let features_map = package["features"]
         .as_object()
-        .map(|m| {
-            m.iter()
-                .map(|(name, implied)| {
-                    let implied: Vec<String> = implied
-                        .as_array()
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|v| v.as_str().map(str::to_string))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    (name.clone(), implied)
+        .ok_or_else(|| IngestError::Parse("Cargo package has no feature map".to_string()))?
+        .iter()
+        .map(|(name, implied)| {
+            let implied = implied
+                .as_array()
+                .ok_or_else(|| IngestError::Parse(format!("Cargo feature {name} is not an array")))?
+                .iter()
+                .map(|feature| {
+                    feature.as_str().map(str::to_string).ok_or_else(|| {
+                        IngestError::Parse(format!(
+                            "Cargo feature {name} contains a non-string entry"
+                        ))
+                    })
                 })
-                .collect()
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((name.clone(), implied))
         })
-        .unwrap_or_default();
+        .collect::<Result<BTreeMap<_, _>, IngestError>>()?;
     let mut features: Vec<String> = features_map.keys().cloned().collect();
     features.sort();
     let active_features = resolve_default_active_features(&features_map);
@@ -178,7 +196,37 @@ pub fn ingest_cargo_metadata(
         features,
         active_features,
         edition,
+        workspace: CargoWorkspaceMetadata { raw, typed },
     })
+}
+
+/// Selects the package Cargo says owns the requested manifest. `cargo
+/// metadata` returns every member of a workspace, and its package array
+/// order is not the identity of the manifest passed by the caller. A
+/// virtual workspace manifest has no package of its own and therefore
+/// fails explicitly here; callers that need workspace-wide facts must
+/// consume the complete package collection rather than accidentally
+/// treating its first element as the requested project.
+fn select_cargo_package<'a>(
+    metadata: &'a serde_json::Value,
+    manifest_path: &Path,
+) -> Result<&'a serde_json::Value, IngestError> {
+    let requested = manifest_path
+        .canonicalize()
+        .map_err(|error| IngestError::Io(format!("{}: {error}", manifest_path.display())))?;
+    for package in metadata["packages"].as_array().into_iter().flatten() {
+        if package["manifest_path"]
+            .as_str()
+            .and_then(|path| Path::new(path).canonicalize().ok())
+            .is_some_and(|candidate| candidate == requested)
+        {
+            return Ok(package);
+        }
+    }
+    Err(IngestError::Parse(format!(
+        "cargo metadata has no package whose manifest_path is {} (virtual workspace roots do not identify a member)",
+        requested.display()
+    )))
 }
 
 /// One package's real Nimble facts, read directly from its own
@@ -1147,6 +1195,130 @@ mod tests {
             "laminaria-g1-checkpoint-a-{label}-{}-{n}",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn cargo_metadata_crate_preserves_workspace_members_and_selects_requested_package() {
+        let dir = unique_temp_dir("cargo-member-selection");
+        let root = dir.join("Cargo.toml");
+        let requested = dir.join("crates/requested/Cargo.toml");
+        let other = dir.join("crates/other/Cargo.toml");
+        std::fs::create_dir_all(requested.parent().unwrap()).expect("create requested member");
+        std::fs::create_dir_all(other.parent().unwrap()).expect("create other member");
+        std::fs::write(
+            &root,
+            "[workspace]\nresolver = \"2\"\nmembers = [\"crates/other\", \"crates/requested\"]\ndefault-members = [\"crates/requested\"]\n\n[workspace.package]\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .expect("write virtual workspace manifest");
+        std::fs::write(
+            &requested,
+            "[package]\nname = \"requested\"\nversion.workspace = true\nedition.workspace = true\n\n[dependencies]\nother = { path = \"../other\" }\n\n[features]\nfast = []\n\n[[bin]]\nname = \"special\"\npath = \"src/bin/special.rs\"\nrequired-features = [\"fast\"]\n",
+        )
+        .expect("write requested manifest");
+        std::fs::create_dir_all(requested.parent().unwrap().join("src"))
+            .expect("create requested source directory");
+        std::fs::write(
+            requested.parent().unwrap().join("src/main.rs"),
+            "fn main() {}\n",
+        )
+        .expect("write requested binary target");
+        std::fs::create_dir_all(requested.parent().unwrap().join("src/bin"))
+            .expect("create explicit binary target directory");
+        std::fs::write(
+            requested.parent().unwrap().join("src/bin/special.rs"),
+            "fn main() {}\n",
+        )
+        .expect("write explicit binary target");
+        std::fs::write(
+            requested.parent().unwrap().join("src/lib.rs"),
+            "pub fn api() {}\n",
+        )
+        .expect("write automatically discovered library target");
+        std::fs::create_dir_all(requested.parent().unwrap().join("examples"))
+            .expect("create example target directory");
+        std::fs::write(
+            requested.parent().unwrap().join("examples/demo.rs"),
+            "fn main() {}\n",
+        )
+        .expect("write automatically discovered example target");
+        std::fs::write(
+            &other,
+            "[package]\nname = \"other\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .expect("write other manifest");
+        std::fs::create_dir_all(other.parent().unwrap().join("src"))
+            .expect("create other source directory");
+        std::fs::write(
+            other.parent().unwrap().join("src/main.rs"),
+            "fn main() {}\n",
+        )
+        .expect("write other binary target");
+
+        let facts = ingest_cargo_metadata(&RecordingCommandRunner::new(), &requested)
+            .expect("ingest the requested workspace member");
+        assert_eq!(facts.package_name, "requested");
+        assert_eq!(facts.edition, "2024");
+        assert_eq!(facts.workspace.raw["packages"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            facts.workspace.raw["workspace_members"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        let typed_requested = facts
+            .workspace
+            .typed
+            .as_ref()
+            .expect("cargo_metadata 0.18.1 must preserve edition 2024")
+            .packages
+            .iter()
+            .find(|package| package.name == facts.package_name)
+            .expect("typed metadata must contain the requested member");
+        assert_eq!(typed_requested.edition.as_str(), "2024");
+        assert_eq!(typed_requested.version.to_string(), "0.1.0");
+        let expected_other_path = other
+            .parent()
+            .unwrap()
+            .canonicalize()
+            .expect("canonicalize the declared path dependency");
+        assert_eq!(
+            typed_requested
+                .dependencies
+                .iter()
+                .find(|dependency| dependency.name == "other")
+                .and_then(|dependency| dependency.path.as_deref().map(|path| path.as_str())),
+            Some(expected_other_path.to_str().expect("UTF-8 temp path"))
+        );
+        assert!(typed_requested.features.contains_key("fast"));
+        assert!(typed_requested.targets.iter().any(|target| {
+            target.name == "requested" && target.kind.iter().any(|kind| kind == "lib")
+        }));
+        assert!(typed_requested.targets.iter().any(|target| {
+            target.name == "demo" && target.kind.iter().any(|kind| kind == "example")
+        }));
+        let explicit_bin = typed_requested
+            .targets
+            .iter()
+            .find(|target| target.name == "special")
+            .expect("explicitly declared binary target must survive normalization");
+        assert!(explicit_bin.kind.iter().any(|kind| kind == "bin"));
+        assert_eq!(
+            explicit_bin.src_path,
+            requested.parent().unwrap().join("src/bin/special.rs")
+        );
+        assert_eq!(explicit_bin.required_features, vec!["fast"]);
+
+        std::fs::write(
+            &requested,
+            "[package]\nname = \"requested\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .expect("change requested member to a typed crate-supported edition");
+        let typed_facts = ingest_cargo_metadata(&RecordingCommandRunner::new(), &requested)
+            .expect("ingest the same member with the typed Cargo metadata API available");
+        assert_eq!(typed_facts.edition, "2021");
+        assert!(typed_facts.workspace.typed.is_some());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Checkpoint A, evidence 1: a retained C implementation source

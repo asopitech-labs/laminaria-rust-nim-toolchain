@@ -20,6 +20,7 @@ name = "laminaria-nimble-shadow-probe"
 path = "src/bin/nimble_shadow_probe.rs"
 
 [dependencies]
+cargo_metadata = "0.18.1"
 laminaria-fingerprint = { path = "../laminaria-fingerprint" }
 laminaria-ir = { path = "../laminaria-ir" }
 laminaria-plan = { path = "../laminaria-plan" }

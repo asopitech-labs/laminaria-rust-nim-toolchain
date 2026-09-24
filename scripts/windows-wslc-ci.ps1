@@ -10,7 +10,7 @@ This script never shuts down WSL, kills wslcsession, or stops WSLService.
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet("full", "fast", "test-only", "doctor")]
+    [ValidateSet("full", "fast", "test-only", "doctor", "lockfile-update")]
     [string]$Mode = "full",
     [string]$TestFilter,
     [ValidateRange(1, 86400)]
@@ -38,14 +38,22 @@ function Invoke-Git {
 }
 
 function Get-SourceFingerprint {
-    $paths = @(Invoke-Git -Arguments @("ls-files", "-co", "--exclude-standard")) |
-        Where-Object { $_ -ne "" } |
-        Sort-Object -CaseSensitive
+    param([switch]$IgnoreRootCargoLock)
 
-    $blobIds = @($paths | & git -C $repositoryRoot hash-object --no-filters --stdin-paths)
-    if ($LASTEXITCODE -ne 0) {
-        throw "git hash-object --no-filters --stdin-paths failed with exit code $LASTEXITCODE"
-    }
+    [string[]]$paths = @(Invoke-Git -Arguments @("ls-files", "-co", "--exclude-standard")) |
+        Where-Object { $_ -ne "" } |
+        Where-Object { -not $IgnoreRootCargoLock -or $_ -ne "Cargo.lock" }
+    # Sort-Object's string ordering can differ between Windows PowerShell 5.1
+    # and PowerShell 7 (different .NET globalization implementations). The
+    # receipt is consumed by both, so its source identity must use an
+    # explicit culture-independent ordering.
+    [Array]::Sort($paths, [StringComparer]::Ordinal)
+
+    # Passing stdin lines to a native process also has different default
+    # encodings in Windows PowerShell 5.1 and PowerShell 7. Pass paths as
+    # discrete arguments instead, so both produce identical blob IDs.
+    $hashArguments = @("hash-object", "--no-filters", "--") + $paths
+    $blobIds = @(Invoke-Git -Arguments $hashArguments)
     if ($blobIds.Count -ne $paths.Count) {
         throw "git returned $($blobIds.Count) blob IDs for $($paths.Count) repository inputs."
     }
@@ -99,8 +107,10 @@ if ($Mode -eq "test-only" -and [string]::IsNullOrWhiteSpace($TestFilter)) {
 if ($Mode -ne "test-only" -and -not [string]::IsNullOrWhiteSpace($TestFilter)) {
     throw "-TestFilter is valid only with -Mode test-only."
 }
-
 $sourceFingerprint = Get-SourceFingerprint
+$initialNonLockFingerprint = if ($Mode -eq "lockfile-update") {
+    Get-SourceFingerprint -IgnoreRootCargoLock
+}
 if ($FingerprintOnly) {
     Write-Output $sourceFingerprint
     exit 0
@@ -226,6 +236,15 @@ try {
     if ($Mode -eq "doctor") {
         $runArguments += @($imageId, "doctor")
     }
+    elseif ($Mode -eq "lockfile-update") {
+        $runArguments += @(
+            "--mount", "type=bind,source=$repositoryRoot,target=/workspace",
+            "--workdir", "/workspace",
+            "--entrypoint", "cargo", $imageId,
+            "update", "--offline", "--package", "cargo_metadata",
+            "--precise", "0.18.1"
+        )
+    }
     else {
         $runArguments += @("--entrypoint", "bash", $imageId, "scripts/local-ci.sh")
     }
@@ -245,12 +264,24 @@ try {
         throw "wslc $($runArguments -join ' ') failed with exit code $runExitCode"
     }
 
-    $finalFingerprint = Get-SourceFingerprint
-    if ($finalFingerprint -ne $sourceFingerprint) {
-        throw "Repository-owned inputs changed during WSLC verification; no receipt was issued."
+    if ($Mode -eq "lockfile-update") {
+        $finalNonLockFingerprint = Get-SourceFingerprint -IgnoreRootCargoLock
+        if ($finalNonLockFingerprint -ne $initialNonLockFingerprint) {
+            throw "lockfile-update changed repository inputs other than root Cargo.lock."
+        }
+        if (-not (Test-Path -LiteralPath (Join-Path $repositoryRoot "Cargo.lock") -PathType Leaf)) {
+            throw "lockfile-update completed without producing root Cargo.lock."
+        }
+        Write-Host "Cargo.lock updated through the serialized WSLC owner harness. No verification receipt was issued."
+    }
+    else {
+        $finalFingerprint = Get-SourceFingerprint
+        if ($finalFingerprint -ne $sourceFingerprint) {
+            throw "Repository-owned inputs changed during WSLC verification; no receipt was issued."
+        }
     }
 
-    if ($Mode -ne "doctor") {
+    if ($Mode -notin @("doctor", "lockfile-update")) {
         $receipt = [ordered]@{
             schema = "laminaria-wslc-verification/v1"
             source_fingerprint = $sourceFingerprint
