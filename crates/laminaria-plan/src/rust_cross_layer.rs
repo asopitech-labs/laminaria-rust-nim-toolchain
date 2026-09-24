@@ -74,8 +74,11 @@ pub struct RustGenericWork {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RustGenericWorkStage {
+    SemanticAnalysis,
+    LowerToIr,
     Monomorphize,
     Codegen,
+    SymbolLiveness,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -169,8 +172,11 @@ pub fn plan_rust_generic_work(
             .iter()
             .flat_map(|instance| {
                 [
+                    RustGenericWorkStage::SemanticAnalysis,
+                    RustGenericWorkStage::LowerToIr,
                     RustGenericWorkStage::Monomorphize,
                     RustGenericWorkStage::Codegen,
+                    RustGenericWorkStage::SymbolLiveness,
                 ]
                 .into_iter()
                 .map(move |stage| RustGenericWork {

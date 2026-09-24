@@ -115,9 +115,9 @@ fn generic_feedback_keeps_requested_fixture_instance_and_prunes_test_only_instan
     let plan = plan_rust_generic_work(&eager, &requested)
         .expect("requested generic work must be included in the conservative eager inventory");
 
-    assert_eq!(plan.eager_work.len(), 4);
-    assert_eq!(plan.feedback_work.len(), 2);
-    assert_eq!(plan.pruned_work.len(), 2);
+    assert_eq!(plan.eager_work.len(), 10);
+    assert_eq!(plan.feedback_work.len(), 5);
+    assert_eq!(plan.pruned_work.len(), 5);
     assert!(plan.feedback_work.iter().all(|work| {
         work.instance.package == "fixture-core" && work.instance.type_arguments == ["i64"]
     }));
@@ -203,8 +203,8 @@ fn artifact_feedback_joins_cargo_workspace_packages_to_fixture_generic_demand() 
             .map(str::to_string)
             .collect()
     );
-    assert_eq!(plan.generic_work_plan.feedback_work.len(), 2);
-    assert_eq!(plan.generic_work_plan.pruned_work.len(), 2);
+    assert_eq!(plan.generic_work_plan.feedback_work.len(), 5);
+    assert_eq!(plan.generic_work_plan.pruned_work.len(), 5);
     assert!(plan.generic_work_plan.feedback_work.iter().all(|work| {
         work.instance.function == "sum_generic" && work.instance.type_arguments == ["i64"]
     }));

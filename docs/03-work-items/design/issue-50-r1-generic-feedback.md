@@ -49,9 +49,12 @@ argument inference. Its `include_test_cfg` behavior is validated against the
 fixture's inline `#[cfg(test)]` module; it is not a general implementation of
 Rust cfg evaluation.
 
-The planner creates demand-relative `Monomorphize` and `Codegen` identities.
-It is not yet connected to LAMINARIA-owned Rust parsing/type/IR lowering,
-symbol/link liveness, a native target executor, or process/action provenance.
+The planner creates demand-relative semantic-analysis, IR-lowering,
+monomorphization, codegen, and symbol/liveness identities for each selected
+generic instance. These are planning identities, not evidence that any stage
+ran. It is not yet connected to LAMINARIA-owned Rust parsing/type/IR lowering,
+symbol/link liveness execution, a native target executor, or process/action
+provenance.
 Therefore this slice does not establish the full requested-artifact → unit →
 semantic/IR → symbol/liveness → unit feedback loop, a positive artifact from
 the owned path, a compile-before-reject run, or an actual difference in
