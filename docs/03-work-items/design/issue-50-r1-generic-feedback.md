@@ -7,8 +7,11 @@ one generic function instance. For a `fixture-bin` executable request, the
 planner retains `sum_generic<i64>` and omits the `#[cfg(test)]`-only
 `sum_generic<i32>` from its demand-relative generic work set. For a
 `fixture-core` test request, that selection reverses: `i32` remains and `i64`
-is omitted. This is graph-level planning evidence only; no compiler work is
-claimed to have been executed or avoided by a production executor.
+is omitted. An artifact feedback plan now composes that specialization demand
+with the package selection from the same artifact request and rejects generic
+providers that are not candidates or are not selected. This is graph-level
+planning evidence only; no compiler work is claimed to have been executed or
+avoided by a production executor.
 
 ## Checkpoint contract
 
@@ -21,12 +24,16 @@ claimed to have been executed or avoided by a production executor.
   and the rule that discovery uncertainty must not silently remove required
   work.
 - **Evidence:** `laminaria-ir::rust_generic_demand` discovers the fixture's
-  `sum_generic<i64>` call and test-only `sum_generic<i32>` call. The generic
-  work planner requires requested instances to be a subset of the eager
-  inventory, then reports eager, feedback, and pruned monomorphize/codegen
-  work identities. The integration test checks both the executable and core
-  test request directions. Unsupported generic inference and unknown macros
-  are structured discovery errors.
+  `sum_generic<i64>` call and test-only `sum_generic<i32>` call. Package
+  candidates and direct dependencies come from the existing
+  `cargo_metadata 0.18.1` crate; the source collector resolves the fixture's
+  imported type/function roots and avoids interpreting `Cluster::...` as a
+  package. The artifact feedback planner requires requested instances to be
+  in the eager inventory, verifies canonical Cargo package identities across
+  package/generic layers, and reports eager, feedback, and pruned
+  monomorphize/codegen work identities. The integration test checks both the
+  executable and core-test request directions. Unsupported generic inference
+  and unknown macros are structured discovery errors.
 - **Enables:** A later owned executor can consume a tested specialization work
   set and produce evidence that the omitted specialization never reached
   compiler work. It does not itself enable a claim of R1 completion.

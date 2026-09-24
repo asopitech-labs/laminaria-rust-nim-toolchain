@@ -202,8 +202,8 @@ struct GenericCallCollector<'a> {
 }
 
 impl GenericCallCollector<'_> {
-    fn known_function(&self, package: &str, name: &str) -> bool {
-        self.known_functions.iter().any(|function| {
+    fn known_function(&self, package: &str, name: &str) -> Option<&RustGenericFunction> {
+        self.known_functions.iter().find(|function| {
             function.name == name
                 && (function.package.replace('-', "_") == package || function.package == package)
         })
@@ -234,7 +234,7 @@ impl GenericCallCollector<'_> {
             (self.owner_package.replace('-', "_"), name)
         };
         self.known_function(&package, &function)
-            .then_some((package, function, explicit_types))
+            .map(|known| (known.package.clone(), known.name.clone(), explicit_types))
     }
 
     fn inferred_argument(&self, expression: &syn::Expr) -> Option<String> {

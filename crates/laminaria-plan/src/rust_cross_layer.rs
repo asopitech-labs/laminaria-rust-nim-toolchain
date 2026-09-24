@@ -90,6 +90,68 @@ pub enum RustGenericWorkReject {
     RequestedInstanceNotInEagerSet(RustGenericInstance),
 }
 
+/// One artifact-rooted view joining package selection with generic-instance
+/// demand. The package and specialization plans remain independently
+/// inspectable, while provider membership is checked at their boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RustArtifactFeedbackInput {
+    pub package_input: RustCrossLayerInput,
+    pub eager_instances: BTreeSet<RustGenericInstance>,
+    pub requested_instances: BTreeSet<RustGenericInstance>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RustArtifactFeedbackPlan {
+    pub package_plan: RustCrossLayerPlan,
+    pub generic_work_plan: RustGenericWorkPlan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RustArtifactFeedbackReject {
+    Package(RustCrossLayerReject),
+    Generic(RustGenericWorkReject),
+    GenericProviderNotCandidate(RustGenericInstance),
+    GenericProviderNotSelected(RustGenericInstance),
+}
+
+/// Composes artifact-rooted package selection and generic demand. A generic
+/// specialization cannot be accepted if its provider package was not selected
+/// by the same artifact request.
+pub fn plan_rust_artifact_feedback(
+    input: &RustArtifactFeedbackInput,
+) -> Result<RustArtifactFeedbackPlan, RustArtifactFeedbackReject> {
+    let package_plan =
+        plan_rust_cross_layer(&input.package_input).map_err(RustArtifactFeedbackReject::Package)?;
+    let generic_work_plan =
+        plan_rust_generic_work(&input.eager_instances, &input.requested_instances)
+            .map_err(RustArtifactFeedbackReject::Generic)?;
+
+    for instance in &input.eager_instances {
+        if !input
+            .package_input
+            .package_candidates
+            .contains(&instance.package)
+        {
+            return Err(RustArtifactFeedbackReject::GenericProviderNotCandidate(
+                instance.clone(),
+            ));
+        }
+    }
+
+    for instance in &input.requested_instances {
+        if !package_plan.selected_packages.contains(&instance.package) {
+            return Err(RustArtifactFeedbackReject::GenericProviderNotSelected(
+                instance.clone(),
+            ));
+        }
+    }
+
+    Ok(RustArtifactFeedbackPlan {
+        package_plan,
+        generic_work_plan,
+    })
+}
+
 /// Selects only generic instances demanded by the requested artifact from a
 /// conservative eager set. Rejecting a non-subset is important: an incomplete
 /// eager inventory must not be mistaken for successful pruning.
@@ -288,6 +350,61 @@ mod tests {
             plan_rust_generic_work(&BTreeSet::new(), &BTreeSet::from([demanded.clone()])),
             Err(RustGenericWorkReject::RequestedInstanceNotInEagerSet(
                 demanded
+            ))
+        );
+    }
+
+    #[test]
+    fn artifact_feedback_rejects_a_generic_provider_outside_selected_packages() {
+        let instance = RustGenericInstance {
+            package: "unused-helper".to_string(),
+            function: "convert".to_string(),
+            type_arguments: vec!["u8".to_string()],
+        };
+        let input = RustArtifactFeedbackInput {
+            package_input: RustCrossLayerInput {
+                requested_artifact: "app".to_string(),
+                entry_package: "app".to_string(),
+                package_candidates: ["app", "unused-helper"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+                declared_dependency_packages: BTreeSet::new(),
+                semantic_references: BTreeSet::new(),
+            },
+            eager_instances: BTreeSet::from([instance.clone()]),
+            requested_instances: BTreeSet::from([instance.clone()]),
+        };
+        assert_eq!(
+            plan_rust_artifact_feedback(&input),
+            Err(RustArtifactFeedbackReject::GenericProviderNotSelected(
+                instance
+            ))
+        );
+    }
+
+    #[test]
+    fn artifact_feedback_rejects_a_generic_provider_outside_package_candidates() {
+        let instance = RustGenericInstance {
+            package: "missing-provider".to_string(),
+            function: "convert".to_string(),
+            type_arguments: vec!["u8".to_string()],
+        };
+        let input = RustArtifactFeedbackInput {
+            package_input: RustCrossLayerInput {
+                requested_artifact: "app".to_string(),
+                entry_package: "app".to_string(),
+                package_candidates: BTreeSet::from(["app".to_string()]),
+                declared_dependency_packages: BTreeSet::new(),
+                semantic_references: BTreeSet::new(),
+            },
+            eager_instances: BTreeSet::from([instance.clone()]),
+            requested_instances: BTreeSet::from([instance.clone()]),
+        };
+        assert_eq!(
+            plan_rust_artifact_feedback(&input),
+            Err(RustArtifactFeedbackReject::GenericProviderNotCandidate(
+                instance
             ))
         );
     }
