@@ -1436,6 +1436,48 @@ mod tests {
         ));
     }
 
+    /// The R0 Rust fixture is intentionally outside the currently owned
+    /// frontend subset because it declares a generic function.  The owned
+    /// executor must surface that boundary as a structured lowering reject
+    /// before publishing a candidate program; it must never fall back to
+    /// Cargo/rustc or pretend that the generic source was compiled.
+    #[test]
+    fn the_r0_generic_fixture_is_rejected_before_owned_program_publication() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("laminaria-run must remain inside the workspace");
+        let source_path =
+            workspace.join("fixtures/rust-heavy-workspace/crates/fixture-core/src/lib.rs");
+        let source_text = fs::read_to_string(&source_path).expect("R0 fixture source");
+        let source_path = source_path.to_string_lossy().into_owned();
+        let snapshot = compute_source_snapshot_id(&source_text);
+        let mut action = minimal_lower_source_action("r0-generic-reject", &source_path);
+        let descriptor = action
+            .compiler_work
+            .as_mut()
+            .expect("minimal action descriptor");
+        descriptor.language = Some("rust".to_string());
+        descriptor.requested_functions = vec!["sum_generic".to_string()];
+        descriptor
+            .source_provenance
+            .as_mut()
+            .unwrap()
+            .source_snapshot_id = snapshot;
+        let plan = plan_of(vec![action]);
+        let mut store = ArtifactStore::new();
+
+        let result = run_compiler_work_plan(&plan, &mut store, NonZeroUsize::new(1).unwrap());
+        assert!(
+            matches!(
+                result,
+                Err(CompilerWorkExecutionError::LoweringFailed { .. })
+            ),
+            "generic R0 source must be a structured owned-boundary reject, got {result:?}"
+        );
+        assert!(store.candidate_program("r0-generic-reject").is_none());
+    }
+
     /// A compiler-work-kinded action with no descriptor at all is a hard
     /// error, never treated as a no-op.
     #[test]
