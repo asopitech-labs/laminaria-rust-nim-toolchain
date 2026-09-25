@@ -1110,6 +1110,10 @@ mod tests {
     use laminaria_plan::compiler_work::{
         ResourceRequest, TransformParameters, COMPILER_WORK_SCHEMA_VERSION,
     };
+    use laminaria_plan::rust_cross_layer::{
+        plan_rust_artifact_feedback, RustArtifactFeedbackInput, RustExecutionWork, RustWork,
+        RustWorkStage,
+    };
     use laminaria_plan::ArtifactRef;
     // `PathBuf` is used by cross-platform tests too (`nim_fact`'s own
     // `Provenance.source_file`), so it stays ungated -- only the items
@@ -1750,9 +1754,58 @@ mod tests {
             &[vec![1]],
         );
         let first_ids: BTreeSet<String> = first.iter().map(|action| action.id.clone()).collect();
+        let action_metadata = first.clone();
         first.extend(second);
         let eager_plan = plan_of(first);
-        let feedback_plan = restrict_execution_plan(&eager_plan, &first_ids).unwrap();
+        let artifact_feedback = plan_rust_artifact_feedback(&RustArtifactFeedbackInput {
+            package_input: laminaria_plan::rust_cross_layer::RustCrossLayerInput {
+                requested_artifact: "app".to_string(),
+                entry_package: "app".to_string(),
+                package_candidates: BTreeSet::from(["app".to_string(), "unused".to_string()]),
+                declared_dependency_packages: BTreeSet::new(),
+                semantic_references: BTreeSet::new(),
+            },
+            eager_instances: BTreeSet::new(),
+            requested_instances: BTreeSet::new(),
+        })
+        .expect("artifact feedback plan must select entry package");
+        let mut action_work = BTreeMap::new();
+        for (action, stage) in action_metadata.iter().zip([
+            RustWorkStage::Parse,
+            RustWorkStage::Typecheck,
+            RustWorkStage::Lower,
+        ]) {
+            action_work.insert(
+                action.id.clone(),
+                RustExecutionWork::Package(RustWork {
+                    package: "app".to_string(),
+                    stage,
+                }),
+            );
+        }
+        for (action, stage) in eager_plan
+            .ordered_actions
+            .iter()
+            .skip(3)
+            .take(3)
+            .map(|id| eager_plan.actions.get(id).expect("action exists"))
+            .zip([
+                RustWorkStage::Parse,
+                RustWorkStage::Typecheck,
+                RustWorkStage::Lower,
+            ])
+        {
+            action_work.insert(
+                action.id.clone(),
+                RustExecutionWork::Package(RustWork {
+                    package: "unused".to_string(),
+                    stage,
+                }),
+            );
+        }
+        let selected_ids = artifact_feedback.select_action_ids(&action_work, true);
+        assert_eq!(selected_ids, first_ids);
+        let feedback_plan = restrict_execution_plan(&eager_plan, &selected_ids).unwrap();
 
         let mut eager_store = ArtifactStore::new();
         let (eager_result, eager_trace) = run_compiler_work_plan_with_dispatch_trace(

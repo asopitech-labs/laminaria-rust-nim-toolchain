@@ -5,7 +5,7 @@
 //! enter parse/typecheck/lower/codegen; this module never reads files or
 //! starts a compiler.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The compiler work a package unit would otherwise require.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -156,6 +156,26 @@ impl RustArtifactFeedbackPlan {
         self.eager_execution_work()
             .difference(&self.feedback_execution_work())
             .cloned()
+            .collect()
+    }
+
+    /// Converts executor-owned action metadata into the selected action IDs
+    /// for this artifact. The action builder owns the identity mapping; this
+    /// method owns the demand decision and never guesses from an action ID.
+    pub fn select_action_ids(
+        &self,
+        action_work: &BTreeMap<String, RustExecutionWork>,
+        feedback: bool,
+    ) -> BTreeSet<String> {
+        let selected = if feedback {
+            self.feedback_execution_work()
+        } else {
+            self.eager_execution_work()
+        };
+        action_work
+            .iter()
+            .filter(|(_, work)| selected.contains(*work))
+            .map(|(action_id, _)| action_id.clone())
             .collect()
     }
 }
@@ -492,6 +512,46 @@ mod tests {
         assert_eq!(
             plan.eager_execution_work().len() - plan.feedback_execution_work().len(),
             plan.pruned_execution_work().len()
+        );
+    }
+
+    #[test]
+    fn artifact_feedback_selects_action_ids_from_typed_work_metadata() {
+        let input = RustArtifactFeedbackInput {
+            package_input: RustCrossLayerInput {
+                requested_artifact: "app".to_string(),
+                entry_package: "app".to_string(),
+                package_candidates: ["app", "unused"].into_iter().map(str::to_string).collect(),
+                declared_dependency_packages: BTreeSet::new(),
+                semantic_references: BTreeSet::new(),
+            },
+            eager_instances: BTreeSet::new(),
+            requested_instances: BTreeSet::new(),
+        };
+        let plan = plan_rust_artifact_feedback(&input).expect("entry package is selected");
+        let action_work = BTreeMap::from([
+            (
+                "selected".to_string(),
+                RustExecutionWork::Package(RustWork {
+                    package: "app".to_string(),
+                    stage: RustWorkStage::Parse,
+                }),
+            ),
+            (
+                "pruned".to_string(),
+                RustExecutionWork::Package(RustWork {
+                    package: "unused".to_string(),
+                    stage: RustWorkStage::Parse,
+                }),
+            ),
+        ]);
+        assert_eq!(
+            plan.select_action_ids(&action_work, true),
+            BTreeSet::from(["selected".to_string()])
+        );
+        assert_eq!(
+            plan.select_action_ids(&action_work, false),
+            BTreeSet::from(["selected".to_string(), "pruned".to_string()])
         );
     }
 }

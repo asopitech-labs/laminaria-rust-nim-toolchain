@@ -56,19 +56,23 @@ ran. It is not yet connected to LAMINARIA-owned Rust parsing/type/IR lowering,
 symbol/link liveness execution, a native target executor, or process/action
 provenance.
 
-The artifact feedback plan now exposes a combined eager/feedback/pruned
-execution identity set containing both package-stage and generic-instance
-work. This is the executor bridge contract: it prevents a consumer from
-comparing only package pruning or only generic pruning. The bridge itself does
-not claim that those identities have run; an owned executor still has to
-consume the feedback set and record its actual dispatch set.
-Therefore this slice does not establish the full requested-artifact → unit →
-semantic/IR → symbol/liveness → unit feedback loop, a positive artifact from
-the owned path, a compile-before-reject run, or an actual difference in
-executed work. Cargo remains the R0 reference oracle only. No resource or
-performance claim is made.
+The artifact feedback plan exposes a combined eager/feedback/pruned execution
+identity set containing both package-stage and generic-instance work. The
+executor bridge now maps its typed `RustExecutionWork` values to the concrete
+action IDs supplied by the action builder; it never guesses from an ID prefix
+or from ordering. The selected IDs are closure-checked before dispatch, and
+the executor records only successfully completed IDs. The focused regression
+therefore proves a real six-action eager run, a three-action feedback run, and
+structured rejection when a producer is omitted.
 
-R1 remains open until the missing loop is implemented and evidence shows a
-positive owned artifact (or structured pre-compiler rejection) and distinct
-eager/feedback execution sets. R2 remains responsible for matched raw resource
-evidence and causal attribution.
+This still does not establish the full requested-artifact → unit →
+semantic/IR → symbol/liveness → unit feedback loop, a positive compiler
+artifact from the owned path, or raw resource/performance attribution. Cargo
+remains the R0 reference oracle. R2 remains responsible for matched raw
+resource evidence and causal attribution.
+
+R1's current result is the first executable package feedback slice: typed
+artifact demand selects the action set, dependency closure is enforced, and
+dispatch evidence is observable. The remaining R1 work is to connect the same
+selection contract to the real artifact-producing path and its independent
+consumer evidence.
