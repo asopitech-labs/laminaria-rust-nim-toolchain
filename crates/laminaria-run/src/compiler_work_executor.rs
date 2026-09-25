@@ -27,7 +27,7 @@
 //! executorが黙って実行してはならない" is enforced here by an actual
 //! executor, not merely documented as an intention.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::num::NonZeroUsize;
 use std::path::Path;
@@ -611,6 +611,7 @@ struct SchedulerState {
     /// `remaining_deps == 0`). The scheduler is done exactly when this
     /// covers every action in the plan.
     resolved: HashSet<String>,
+    successful: BTreeSet<String>,
     errors: BTreeMap<String, CompilerWorkExecutionError>,
 }
 
@@ -662,6 +663,7 @@ fn worker_loop(
         state.resolved.insert(action_id.clone());
         match result {
             Ok(()) => {
+                state.successful.insert(action_id.clone());
                 for dependent in dependents.get(&action_id).into_iter().flatten() {
                     if state.resolved.contains(dependent) {
                         continue;
@@ -738,6 +740,18 @@ pub fn run_compiler_work_plan(
     run_compiler_work_plan_inner(plan, store, cpu_budget, false).0
 }
 
+/// Executes a compiler-work plan and returns the exact action identities that
+/// completed successfully. This is the owned executor's dispatch evidence;
+/// poisoned dependents and failed actions are intentionally absent.
+pub fn run_compiler_work_plan_with_dispatch_trace(
+    plan: &ExecutionPlan,
+    store: &mut ArtifactStore,
+    cpu_budget: NonZeroUsize,
+) -> (Result<(), CompilerWorkExecutionError>, BTreeSet<String>) {
+    let (result, _peak, successful) = run_compiler_work_plan_inner(plan, store, cpu_budget, false);
+    (result, successful)
+}
+
 /// Opt-in-traced entry point that also returns the peak number of real
 /// `laminaria_ir` computations [`ComputeConcurrencyProbe`] ever observed
 /// running at once, so a caller can directly confirm two independent
@@ -754,7 +768,8 @@ pub fn run_compiler_work_plan_with_concurrency_trace(
     store: &mut ArtifactStore,
     cpu_budget: NonZeroUsize,
 ) -> (Result<(), CompilerWorkExecutionError>, usize) {
-    run_compiler_work_plan_inner(plan, store, cpu_budget, true)
+    let (result, peak, _successful) = run_compiler_work_plan_inner(plan, store, cpu_budget, true);
+    (result, peak)
 }
 
 fn run_compiler_work_plan_inner(
@@ -762,7 +777,11 @@ fn run_compiler_work_plan_inner(
     store: &mut ArtifactStore,
     cpu_budget: NonZeroUsize,
     trace_compute_concurrency: bool,
-) -> (Result<(), CompilerWorkExecutionError>, usize) {
+) -> (
+    Result<(), CompilerWorkExecutionError>,
+    usize,
+    BTreeSet<String>,
+) {
     let total = plan.actions.len();
     let (remaining_deps, dependents) = dependency_graph(plan);
 
@@ -776,6 +795,7 @@ fn run_compiler_work_plan_inner(
         ready,
         remaining_deps,
         resolved: HashSet::new(),
+        successful: BTreeSet::new(),
         errors: BTreeMap::new(),
     });
     let ready_or_done = Condvar::new();
@@ -802,11 +822,13 @@ fn run_compiler_work_plan_inner(
     // Deterministic regardless of which worker happened to fail first or
     // how many actions failed: always the smallest failing action id's
     // own error, the same choice at every `cpu_budget`.
-    let result = match scheduler.into_inner().unwrap().errors.into_iter().next() {
+    let state = scheduler.into_inner().unwrap();
+    let successful = state.successful;
+    let result = match state.errors.into_iter().next() {
         Some((_, error)) => Err(error),
         None => Ok(()),
     };
-    (result, peak_compute_concurrency)
+    (result, peak_compute_concurrency, successful)
 }
 
 fn dispatch_action(action: &Action, store: &SharedStore) -> Result<(), CompilerWorkExecutionError> {
@@ -1617,6 +1639,32 @@ mod tests {
             actions,
             physical_work: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn dispatch_trace_reports_only_successfully_completed_action_identities() {
+        let dir = std::env::temp_dir().join(format!(
+            "laminaria-dispatch-trace-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source_path = dir.join("add.rs");
+        let source_text = "fn add(x: i32) -> i32 { x }\n";
+        std::fs::write(&source_path, source_text).unwrap();
+        let source_path = source_path.to_string_lossy().into_owned();
+        let (actions, _) =
+            independent_chain_actions("rust", &source_path, source_text, "add", &[vec![1]]);
+        let plan = plan_of(actions);
+        let expected: BTreeSet<String> = plan.actions.keys().cloned().collect();
+        let mut store = ArtifactStore::new();
+
+        let (result, successful) = run_compiler_work_plan_with_dispatch_trace(
+            &plan,
+            &mut store,
+            NonZeroUsize::new(1).unwrap(),
+        );
+        assert!(result.is_ok(), "owned chain must execute: {result:?}");
+        assert_eq!(successful, expected);
     }
 
     /// Issue #27's own "産出者失敗時にはconsumerを開始しない": a
