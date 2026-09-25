@@ -243,6 +243,61 @@ pub fn compute_source_snapshot_id(source_text: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecutionSelectionError {
+    UnknownAction(String),
+    MissingProducer { consumer: String, producer: String },
+}
+
+/// Derives an executor plan from an explicitly selected action identity set.
+/// A consumer cannot be retained when its declared producer is omitted; this
+/// prevents feedback pruning from turning a dependency failure into a partial
+/// or silently reordered execution.
+pub fn restrict_execution_plan(
+    plan: &ExecutionPlan,
+    selected_actions: &BTreeSet<String>,
+) -> Result<ExecutionPlan, ExecutionSelectionError> {
+    for action_id in selected_actions {
+        if !plan.actions.contains_key(action_id) {
+            return Err(ExecutionSelectionError::UnknownAction(action_id.clone()));
+        }
+    }
+    let mut producer_of = HashMap::new();
+    for (action_id, action) in &plan.actions {
+        for output in &action.outputs {
+            if let ArtifactRef::Declared { artifact_id } = output {
+                producer_of.insert(artifact_id.as_str(), action_id.as_str());
+            }
+        }
+    }
+    for action_id in selected_actions {
+        let action = &plan.actions[action_id];
+        for input in &action.inputs {
+            let ArtifactRef::Declared { artifact_id } = input else {
+                continue;
+            };
+            let Some(producer) = producer_of.get(artifact_id.as_str()) else {
+                continue;
+            };
+            if !selected_actions.contains(*producer) {
+                return Err(ExecutionSelectionError::MissingProducer {
+                    consumer: action_id.clone(),
+                    producer: (*producer).to_string(),
+                });
+            }
+        }
+    }
+    let mut selected = plan.clone();
+    selected
+        .ordered_actions
+        .retain(|id| selected_actions.contains(id));
+    selected
+        .actions
+        .retain(|id, _| selected_actions.contains(id));
+    selected.physical_work.clear();
+    Ok(selected)
+}
+
 /// Builds the `LowerSource -> ValidateIr -> EvaluateEvidence` action
 /// triple for one language's chain -- the exact three-action, no-
 /// `TransformFunction` shape `plan.actions.len() == 6` asserts on below
@@ -1665,6 +1720,63 @@ mod tests {
         );
         assert!(result.is_ok(), "owned chain must execute: {result:?}");
         assert_eq!(successful, expected);
+    }
+
+    #[test]
+    fn feedback_selection_reduces_actual_dispatch_set_and_rejects_broken_closure() {
+        let dir = std::env::temp_dir().join(format!(
+            "laminaria-selection-trace-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let first_path = dir.join("first.rs");
+        let second_path = dir.join("second.rs");
+        let source_text = "fn f(x: i32) -> i32 { x }\n";
+        let second_text = "fn f(x: i32) -> i32 { x } \n";
+        std::fs::write(&first_path, source_text).unwrap();
+        std::fs::write(&second_path, second_text).unwrap();
+        let (mut first, _) = independent_chain_actions(
+            "rust",
+            &first_path.to_string_lossy(),
+            source_text,
+            "f",
+            &[vec![1]],
+        );
+        let (second, _) = independent_chain_actions(
+            "rust",
+            &second_path.to_string_lossy(),
+            second_text,
+            "f",
+            &[vec![1]],
+        );
+        let first_ids: BTreeSet<String> = first.iter().map(|action| action.id.clone()).collect();
+        first.extend(second);
+        let eager_plan = plan_of(first);
+        let feedback_plan = restrict_execution_plan(&eager_plan, &first_ids).unwrap();
+
+        let mut eager_store = ArtifactStore::new();
+        let (eager_result, eager_trace) = run_compiler_work_plan_with_dispatch_trace(
+            &eager_plan,
+            &mut eager_store,
+            NonZeroUsize::new(1).unwrap(),
+        );
+        eager_result.expect("eager plan must execute");
+        let mut feedback_store = ArtifactStore::new();
+        let (feedback_result, feedback_trace) = run_compiler_work_plan_with_dispatch_trace(
+            &feedback_plan,
+            &mut feedback_store,
+            NonZeroUsize::new(1).unwrap(),
+        );
+        feedback_result.expect("feedback plan must execute");
+        assert_eq!(eager_trace.len(), 6);
+        assert_eq!(feedback_trace, first_ids);
+        assert!(feedback_trace.is_subset(&eager_trace));
+
+        let broken = BTreeSet::from([eager_plan.ordered_actions[1].clone()]);
+        assert!(matches!(
+            restrict_execution_plan(&eager_plan, &broken),
+            Err(ExecutionSelectionError::MissingProducer { .. })
+        ));
     }
 
     /// Issue #27's own "産出者失敗時にはconsumerを開始しない": a
