@@ -55,6 +55,13 @@ generic instance. These are planning identities, not evidence that any stage
 ran. It is not yet connected to LAMINARIA-owned Rust parsing/type/IR lowering,
 symbol/link liveness execution, a native target executor, or process/action
 provenance.
+
+The artifact feedback plan now exposes a combined eager/feedback/pruned
+execution identity set containing both package-stage and generic-instance
+work. This is the executor bridge contract: it prevents a consumer from
+comparing only package pruning or only generic pruning. The bridge itself does
+not claim that those identities have run; an owned executor still has to
+consume the feedback set and record its actual dispatch set.
 Therefore this slice does not establish the full requested-artifact → unit →
 semantic/IR → symbol/liveness → unit feedback loop, a positive artifact from
 the owned path, a compile-before-reject run, or an actual difference in

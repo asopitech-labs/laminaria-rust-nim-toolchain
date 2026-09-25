@@ -109,6 +109,57 @@ pub struct RustArtifactFeedbackPlan {
     pub generic_work_plan: RustGenericWorkPlan,
 }
 
+/// One executable identity in the artifact-rooted bridge. Package work and
+/// generic-instance work remain typed separately inside each variant, but an
+/// executor can compare the complete eager and feedback sets without silently
+/// dropping one layer.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RustExecutionWork {
+    Package(RustWork),
+    Generic(RustGenericWork),
+}
+
+impl RustArtifactFeedbackPlan {
+    pub fn eager_execution_work(&self) -> BTreeSet<RustExecutionWork> {
+        self.package_plan
+            .eager_work
+            .iter()
+            .cloned()
+            .map(RustExecutionWork::Package)
+            .chain(
+                self.generic_work_plan
+                    .eager_work
+                    .iter()
+                    .cloned()
+                    .map(RustExecutionWork::Generic),
+            )
+            .collect()
+    }
+
+    pub fn feedback_execution_work(&self) -> BTreeSet<RustExecutionWork> {
+        self.package_plan
+            .feedback_work
+            .iter()
+            .cloned()
+            .map(RustExecutionWork::Package)
+            .chain(
+                self.generic_work_plan
+                    .feedback_work
+                    .iter()
+                    .cloned()
+                    .map(RustExecutionWork::Generic),
+            )
+            .collect()
+    }
+
+    pub fn pruned_execution_work(&self) -> BTreeSet<RustExecutionWork> {
+        self.eager_execution_work()
+            .difference(&self.feedback_execution_work())
+            .cloned()
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RustArtifactFeedbackReject {
     Package(RustCrossLayerReject),
@@ -412,6 +463,35 @@ mod tests {
             Err(RustArtifactFeedbackReject::GenericProviderNotCandidate(
                 instance
             ))
+        );
+    }
+
+    #[test]
+    fn artifact_feedback_exposes_a_strictly_smaller_combined_execution_set() {
+        let instance = RustGenericInstance {
+            package: "app".to_string(),
+            function: "convert".to_string(),
+            type_arguments: vec!["u8".to_string()],
+        };
+        let input = RustArtifactFeedbackInput {
+            package_input: RustCrossLayerInput {
+                requested_artifact: "app".to_string(),
+                entry_package: "app".to_string(),
+                package_candidates: ["app", "unused"].into_iter().map(str::to_string).collect(),
+                declared_dependency_packages: BTreeSet::new(),
+                semantic_references: BTreeSet::new(),
+            },
+            eager_instances: BTreeSet::from([instance.clone()]),
+            requested_instances: BTreeSet::from([instance]),
+        };
+        let plan = plan_rust_artifact_feedback(&input).expect("the provider is selected");
+        assert!(plan
+            .feedback_execution_work()
+            .is_subset(&plan.eager_execution_work()));
+        assert!(!plan.pruned_execution_work().is_empty());
+        assert_eq!(
+            plan.eager_execution_work().len() - plan.feedback_execution_work().len(),
+            plan.pruned_execution_work().len()
         );
     }
 }
