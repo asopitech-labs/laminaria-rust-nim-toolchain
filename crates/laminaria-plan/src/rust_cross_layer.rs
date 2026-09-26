@@ -188,6 +188,161 @@ pub enum RustArtifactFeedbackReject {
     GenericProviderNotSelected(RustGenericInstance),
 }
 
+/// Caller-independent identity used by the A7 worklist.  The fields are
+/// deliberately semantic inputs only; no module, caller, or CGU identity is
+/// permitted here.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RustInstantiationKey {
+    pub declaration: String,
+    pub type_arguments: Vec<String>,
+    pub const_arguments: Vec<String>,
+    pub abi_target: String,
+    pub active_features: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RustA7RequestSource {
+    SemanticEdge(String),
+    Export(String),
+    Ffi(String),
+    Reflection(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RustA7Request {
+    pub key: RustInstantiationKey,
+    pub source: RustA7RequestSource,
+}
+
+/// A semantic definition supplies the transitive generic calls for one key.
+/// Its fingerprint makes an inconsistent duplicate an explicit rejection
+/// rather than a first-writer-wins race.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RustA7Definition {
+    pub fingerprint: String,
+    pub dependencies: Vec<RustInstantiationKey>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RustA7Input {
+    pub roots: Vec<RustA7Request>,
+    pub definitions: BTreeMap<RustInstantiationKey, RustA7Definition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RustA7WorkItem {
+    pub key: RustInstantiationKey,
+    pub fingerprint: String,
+    pub dependencies: BTreeSet<RustInstantiationKey>,
+    pub usage_sources: BTreeSet<RustA7RequestSource>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RustA7Plan {
+    pub work_items: Vec<RustA7WorkItem>,
+    pub mentioned: BTreeSet<RustInstantiationKey>,
+    pub visited: BTreeSet<RustInstantiationKey>,
+    pub usage_map: BTreeMap<RustInstantiationKey, BTreeSet<RustA7RequestSource>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RustA7Reject {
+    MissingDefinition(RustInstantiationKey),
+    MissingDependency {
+        owner: RustInstantiationKey,
+        dependency: RustInstantiationKey,
+    },
+    ConflictingDefinition {
+        key: RustInstantiationKey,
+        fingerprints: BTreeSet<String>,
+    },
+}
+
+/// Collects dependency-closed A7 work with a deterministic BFS.  `mentioned`
+/// reserves a key when it enters the queue, while `visited` records completed
+/// expansion; keeping those states separate prevents a diamond or recursive
+/// edge from losing an unexpanded dependency.
+pub fn plan_rust_a7_worklist(
+    input: &RustA7Input,
+) -> Result<RustA7Plan, Box<RustA7Reject>> {
+    use std::collections::VecDeque;
+
+    let mut queue = VecDeque::new();
+    let mut mentioned = BTreeSet::new();
+    let mut visited = BTreeSet::new();
+    let mut usage_map: BTreeMap<_, BTreeSet<_>> = BTreeMap::new();
+    let mut sources: BTreeMap<_, BTreeSet<_>> = BTreeMap::new();
+
+    let mut roots = input.roots.clone();
+    roots.sort_by(|left, right| {
+        left.key
+            .cmp(&right.key)
+            .then(left.source.cmp(&right.source))
+    });
+    for request in roots {
+        usage_map
+            .entry(request.key.clone())
+            .or_default()
+            .insert(request.source.clone());
+        sources
+            .entry(request.key.clone())
+            .or_default()
+            .insert(request.source.clone());
+        if mentioned.insert(request.key.clone()) {
+            queue.push_back(request.key);
+        }
+    }
+
+    let mut committed: BTreeMap<RustInstantiationKey, RustA7WorkItem> = BTreeMap::new();
+    while let Some(key) = queue.pop_front() {
+        if visited.contains(&key) {
+            continue;
+        }
+        let definition = input
+            .definitions
+            .get(&key)
+            .ok_or_else(|| Box::new(RustA7Reject::MissingDefinition(key.clone())))?;
+        let mut fingerprints = BTreeSet::from([definition.fingerprint.clone()]);
+        if let Some(existing) = committed.get(&key) {
+            fingerprints.insert(existing.fingerprint.clone());
+        }
+        if fingerprints.len() > 1 {
+            return Err(Box::new(RustA7Reject::ConflictingDefinition { key, fingerprints }));
+        }
+
+        let dependencies: BTreeSet<_> = definition.dependencies.iter().cloned().collect();
+        for dependency in &dependencies {
+            if !input.definitions.contains_key(dependency) {
+                return Err(Box::new(RustA7Reject::MissingDependency {
+                    owner: key.clone(),
+                    dependency: dependency.clone(),
+                }));
+            }
+            usage_map.entry(dependency.clone()).or_default();
+            if mentioned.insert(dependency.clone()) {
+                queue.push_back(dependency.clone());
+            }
+        }
+        committed.insert(
+            key.clone(),
+            RustA7WorkItem {
+                key: key.clone(),
+                fingerprint: definition.fingerprint.clone(),
+                dependencies,
+                usage_sources: sources.remove(&key).unwrap_or_default(),
+            },
+        );
+        visited.insert(key);
+    }
+
+    Ok(RustA7Plan {
+        work_items: committed.into_values().collect(),
+        mentioned,
+        visited,
+        usage_map,
+    })
+}
+
 /// Composes artifact-rooted package selection and generic demand. A generic
 /// specialization cannot be accepted if its provider package was not selected
 /// by the same artifact request.
@@ -351,6 +506,16 @@ pub fn plan_rust_cross_layer(
 mod tests {
     use super::*;
 
+    fn a7_key(name: &str) -> RustInstantiationKey {
+        RustInstantiationKey {
+            declaration: name.to_string(),
+            type_arguments: vec!["u8".to_string()],
+            const_arguments: vec![],
+            abi_target: "x86_64-pc-windows-msvc".to_string(),
+            active_features: BTreeSet::new(),
+        }
+    }
+
     fn input() -> RustCrossLayerInput {
         RustCrossLayerInput {
             requested_artifact: "fixture-bin".to_string(),
@@ -362,6 +527,127 @@ mod tests {
             declared_dependency_packages: ["used-core"].into_iter().map(str::to_string).collect(),
             semantic_references: ["used_core"].into_iter().map(str::to_string).collect(),
         }
+    }
+
+    #[test]
+    fn a7_bfs_deduplicates_a_diamond_and_returns_canonical_items() {
+        let (root, left, right, leaf) = (
+            a7_key("root"),
+            a7_key("left"),
+            a7_key("right"),
+            a7_key("leaf"),
+        );
+        let plan = plan_rust_a7_worklist(&RustA7Input {
+            roots: vec![RustA7Request {
+                key: root.clone(),
+                source: RustA7RequestSource::Export("main".into()),
+            }],
+            definitions: BTreeMap::from([
+                (
+                    root.clone(),
+                    RustA7Definition {
+                        fingerprint: "r".into(),
+                        dependencies: vec![right.clone(), left.clone()],
+                    },
+                ),
+                (
+                    left.clone(),
+                    RustA7Definition {
+                        fingerprint: "l".into(),
+                        dependencies: vec![leaf.clone()],
+                    },
+                ),
+                (
+                    right.clone(),
+                    RustA7Definition {
+                        fingerprint: "q".into(),
+                        dependencies: vec![leaf.clone()],
+                    },
+                ),
+                (
+                    leaf.clone(),
+                    RustA7Definition {
+                        fingerprint: "d".into(),
+                        dependencies: vec![],
+                    },
+                ),
+            ]),
+        })
+        .expect("diamond is a valid closed graph");
+        assert_eq!(plan.work_items.len(), 4);
+        assert_eq!(plan.visited, plan.mentioned);
+        assert_eq!(plan.work_items[0].key, leaf);
+        assert_eq!(plan.work_items[3].key, root);
+    }
+
+    #[test]
+    fn a7_bfs_handles_recursive_keys_without_requeueing_forever() {
+        let key = a7_key("recursive");
+        let plan = plan_rust_a7_worklist(&RustA7Input {
+            roots: vec![RustA7Request {
+                key: key.clone(),
+                source: RustA7RequestSource::Ffi("f".into()),
+            }],
+            definitions: BTreeMap::from([(
+                key.clone(),
+                RustA7Definition {
+                    fingerprint: "r".into(),
+                    dependencies: vec![key.clone()],
+                },
+            )]),
+        })
+        .expect("recursive generic is finite after key reservation");
+        assert_eq!(plan.work_items.len(), 1);
+        assert_eq!(plan.work_items[0].dependencies, BTreeSet::from([key]));
+    }
+
+    #[test]
+    fn a7_bfs_is_independent_of_root_submission_order() {
+        let (a, b) = (a7_key("a"), a7_key("b"));
+        let definitions = BTreeMap::from([
+            (
+                a.clone(),
+                RustA7Definition {
+                    fingerprint: "a".into(),
+                    dependencies: vec![],
+                },
+            ),
+            (
+                b.clone(),
+                RustA7Definition {
+                    fingerprint: "b".into(),
+                    dependencies: vec![],
+                },
+            ),
+        ]);
+        let make = |roots| {
+            plan_rust_a7_worklist(&RustA7Input {
+                roots,
+                definitions: definitions.clone(),
+            })
+            .unwrap()
+        };
+        let first = make(vec![
+            RustA7Request {
+                key: b.clone(),
+                source: RustA7RequestSource::SemanticEdge("z".into()),
+            },
+            RustA7Request {
+                key: a.clone(),
+                source: RustA7RequestSource::SemanticEdge("y".into()),
+            },
+        ]);
+        let second = make(vec![
+            RustA7Request {
+                key: a,
+                source: RustA7RequestSource::SemanticEdge("y".into()),
+            },
+            RustA7Request {
+                key: b,
+                source: RustA7RequestSource::SemanticEdge("z".into()),
+            },
+        ]);
+        assert_eq!(first, second);
     }
 
     #[test]
