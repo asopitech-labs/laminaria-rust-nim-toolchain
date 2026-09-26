@@ -249,6 +249,79 @@ pub enum ExecutionSelectionError {
     MissingProducer { consumer: String, producer: String },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompilerWorkExecutionReceipt {
+    pub plan_id: String,
+    pub selected_actions: BTreeSet<String>,
+    pub successful_actions: BTreeSet<String>,
+    pub evidence_artifacts: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecutionReceiptError {
+    PlanIdentityMismatch { expected: String, actual: String },
+    UnknownAction(String),
+    SuccessfulActionNotSelected(String),
+    RequestedArtifactNotProduced(String),
+    RequestedArtifactNotSuccessful(String),
+}
+
+/// Builds the producer-side receipt without allowing it to claim an artifact
+/// that is absent from the actual owned artifact store.
+pub fn build_execution_receipt(
+    plan: &ExecutionPlan,
+    selected_actions: BTreeSet<String>,
+    successful_actions: BTreeSet<String>,
+    store: &ArtifactStore,
+) -> CompilerWorkExecutionReceipt {
+    CompilerWorkExecutionReceipt {
+        plan_id: plan.plan_id.clone(),
+        selected_actions,
+        successful_actions,
+        evidence_artifacts: store.evidence_ids(),
+    }
+}
+
+/// Independent-consumer validation for an execution receipt. It checks the
+/// plan identity, action membership, dependency-selection outcome supplied by
+/// the producer, and the requested evidence artifact. It does not trust a
+/// mutable tag or an action-name convention.
+pub fn validate_execution_receipt(
+    plan: &ExecutionPlan,
+    receipt: &CompilerWorkExecutionReceipt,
+    requested_artifact: &str,
+) -> Result<(), ExecutionReceiptError> {
+    if receipt.plan_id != plan.plan_id {
+        return Err(ExecutionReceiptError::PlanIdentityMismatch {
+            expected: plan.plan_id.clone(),
+            actual: receipt.plan_id.clone(),
+        });
+    }
+    for action_id in receipt.selected_actions.union(&receipt.successful_actions) {
+        if !plan.actions.contains_key(action_id) {
+            return Err(ExecutionReceiptError::UnknownAction(action_id.clone()));
+        }
+    }
+    for action_id in &receipt.successful_actions {
+        if !receipt.selected_actions.contains(action_id) {
+            return Err(ExecutionReceiptError::SuccessfulActionNotSelected(
+                action_id.clone(),
+            ));
+        }
+    }
+    if !receipt.evidence_artifacts.contains(requested_artifact) {
+        return Err(ExecutionReceiptError::RequestedArtifactNotProduced(
+            requested_artifact.to_string(),
+        ));
+    }
+    if !receipt.successful_actions.contains(requested_artifact) {
+        return Err(ExecutionReceiptError::RequestedArtifactNotSuccessful(
+            requested_artifact.to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Derives an executor plan from an explicitly selected action identity set.
 /// A consumer cannot be retained when its declared producer is omitted; this
 /// prevents feedback pruning from turning a dependency failure into a partial
@@ -470,6 +543,10 @@ impl ArtifactStore {
 
     pub fn evidence(&self, artifact_id: &str) -> Option<&[EvalOutcome]> {
         self.evidence.get(artifact_id).map(Vec::as_slice)
+    }
+
+    pub fn evidence_ids(&self) -> BTreeSet<String> {
+        self.evidence.keys().cloned().collect()
     }
 }
 

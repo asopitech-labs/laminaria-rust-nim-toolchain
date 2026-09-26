@@ -76,3 +76,12 @@ artifact demand selects the action set, dependency closure is enforced, and
 dispatch evidence is observable. The remaining R1 work is to connect the same
 selection contract to the real artifact-producing path and its independent
 consumer evidence.
+
+The executor now publishes a typed `CompilerWorkExecutionReceipt` from the
+actual `ArtifactStore` evidence, including selected actions, successful
+dispatch identities, and produced evidence artifact identities. A separate
+integration-test consumer validates the receipt against the immutable plan and
+requested evidence artifact, and rejects unknown or tampered action identities.
+This consumer accepts both eager and feedback-produced positive evidence; it
+does not rely on the mutable `laminaria-bootstrap` tag or on producer-side
+assertions alone.
