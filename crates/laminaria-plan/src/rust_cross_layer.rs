@@ -117,6 +117,7 @@ pub struct RustArtifactFeedbackPlan {
 pub enum RustExecutionWork {
     Package(RustWork),
     Generic(RustGenericWork),
+    A7(RustInstantiationKey),
 }
 
 impl RustArtifactFeedbackPlan {
@@ -243,6 +244,33 @@ pub struct RustA7Plan {
     pub mentioned: BTreeSet<RustInstantiationKey>,
     pub visited: BTreeSet<RustInstantiationKey>,
     pub usage_map: BTreeMap<RustInstantiationKey, BTreeSet<RustA7RequestSource>>,
+}
+
+impl RustA7Plan {
+    /// Converts the closed A7 result into executor-owned typed identities.
+    /// Dependency edges remain in `work_items`; this set is only the action
+    /// selection boundary and never invents a physical A7-to-A7 dependency.
+    pub fn execution_work(&self) -> BTreeSet<RustExecutionWork> {
+        self.work_items
+            .iter()
+            .map(|item| RustExecutionWork::A7(item.key.clone()))
+            .collect()
+    }
+
+    /// Selects existing executor actions whose metadata carries an A7 key.
+    /// The action builder remains the owner of action IDs and this method
+    /// performs only the demand-relative key membership decision.
+    pub fn select_action_ids(
+        &self,
+        action_keys: &BTreeMap<String, RustInstantiationKey>,
+    ) -> BTreeSet<String> {
+        let selected = self.execution_work();
+        action_keys
+            .iter()
+            .filter(|(_, key)| selected.contains(&RustExecutionWork::A7((*key).clone())))
+            .map(|(action_id, _)| action_id.clone())
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -648,6 +676,33 @@ mod tests {
             },
         ]);
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn a7_plan_selects_existing_actions_without_reconstructing_action_ids() {
+        let (used, unused) = (a7_key("used"), a7_key("unused"));
+        let plan = plan_rust_a7_worklist(&RustA7Input {
+            roots: vec![RustA7Request {
+                key: used.clone(),
+                source: RustA7RequestSource::Export("main".into()),
+            }],
+            definitions: BTreeMap::from([(
+                used.clone(),
+                RustA7Definition {
+                    fingerprint: "used".into(),
+                    dependencies: vec![],
+                },
+            )]),
+        })
+        .expect("the selected key is closed");
+        let actions = BTreeMap::from([
+            ("action-used".to_string(), used),
+            ("action-unused".to_string(), unused),
+        ]);
+        assert_eq!(
+            plan.select_action_ids(&actions),
+            BTreeSet::from(["action-used".to_string()])
+        );
     }
 
     #[test]
