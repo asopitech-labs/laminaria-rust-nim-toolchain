@@ -290,9 +290,7 @@ pub enum RustA7Reject {
 /// reserves a key when it enters the queue, while `visited` records completed
 /// expansion; keeping those states separate prevents a diamond or recursive
 /// edge from losing an unexpanded dependency.
-pub fn plan_rust_a7_worklist(
-    input: &RustA7Input,
-) -> Result<RustA7Plan, Box<RustA7Reject>> {
+pub fn plan_rust_a7_worklist(input: &RustA7Input) -> Result<RustA7Plan, Box<RustA7Reject>> {
     use std::collections::VecDeque;
 
     let mut queue = VecDeque::new();
@@ -335,7 +333,10 @@ pub fn plan_rust_a7_worklist(
             fingerprints.insert(existing.fingerprint.clone());
         }
         if fingerprints.len() > 1 {
-            return Err(Box::new(RustA7Reject::ConflictingDefinition { key, fingerprints }));
+            return Err(Box::new(RustA7Reject::ConflictingDefinition {
+                key,
+                fingerprints,
+            }));
         }
 
         let dependencies: BTreeSet<_> = definition.dependencies.iter().cloned().collect();

@@ -10,9 +10,11 @@ This script never shuts down WSL, kills wslcsession, or stops WSLService.
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet("full", "fast", "test-only", "doctor", "lockfile-update")]
+    [ValidateSet("full", "fast", "test-only", "mounted-test-only", "doctor", "lockfile-update")]
     [string]$Mode = "full",
     [string]$TestFilter,
+    [string]$ImageId,
+    [string[]]$SourcePath,
     [ValidateRange(1, 86400)]
     [int]$LockTimeoutSeconds = 1800,
     [switch]$FingerprintOnly,
@@ -104,8 +106,19 @@ function Assert-WslcHostReady {
 if ($Mode -eq "test-only" -and [string]::IsNullOrWhiteSpace($TestFilter)) {
     throw "-Mode test-only requires -TestFilter."
 }
-if ($Mode -ne "test-only" -and -not [string]::IsNullOrWhiteSpace($TestFilter)) {
-    throw "-TestFilter is valid only with -Mode test-only."
+if ($Mode -eq "mounted-test-only" -and [string]::IsNullOrWhiteSpace($TestFilter)) {
+    throw "-Mode mounted-test-only requires -TestFilter."
+}
+if ($Mode -notin @("test-only", "mounted-test-only") -and -not [string]::IsNullOrWhiteSpace($TestFilter)) {
+    throw "-TestFilter is valid only with -Mode test-only or mounted-test-only."
+}
+if ($Mode -eq "mounted-test-only") {
+    if ([string]::IsNullOrWhiteSpace($ImageId)) {
+        throw "-Mode mounted-test-only requires an immutable -ImageId digest."
+    }
+    if ($SourcePath.Count -eq 0) {
+        throw "-Mode mounted-test-only requires at least one -SourcePath."
+    }
 }
 $sourceFingerprint = Get-SourceFingerprint
 $initialNonLockFingerprint = if ($Mode -eq "lockfile-update") {
@@ -190,28 +203,39 @@ try {
     }
 
     Remove-Item -LiteralPath $iidFile, $cidFile -Force -ErrorAction SilentlyContinue
-    $buildArguments = @(
-        "build", "--progress", "plain",
-        "--iidfile", $iidFile,
-        "--label", "org.asopitech.laminaria.source=$sourceFingerprint",
-        "-f", "docker/bootstrap.Dockerfile",
-        "-t", "laminaria-bootstrap",
-        "."
-    )
-    Push-Location $repositoryRoot
-    try {
-        $null = Invoke-Wslc -Arguments $buildArguments
+    if ($Mode -eq "mounted-test-only") {
+        # Reuse an immutable, already-built image and bind only the changed
+        # source files. This preserves the owner mutex and exact container
+        # lease while avoiding a Docker COPY/build layer and its large VHD write.
+        $imageId = $ImageId.Trim()
+        if ($imageId -notmatch '^sha256:[0-9a-f]{64}$') {
+            throw "-ImageId must be a full immutable sha256 digest."
+        }
     }
-    finally {
-        Pop-Location
-    }
+    else {
+        $buildArguments = @(
+            "build", "--progress", "plain",
+            "--iidfile", $iidFile,
+            "--label", "org.asopitech.laminaria.source=$sourceFingerprint",
+            "-f", "docker/bootstrap.Dockerfile",
+            "-t", "laminaria-bootstrap",
+            "."
+        )
+        Push-Location $repositoryRoot
+        try {
+            $null = Invoke-Wslc -Arguments $buildArguments
+        }
+        finally {
+            Pop-Location
+        }
 
-    if (-not (Test-Path -LiteralPath $iidFile -PathType Leaf)) {
-        throw "wslc build succeeded without writing the requested image ID file."
-    }
-    $imageId = (Get-Content -LiteralPath $iidFile -Raw).Trim()
-    if ([string]::IsNullOrWhiteSpace($imageId)) {
-        throw "wslc build wrote an empty image ID."
+        if (-not (Test-Path -LiteralPath $iidFile -PathType Leaf)) {
+            throw "wslc build succeeded without writing the requested image ID file."
+        }
+        $imageId = (Get-Content -LiteralPath $iidFile -Raw).Trim()
+        if ([string]::IsNullOrWhiteSpace($imageId)) {
+            throw "wslc build wrote an empty image ID."
+        }
     }
 
     # A lease is needed only once a container invocation can outlive this owner.
@@ -233,6 +257,18 @@ try {
         "--cidfile", $cidFile,
         "--label", "org.asopitech.laminaria.owner=$containerName"
     )
+    if ($Mode -eq "mounted-test-only") {
+        foreach ($path in $SourcePath) {
+            $fullPath = [System.IO.Path]::GetFullPath((Join-Path $repositoryRoot $path))
+            $relativePath = [System.IO.Path]::GetRelativePath($repositoryRoot, $fullPath).Replace("\", "/")
+            if ($relativePath.StartsWith("..", [StringComparison]::Ordinal) -or -not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
+                throw "-SourcePath must name an existing file inside the repository: $path"
+            }
+            $runArguments += @(
+                "--mount", "type=bind,source=$fullPath,target=/workspace/$relativePath,readonly"
+            )
+        }
+    }
     if ($Mode -eq "doctor") {
         $runArguments += @($imageId, "doctor")
     }
@@ -251,7 +287,7 @@ try {
     if ($Mode -eq "fast") {
         $runArguments += "--fast"
     }
-    elseif ($Mode -eq "test-only") {
+    elseif ($Mode -in @("test-only", "mounted-test-only")) {
         $runArguments += @("--test-only", $TestFilter)
     }
 
@@ -281,7 +317,7 @@ try {
         }
     }
 
-    if ($Mode -notin @("doctor", "lockfile-update")) {
+    if ($Mode -notin @("doctor", "lockfile-update", "mounted-test-only")) {
         $receipt = [ordered]@{
             schema = "laminaria-wslc-verification/v1"
             source_fingerprint = $sourceFingerprint
