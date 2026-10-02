@@ -47,6 +47,18 @@ active hypothesisを反証できる地点まで高めればよい。measurement 
 telemetry detailにはimplementation、runtime、storage、analysis、maintenance costがある。判断に不要な
 精緻化は、evidence system自体の局所最適化として扱う。
 
+## 現行Rust pipelineを現実のbaselineにする
+
+Rust buildの改善を主張する実験はすべて、同じsource revision、manifest／lock設定、target、
+feature集合、適格environmentで、LAMINARIA経路を現行のCargo + rustc pipelineと比較する。
+LAMINARIA内部のcandidate同士だけを比較しても、利用者が現在実行できる経路よりよいとは示せない。
+
+制御したeditでは、同じedit後のcleanな`cargo build`と、通常のincrementalな`cargo build`の
+両方を記録する。まずobservable artifactまたはtest behaviorの同値性を確認し、その後にend-to-endの
+wall time、CPU time、peak／retained memory、disk／I/O、実行・再計算したwork、各経路の運用上の
+前提を比較する。明示的に記録した非性能上の利点でcandidateを採用する余地はあるが、局所的な
+高速化だけを根拠に、現行のCargo + rustc経路より実用上よいとは結論付けない。
+
 ## 優先度
 
 ### P0 — LAMINARIA固有仮説

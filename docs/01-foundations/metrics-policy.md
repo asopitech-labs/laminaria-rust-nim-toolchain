@@ -48,6 +48,14 @@ Every optimization decision records:
 - regressions, uncertainty, and future options affected;
 - the comparison boundary and the reason the overall trade-off is accepted.
 
+For every Rust-build experiment, that comparison boundary includes the current
+Cargo-plus-rustc pipeline for the same revision, target, feature set and
+qualified environment. For an edit-driven claim, report both a clean build and
+the ordinary incremental build after the same edit. Treat these as reality
+baselines, not merely as an external oracle: the candidate's artifact behavior,
+wall/CPU time, peak and retained memory, disk/I/O, executed/recomputed work,
+and operational prerequisites must be compared with them.
+
 Prefer a Pareto comparison over an invented universal score. A scalar objective
 is valid only when its weights and tolerances are part of the experiment's
 declared decision contract.

@@ -56,6 +56,23 @@ telemetry detail have explicit implementation, runtime, storage, analysis, and
 maintenance costs; optimizing them beyond the decision need is local
 optimization of the evidence system.
 
+## Current Rust pipeline as the reality baseline
+
+Every experiment that claims a Rust-build improvement must compare its
+LAMINARIA path with the current Cargo-plus-rustc pipeline for the same source
+revision, manifest/lock configuration, target, feature set, and qualified
+environment. A comparison only among LAMINARIA candidates cannot establish
+that the candidate is better than the path a user can run today.
+
+For controlled edits, record both a clean `cargo build` and the ordinary
+incremental `cargo build` after the same edit. Compare observable artifact or
+test behavior first; then compare end-to-end wall time, CPU time, peak and
+retained memory, disk and I/O, executed and recomputed work, and the
+operational prerequisites of each path. A candidate may still be adopted for
+an explicitly recorded non-performance benefit, but a local speedup alone is
+not a practical improvement if the current Cargo-plus-rustc path is better on
+the declared whole-system boundary.
+
 ## Priority classes
 
 ### P0 — LAMINARIA-specific hypotheses
