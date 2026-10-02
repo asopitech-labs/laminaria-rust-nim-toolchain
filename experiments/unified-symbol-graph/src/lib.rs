@@ -408,6 +408,12 @@ use std::sync::RwLock;
 /// and does not claim.
 pub mod durability;
 
+/// Issue #67 reality-check harness: a deliberately small persistent Rust
+/// build path that turns retained source state into real `rustc` artifacts.
+/// It is intentionally limited to an already-resolved local crate DAG; Cargo
+/// remains the baseline and the owner of manifest/dependency resolution.
+pub mod reality_build;
+
 /// Issue #67 second-generation harness (pre-classification by `Realm`,
 /// binary-heap eviction). See `durability_v2`'s own module doc comment.
 pub mod durability_v2;
