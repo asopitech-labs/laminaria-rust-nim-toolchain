@@ -30,7 +30,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::num::NonZeroUsize;
-use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
 
@@ -526,6 +525,10 @@ pub struct ArtifactStore {
     candidates: HashMap<String, Program>,
     validated: HashMap<String, ValidatedProgram>,
     evidence: HashMap<String, Vec<EvalOutcome>>,
+    /// The complete declaration that produced each retained output. Action
+    /// ids are normally content-derived, but a session treats that as a
+    /// planner invariant to verify, not as a reason to trust an id alone.
+    output_actions: HashMap<String, Action>,
 }
 
 impl ArtifactStore {
@@ -548,6 +551,126 @@ impl ArtifactStore {
     pub fn evidence_ids(&self) -> BTreeSet<String> {
         self.evidence.keys().cloned().collect()
     }
+
+    fn contains_action_output(&self, action: &Action) -> bool {
+        if self.output_actions.get(&action.id) != Some(action) {
+            return false;
+        }
+        match action.kind {
+            ActionKind::LowerSource | ActionKind::TransformFunction => {
+                self.candidates.contains_key(&action.id)
+            }
+            ActionKind::ValidateIr => self.validated.contains_key(&action.id),
+            ActionKind::EvaluateEvidence => self.evidence.contains_key(&action.id),
+            _ => false,
+        }
+    }
+
+    /// A successful incremental generation retains only artifacts the new
+    /// plan can still name. Artifact identity includes the source snapshot
+    /// and declared semantic inputs, so an action omitted by the next plan is
+    /// superseded rather than a candidate for an unbounded historical cache.
+    fn retain_action_outputs(&mut self, retained_action_ids: &BTreeSet<String>) {
+        self.candidates
+            .retain(|action_id, _| retained_action_ids.contains(action_id));
+        self.validated
+            .retain(|action_id, _| retained_action_ids.contains(action_id));
+        self.evidence
+            .retain(|action_id, _| retained_action_ids.contains(action_id));
+        self.output_actions
+            .retain(|action_id, _| retained_action_ids.contains(action_id));
+    }
+}
+
+/// Evidence of one session generation. `reused_actions` were already present
+/// as typed artifacts for this exact plan identity; `recomputed_actions` were
+/// dispatched through LAMINARIA-owned frontend/IR work in this generation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistentExecutionTrace {
+    pub reused_actions: BTreeSet<String>,
+    pub recomputed_actions: BTreeSet<String>,
+}
+
+/// Session-scoped, bounded retention for the production owned compiler path.
+///
+/// A session keeps validated source-derived IR and its derived evidence across
+/// successive plans. On a controlled source edit the planner produces new
+/// snapshot-derived action identities only for the changed closure; unchanged
+/// action identities remain reusable. After a successful generation, entries
+/// absent from that generation's plan are evicted, bounding retention to the
+/// current demand closure instead of accumulating every historical snapshot.
+#[derive(Default)]
+pub struct PersistentCompilerWorkSession {
+    store: ArtifactStore,
+}
+
+impl PersistentCompilerWorkSession {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn evidence(&self, artifact_id: &str) -> Option<&[EvalOutcome]> {
+        self.store.evidence(artifact_id)
+    }
+
+    /// Executes only the plan actions whose typed output is absent. A cached
+    /// `LowerSource` is still checked against the on-disk source snapshot
+    /// before reuse, so a stale plan cannot publish or reuse old IR after an
+    /// edit simply because its old action id happens to be cached.
+    pub fn execute(
+        &mut self,
+        plan: &ExecutionPlan,
+        cpu_budget: NonZeroUsize,
+    ) -> Result<PersistentExecutionTrace, CompilerWorkExecutionError> {
+        let reused_actions = reusable_action_ids(plan, &self.store)?;
+        let pending = plan_without_actions(plan, &reused_actions);
+        let (result, recomputed_actions) =
+            run_compiler_work_plan_with_dispatch_trace(&pending, &mut self.store, cpu_budget);
+        result?;
+
+        self.store
+            .retain_action_outputs(&plan.actions.keys().cloned().collect());
+        Ok(PersistentExecutionTrace {
+            reused_actions,
+            recomputed_actions,
+        })
+    }
+}
+
+fn plan_without_actions(
+    plan: &ExecutionPlan,
+    omitted_action_ids: &BTreeSet<String>,
+) -> ExecutionPlan {
+    let mut pending = plan.clone();
+    pending
+        .ordered_actions
+        .retain(|action_id| !omitted_action_ids.contains(action_id));
+    pending
+        .actions
+        .retain(|action_id, _| !omitted_action_ids.contains(action_id));
+    pending
+}
+
+fn reusable_action_ids(
+    plan: &ExecutionPlan,
+    store: &ArtifactStore,
+) -> Result<BTreeSet<String>, CompilerWorkExecutionError> {
+    let mut reusable = BTreeSet::new();
+    for action in plan.actions.values() {
+        if !store.contains_action_output(action) {
+            continue;
+        }
+        if action.kind == ActionKind::LowerSource {
+            let descriptor = action.compiler_work.as_ref().ok_or_else(|| {
+                CompilerWorkExecutionError::MissingDescriptor {
+                    action_id: action.id.clone(),
+                }
+            })?;
+            source_text_matching_snapshot(action, descriptor)?;
+        }
+        reusable.insert(action.id.clone());
+    }
+    Ok(reusable)
 }
 
 /// Counts how many `laminaria_ir` computations -- never a `SharedStore`
@@ -685,6 +808,14 @@ impl SharedStore {
             .unwrap()
             .evidence
             .insert(artifact_id, outcomes);
+    }
+
+    fn record_output_action(&self, action: &Action) {
+        self.store
+            .lock()
+            .unwrap()
+            .output_actions
+            .insert(action.id.clone(), action.clone());
     }
 }
 
@@ -990,13 +1121,17 @@ fn dispatch_action(action: &Action, store: &SharedStore) -> Result<(), CompilerW
         }
     })?;
 
-    match action.kind {
+    let result = match action.kind {
         ActionKind::LowerSource => dispatch_lower_source(action, descriptor, store),
         ActionKind::ValidateIr => dispatch_validate_ir(action, descriptor, store),
         ActionKind::TransformFunction => dispatch_transform_function(action, descriptor, store),
         ActionKind::EvaluateEvidence => dispatch_evaluate_evidence(action, descriptor, store),
         _ => unreachable!("already checked above"),
+    };
+    if result.is_ok() {
+        store.record_output_action(action);
     }
+    result
 }
 
 fn dispatch_lower_source(
@@ -1004,13 +1139,49 @@ fn dispatch_lower_source(
     descriptor: &CompilerWorkDescriptor,
     store: &SharedStore,
 ) -> Result<(), CompilerWorkExecutionError> {
+    let (source_path, source_text) = source_text_matching_snapshot(action, descriptor)?;
+    let requested: Vec<&str> = descriptor
+        .requested_functions
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let language = descriptor.language.as_deref().unwrap_or("");
+    let lowered = {
+        let _compute = store.enter_compute();
+        match language {
+            "rust" => lower_rust_source(&source_path, &source_text, &requested),
+            "nim" => lower_nim_source(&source_path, &source_text, &requested),
+            other => {
+                return Err(CompilerWorkExecutionError::UnsupportedLanguage {
+                    action_id: action.id.clone(),
+                    language: other.to_string(),
+                })
+            }
+        }
+    };
+    let program = lowered.map_err(|diagnostics| CompilerWorkExecutionError::LoweringFailed {
+        action_id: action.id.clone(),
+        diagnostics,
+    })?;
+    store.insert_candidate(action.id.clone(), program);
+    Ok(())
+}
+
+/// Reads a `LowerSource` action's input and proves it still equals the
+/// snapshot that participated in the action identity. Shared by fresh
+/// dispatch and session-cache reuse so those paths have the same stale-source
+/// refusal behavior.
+fn source_text_matching_snapshot(
+    action: &Action,
+    descriptor: &CompilerWorkDescriptor,
+) -> Result<(std::path::PathBuf, String), CompilerWorkExecutionError> {
     let source_provenance = descriptor.source_provenance.as_ref().ok_or_else(|| {
         CompilerWorkExecutionError::MissingSourceProvenance {
             action_id: action.id.clone(),
         }
     })?;
-    let source_path = Path::new(&source_provenance.source_file);
-    let source_text = fs::read_to_string(source_path).map_err(|e| {
+    let source_path = std::path::PathBuf::from(&source_provenance.source_file);
+    let source_text = fs::read_to_string(&source_path).map_err(|e| {
         CompilerWorkExecutionError::SourceReadFailed {
             action_id: action.id.clone(),
             path: source_provenance.source_file.clone(),
@@ -1034,31 +1205,7 @@ fn dispatch_lower_source(
             actual: actual_snapshot_id,
         });
     }
-    let requested: Vec<&str> = descriptor
-        .requested_functions
-        .iter()
-        .map(String::as_str)
-        .collect();
-    let language = descriptor.language.as_deref().unwrap_or("");
-    let lowered = {
-        let _compute = store.enter_compute();
-        match language {
-            "rust" => lower_rust_source(source_path, &source_text, &requested),
-            "nim" => lower_nim_source(source_path, &source_text, &requested),
-            other => {
-                return Err(CompilerWorkExecutionError::UnsupportedLanguage {
-                    action_id: action.id.clone(),
-                    language: other.to_string(),
-                })
-            }
-        }
-    };
-    let program = lowered.map_err(|diagnostics| CompilerWorkExecutionError::LoweringFailed {
-        action_id: action.id.clone(),
-        diagnostics,
-    })?;
-    store.insert_candidate(action.id.clone(), program);
-    Ok(())
+    Ok((source_path, source_text))
 }
 
 fn dispatch_validate_ir(
@@ -1213,7 +1360,7 @@ mod tests {
     };
     #[cfg(unix)]
     use laminaria_plan::{validate, PlanOutcome, PlanningInput};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     #[cfg(unix)]
     fn repo_root() -> PathBuf {
@@ -1801,6 +1948,120 @@ mod tests {
         );
         assert!(result.is_ok(), "owned chain must execute: {result:?}");
         assert_eq!(successful, expected);
+    }
+
+    #[test]
+    fn persistent_session_reuses_unchanged_owned_ir_and_evicts_superseded_generation() {
+        let dir = std::env::temp_dir().join(format!(
+            "laminaria-persistent-compiler-session-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source_path = dir.join("f.rs");
+        let first_source = "fn f(x: i32) -> i32 { x }\n";
+        std::fs::write(&source_path, first_source).unwrap();
+        let (first_actions, first_evidence) = independent_chain_actions(
+            "rust",
+            &source_path.to_string_lossy(),
+            first_source,
+            "f",
+            &[vec![2]],
+        );
+        let first_plan = plan_of(first_actions);
+        let first_ids: BTreeSet<_> = first_plan.actions.keys().cloned().collect();
+
+        let mut session = PersistentCompilerWorkSession::new();
+        let first = session
+            .execute(&first_plan, NonZeroUsize::new(1).unwrap())
+            .expect("first owned compiler generation succeeds");
+        assert!(first.reused_actions.is_empty());
+        assert_eq!(first.recomputed_actions, first_ids);
+        assert_eq!(session.evidence(&first_evidence).unwrap()[0].value, 2);
+
+        let unchanged = session
+            .execute(&first_plan, NonZeroUsize::new(1).unwrap())
+            .expect("unchanged generation reuses exact snapshot-derived IR");
+        assert_eq!(unchanged.reused_actions, first_ids);
+        assert!(unchanged.recomputed_actions.is_empty());
+
+        let edited_source = "fn f(x: i32) -> i32 { x.wrapping_add(1) }\n";
+        std::fs::write(&source_path, edited_source).unwrap();
+        assert!(
+            matches!(
+                session.execute(&first_plan, NonZeroUsize::new(1).unwrap()),
+                Err(CompilerWorkExecutionError::SourceSnapshotMismatch { .. })
+            ),
+            "a cached old action must not conceal an edit when the caller supplies a stale plan"
+        );
+        let (edited_actions, edited_evidence) = independent_chain_actions(
+            "rust",
+            &source_path.to_string_lossy(),
+            edited_source,
+            "f",
+            &[vec![2]],
+        );
+        let edited_plan = plan_of(edited_actions);
+        let edited_ids: BTreeSet<_> = edited_plan.actions.keys().cloned().collect();
+        let edited = session
+            .execute(&edited_plan, NonZeroUsize::new(1).unwrap())
+            .expect("edited generation recomputes the new source closure");
+        assert!(edited.reused_actions.is_empty());
+        assert_eq!(edited.recomputed_actions, edited_ids);
+        assert_eq!(session.evidence(&edited_evidence).unwrap()[0].value, 3);
+        assert!(
+            session.evidence(&first_evidence).is_none(),
+            "a successful superseding plan must evict obsolete evidence instead of retaining every source generation"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn persistent_session_does_not_trust_an_action_id_when_its_declaration_changes() {
+        let dir = std::env::temp_dir().join(format!(
+            "laminaria-persistent-compiler-identity-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source_path = dir.join("f.rs");
+        let source = "fn f(x: i32) -> i32 { x }\n";
+        std::fs::write(&source_path, source).unwrap();
+        let (actions, evidence_id) = independent_chain_actions(
+            "rust",
+            &source_path.to_string_lossy(),
+            source,
+            "f",
+            &[vec![2]],
+        );
+        let plan = plan_of(actions);
+        let mut session = PersistentCompilerWorkSession::new();
+        session
+            .execute(&plan, NonZeroUsize::new(1).unwrap())
+            .expect("first generation succeeds");
+
+        let mut altered_plan = plan.clone();
+        altered_plan
+            .actions
+            .get_mut(&evidence_id)
+            .unwrap()
+            .compiler_work
+            .as_mut()
+            .unwrap()
+            .test_inputs = vec![vec![9]];
+        let trace = session
+            .execute(&altered_plan, NonZeroUsize::new(1).unwrap())
+            .expect("the changed declaration is recomputed, not accepted by matching id");
+        assert_eq!(
+            trace.recomputed_actions,
+            BTreeSet::from([evidence_id.clone()])
+        );
+        assert_eq!(
+            session.evidence(&evidence_id).unwrap()[0].value,
+            9,
+            "the retained output must correspond to the current declaration, not the prior id-only cache entry"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

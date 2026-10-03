@@ -755,6 +755,7 @@ impl RuntimePreflightEvidence {
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn require_runtime_path(path: &Path, contract: &str) -> Result<(), G2Error> {
     if path.is_file() {
         Ok(())

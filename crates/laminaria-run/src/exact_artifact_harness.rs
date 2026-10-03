@@ -1,15 +1,20 @@
 //! Issue #49's independent consumer for an already-published production
 //! artifact. This module never calls G2 production or its preflight helpers.
 
+#[cfg(target_os = "linux")]
 use std::fs;
+#[cfg(target_os = "linux")]
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
 use std::process::Command;
 
+#[cfg(target_os = "linux")]
 use laminaria_plan::dependency_graph::{ObligationKind, ObligationState, RequiredActionKind};
-use laminaria_plan::obligation_lifecycle::{
-    ArtifactManifest, RuntimeContractEvidence, OBLIGATION_CONTRACT_VERSION,
-};
+use laminaria_plan::obligation_lifecycle::RuntimeContractEvidence;
+#[cfg(target_os = "linux")]
+use laminaria_plan::obligation_lifecycle::{ArtifactManifest, OBLIGATION_CONTRACT_VERSION};
 use serde::{Deserialize, Serialize};
+#[cfg(target_os = "linux")]
 use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,6 +69,7 @@ pub struct TestResult {
     pub verdict: TestVerdict,
 }
 
+#[cfg(target_os = "linux")]
 fn sha256_file(path: &Path) -> Result<String, String> {
     let bytes = fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
     let mut hasher = Sha256::new();
@@ -71,6 +77,7 @@ fn sha256_file(path: &Path) -> Result<String, String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
+#[cfg(target_os = "linux")]
 fn run_inspector(program: &str, args: &[&str]) -> Result<String, String> {
     let output = Command::new(program)
         .args(args)
@@ -85,10 +92,12 @@ fn run_inspector(program: &str, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+#[cfg(target_os = "linux")]
 fn under_runtime_root(runtime_root: &Path, published_path: &str) -> PathBuf {
     runtime_root.join(published_path.trim_start_matches('/'))
 }
 
+#[cfg(target_os = "linux")]
 fn dependency_missing(
     contract: TestContract,
     runtime_contract: RuntimeContractEvidence,
