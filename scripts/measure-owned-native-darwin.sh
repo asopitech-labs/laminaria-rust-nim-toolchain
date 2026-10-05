@@ -53,12 +53,28 @@ source "$REPO_ROOT/scripts/activate-pinned-toolchains.sh"
 mkdir -p "$REPORT_ROOT/runs" "$REPORT_ROOT/work"
 COMPILER="$REPO_ROOT/target/release/laminaria"
 
+require_clean_checkout() {
+  local dirty_entries
+  dirty_entries="$(git -C "$REPO_ROOT" status --porcelain)"
+  if [[ -n "$dirty_entries" ]]; then
+    echo "refusing to mix a dirty checkout into a comparable measurement:" >&2
+    printf '%s\n' "$dirty_entries" >&2
+    exit 1
+  fi
+}
+
+# A later Run records the Git fingerprint at its own start. Recheck before
+# and after every observation so unrelated test output or operator activity
+# cannot silently turn one repetition set into a mixed clean/dirty report.
+require_clean_checkout
+
 # This is the bootstrap compiler, not either side of the measured workload.
 cargo build --release -p laminaria-cli
 if [[ ! -x "$COMPILER" ]]; then
   echo "expected bootstrap compiler is missing: $COMPILER" >&2
   exit 1
 fi
+require_clean_checkout
 
 SDK_ROOT="$(xcrun --show-sdk-path)"
 RESULTS="$REPORT_ROOT/artifact-exit-statuses.txt"
@@ -115,10 +131,12 @@ for repetition in $(seq 1 "$REPETITIONS"); do
     "clean-cargo-rustc-r$repetition" \
     "$CARGO_ROOT/target" \
     cargo build --locked --release --manifest-path "$CARGO_ROOT/Cargo.toml" --target-dir "$CARGO_ROOT/target"
+  require_clean_checkout
   record_run \
     "clean-laminaria-owned-r$repetition" \
     "$OWNED_ROOT/out" \
     "$COMPILER" owned-native-build --source "$OWNED_ROOT/src/main.rs" --entry laminaria_entry --output-dir "$OWNED_ROOT/out" --linker /usr/bin/ld --sdk-root "$SDK_ROOT" --minimum-macos-version 11.0 --json
+  require_clean_checkout
   check_exit_status \
     "clean-cargo-rustc-r$repetition" \
     "$CARGO_ROOT/target/release/owned-native-call-compare" \
@@ -142,10 +160,12 @@ for repetition in $(seq 1 "$REPETITIONS"); do
     "incremental-cargo-rustc-r$repetition" \
     "$CARGO_ROOT/target" \
     cargo build --locked --release --manifest-path "$CARGO_ROOT/Cargo.toml" --target-dir "$CARGO_ROOT/target"
+  require_clean_checkout
   record_run \
     "incremental-laminaria-owned-r$repetition" \
     "$OWNED_ROOT/out" \
     "$COMPILER" owned-native-build --source "$OWNED_ROOT/src/main.rs" --entry laminaria_entry --output-dir "$OWNED_ROOT/out" --linker /usr/bin/ld --sdk-root "$SDK_ROOT" --minimum-macos-version 11.0 --json
+  require_clean_checkout
   check_exit_status \
     "incremental-cargo-rustc-r$repetition" \
     "$CARGO_ROOT/target/release/owned-native-call-compare" \
