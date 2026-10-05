@@ -75,6 +75,7 @@ pub const WORKLOAD_ID: &str = "issue47-g3-e0-vs-e1-cadd-app@v1";
 /// candidate shape.
 pub fn synthetic_unreachable_candidate(
     index: usize,
+    target_triple: &str,
 ) -> (
     SourceModuleFacts,
     PackageCandidateFacts,
@@ -93,7 +94,11 @@ pub fn synthetic_unreachable_candidate(
         package_id: package_id.clone(),
         version: "1.0.0".to_string(),
         role: Role::Target,
-        target_triple: "x86_64-unknown-linux-gnu".to_string(),
+        // E0 deliberately visits this otherwise-unreachable provider. It
+        // must therefore be a valid candidate for the input's target: an
+        // ABI mismatch would test rejection behavior, not candidate-pool
+        // pruning, and makes the measurement host-target dependent.
+        target_triple: target_triple.to_string(),
         sources: vec![source_id.clone()],
         declared_exports: vec![FfiExportFacts {
             declaring_source: source_id,
@@ -128,8 +133,9 @@ pub fn inject_unreachable_candidates(
     mut input: DependencyResolutionInput,
     count: usize,
 ) -> DependencyResolutionInput {
+    let target_triple = input.target_triple.clone();
     for i in 0..count {
-        let (source, candidate, requirement) = synthetic_unreachable_candidate(i);
+        let (source, candidate, requirement) = synthetic_unreachable_candidate(i, &target_triple);
         input.sources.push(source);
         input.package_candidates.push(candidate);
         input.ffi_requirements.push(requirement);

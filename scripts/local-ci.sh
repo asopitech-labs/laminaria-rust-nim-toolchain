@@ -36,6 +36,12 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# The CI gate must use the locked, native toolchains rather than whatever
+# happens to be first on a developer's PATH (notably an x86_64 Homebrew tool
+# under /usr/local on an arm64 Mac). Fail before any verification if the
+# pinned toolchain has not been installed through bootstrap.
+source "$REPO_ROOT/scripts/activate-pinned-toolchains.sh"
+
 MODE="full"
 TEST_FILTER=""
 if [[ "${1:-}" == "--fast" ]]; then

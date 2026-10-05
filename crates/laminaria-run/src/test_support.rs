@@ -40,7 +40,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-/// Builds `nim-planner/bin/laminaria-planner` via `nim c` directly --
+/// Builds a test-private `laminaria-planner` via `nim c` directly --
 /// not `nimble build`, which this crate's own tests found exits `0` on a
 /// genuine compile failure, and which `apt`'s packaged `nim`/`nimble` on
 /// Ubuntu CI fails outright with a false `Unsatisfied dependency` even
@@ -53,18 +53,23 @@ pub(crate) fn real_planner_binary(repo_root: &Path) -> PathBuf {
     BUILT
         .get_or_init(|| {
             let nim_planner_dir = repo_root.join("nim-planner");
+            let build_root = repo_root
+                .join("target")
+                .join(format!("laminaria-run-test-planner-{}", std::process::id()));
+            std::fs::create_dir_all(&build_root).unwrap();
+            let bin = build_root.join("laminaria-planner");
             let status = std::process::Command::new("nim")
-                .args([
-                    "c",
-                    "--path:src",
-                    "-o:bin/laminaria-planner",
-                    "src/laminaria_planner.nim",
-                ])
+                .args(["c", "--path:src"])
+                .arg(format!(
+                    "--nimcache:{}",
+                    build_root.join("nimcache").display()
+                ))
+                .arg(format!("-o:{}", bin.display()))
+                .arg("src/laminaria_planner.nim")
                 .current_dir(&nim_planner_dir)
                 .status()
                 .expect("failed to invoke nim -- is Nim installed?");
             assert!(status.success(), "nim c failed to build laminaria-planner");
-            let bin = nim_planner_dir.join("bin/laminaria-planner");
             assert!(
                 bin.is_file(),
                 "expected {} to exist after building it",
@@ -76,7 +81,7 @@ pub(crate) fn real_planner_binary(repo_root: &Path) -> PathBuf {
 }
 
 /// The session-scoped counterpart of [`real_planner_binary`] --
-/// `nim-planner/bin/laminaria-incremental-planner`, built exactly once
+/// a test-private `laminaria-incremental-planner`, built exactly once
 /// per test binary process no matter which of `incremental_executor.rs`/
 /// `incremental_session_client.rs` asks first or how many ask
 /// concurrently (see this module's own doc comment for the exact CI
@@ -88,14 +93,20 @@ pub(crate) fn real_incremental_planner_binary(repo_root: &Path) -> PathBuf {
     BUILT
         .get_or_init(|| {
             let nim_planner_dir = repo_root.join("nim-planner");
+            let build_root = repo_root.join("target").join(format!(
+                "laminaria-run-test-incremental-planner-{}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&build_root).unwrap();
+            let bin = build_root.join("laminaria-incremental-planner");
             let status = std::process::Command::new("nim")
-                .args([
-                    "c",
-                    "--path:src",
-                    "--nimcache:nimcache",
-                    "-o:bin/laminaria-incremental-planner",
-                    "src/laminaria_incremental_planner.nim",
-                ])
+                .args(["c", "--path:src"])
+                .arg(format!(
+                    "--nimcache:{}",
+                    build_root.join("nimcache").display()
+                ))
+                .arg(format!("-o:{}", bin.display()))
+                .arg("src/laminaria_incremental_planner.nim")
                 .current_dir(&nim_planner_dir)
                 .status()
                 .expect("failed to invoke nim -- is Nim installed?");
@@ -103,7 +114,6 @@ pub(crate) fn real_incremental_planner_binary(repo_root: &Path) -> PathBuf {
                 status.success(),
                 "nim c failed to build laminaria-incremental-planner"
             );
-            let bin = nim_planner_dir.join("bin/laminaria-incremental-planner");
             assert!(
                 bin.is_file(),
                 "expected {} to exist after building it",

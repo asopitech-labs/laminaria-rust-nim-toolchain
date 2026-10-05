@@ -258,7 +258,20 @@ impl CObjectArchiveEvidence {
 }
 
 fn run_tool(program: &str, args: &[&str]) -> Result<String, G2Error> {
+    run_tool_with_env(program, args, &[])
+}
+
+/// Invokes a declared external foreign-tool action with only the explicit
+/// environment required by that tool's contract.  This is deliberately kept
+/// out of LAMINARIA-owned Rust/Nim lowering and code generation: this helper
+/// exists solely for separately declared C/C++ foreign components.
+fn run_tool_with_env(
+    program: &str,
+    args: &[&str],
+    environment: &[(&str, &str)],
+) -> Result<String, G2Error> {
     let output = Command::new(program)
+        .envs(environment.iter().copied())
         .args(args)
         .output()
         .map_err(|e| G2Error::Io(format!("failed to spawn {program}: {e}")))?;
@@ -373,13 +386,19 @@ fn compile_and_archive_native_source(
     // `ar` refuses to update an archive that already exists with stale
     // members from a previous run of this same function.
     let _ = fs::remove_file(&archive_path);
-    run_tool(
+    // BSD `ar` does not support GNU's `D` modifier.  `ZERO_AR_DATE=1` is
+    // supported by both Darwin and GNU ar and removes archive-member wall
+    // clock time, so an unchanged foreign source produces the same archive
+    // bytes on either execution path.  This is an artifact contract, not a
+    // test-only normalization.
+    run_tool_with_env(
         "ar",
         &[
             "rcs",
             &archive_path.to_string_lossy(),
             &object_path.to_string_lossy(),
         ],
+        &[("ZERO_AR_DATE", "1")],
     )?;
 
     verify_symbol_defined(&archive_path, expected_defined_symbol)?;

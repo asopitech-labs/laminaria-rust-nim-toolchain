@@ -21,21 +21,28 @@ fn laminaria_bin() -> &'static Path {
     Path::new(env!("CARGO_BIN_EXE_laminaria"))
 }
 
-/// Builds `nim-planner/bin/laminaria-planner` via `nim c` directly, once
-/// per test binary process -- same `OnceLock` pattern used throughout
-/// `laminaria-run`'s own tests, for the same fresh-checkout race reason.
+/// Builds a test-private planner via `nim c` directly, once per test binary
+/// process. Both output and nimcache live under a PID-specific `target/`
+/// directory: Cargo can run this integration-test binary concurrently with
+/// other crates which also compile the planner, and Nim's default user cache
+/// is not a safe shared output directory for those independent `nim c` runs.
 fn stage0_planner() -> PathBuf {
     static BUILT: OnceLock<PathBuf> = OnceLock::new();
     BUILT
         .get_or_init(|| {
             let repo_root = repo_root();
+            let build_root = repo_root.join("target").join(format!(
+                "laminaria-cli-project-build-planner-{}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&build_root).unwrap();
+            let planner = build_root.join("laminaria-planner");
+            let nimcache = build_root.join("nimcache");
             let status = std::process::Command::new("nim")
-                .args([
-                    "c",
-                    "--path:src",
-                    "-o:bin/laminaria-planner",
-                    "src/laminaria_planner.nim",
-                ])
+                .args(["c", "--path:src"])
+                .arg(format!("--nimcache:{}", nimcache.display()))
+                .arg(format!("-o:{}", planner.display()))
+                .arg("src/laminaria_planner.nim")
                 .current_dir(repo_root.join("nim-planner"))
                 .status()
                 .expect("failed to invoke nim -- is Nim installed?");
@@ -43,7 +50,7 @@ fn stage0_planner() -> PathBuf {
                 status.success(),
                 "stage0 nim c build of laminaria-planner failed"
             );
-            repo_root.join("nim-planner/bin/laminaria-planner")
+            planner
         })
         .clone()
 }

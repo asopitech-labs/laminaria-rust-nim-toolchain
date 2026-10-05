@@ -76,7 +76,7 @@ pub struct Scenario {
     pub cache_state_label: CacheStateLabel,
 }
 
-fn cargo_root(manifest_path: &Path) -> RootCommand {
+fn cargo_root(manifest_path: &Path, target_dir: &Path) -> RootCommand {
     RootCommand {
         program: "cargo".to_string(),
         args: vec![
@@ -84,6 +84,8 @@ fn cargo_root(manifest_path: &Path) -> RootCommand {
             "--manifest-path".to_string(),
             manifest_path.display().to_string(),
             "--workspace".to_string(),
+            "--target-dir".to_string(),
+            target_dir.display().to_string(),
         ],
         cwd: None,
         env_overrides: Default::default(),
@@ -155,7 +157,7 @@ pub fn rust_heavy_workspace_scenario(
         },
         workload_id: "rust-heavy-workspace".to_string(),
         prepare,
-        root: cargo_root(manifest_path),
+        root: cargo_root(manifest_path, target_dir),
         observation_roots: vec![target_dir.to_path_buf()],
         cache_state_label: kind,
     }
