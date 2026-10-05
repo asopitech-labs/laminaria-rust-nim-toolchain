@@ -92,6 +92,38 @@ fn owned_native_build_lowers_links_and_launches_supported_main() {
 }
 
 #[test]
+fn owned_native_build_lowers_links_and_launches_source_conditional() {
+    let root = temp_dir("conditional");
+    let source = root.join("main.rs");
+    let output_dir = root.join("out");
+    std::fs::write(
+        &source,
+        r#"fn main() -> i32 {
+            let zero = 3i32.wrapping_sub(3);
+            if zero != 0 { 27 } else { 11 }
+        }
+        "#,
+    )
+    .unwrap();
+
+    let output = owned_native_command(&source, &output_dir).output().unwrap();
+    assert!(
+        output.status.success(),
+        "owned-native-build failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let executable = PathBuf::from(
+        json_stdout(&output)["result"]["executable_path"]
+            .as_str()
+            .unwrap(),
+    );
+    assert_eq!(Command::new(executable).status().unwrap().code(), Some(11));
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn owned_native_build_reports_unsupported_source_before_linking() {
     let root = temp_dir("unsupported");
     let source = root.join("main.rs");

@@ -8,31 +8,35 @@ validated owned IR program and emits an `aarch64-apple-darwin` Mach-O object
 file.  The object contains a selected owned-IR entry function under the
 Darwin AArch64 integer ABI.  The
 initial core is parameters, literals, and wrapping add/subtract/multiply;
-calls, lets, and conditionals are diagnosed until their ABI/control-flow
-lowering is added.  They are never delegated.
+lexical `let` bindings and `if EXPR != 0 { ... } else { ... }` are lowered
+as owned stack operations and in-function AArch64 control flow. Calls remain
+diagnosed until their ABI lowering is added. They are never delegated.
 
 This is a product compiler path, not a comparison experiment: the source
 frontends, validation, lowering, instruction selection, AArch64 encoding, and
-Mach-O writer are all LAMINARIA code.  It neither invokes nor embeds Cargo,
-`rustc`, Nim, a C/C++ compiler, assembler, or linker.
+Mach-O writer are all LAMINARIA code. It neither invokes nor embeds Cargo,
+`rustc`, Nim, a C/C++ compiler, or assembler. A completed LAMINARIA object
+is subsequently joined to the Darwin system runtime by one explicit,
+caller-declared `ld` action; that action does not compile target source.
 
 ## Checkpoints
 
 | Checkpoint | Consumes | Must preserve | Evidence | Enables |
 | --- | --- | --- | --- | --- |
 | Native executable model | `ValidatedProgram`, selected entry and `i32` arguments | The existing source provenance, validation boundary, wrapping-i32 semantics and lexical `let` scope | The backend rejects an absent entry or wrong arity before writing bytes | A source-derived program can become an owned native artifact |
-| AArch64 lowering | `Expr`/`Stmt`/`FnFact` | Source-order argument evaluation, two's-complement wrapping operations, calls and nested local shadowing | Generated machine code executes the same entry result as the interpreter for the supported subset | Native execution is a semantic consumer, not a hand-written duplicate fixture |
-| Darwin artifact writer | Encoded AArch64 text | A `MH_EXECUTE` header, one executable `__TEXT,__text` section, and an `LC_MAIN` entry offset | macOS executes the emitted file directly; no intermediate object or external linker exists | The first native target artifact and later explicit runtime/link contracts |
+| AArch64 lowering | `Expr`/`Stmt`/`FnFact` | Source-order evaluation, two's-complement wrapping operations, lexical local shadowing, and the selected conditional arm | Generated machine code executes `let` and both `if` branches with the same entry result as the interpreter for the supported subset | Native execution is a semantic consumer, not a hand-written duplicate fixture |
+| Darwin artifact writer | Encoded AArch64 text | A relocatable `MH_OBJECT` with an owned `__TEXT,__text` section and external entry symbol | The declared linker accepts the LAMINARIA object and macOS launches the linked executable | An inspectable owned target artifact and explicit runtime/link contract |
 
 ## ABI and current boundary
 
 Generated owned functions use the Darwin AArch64 integer convention for this
-subset: the first eight `i32` arguments are in `w0` through `w7`; the result
-is in `w0`; calls preserve the link register around nested calls.  Locals use
-compiler-owned stack slots.  The generated process entry materializes the
-declared test/application arguments, calls the selected function, and invokes
-the Darwin `exit` system call directly.  There is no libc runtime contract in
-this first slice.
+subset: the first eight `i32` arguments are in `w0` through `w7`, and the
+result is in `w0`. Locals and materialized intermediate values use
+compiler-owned stack slots. The current process boundary accepts a zero-argument
+source `main`; calls between generated functions are deliberately diagnosed
+until their link-register and call-frame lowering is added. The linked process
+entry is the LAMINARIA-produced `_main` joined to the Darwin `libSystem`
+runtime by the declared link action.
 
 The target is deliberately host-specific.  `laminaria-run` now owns the
 explicit Darwin link action: it writes the LAMINARIA-produced `_main` object

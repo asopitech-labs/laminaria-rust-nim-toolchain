@@ -11,6 +11,7 @@ pub enum CodegenError {
     MissingEntry(String),
     TooManyArguments(usize),
     StackFrameTooLarge(usize),
+    BranchOutOfRange { from: usize, target: usize },
     UnboundLocal(LocalId),
     UnsupportedConstruct(&'static str),
 }
@@ -28,6 +29,10 @@ impl std::fmt::Display for CodegenError {
             Self::StackFrameTooLarge(slots) => write!(
                 f,
                 "aarch64-darwin target: {slots} stack slots exceeds the reloc-free native core"
+            ),
+            Self::BranchOutOfRange { from, target } => write!(
+                f,
+                "aarch64-darwin target: conditional branch from {from:#x} to {target:#x} is out of range"
             ),
             Self::UnboundLocal(local) => write!(
                 f,
@@ -244,7 +249,22 @@ fn emit_stmt(
             context.unbind(*local);
             result
         }
-        Stmt::If { .. } => Err(CodegenError::UnsupportedConstruct("conditional")),
+        Stmt::If {
+            cond, then, els, ..
+        } => {
+            // The validated IR permits `NotEqZero` only as an `if`
+            // condition. Materialize it like every other expression, then
+            // branch directly on its owned stack slot. Each branch ends in
+            // `ret` by construction of `Stmt`, so no compensating jump is
+            // needed after the `then` body.
+            let condition = emit_expr(code, cond, context)?;
+            emit_load_slot(code, condition, 17);
+            let else_branch = emit_cbz_placeholder(code, 17);
+            emit_stmt(code, then, context)?;
+            let else_offset = code.len();
+            patch_cbz(code, else_branch, else_offset)?;
+            emit_stmt(code, els, context)
+        }
     }
 }
 
@@ -277,7 +297,17 @@ fn emit_expr(
             emit_copy_slot(code, source, result);
             Ok(result)
         }
-        Expr::NotEqZero(..) => Err(CodegenError::UnsupportedConstruct("condition")),
+        Expr::NotEqZero(inner, _) => {
+            let inner = emit_expr(code, inner, context)?;
+            let result = context.temp();
+            emit_load_slot(code, inner, 17);
+            // `cmp w17, #0; cset w17, ne`. The condition code is encoded as
+            // NE (0001), matching the IR operation exactly.
+            emit(code, 0x7100_023f);
+            emit(code, 0x1a9f_07f1);
+            emit_store_slot(code, 17, result);
+            Ok(result)
+        }
         Expr::Call(..) => Err(CodegenError::UnsupportedConstruct("function call")),
         Expr::Let {
             local, value, body, ..
@@ -355,6 +385,32 @@ fn emit_store_slot(code: &mut Vec<u8>, register: u8, slot: StackSlot) {
 fn emit_copy_slot(code: &mut Vec<u8>, from: StackSlot, to: StackSlot) {
     emit_load_slot(code, from, 17);
     emit_store_slot(code, 17, to);
+}
+
+/// Emits `cbz w<register>, <target>` with a later-bound target and returns
+/// the byte offset of the instruction. `imm19` is PC-relative in four-byte
+/// units; keeping the object reloc-free is correct because both branch
+/// endpoints belong to the same generated function.
+fn emit_cbz_placeholder(code: &mut Vec<u8>, register: u8) -> usize {
+    let offset = code.len();
+    emit(code, 0x3400_0000 | register as u32);
+    offset
+}
+
+fn patch_cbz(code: &mut [u8], from: usize, target: usize) -> Result<(), CodegenError> {
+    let distance = target as isize - from as isize;
+    let words = distance / 4;
+    if distance % 4 != 0 || !(-(1 << 18)..(1 << 18)).contains(&words) {
+        return Err(CodegenError::BranchOutOfRange { from, target });
+    }
+    let mut instruction = u32::from_le_bytes(
+        code[from..from + 4]
+            .try_into()
+            .expect("branch instruction is fully emitted before patching"),
+    );
+    instruction |= ((words as i32 as u32) & 0x7ffff) << 5;
+    code[from..from + 4].copy_from_slice(&instruction.to_le_bytes());
+    Ok(())
 }
 
 fn emit(code: &mut Vec<u8>, instruction: u32) {
@@ -485,6 +541,32 @@ mod tests {
         let program =
             lower_rust_source(std::path::Path::new("main.rs"), source, &["main"]).unwrap();
         assert_owned_object_exits(&validate_program(&program).unwrap(), 25);
+    }
+
+    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+    #[test]
+    fn source_conditionals_link_and_launch_from_an_owned_object() {
+        // These sources cover both emitted CBZ paths. The truth values are
+        // derived in owned arithmetic before the condition, so this tests
+        // expression materialization, branch patching, and both tail bodies.
+        for (source, expected) in [
+            (
+                r#"fn main() -> i32 {
+                    if 3i32.wrapping_sub(2) != 0 { 27 } else { 11 }
+                }"#,
+                27,
+            ),
+            (
+                r#"fn main() -> i32 {
+                    if 3i32.wrapping_sub(3) != 0 { 27 } else { 11 }
+                }"#,
+                11,
+            ),
+        ] {
+            let program =
+                lower_rust_source(std::path::Path::new("main.rs"), source, &["main"]).unwrap();
+            assert_owned_object_exits(&validate_program(&program).unwrap(), expected);
+        }
     }
 
     #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
