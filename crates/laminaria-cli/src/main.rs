@@ -1141,9 +1141,9 @@ fn owned_native_build_command(
             )
         }
     };
-    let program =
-        match laminaria_ir::rust_frontend::lower_rust_source(&source, &source_text, &["main"]) {
-            Ok(program) => program,
+    let discovered_functions =
+        match laminaria_ir::discover::discover_called_functions(&source, &source_text, &["main"]) {
+            Ok(functions) => functions,
             Err(diagnostics) => {
                 let detail = diagnostics
                     .iter()
@@ -1167,6 +1167,36 @@ fn owned_native_build_command(
                 );
             }
         };
+    let mut requested_functions = Vec::with_capacity(1 + discovered_functions.len());
+    requested_functions.push("main".to_owned());
+    requested_functions.extend(discovered_functions);
+    let requested_function_refs = requested_functions
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let program = match laminaria_ir::rust_frontend::lower_rust_source(
+        &source,
+        &source_text,
+        &requested_function_refs,
+    ) {
+        Ok(program) => program,
+        Err(diagnostics) => {
+            let detail = diagnostics
+                .iter()
+                .map(|diagnostic| {
+                    format!(
+                        "{}:{}:{}: {}",
+                        source.display(),
+                        diagnostic.span.start.line,
+                        diagnostic.span.start.column,
+                        diagnostic.message
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            return print_build_error("owned-native-build", "source_diagnostic", detail, json, 2);
+        }
+    };
     let validated = match laminaria_ir::validate::validate_program(&program) {
         Ok(validated) => validated,
         Err(error) => {

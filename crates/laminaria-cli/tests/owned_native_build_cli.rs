@@ -124,6 +124,41 @@ fn owned_native_build_lowers_links_and_launches_source_conditional() {
 }
 
 #[test]
+fn owned_native_build_discovers_lowers_links_and_launches_transitive_calls() {
+    let root = temp_dir("calls");
+    let source = root.join("main.rs");
+    let output_dir = root.join("out");
+    std::fs::write(
+        &source,
+        r#"
+        fn increment(x: i32) -> i32 { x.wrapping_add(1) }
+        fn combine(x: i32) -> i32 { x.wrapping_add(increment(x)) }
+        fn pack(left: i32, right: i32) -> i32 {
+            left.wrapping_mul(10).wrapping_add(right)
+        }
+        fn main() -> i32 { pack(combine(3), increment(4)) }
+        "#,
+    )
+    .unwrap();
+
+    let output = owned_native_command(&source, &output_dir).output().unwrap();
+    assert!(
+        output.status.success(),
+        "owned-native-build failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let executable = PathBuf::from(
+        json_stdout(&output)["result"]["executable_path"]
+            .as_str()
+            .unwrap(),
+    );
+    assert_eq!(Command::new(executable).status().unwrap().code(), Some(75));
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn owned_native_build_reports_unsupported_source_before_linking() {
     let root = temp_dir("unsupported");
     let source = root.join("main.rs");
