@@ -83,13 +83,34 @@ build, checking their independent, manually derived exit values (75 then 86).
 Its emitted samples are evidence for a Pareto comparison, not a fabricated
 single-score declaration that either compiler has won in general.
 
-### Comparison result pending rerun with conventional `main`
+### Measured result: conventional `main` versus the current Cargo+rustc path
 
-The historical measurements from commit `f2267ac` selected
-`laminaria_entry` as LAMINARIA's process entry while Cargo compiled the source
-wrapper. They remain recoverable in Git history and their raw evidence remains
-under `/private/tmp/laminaria-owned-native-compare-f2267ac`, but are no longer
-a valid current comparison after this product path began lowering the source's
-conventional `main` itself. The next clean five-repetition run of the fixed
-script is required to establish the new Cargo+rustc baseline; it must not reuse
-the old numbers or claim that this implementation already wins.
+On 2026-10-06, the fixed procedure ran five clean and five same-edit rebuild
+repetitions per route from clean commit `797c03f3b2a2f29e09420fc2cd5c6e2462b12d5a`
+on native arm64 macOS (18 logical cores, 48 GiB memory). The saved raw Run
+envelopes and Level 1 traces are under
+`/private/tmp/laminaria-owned-native-compare-797c03f`; every envelope records
+that same clean commit and `dirty=false`. Both routes consumed the exact same
+source file, including a conventional `main` whose body is
+`std::process::exit(pack(combine(3), increment(4)));`. All ten Cargo products
+and all ten LAMINARIA products launched successfully: the unchanged source
+exited 75 and the identical `wrapping_add(1)` → `wrapping_add(2)` edit exited
+86.
+
+| Scenario and measured boundary | Cargo+rustc median | LAMINARIA median | Current result for this workload |
+| --- | ---: | ---: | --- |
+| Clean target build wall time | 159.204 ms | 21.408 ms | LAMINARIA is 7.44× shorter |
+| Clean root-process peak RSS | 83.594 MiB | 35.438 MiB | LAMINARIA is 2.36× lower |
+| Clean observed output footprint | 13 files / 865,104 B scanned / 430,976 B executable | 2 files / 50,791 B scanned / 50,080 B executable | LAMINARIA writes less; executable is 8.61× smaller |
+| Rebuild after the same semantic edit, wall time | 94.949 ms | 21.290 ms | LAMINARIA is 4.46× shorter |
+| Rebuild root-process peak RSS | 83.594 MiB | 35.578 MiB | LAMINARIA is 2.35× lower |
+| Rebuild observed output footprint | 7 files / 862,753 B scanned | 2 files / 50,791 B scanned | LAMINARIA writes less |
+
+For this currently implemented, pure-i32 transitive-call `main`, LAMINARIA is
+better than the current Cargo+rustc route on every measured dimension above,
+without bypassing the source's process entry. This is deliberately not a claim
+that it is already the better general Rust compiler: Cargo provides Rust's full
+runtime contract, while LAMINARIA's closed process boundary maps the exact
+accepted exit call to C `exit` in `libSystem` and does not yet model all Rust
+cleanup or handler semantics. Future feature work must rerun this procedure
+rather than treating this narrow result as a standing performance exemption.
