@@ -254,6 +254,30 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Compile a supported Rust `fn main() -> i32` through LAMINARIA's
+    /// owned frontend, validation, ARM64 Mach-O code generator, and an
+    /// explicit Darwin linker/runtime contract. This command never invokes
+    /// Cargo, rustc, Nim, a C compiler, or an assembler for target source.
+    OwnedNativeBuild {
+        /// A Rust source file containing the supported `fn main() -> i32`.
+        #[arg(long)]
+        source: PathBuf,
+        /// Directory receiving LAMINARIA's Mach-O object and linked executable.
+        #[arg(long)]
+        output_dir: PathBuf,
+        /// Explicit Darwin linker path, normally `/usr/bin/ld`.
+        #[arg(long)]
+        linker: PathBuf,
+        /// Explicit macOS SDK root supplying the selected `libSystem` runtime.
+        #[arg(long)]
+        sdk_root: PathBuf,
+        /// Explicit Darwin deployment target forwarded verbatim to `ld`.
+        #[arg(long)]
+        minimum_macos_version: String,
+        /// Emit a machine-readable success or failure envelope.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -393,6 +417,21 @@ fn main() {
             planner,
             runs_root,
             lock,
+            json,
+        ),
+        Commands::OwnedNativeBuild {
+            source,
+            output_dir,
+            linker,
+            sdk_root,
+            minimum_macos_version,
+            json,
+        } => owned_native_build_command(
+            source,
+            output_dir,
+            linker,
+            sdk_root,
+            minimum_macos_version,
             json,
         ),
     };
@@ -1076,5 +1115,107 @@ fn build_command(
             let kind = project_build_error_kind(&err);
             print_build_error("build", kind, err.to_string(), json, 2)
         }
+    }
+}
+
+/// Executes the deliberately narrow owned-native product path.  The caller
+/// supplies every platform-specific link input rather than asking this CLI to
+/// infer it from a Rust/Nim compiler driver or the ambient SDK selection.
+fn owned_native_build_command(
+    source: PathBuf,
+    output_dir: PathBuf,
+    linker: PathBuf,
+    sdk_root: PathBuf,
+    minimum_macos_version: String,
+    json: bool,
+) -> i32 {
+    let source_text = match std::fs::read_to_string(&source) {
+        Ok(source_text) => source_text,
+        Err(error) => {
+            return print_build_error(
+                "owned-native-build",
+                "source_read",
+                format!("{}: {error}", source.display()),
+                json,
+                2,
+            )
+        }
+    };
+    let program =
+        match laminaria_ir::rust_frontend::lower_rust_source(&source, &source_text, &["main"]) {
+            Ok(program) => program,
+            Err(diagnostics) => {
+                let detail = diagnostics
+                    .iter()
+                    .map(|diagnostic| {
+                        format!(
+                            "{}:{}:{}: {}",
+                            source.display(),
+                            diagnostic.span.start.line,
+                            diagnostic.span.start.column,
+                            diagnostic.message
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                return print_build_error(
+                    "owned-native-build",
+                    "source_diagnostic",
+                    detail,
+                    json,
+                    2,
+                );
+            }
+        };
+    let validated = match laminaria_ir::validate::validate_program(&program) {
+        Ok(validated) => validated,
+        Err(error) => {
+            return print_build_error(
+                "owned-native-build",
+                "invalid_owned_ir",
+                error.to_string(),
+                json,
+                2,
+            )
+        }
+    };
+    let toolchain = laminaria_run::owned_native_link::DarwinLinkToolchain {
+        linker: linker.clone(),
+        sdk_root: sdk_root.clone(),
+        minimum_macos_version: minimum_macos_version.clone(),
+    };
+    match laminaria_run::owned_native_link::compile_and_link_main(
+        &validated,
+        "main",
+        &output_dir,
+        &toolchain,
+    ) {
+        Ok(artifact) => print_build_success(
+            serde_json::json!({
+                "source": source,
+                "entry": "main",
+                "object_path": artifact.object_path,
+                "executable_path": artifact.executable_path,
+                "toolchain": {
+                    "linker": linker,
+                    "sdk_root": sdk_root,
+                    "minimum_macos_version": minimum_macos_version,
+                },
+            }),
+            json,
+            || {
+                println!("source: {}", source.display());
+                println!("entry: main");
+                println!("object: {}", artifact.object_path.display());
+                println!("executable: {}", artifact.executable_path.display());
+            },
+        ),
+        Err(error) => print_build_error(
+            "owned-native-build",
+            "owned_native_link",
+            error.to_string(),
+            json,
+            2,
+        ),
     }
 }

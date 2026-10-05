@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 laminaria-fingerprint = { path = "../laminaria-fingerprint" }
+laminaria-ir = { path = "../laminaria-ir" }
 laminaria-run = { path = "../laminaria-run" }
 laminaria-plan = { path = "../laminaria-plan" }
 clap = { version = "4", features = ["derive"] }
