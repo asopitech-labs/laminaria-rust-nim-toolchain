@@ -32,7 +32,6 @@ pub struct OwnedNativeArtifact {
 #[derive(Debug)]
 pub enum OwnedNativeLinkError {
     UnsupportedHost,
-    EntryMustBeMain(String),
     EntryHasParameters { entry: String, count: usize },
     Codegen(CodegenError),
     Io { path: PathBuf, detail: String },
@@ -43,7 +42,6 @@ impl std::fmt::Display for OwnedNativeLinkError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::UnsupportedHost => write!(f, "owned Darwin native link requires an aarch64 macOS host"),
-            Self::EntryMustBeMain(entry) => write!(f, "owned Darwin process entry must be source function `main`, got {entry:?}"),
             Self::EntryHasParameters { entry, count } => write!(f, "owned Darwin process entry {entry:?} has {count} parameters; this runtime boundary accepts none"),
             Self::Codegen(error) => write!(f, "owned Darwin code generation failed: {error}"),
             Self::Io { path, detail } => write!(f, "{}: {detail}", path.display()),
@@ -54,10 +52,10 @@ impl std::fmt::Display for OwnedNativeLinkError {
 
 impl std::error::Error for OwnedNativeLinkError {}
 
-/// Emits LAMINARIA's own ARM64 `main` object then links it with the declared
-/// Darwin runtime.  The object is written before `ld` runs so its producer and
-/// link input remain inspectable as separate artifacts.
-pub fn compile_and_link_main(
+/// Emits an owned source entry as Darwin process `_main`, then links it with
+/// the declared runtime. The object is written before `ld` runs so its
+/// producer and link input remain inspectable as separate artifacts.
+pub fn compile_and_link_entry(
     program: &ValidatedProgram,
     entry: &str,
     output_dir: &Path,
@@ -65,9 +63,6 @@ pub fn compile_and_link_main(
 ) -> Result<OwnedNativeArtifact, OwnedNativeLinkError> {
     if !cfg!(all(target_arch = "aarch64", target_os = "macos")) {
         return Err(OwnedNativeLinkError::UnsupportedHost);
-    }
-    if entry != "main" {
-        return Err(OwnedNativeLinkError::EntryMustBeMain(entry.to_owned()));
     }
     let function = program.program().functions.get(entry).ok_or_else(|| {
         OwnedNativeLinkError::Codegen(CodegenError::MissingEntry(entry.to_owned()))
@@ -152,7 +147,7 @@ mod tests {
             "laminaria-owned-native-link-action-{}",
             std::process::id()
         ));
-        let artifact = compile_and_link_main(
+        let artifact = compile_and_link_entry(
             &validate_program(&program).unwrap(),
             "main",
             &root,

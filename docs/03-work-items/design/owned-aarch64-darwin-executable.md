@@ -38,17 +38,22 @@ parameters use compiler-owned stack slots. Generated functions preserve `x19`
 as their frame base, save their link register, and marshal evaluated call
 arguments into `w0` through `w7` immediately before a direct `BL` to another
 symbol in the same LAMINARIA object. The current process boundary accepts a
-zero-argument source `main`; external symbols, calls requiring more than eight
-arguments, and cross-object relocation remain explicitly diagnosed. The linked
-process entry is the LAMINARIA-produced `_main` joined to the Darwin `libSystem`
-runtime by the declared link action.
+zero-argument owned `i32` source entry; external symbols, calls requiring more
+than eight arguments, and cross-object relocation remain explicitly diagnosed.
+The linked process entry is the LAMINARIA-produced `_main` joined to the Darwin
+`libSystem` runtime by the declared link action. `owned-native-build --entry
+NAME` may select another owned source function for that `_main` symbol. This
+lets a conventional Rust `fn main()` wrapper remain in the same source file for
+a Cargo+rustc comparison while LAMINARIA compiles the selected owned closure;
+that wrapper is deliberately outside the selected LAMINARIA closure, so it
+cannot create a duplicate Darwin `_main` symbol.
 
 The target is deliberately host-specific.  `laminaria-run` now owns the
 explicit Darwin link action: it writes the LAMINARIA-produced `_main` object
 and calls the declared `ld` with a caller-supplied SDK root and deployment
-target to provide only `libSystem`.  A real source-derived `fn main() -> i32`
-has been linked and launched this way without Cargo, rustc, Nim, a C compiler,
-or an assembler. Non-AArch64-Darwin requests are
+target to provide only `libSystem`. A real source-derived zero-argument `i32`
+entry has been linked and launched this way without Cargo, rustc, Nim, a C
+compiler, or an assembler. Non-AArch64-Darwin requests are
 diagnosed rather than delegated to a host compiler.  C/C++ foreign components
 remain separate declared actions and do not participate in lowering Rust or
 Nim target source.
@@ -59,3 +64,17 @@ Cargo+rustc remains the practical baseline for the same workload.  It is a
 comparison target for correctness, startup, artifact size, and rebuild work;
 it is never invoked to create LAMINARIA's target artifact and is not a
 precondition for extending this owned path.
+
+`scripts/measure-owned-native-darwin.sh` fixes the initial comparison
+procedure. It consumes `fixtures/owned-native-call-compare/src/main.rs` both
+as an independent Cargo package and as input to `owned-native-build`, builds
+each route clean, then repeats the same one-line semantic edit and records the
+ordinary rebuild. Every observed command is wrapped in `laminaria run` at
+Level 1, so the saved Run envelopes contain the qualified environment,
+toolchain identities, process/resource trace, output artifact inventory, and
+the exact command. The compiler bootstrap is recorded but outside the timed
+commands: it cannot be silently charged to LAMINARIA while Cargo's compiler is
+treated as pre-existing. The script also launches both products after each
+build, checking their independent, manually derived exit values (75 then 86).
+Its emitted samples are evidence for a Pareto comparison, not a fabricated
+single-score declaration that either compiler has won in general.

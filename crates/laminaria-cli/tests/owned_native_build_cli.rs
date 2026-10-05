@@ -36,10 +36,15 @@ fn macos_sdk_root() -> PathBuf {
 }
 
 fn owned_native_command(source: &Path, output_dir: &Path) -> Command {
+    owned_native_command_for_entry(source, output_dir, "main")
+}
+
+fn owned_native_command_for_entry(source: &Path, output_dir: &Path, entry: &str) -> Command {
     let mut command = Command::new(laminaria_bin());
     command
         .args(["owned-native-build", "--source"])
         .arg(source)
+        .args(["--entry", entry])
         .args(["--output-dir"])
         .arg(output_dir)
         .args(["--linker", "/usr/bin/ld", "--sdk-root"])
@@ -154,6 +159,38 @@ fn owned_native_build_discovers_lowers_links_and_launches_transitive_calls() {
             .unwrap(),
     );
     assert_eq!(Command::new(executable).status().unwrap().code(), Some(75));
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn owned_native_build_promotes_an_explicit_source_entry_to_darwin_main() {
+    let root = temp_dir("explicit-entry");
+    let source = root.join("main.rs");
+    let output_dir = root.join("out");
+    std::fs::write(
+        &source,
+        r#"
+        fn increment(x: i32) -> i32 { x.wrapping_add(1) }
+        fn laminaria_entry() -> i32 { increment(6) }
+        fn main() { std::process::exit(laminaria_entry()); }
+        "#,
+    )
+    .unwrap();
+
+    let output = owned_native_command_for_entry(&source, &output_dir, "laminaria_entry")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "owned-native-build failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json = json_stdout(&output);
+    assert_eq!(json["result"]["entry"], "laminaria_entry");
+    let executable = PathBuf::from(json["result"]["executable_path"].as_str().unwrap());
+    assert_eq!(Command::new(executable).status().unwrap().code(), Some(7));
 
     let _ = std::fs::remove_dir_all(root);
 }

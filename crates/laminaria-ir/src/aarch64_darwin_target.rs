@@ -9,6 +9,7 @@ use crate::validate::ValidatedProgram;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodegenError {
     MissingEntry(String),
+    EntrySymbolCollision { entry: String },
     TooManyArguments(usize),
     StackFrameTooLarge(usize),
     BranchOutOfRange { from: usize, target: usize },
@@ -22,6 +23,10 @@ impl std::fmt::Display for CodegenError {
             Self::MissingEntry(entry) => {
                 write!(f, "aarch64-darwin target: missing entry {entry:?}")
             }
+            Self::EntrySymbolCollision { entry } => write!(
+                f,
+                "aarch64-darwin target: entry {entry:?} would collide with a separately emitted source `main` symbol"
+            ),
             Self::TooManyArguments(count) => write!(
                 f,
                 "aarch64-darwin target: {count} arguments exceeds the eight-register ABI core"
@@ -57,6 +62,11 @@ pub fn generate_object(program: &ValidatedProgram, entry: &str) -> Result<Vec<u8
     if !program.program().functions.contains_key(entry) {
         return Err(CodegenError::MissingEntry(entry.to_owned()));
     }
+    if entry != "main" && program.program().functions.contains_key("main") {
+        return Err(CodegenError::EntrySymbolCollision {
+            entry: entry.to_owned(),
+        });
+    }
 
     let mut text = Vec::new();
     let mut symbols = BTreeMap::new();
@@ -82,7 +92,7 @@ pub fn generate_object(program: &ValidatedProgram, entry: &str) -> Result<Vec<u8
             .expect("validated programs only call functions in this object");
         patch_bl(&mut text, call.offset, target)?;
     }
-    Ok(write_mach_o_object(&text, &symbols))
+    Ok(write_mach_o_object(&text, &symbols, entry))
 }
 
 struct PendingCall {
@@ -543,7 +553,7 @@ fn name(out: &mut Vec<u8>, value: &str) {
     out.extend_from_slice(&bytes);
 }
 
-fn write_mach_o_object(text: &[u8], symbols: &BTreeMap<String, usize>) -> Vec<u8> {
+fn write_mach_o_object(text: &[u8], symbols: &BTreeMap<String, usize>, entry: &str) -> Vec<u8> {
     const HEADER_SIZE: usize = 32;
     const SEGMENT_COMMAND_SIZE: usize = 152;
     const SYMTAB_COMMAND_SIZE: usize = 24;
@@ -553,7 +563,16 @@ fn write_mach_o_object(text: &[u8], symbols: &BTreeMap<String, usize>) -> Vec<u8
     let string_table_offset = symtab_offset + NLIST64_SIZE * symbols.len();
     let external_symbols: Vec<_> = symbols
         .iter()
-        .map(|(name, offset)| (format!("_{name}"), *offset))
+        .map(|(name, offset)| {
+            (
+                if name == entry {
+                    "_main".to_owned()
+                } else {
+                    format!("_{name}")
+                },
+                *offset,
+            )
+        })
         .collect();
     let string_table_size = 1 + external_symbols
         .iter()
@@ -608,19 +627,16 @@ fn write_mach_o_object(text: &[u8], symbols: &BTreeMap<String, usize>) -> Vec<u8
     image.extend_from_slice(text);
     image.resize(symtab_offset, 0);
     let mut string_index = 1_u32;
-    for (symbol, offset) in external_symbols {
+    for (symbol, offset) in &external_symbols {
         u32le(&mut image, string_index);
         image.push(0x0f); // N_SECT | N_EXT
         image.push(1); // __text section
         image.extend_from_slice(&0_u16.to_le_bytes());
-        u64le(&mut image, offset as u64); // section offset in MH_OBJECT
+        u64le(&mut image, *offset as u64); // section offset in MH_OBJECT
         string_index += (symbol.len() + 1) as u32;
     }
     image.push(0); // string-table index zero is the empty name
-    for (symbol, _) in symbols
-        .iter()
-        .map(|(name, offset)| (format!("_{name}"), offset))
-    {
+    for (symbol, _) in &external_symbols {
         image.extend_from_slice(symbol.as_bytes());
         image.push(0);
     }
@@ -658,6 +674,51 @@ mod tests {
         assert!(image
             .windows(b"_main\0".len())
             .any(|window| window == b"_main\0"));
+    }
+
+    #[test]
+    fn selected_entry_is_exported_as_darwin_main() {
+        let source = r#"
+            fn increment(x: i32) -> i32 { x.wrapping_add(1) }
+            fn selected_entry() -> i32 { increment(6) }
+        "#;
+        let program = lower_rust_source(
+            std::path::Path::new("selected.rs"),
+            source,
+            &["increment", "selected_entry"],
+        )
+        .unwrap();
+        let image =
+            generate_object(&validate_program(&program).unwrap(), "selected_entry").unwrap();
+        assert!(image
+            .windows(b"_increment\0".len())
+            .any(|window| window == b"_increment\0"));
+        assert!(image
+            .windows(b"_main\0".len())
+            .any(|window| window == b"_main\0"));
+        assert!(!image
+            .windows(b"_selected_entry\0".len())
+            .any(|window| window == b"_selected_entry\0"));
+    }
+
+    #[test]
+    fn source_main_cannot_collide_with_a_different_selected_entry() {
+        let source = r#"
+            fn selected_entry() -> i32 { 7 }
+            fn main() -> i32 { 9 }
+        "#;
+        let program = lower_rust_source(
+            std::path::Path::new("collision.rs"),
+            source,
+            &["selected_entry", "main"],
+        )
+        .unwrap();
+        assert_eq!(
+            generate_object(&validate_program(&program).unwrap(), "selected_entry"),
+            Err(CodegenError::EntrySymbolCollision {
+                entry: "selected_entry".to_owned(),
+            })
+        );
     }
 
     #[cfg(all(target_arch = "aarch64", target_os = "macos"))]

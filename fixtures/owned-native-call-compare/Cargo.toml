@@ -1,0 +1,9 @@
+[package]
+name = "owned-native-call-compare"
+version = "0.1.0"
+edition = "2021"
+
+# This fixture is intentionally its own workspace. It is consumed both by
+# Cargo+rustc and by `laminaria owned-native-build`, so neither route receives
+# a fixture-only reimplementation of the workload.
+[workspace]

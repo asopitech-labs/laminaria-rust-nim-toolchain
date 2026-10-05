@@ -254,14 +254,20 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Compile a supported Rust `fn main() -> i32` through LAMINARIA's
-    /// owned frontend, validation, ARM64 Mach-O code generator, and an
-    /// explicit Darwin linker/runtime contract. This command never invokes
-    /// Cargo, rustc, Nim, a C compiler, or an assembler for target source.
+    /// Compile a supported zero-argument Rust `i32` source function through
+    /// LAMINARIA's owned frontend, validation, ARM64 Mach-O code generator,
+    /// and an explicit Darwin linker/runtime contract. This command never
+    /// invokes Cargo, rustc, Nim, a C compiler, or an assembler for target
+    /// source.
     OwnedNativeBuild {
-        /// A Rust source file containing the supported `fn main() -> i32`.
+        /// A Rust source file containing the selected supported entry function.
         #[arg(long)]
         source: PathBuf,
+        /// Zero-argument `i32` source function emitted as Darwin process
+        /// `_main`. This permits a normal Rust `main` wrapper to remain in
+        /// the same source file for Cargo+rustc comparison.
+        #[arg(long, default_value = "main")]
+        entry: String,
         /// Directory receiving LAMINARIA's Mach-O object and linked executable.
         #[arg(long)]
         output_dir: PathBuf,
@@ -421,6 +427,7 @@ fn main() {
         ),
         Commands::OwnedNativeBuild {
             source,
+            entry,
             output_dir,
             linker,
             sdk_root,
@@ -428,6 +435,7 @@ fn main() {
             json,
         } => owned_native_build_command(
             source,
+            entry,
             output_dir,
             linker,
             sdk_root,
@@ -1123,6 +1131,7 @@ fn build_command(
 /// infer it from a Rust/Nim compiler driver or the ambient SDK selection.
 fn owned_native_build_command(
     source: PathBuf,
+    entry: String,
     output_dir: PathBuf,
     linker: PathBuf,
     sdk_root: PathBuf,
@@ -1141,34 +1150,31 @@ fn owned_native_build_command(
             )
         }
     };
-    let discovered_functions =
-        match laminaria_ir::discover::discover_called_functions(&source, &source_text, &["main"]) {
-            Ok(functions) => functions,
-            Err(diagnostics) => {
-                let detail = diagnostics
-                    .iter()
-                    .map(|diagnostic| {
-                        format!(
-                            "{}:{}:{}: {}",
-                            source.display(),
-                            diagnostic.span.start.line,
-                            diagnostic.span.start.column,
-                            diagnostic.message
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                return print_build_error(
-                    "owned-native-build",
-                    "source_diagnostic",
-                    detail,
-                    json,
-                    2,
-                );
-            }
-        };
+    let discovered_functions = match laminaria_ir::discover::discover_called_functions(
+        &source,
+        &source_text,
+        &[entry.as_str()],
+    ) {
+        Ok(functions) => functions,
+        Err(diagnostics) => {
+            let detail = diagnostics
+                .iter()
+                .map(|diagnostic| {
+                    format!(
+                        "{}:{}:{}: {}",
+                        source.display(),
+                        diagnostic.span.start.line,
+                        diagnostic.span.start.column,
+                        diagnostic.message
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            return print_build_error("owned-native-build", "source_diagnostic", detail, json, 2);
+        }
+    };
     let mut requested_functions = Vec::with_capacity(1 + discovered_functions.len());
-    requested_functions.push("main".to_owned());
+    requested_functions.push(entry.clone());
     requested_functions.extend(discovered_functions);
     let requested_function_refs = requested_functions
         .iter()
@@ -1214,16 +1220,16 @@ fn owned_native_build_command(
         sdk_root: sdk_root.clone(),
         minimum_macos_version: minimum_macos_version.clone(),
     };
-    match laminaria_run::owned_native_link::compile_and_link_main(
+    match laminaria_run::owned_native_link::compile_and_link_entry(
         &validated,
-        "main",
+        &entry,
         &output_dir,
         &toolchain,
     ) {
         Ok(artifact) => print_build_success(
             serde_json::json!({
                 "source": source,
-                "entry": "main",
+                "entry": entry,
                 "object_path": artifact.object_path,
                 "executable_path": artifact.executable_path,
                 "toolchain": {
@@ -1235,7 +1241,7 @@ fn owned_native_build_command(
             json,
             || {
                 println!("source: {}", source.display());
-                println!("entry: main");
+                println!("entry: {entry}");
                 println!("object: {}", artifact.object_path.display());
                 println!("executable: {}", artifact.executable_path.display());
             },
