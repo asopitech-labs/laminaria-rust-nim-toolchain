@@ -2,7 +2,10 @@
 # Source this file to put the toolchains declared by toolchains.lock.toml
 # ahead of ambient PATH entries. In particular, this prevents an x86_64
 # Homebrew Nim/Cargo under /usr/local from winning over the arm64 tools this
-# repository verified on Apple Silicon.
+# repository verified on Apple Silicon. On Darwin it also puts the universal
+# system-tool directories before ambient Homebrew entries: repository code
+# invokes `git` for source identity, so a translated-only Homebrew git must
+# not make local verification depend on a Rosetta installation.
 #
 # Usage (from Bash):
 #   source scripts/activate-pinned-toolchains.sh
@@ -50,6 +53,11 @@ if ! rustup run "$PINNED_RUST_SELECTOR" rustc -vV >/dev/null 2>&1; then
 fi
 
 PINNED_RUST_BIN_DIR="$(dirname "$(rustup which cargo --toolchain "$PINNED_RUST_SELECTOR")")"
-export PATH="$PINNED_NIM_BIN_DIR:$HOME/.nimble/bin:$PINNED_RUST_BIN_DIR:$PATH"
+PINNED_TOOLCHAIN_PATH="$PINNED_NIM_BIN_DIR:$HOME/.nimble/bin:$PINNED_RUST_BIN_DIR"
+if [[ "${OSTYPE:-}" == darwin* ]]; then
+  export PATH="$PINNED_TOOLCHAIN_PATH:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+else
+  export PATH="$PINNED_TOOLCHAIN_PATH:$PATH"
+fi
 
-unset PINNED_TOOLCHAIN_DATA PINNED_TOOLCHAIN_ROOT
+unset PINNED_TOOLCHAIN_DATA PINNED_TOOLCHAIN_ROOT PINNED_TOOLCHAIN_PATH

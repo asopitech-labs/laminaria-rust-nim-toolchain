@@ -8,6 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::exec::{run, which};
@@ -318,11 +319,40 @@ fn detect_environment_class() -> String {
     "native".to_string()
 }
 
+/// Git hook processes export these variables for their own repository. A
+/// fingerprint asks Git about an explicit `repo_root`, so inherited context
+/// would otherwise redirect `git -C <repo_root>` to the hook's index, object
+/// database, or worktree. Clear only Git's repository-location variables;
+/// user configuration and ordinary environment settings remain intact.
+const GIT_REPOSITORY_CONTEXT_ENV: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_PREFIX",
+];
+
+fn repository_git_command(repo_root: &Path) -> Command {
+    let mut command = Command::new("git");
+    for variable in GIT_REPOSITORY_CONTEXT_ENV {
+        command.env_remove(variable);
+    }
+    command.arg("-C").arg(repo_root);
+    command
+}
+
 fn detect_repository_state(repo_root: &Path) -> RepositoryState {
-    let commit = run(
-        "git",
-        &["-C", &repo_root.to_string_lossy(), "rev-parse", "HEAD"],
-    );
+    let commit = repository_git_command(repo_root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| {
+            let commit = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+            (!commit.is_empty()).then_some(commit)
+        });
     let dirty = git_status_porcelain_is_dirty(repo_root);
     RepositoryState { commit, dirty }
 }
@@ -339,8 +369,8 @@ fn detect_repository_state(repo_root: &Path) -> RepositoryState {
 /// tree with some unrelated untracked file, so `status --porcelain`
 /// always had non-empty output and this gap stayed invisible.
 fn git_status_porcelain_is_dirty(repo_root: &Path) -> Option<bool> {
-    let output = std::process::Command::new("git")
-        .args(["-C", &repo_root.to_string_lossy(), "status", "--porcelain"])
+    let output = repository_git_command(repo_root)
+        .args(["status", "--porcelain"])
         .output()
         .ok()?;
     if !output.status.success() {
@@ -422,9 +452,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).expect("create temp dir");
         let run_git = |args: &[&str]| {
-            let status = std::process::Command::new("git")
-                .arg("-C")
-                .arg(&dir)
+            let status = repository_git_command(&dir)
                 .args(args)
                 .status()
                 .expect("git must be on PATH");
