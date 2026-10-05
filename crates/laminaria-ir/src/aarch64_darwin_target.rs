@@ -46,7 +46,7 @@ pub fn generate_object(program: &ValidatedProgram, entry: &str) -> Result<Vec<u8
     let mut text = Vec::new();
     // Function uses w0..w7 by the Darwin AArch64 integer calling convention.
     emit_stmt(&mut text, &function.body)?;
-    Ok(write_mach_o_object(&text))
+    Ok(write_mach_o_object(&text, entry))
 }
 
 fn emit_stmt(code: &mut Vec<u8>, stmt: &Stmt) -> Result<(), CodegenError> {
@@ -123,15 +123,26 @@ fn name(out: &mut Vec<u8>, value: &str) {
     out.extend_from_slice(&bytes);
 }
 
-fn write_mach_o_object(text: &[u8]) -> Vec<u8> {
-    let section_offset = 32 + 152;
-    let mut image = Vec::with_capacity(section_offset + text.len());
+fn write_mach_o_object(text: &[u8], symbol: &str) -> Vec<u8> {
+    const HEADER_SIZE: usize = 32;
+    const SEGMENT_COMMAND_SIZE: usize = 152;
+    const SYMTAB_COMMAND_SIZE: usize = 24;
+    const NLIST64_SIZE: usize = 16;
+    let section_offset = HEADER_SIZE + SEGMENT_COMMAND_SIZE + SYMTAB_COMMAND_SIZE;
+    let symtab_offset = (section_offset + text.len() + 7) & !7;
+    let string_table_offset = symtab_offset + NLIST64_SIZE;
+    let external_symbol = format!("_{symbol}");
+    let string_table_size = external_symbol.len() + 2; // leading and trailing NUL
+    let mut image = Vec::with_capacity(string_table_offset + string_table_size);
     u32le(&mut image, 0xfeed_facf);
     u32le(&mut image, 0x0100_000c);
     u32le(&mut image, 0);
     u32le(&mut image, 1);
-    u32le(&mut image, 1);
-    u32le(&mut image, 152);
+    u32le(&mut image, 2);
+    u32le(
+        &mut image,
+        (SEGMENT_COMMAND_SIZE + SYMTAB_COMMAND_SIZE) as u32,
+    );
     u32le(&mut image, 0);
     u32le(&mut image, 0);
     // LC_SEGMENT_64 __TEXT with one regular, reloc-free __text section.
@@ -154,11 +165,30 @@ fn write_mach_o_object(text: &[u8]) -> Vec<u8> {
     u32le(&mut image, 2);
     u32le(&mut image, 0);
     u32le(&mut image, 0);
+    // S_REGULAR | S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS.
+    u32le(&mut image, 0x8000_0400);
     u32le(&mut image, 0);
     u32le(&mut image, 0);
     u32le(&mut image, 0);
-    u32le(&mut image, 0);
+    // LC_SYMTAB and a single external `N_SECT` symbol. This is the exact
+    // native-link interface: the linker sees a symbol emitted by LAMINARIA,
+    // not a name inferred from source or delegated compiler output.
+    u32le(&mut image, 0x2);
+    u32le(&mut image, SYMTAB_COMMAND_SIZE as u32);
+    u32le(&mut image, symtab_offset as u32);
+    u32le(&mut image, 1);
+    u32le(&mut image, string_table_offset as u32);
+    u32le(&mut image, string_table_size as u32);
     image.extend_from_slice(text);
+    image.resize(symtab_offset, 0);
+    u32le(&mut image, 1); // string-table index of the external symbol
+    image.push(0x0f); // N_SECT | N_EXT
+    image.push(1); // __text section
+    image.extend_from_slice(&0_u16.to_le_bytes());
+    u64le(&mut image, 0); // offset within a relocatable object
+    image.push(0);
+    image.extend_from_slice(external_symbol.as_bytes());
+    image.push(0);
     image
 }
 
@@ -175,5 +205,8 @@ mod tests {
         let image = generate_object(&validate_program(&program).unwrap(), "add").unwrap();
         assert_eq!(&image[..4], &[0xcf, 0xfa, 0xed, 0xfe]);
         assert_eq!(u32::from_le_bytes(image[12..16].try_into().unwrap()), 1);
+        assert!(image
+            .windows(b"_add\0".len())
+            .any(|window| window == b"_add\0"));
     }
 }

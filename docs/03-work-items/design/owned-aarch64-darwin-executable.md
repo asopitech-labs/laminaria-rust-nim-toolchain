@@ -34,10 +34,12 @@ declared test/application arguments, calls the selected function, and invokes
 the Darwin `exit` system call directly.  There is no libc runtime contract in
 this first slice.
 
-The target is deliberately host-specific.  Its next checkpoint is an explicit
-Darwin link/runtime contract that turns these owned objects into an executable;
-that is distinct from target-source compilation and will not be hidden behind
-`rustc` or Cargo. Non-AArch64-Darwin requests are
+The target is deliberately host-specific.  `laminaria-run` now owns the
+explicit Darwin link action: it writes the LAMINARIA-produced `_main` object
+and calls the declared `ld` with a caller-supplied SDK root and deployment
+target to provide only `libSystem`.  A real source-derived `fn main() -> i32`
+has been linked and launched this way without Cargo, rustc, Nim, a C compiler,
+or an assembler. Non-AArch64-Darwin requests are
 diagnosed rather than delegated to a host compiler.  C/C++ foreign components
 remain separate declared actions and do not participate in lowering Rust or
 Nim target source.
