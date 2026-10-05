@@ -101,6 +101,10 @@ clone済みであることは全ソースを調査・検証済みという意味
 | `nlvm` | `nlvm/llgen.nim`等、NimからLLVMへのloweringの参照実装 |
 | `rust` | `compiler/rustc_codegen_llvm`、`compiler/rustc_target`等、rustc側の意味・target由来の差異 |
 | `llvm-project` | LLVM/Clang/LLD、IR・analysis・pass・LTO/ThinLTO/DTLTO（Clangを別cloneしない） |
+| `abi-aa` | AAPCS64のAArch64整数ABI・register/stack保存規約。LAMINARIA owned ARM64 loweringの一次仕様 |
+| `cctools` | AppleのMach-O object/arm64 relocationとDarwin linker実装。LAMINARIA object/link契約の一次参照 |
+| `ld64` | Appleの現行Darwin linker。cross-object call/relocation・fixup・branch-island契約の一次参照 |
+| `dyld` | AppleのMach-O loader/runtime contract。生成済みnative executableのload command検証に使用 |
 | `cargo-nextest` | per-test process、retry/timeout、reporting、archive、target runnerとtest execution model |
 | `googletest` | C++ test registration、assertion、parameterized/death test、gMock、machine-readable report |
 | `Catch2` | C++ section/generator/reportingと`catch_discover_tests`によるdynamic discovery |
