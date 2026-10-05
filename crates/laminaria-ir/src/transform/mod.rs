@@ -445,6 +445,18 @@ fn rewrite_calls_in_stmt(
             rewrite_calls_in_expr(expr, callee_name, replace)?,
             provenance.clone(),
         ),
+        Stmt::ExternalCall {
+            target,
+            args,
+            provenance,
+        } => Stmt::ExternalCall {
+            target: *target,
+            args: args
+                .iter()
+                .map(|arg| rewrite_calls_in_expr(arg, callee_name, replace))
+                .collect::<Result<Vec<_>, _>>()?,
+            provenance: provenance.clone(),
+        },
     })
 }
 
@@ -561,7 +573,7 @@ mod tests {
             params: (0..params)
                 .map(|i| (format!("p{i}"), IntWidth::I32))
                 .collect(),
-            return_width: IntWidth::I32,
+            result: crate::types::FunctionResult::I32,
             body,
             provenance: prov(),
         }

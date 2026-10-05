@@ -12,7 +12,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::types::{Expr, FnId, LocalId, Program, Stmt};
+use crate::types::{Expr, ExternalTarget, FnId, LocalId, Program, Stmt};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallEvent {
@@ -68,6 +68,7 @@ pub enum EvalError {
         got: usize,
     },
     UnboundLocal(LocalId),
+    ExternalCallUnsupported(ExternalTarget),
 }
 
 struct EvalState<'a> {
@@ -140,6 +141,17 @@ fn eval_stmt(stmt: &Stmt, state: &mut EvalState) -> Result<i64, EvalError> {
             }
         }
         Stmt::Return(expr, _) => eval_expr(expr, state),
+        // The reference evaluator intentionally does not terminate the test
+        // process.  It evaluates the status expression first, preserving any
+        // same-program calls in source order, then reports that a real
+        // process-level operation was reached rather than fabricating an i32
+        // return value for a unit function.
+        Stmt::ExternalCall { target, args, .. } => {
+            for arg in args {
+                eval_expr(arg, state)?;
+            }
+            Err(EvalError::ExternalCallUnsupported(*target))
+        }
     }
 }
 
@@ -242,7 +254,7 @@ mod tests {
         program.insert(FnFact {
             name: "double".to_string(),
             params: vec![("x".to_string(), crate::types::IntWidth::I32)],
-            return_width: crate::types::IntWidth::I32,
+            result: crate::types::FunctionResult::I32,
             provenance: prov(),
             body: Stmt::Return(
                 Expr::WrappingAdd(
@@ -263,7 +275,7 @@ mod tests {
         program.insert(FnFact {
             name: "caller".to_string(),
             params: vec![("a".to_string(), crate::types::IntWidth::I32)],
-            return_width: crate::types::IntWidth::I32,
+            result: crate::types::FunctionResult::I32,
             provenance: prov(),
             body: Stmt::Return(
                 Expr::Call(
@@ -295,7 +307,7 @@ mod tests {
         program.insert(FnFact {
             name: "caller".to_string(),
             params: vec![],
-            return_width: crate::types::IntWidth::I32,
+            result: crate::types::FunctionResult::I32,
             provenance: prov(),
             body: Stmt::Return(
                 Expr::Call(
@@ -328,7 +340,7 @@ mod tests {
         program.insert(FnFact {
             name: "caller".to_string(),
             params: vec![],
-            return_width: crate::types::IntWidth::I32,
+            result: crate::types::FunctionResult::I32,
             provenance: prov(),
             body: Stmt::Let {
                 local: LocalId(0),
@@ -381,7 +393,7 @@ mod tests {
         program.insert(FnFact {
             name: "inner".to_string(),
             params: vec![("x".to_string(), crate::types::IntWidth::I32)],
-            return_width: crate::types::IntWidth::I32,
+            result: crate::types::FunctionResult::I32,
             provenance: prov(),
             body: Stmt::Return(
                 Expr::WrappingAdd(
@@ -408,7 +420,7 @@ mod tests {
         program.insert(FnFact {
             name: "caller".to_string(),
             params: vec![],
-            return_width: crate::types::IntWidth::I32,
+            result: crate::types::FunctionResult::I32,
             provenance: prov(),
             body: Stmt::Return(
                 Expr::WrappingAdd(
@@ -432,7 +444,7 @@ mod tests {
             FnFact {
                 name: "mark".to_string(),
                 params: vec![("v".to_string(), crate::types::IntWidth::I32)],
-                return_width: crate::types::IntWidth::I32,
+                result: crate::types::FunctionResult::I32,
                 provenance: prov(),
                 body: Stmt::Return(Expr::Param(0, prov()), prov()),
             }

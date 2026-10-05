@@ -1180,11 +1180,23 @@ fn owned_native_build_command(
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>();
-    let program = match laminaria_ir::rust_frontend::lower_rust_source(
-        &source,
-        &source_text,
-        &requested_function_refs,
-    ) {
+    // The regular product entry is the source's conventional `fn main()`.
+    // Keep an explicitly selected non-main i32 closure as a compatibility
+    // path, but never use it to make the ordinary main route look faster.
+    let lower_result = if entry == "main" {
+        laminaria_ir::rust_frontend::lower_rust_process_main(
+            &source,
+            &source_text,
+            &requested_function_refs,
+        )
+    } else {
+        laminaria_ir::rust_frontend::lower_rust_source(
+            &source,
+            &source_text,
+            &requested_function_refs,
+        )
+    };
+    let program = match lower_result {
         Ok(program) => program,
         Err(diagnostics) => {
             let detail = diagnostics

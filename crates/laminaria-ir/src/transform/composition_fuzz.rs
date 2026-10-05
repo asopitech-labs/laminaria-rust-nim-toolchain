@@ -99,7 +99,7 @@ fn fact(name: &str, params: usize, body: Stmt) -> FnFact {
         params: (0..params)
             .map(|i| (format!("p{i}"), IntWidth::I32))
             .collect(),
-        return_width: IntWidth::I32,
+        result: crate::types::FunctionResult::I32,
         body,
         provenance: prov(),
     }

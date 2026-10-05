@@ -665,7 +665,7 @@ fn parse_proc(p: &mut Parser) -> PResult<FnFact> {
     Ok(FnFact {
         name,
         params,
-        return_width: IntWidth::I32,
+        result: crate::types::FunctionResult::I32,
         body,
         provenance: Provenance {
             source_file: p.source_file.to_path_buf(),

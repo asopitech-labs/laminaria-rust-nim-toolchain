@@ -135,7 +135,7 @@ for repetition in $(seq 1 "$REPETITIONS"); do
   record_run \
     "clean-laminaria-owned-r$repetition" \
     "$OWNED_ROOT/out" \
-    "$COMPILER" owned-native-build --source "$OWNED_ROOT/src/main.rs" --entry laminaria_entry --output-dir "$OWNED_ROOT/out" --linker /usr/bin/ld --sdk-root "$SDK_ROOT" --minimum-macos-version 11.0 --json
+    "$COMPILER" owned-native-build --source "$OWNED_ROOT/src/main.rs" --output-dir "$OWNED_ROOT/out" --linker /usr/bin/ld --sdk-root "$SDK_ROOT" --minimum-macos-version 11.0 --json
   require_clean_checkout
   check_exit_status \
     "clean-cargo-rustc-r$repetition" \
@@ -164,7 +164,7 @@ for repetition in $(seq 1 "$REPETITIONS"); do
   record_run \
     "incremental-laminaria-owned-r$repetition" \
     "$OWNED_ROOT/out" \
-    "$COMPILER" owned-native-build --source "$OWNED_ROOT/src/main.rs" --entry laminaria_entry --output-dir "$OWNED_ROOT/out" --linker /usr/bin/ld --sdk-root "$SDK_ROOT" --minimum-macos-version 11.0 --json
+    "$COMPILER" owned-native-build --source "$OWNED_ROOT/src/main.rs" --output-dir "$OWNED_ROOT/out" --linker /usr/bin/ld --sdk-root "$SDK_ROOT" --minimum-macos-version 11.0 --json
   require_clean_checkout
   check_exit_status \
     "incremental-cargo-rustc-r$repetition" \

@@ -27,7 +27,9 @@
 
 use std::collections::BTreeSet;
 
-use crate::types::{Expr, FnFact, FnId, IntWidth, LocalId, Program, Stmt};
+use crate::types::{
+    Expr, ExternalTarget, FnFact, FnId, FunctionResult, IntWidth, LocalId, Program, Stmt,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProgramValidationError {
@@ -54,6 +56,8 @@ pub enum ProgramValidationError {
         expected: usize,
         got: usize,
     },
+    /// A value expression cannot call a unit-returning function.
+    CallToUnitFunction { function: String, callee: String },
     /// An `IntLit` value does not fit its own declared `IntWidth`.
     ValueOutOfRange {
         function: String,
@@ -75,6 +79,16 @@ pub enum ProgramValidationError {
     /// exactly one condition form, and a real `if` position must actually
     /// contain it, not merely be permitted to.
     ValueUsedAsCondition { function: String },
+    /// A unit-returning source function must not claim to produce an i32.
+    ReturnValueFromUnitFunction { function: String },
+    /// An external intrinsic was formed with an arity other than its declared
+    /// ABI contract permits.
+    ExternalCallArityMismatch {
+        function: String,
+        target: ExternalTarget,
+        expected: usize,
+        got: usize,
+    },
 }
 
 impl std::fmt::Display for ProgramValidationError {
@@ -108,6 +122,10 @@ impl std::fmt::Display for ProgramValidationError {
                 "function {function:?} calls {callee:?} with {got} argument(s), but {callee:?} \
                  declares {expected}"
             ),
+            ProgramValidationError::CallToUnitFunction { function, callee } => write!(
+                f,
+                "function {function:?} uses unit-returning function {callee:?} as an i32 value"
+            ),
             ProgramValidationError::ValueOutOfRange {
                 function,
                 value,
@@ -126,6 +144,20 @@ impl std::fmt::Display for ProgramValidationError {
                 "function {function:?} uses a bare value directly as an if's own condition, not \
                  a NotEqZero comparison -- this subset's only condition form must actually \
                  appear there"
+            ),
+            ProgramValidationError::ReturnValueFromUnitFunction { function } => write!(
+                f,
+                "unit-returning function {function:?} contains an i32 Return"
+            ),
+            ProgramValidationError::ExternalCallArityMismatch {
+                function,
+                target,
+                expected,
+                got,
+            } => write!(
+                f,
+                "function {function:?} calls external target {target:?} with {got} argument(s), \
+                 but its ABI contract requires {expected}"
             ),
         }
     }
@@ -167,7 +199,14 @@ pub fn validate_program(program: &Program) -> Result<ValidatedProgram, ProgramVa
 
 fn validate_fn(name: &str, fact: &FnFact, program: &Program) -> Result<(), ProgramValidationError> {
     let mut bound: BTreeSet<LocalId> = BTreeSet::new();
-    validate_stmt(name, &fact.body, fact.params.len(), &mut bound, program)
+    validate_stmt(
+        name,
+        &fact.body,
+        fact.params.len(),
+        fact.result,
+        &mut bound,
+        program,
+    )
 }
 
 /// Binds/unbinds `local` around `f`, mirroring
@@ -193,6 +232,7 @@ fn validate_stmt(
     fn_name: &str,
     stmt: &Stmt,
     param_count: usize,
+    function_result: FunctionResult,
     bound: &mut BTreeSet<LocalId>,
     program: &Program,
 ) -> Result<(), ProgramValidationError> {
@@ -202,7 +242,7 @@ fn validate_stmt(
         } => {
             validate_expr(fn_name, value, param_count, bound, program, false)?;
             with_bound(bound, *local, |bound| {
-                validate_stmt(fn_name, body, param_count, bound, program)
+                validate_stmt(fn_name, body, param_count, function_result, bound, program)
             })
         }
         Stmt::If {
@@ -221,10 +261,34 @@ fn validate_stmt(
                 });
             }
             validate_expr(fn_name, cond, param_count, bound, program, true)?;
-            validate_stmt(fn_name, then, param_count, bound, program)?;
-            validate_stmt(fn_name, els, param_count, bound, program)
+            validate_stmt(fn_name, then, param_count, function_result, bound, program)?;
+            validate_stmt(fn_name, els, param_count, function_result, bound, program)
         }
-        Stmt::Return(expr, _) => validate_expr(fn_name, expr, param_count, bound, program, false),
+        Stmt::Return(expr, _) => {
+            if function_result == FunctionResult::Unit {
+                return Err(ProgramValidationError::ReturnValueFromUnitFunction {
+                    function: fn_name.to_string(),
+                });
+            }
+            validate_expr(fn_name, expr, param_count, bound, program, false)
+        }
+        Stmt::ExternalCall { target, args, .. } => {
+            let expected = match target {
+                ExternalTarget::ProcessExit => 1,
+            };
+            if args.len() != expected {
+                return Err(ProgramValidationError::ExternalCallArityMismatch {
+                    function: fn_name.to_string(),
+                    target: *target,
+                    expected,
+                    got: args.len(),
+                });
+            }
+            for arg in args {
+                validate_expr(fn_name, arg, param_count, bound, program, false)?;
+            }
+            Ok(())
+        }
     }
 }
 
@@ -300,6 +364,12 @@ fn validate_expr(
                     got: args.len(),
                 });
             }
+            if callee.result == FunctionResult::Unit {
+                return Err(ProgramValidationError::CallToUnitFunction {
+                    function: fn_name.to_string(),
+                    callee: callee_name.clone(),
+                });
+            }
             for arg in args {
                 validate_expr(fn_name, arg, param_count, bound, program, false)?;
             }
@@ -339,7 +409,7 @@ mod tests {
             params: (0..params)
                 .map(|i| (format!("p{i}"), IntWidth::I32))
                 .collect(),
-            return_width: IntWidth::I32,
+            result: crate::types::FunctionResult::I32,
             body,
             provenance: prov(),
         }
@@ -350,6 +420,75 @@ mod tests {
         let mut program = Program::default();
         program.insert(fact("id", 1, Stmt::Return(Expr::Param(0, prov()), prov())));
         assert!(validate_program(&program).is_ok());
+    }
+
+    #[test]
+    fn unit_process_exit_validates_only_with_its_declared_arity() {
+        let mut program = Program::default();
+        program.insert(FnFact {
+            name: "main".to_owned(),
+            params: vec![],
+            result: FunctionResult::Unit,
+            body: Stmt::ExternalCall {
+                target: ExternalTarget::ProcessExit,
+                args: vec![Expr::IntLit(75, IntWidth::I32, prov())],
+                provenance: prov(),
+            },
+            provenance: prov(),
+        });
+        assert!(validate_program(&program).is_ok());
+
+        let mut malformed = program.clone();
+        malformed.functions.get_mut("main").unwrap().body = Stmt::ExternalCall {
+            target: ExternalTarget::ProcessExit,
+            args: vec![],
+            provenance: prov(),
+        };
+        assert_eq!(
+            validate_program(&malformed),
+            Err(ProgramValidationError::ExternalCallArityMismatch {
+                function: "main".to_owned(),
+                target: ExternalTarget::ProcessExit,
+                expected: 1,
+                got: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn unit_function_cannot_forge_an_i32_return_or_be_called_as_one() {
+        let mut program = Program::default();
+        program.insert(FnFact {
+            name: "unit".to_owned(),
+            params: vec![],
+            result: FunctionResult::Unit,
+            body: Stmt::Return(Expr::IntLit(1, IntWidth::I32, prov()), prov()),
+            provenance: prov(),
+        });
+        assert_eq!(
+            validate_program(&program),
+            Err(ProgramValidationError::ReturnValueFromUnitFunction {
+                function: "unit".to_owned(),
+            })
+        );
+
+        program.functions.get_mut("unit").unwrap().body = Stmt::ExternalCall {
+            target: ExternalTarget::ProcessExit,
+            args: vec![Expr::IntLit(0, IntWidth::I32, prov())],
+            provenance: prov(),
+        };
+        program.insert(fact(
+            "caller",
+            0,
+            Stmt::Return(Expr::Call(FnId("unit".to_owned()), vec![], prov()), prov()),
+        ));
+        assert_eq!(
+            validate_program(&program),
+            Err(ProgramValidationError::CallToUnitFunction {
+                function: "caller".to_owned(),
+                callee: "unit".to_owned(),
+            })
+        );
     }
 
     #[test]

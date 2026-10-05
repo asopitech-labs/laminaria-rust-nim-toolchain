@@ -14,7 +14,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::types::{Expr, FnFact, FnId, IntWidth, LocalId, Stmt};
+use crate::types::{Expr, ExternalTarget, FnFact, FnId, FunctionResult, IntWidth, LocalId, Stmt};
 use crate::validate::ValidatedProgram;
 
 /// No variant is constructed by this module today -- every `Expr`/
@@ -29,6 +29,8 @@ use crate::validate::ValidatedProgram;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodegenError {
     UnsupportedIntWidth(IntWidth),
+    UnsupportedFunctionResult(FunctionResult),
+    UnsupportedExternalTarget(ExternalTarget),
 }
 
 impl std::fmt::Display for CodegenError {
@@ -36,6 +38,12 @@ impl std::fmt::Display for CodegenError {
         match self {
             CodegenError::UnsupportedIntWidth(width) => {
                 write!(f, "wasm_target: unsupported IntWidth: {width:?}")
+            }
+            CodegenError::UnsupportedFunctionResult(result) => {
+                write!(f, "wasm_target: unsupported function result: {result:?}")
+            }
+            CodegenError::UnsupportedExternalTarget(target) => {
+                write!(f, "wasm_target: unsupported external target: {target:?}")
             }
         }
     }
@@ -272,6 +280,9 @@ fn lower_stmt(
             lower_expr(expr, ctx, out)?;
             out.push(OP_RETURN);
         }
+        Stmt::ExternalCall { target, .. } => {
+            return Err(CodegenError::UnsupportedExternalTarget(*target));
+        }
     }
     Ok(())
 }
@@ -283,7 +294,9 @@ fn lower_function(
     for (_, width) in &f.params {
         lower_int_width(*width)?;
     }
-    lower_int_width(f.return_width)?;
+    if f.result != FunctionResult::I32 {
+        return Err(CodegenError::UnsupportedFunctionResult(f.result));
+    }
 
     let mut ctx = FunctionCtx {
         scope: Vec::new(),
@@ -312,8 +325,8 @@ fn lower_function(
 /// `memory`/`table`/`global`, since the current IR has no arrays,
 /// pointers, or global state -- T0 doc §4). Every `FnFact` becomes one
 /// exported WASM function with the same name, `(params.len() i32s) ->
-/// (1 i32)` signature (`FnFact.return_width` is always `IntWidth::I32`,
-/// so the result type is always a single `i32`).
+/// (1 i32)` signature.  Unit/process-exit functions are rejected explicitly
+/// until this target gains its own host-import and termination contract.
 pub fn generate_wasm_module(program: &ValidatedProgram) -> Result<Vec<u8>, CodegenError> {
     let program = program.program();
     let names: Vec<&str> = program.functions.keys().map(String::as_str).collect();
@@ -419,7 +432,7 @@ mod tests {
         program.insert(FnFact {
             name: "f".to_string(),
             params: vec![("x".to_string(), IntWidth::I32)],
-            return_width: IntWidth::I32,
+            result: crate::types::FunctionResult::I32,
             provenance: prov(),
             body: Stmt::Return(Expr::Param(0, prov()), prov()),
         });
@@ -537,7 +550,7 @@ mod tests {
         program.insert(FnFact {
             name: "shadow_test".to_string(),
             params: vec![("x".to_string(), IntWidth::I32)],
-            return_width: IntWidth::I32,
+            result: crate::types::FunctionResult::I32,
             provenance: prov(),
             body,
         });
@@ -621,7 +634,7 @@ mod tests {
         program.insert(FnFact {
             name: "countdown".to_string(),
             params: vec![("n".to_string(), IntWidth::I32)],
-            return_width: IntWidth::I32,
+            result: crate::types::FunctionResult::I32,
             provenance: prov(),
             body,
         });

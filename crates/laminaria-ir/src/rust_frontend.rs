@@ -30,9 +30,15 @@ use syn::{
 
 use crate::diagnostics::{Diagnostic, LoweringError};
 use crate::types::{
-    Expr, FnFact, FnId, IntWidth, LocalId, Program, Provenance, SourceLanguage, SourcePosition,
-    SourceSpan, Stmt,
+    Expr, ExternalTarget, FnFact, FnId, FunctionResult, IntWidth, LocalId, Program, Provenance,
+    SourceLanguage, SourcePosition, SourceSpan, Stmt,
 };
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FunctionLowering {
+    I32Value,
+    ProcessMain,
+}
 
 pub(crate) fn to_source_position(lc: LineColumn) -> SourcePosition {
     // `LineColumn::column` is 0-indexed (per proc_macro2's own docs); this
@@ -129,6 +135,29 @@ pub fn lower_rust_source(
     source_text: &str,
     requested_functions: &[&str],
 ) -> Result<Program, Vec<Diagnostic>> {
+    lower_rust_source_inner(source_file, source_text, requested_functions, false)
+}
+
+/// Lowers a conventional, argument-free Rust `fn main()` which ends through
+/// `std::process::exit(i32)`, together with the same-program i32 closure it
+/// calls.  This is deliberately a distinct source contract from
+/// [`lower_rust_source`]: it retains the real unit result of `main` and the
+/// terminating external operation instead of pretending the status expression
+/// itself was the platform entry point.
+pub fn lower_rust_process_main(
+    source_file: &Path,
+    source_text: &str,
+    requested_functions: &[&str],
+) -> Result<Program, Vec<Diagnostic>> {
+    lower_rust_source_inner(source_file, source_text, requested_functions, true)
+}
+
+fn lower_rust_source_inner(
+    source_file: &Path,
+    source_text: &str,
+    requested_functions: &[&str],
+    process_main: bool,
+) -> Result<Program, Vec<Diagnostic>> {
     let file = syn::parse_file(source_text).map_err(|e| {
         vec![Diagnostic::from_lowering_error(
             LoweringError::ParseError {
@@ -143,6 +172,28 @@ pub fn lower_rust_source(
     })?;
 
     let mut diagnostics: Vec<Diagnostic> = Vec::new();
+
+    // The accepted process spelling starts with `std`.  This narrow profile
+    // has no general Rust name resolver, so reject every non-function item
+    // rather than incorrectly assuming `mod std`, `use ... as std`, or an
+    // extern-crate alias could not change that path's meaning.  Ordinary
+    // i32-only lowering intentionally keeps its existing mixed-file policy.
+    if process_main {
+        for item in &file.items {
+            if !matches!(item, Item::Fn(_)) {
+                diagnostics.push(Diagnostic::from_lowering_error(
+                    LoweringError::UnsupportedConstruct {
+                        construct: "non-function item in process-main source".to_owned(),
+                        span: SourceSpan {
+                            start: to_source_position(item.span().start()),
+                            end: to_source_position(item.span().end()),
+                        },
+                    },
+                    SourceLanguage::Rust,
+                ));
+            }
+        }
+    }
 
     // A review caught a real gap: this module only ever inspects the
     // *items* it's asked about, but a file-level inner attribute
@@ -211,7 +262,12 @@ pub fn lower_rust_source(
             continue;
         }
         let item_fn = candidates[0];
-        match lower_item_fn(source_file, item_fn, &declared_functions) {
+        let mode = if process_main && *name == "main" {
+            FunctionLowering::ProcessMain
+        } else {
+            FunctionLowering::I32Value
+        };
+        match lower_item_fn(source_file, item_fn, &declared_functions, mode) {
             Ok(fact) => program.insert(fact),
             Err(errors) => diagnostics.extend(
                 errors
@@ -297,6 +353,7 @@ fn lower_item_fn(
     source_file: &Path,
     item_fn: &ItemFn,
     declared_functions: &std::collections::BTreeSet<String>,
+    mode: FunctionLowering,
 ) -> Result<FnFact, Vec<LoweringError>> {
     let mut errors = Vec::new();
 
@@ -368,20 +425,36 @@ fn lower_item_fn(
         }
     }
 
-    let return_width = match &item_fn.sig.output {
-        ReturnType::Type(_, ty) if type_is_i32(ty) => IntWidth::I32,
-        ReturnType::Type(_, ty) => {
-            errors.push(unsupported("return type other than i32", ty.span()));
-            IntWidth::I32
+    let result = match (mode, &item_fn.sig.output) {
+        (FunctionLowering::I32Value, ReturnType::Type(_, ty)) if type_is_i32(ty) => {
+            FunctionResult::I32
         }
-        ReturnType::Default => {
+        (FunctionLowering::I32Value, ReturnType::Type(_, ty)) => {
+            errors.push(unsupported("return type other than i32", ty.span()));
+            FunctionResult::I32
+        }
+        (FunctionLowering::I32Value, ReturnType::Default) => {
             errors.push(unsupported(
                 "function with no return type",
                 item_fn.sig.span(),
             ));
-            IntWidth::I32
+            FunctionResult::I32
+        }
+        (FunctionLowering::ProcessMain, ReturnType::Default) => FunctionResult::Unit,
+        (FunctionLowering::ProcessMain, ReturnType::Type(_, ty)) => {
+            errors.push(unsupported(
+                "process main with an explicit return type",
+                ty.span(),
+            ));
+            FunctionResult::Unit
         }
     };
+    if mode == FunctionLowering::ProcessMain && !params.is_empty() {
+        errors.push(unsupported(
+            "process main with parameters",
+            item_fn.sig.inputs.span(),
+        ));
+    }
 
     if !errors.is_empty() {
         return Err(errors);
@@ -395,12 +468,12 @@ fn lower_item_fn(
         next_local: 0,
     };
 
-    let body = lower_block(&item_fn.block, &mut ctx)?;
+    let body = lower_block(&item_fn.block, &mut ctx, mode)?;
 
     Ok(FnFact {
         name: item_fn.sig.ident.to_string(),
         params,
-        return_width,
+        result,
         provenance: ctx.prov(item_fn.span()),
         body,
     })
@@ -411,7 +484,11 @@ fn lower_item_fn(
 /// with no semicolon, an `if` used at the tail, or a `return EXPR;`).
 /// Anything else (extra statements after the tail, a `let` with no
 /// initializer, item/macro statements, ...) is rejected.
-fn lower_block(block: &Block, ctx: &mut Ctx) -> Result<Stmt, Vec<LoweringError>> {
+fn lower_block(
+    block: &Block,
+    ctx: &mut Ctx,
+    mode: FunctionLowering,
+) -> Result<Stmt, Vec<LoweringError>> {
     let mut lets: Vec<(&Local, Span)> = Vec::new();
     let mut tail: Option<&SynStmt> = None;
     for stmt in &block.stmts {
@@ -497,7 +574,7 @@ fn lower_block(block: &Block, ctx: &mut Ctx) -> Result<Stmt, Vec<LoweringError>>
         });
     }
 
-    let mut inner = lower_tail_stmt(tail_stmt, ctx)?;
+    let mut inner = lower_tail_stmt(tail_stmt, ctx, mode)?;
 
     for p in pending.into_iter().rev() {
         match p.shadowed {
@@ -518,10 +595,17 @@ fn lower_block(block: &Block, ctx: &mut Ctx) -> Result<Stmt, Vec<LoweringError>>
     Ok(inner)
 }
 
-fn lower_tail_stmt(stmt: &SynStmt, ctx: &mut Ctx) -> Result<Stmt, Vec<LoweringError>> {
+fn lower_tail_stmt(
+    stmt: &SynStmt,
+    ctx: &mut Ctx,
+    mode: FunctionLowering,
+) -> Result<Stmt, Vec<LoweringError>> {
     let SynStmt::Expr(expr, semi) = stmt else {
         unreachable!("lower_block only ever stores an Expr statement as `tail`")
     };
+    if mode == FunctionLowering::ProcessMain {
+        return lower_process_exit_tail(expr, semi, ctx);
+    }
     match expr {
         SynExpr::If(expr_if) if semi.is_none() => lower_if(expr_if, ctx),
         SynExpr::Return(ret) if semi.is_some() => {
@@ -547,6 +631,59 @@ fn lower_tail_stmt(stmt: &SynStmt, ctx: &mut Ctx) -> Result<Stmt, Vec<LoweringEr
     }
 }
 
+fn lower_process_exit_tail(
+    expr: &SynExpr,
+    semi: &Option<syn::token::Semi>,
+    ctx: &mut Ctx,
+) -> Result<Stmt, Vec<LoweringError>> {
+    let SynExpr::Call(call) = expr else {
+        return Err(vec![unsupported_shape(
+            "process main must end with std::process::exit(EXPR);",
+            expr.span(),
+        )]);
+    };
+    let SynExpr::Path(path) = call.func.as_ref() else {
+        return Err(vec![unsupported_shape(
+            "process main exit callee must be std::process::exit",
+            call.func.span(),
+        )]);
+    };
+    let segments = path
+        .path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>();
+    if segments != ["std", "process", "exit"] {
+        return Err(vec![unsupported_shape(
+            "process main exit callee must be std::process::exit",
+            path.span(),
+        )]);
+    }
+    if semi.is_none() {
+        return Err(vec![unsupported_shape(
+            "process main exit must be semicolon-terminated",
+            call.span(),
+        )]);
+    }
+    if call.args.len() != 1 {
+        return Err(vec![unsupported_shape(
+            "std::process::exit requires exactly one i32 status argument",
+            call.span(),
+        )]);
+    }
+    let args = call
+        .args
+        .iter()
+        .map(|arg| lower_expr(arg, ctx))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Stmt::ExternalCall {
+        target: ExternalTarget::ProcessExit,
+        args,
+        provenance: to_provenance(ctx.source_file, call.span()),
+    })
+}
+
 fn lower_if(expr_if: &ExprIf, ctx: &mut Ctx) -> Result<Stmt, Vec<LoweringError>> {
     let mut attr_errors = Vec::new();
     reject_unsupported_attrs(&expr_if.attrs, &mut attr_errors);
@@ -554,7 +691,7 @@ fn lower_if(expr_if: &ExprIf, ctx: &mut Ctx) -> Result<Stmt, Vec<LoweringError>>
         return Err(attr_errors);
     }
     let (cond, swap) = lower_condition(&expr_if.cond, ctx)?;
-    let then = lower_block(&expr_if.then_branch, ctx)?;
+    let then = lower_block(&expr_if.then_branch, ctx, FunctionLowering::I32Value)?;
     let Some((_, else_expr)) = &expr_if.else_branch else {
         return Err(vec![unsupported_shape(
             "if with no else (every path must return)",
@@ -562,7 +699,7 @@ fn lower_if(expr_if: &ExprIf, ctx: &mut Ctx) -> Result<Stmt, Vec<LoweringError>>
         )]);
     };
     let els = match else_expr.as_ref() {
-        SynExpr::Block(b) => lower_block(&b.block, ctx)?,
+        SynExpr::Block(b) => lower_block(&b.block, ctx, FunctionLowering::I32Value)?,
         SynExpr::If(inner) => lower_if(inner, ctx)?,
         other => return Err(vec![unsupported("else-branch shape", other.span())]),
     };
@@ -1172,6 +1309,54 @@ mod tests {
     fn rejects_a_function_with_no_return_type() {
         let source = "fn f(x: i32) { }";
         assert!(lower_rust_source(&path(), source, &["f"]).is_err());
+    }
+
+    #[test]
+    fn process_main_lowers_its_real_unit_result_and_exit_intrinsic() {
+        let source = r#"
+            fn status(x: i32) -> i32 { x.wrapping_add(1) }
+            fn main() {
+                let code = status(74);
+                std::process::exit(code);
+            }
+        "#;
+        let program = lower_rust_process_main(&path(), source, &["status", "main"]).unwrap();
+        assert_eq!(program.functions["main"].result, FunctionResult::Unit);
+        assert!(matches!(
+            &program.functions["main"].body,
+            Stmt::Let {
+                body,
+                ..
+            } if matches!(body.as_ref(), Stmt::ExternalCall {
+                target: ExternalTarget::ProcessExit,
+                args,
+                ..
+            } if args.len() == 1)
+        ));
+    }
+
+    #[test]
+    fn process_main_rejects_an_unresolved_std_shadowing_item() {
+        let source = r#"
+            mod std { pub mod process { pub fn exit(_: i32) {} } }
+            fn main() { std::process::exit(7); }
+        "#;
+        assert!(lower_rust_process_main(&path(), source, &["main"]).is_err());
+    }
+
+    #[test]
+    fn process_main_rejects_noncanonical_exit_shape() {
+        for source in [
+            "fn main() { process::exit(7); }",
+            "fn main() -> i32 { std::process::exit(7); }",
+            "fn main(x: i32) { std::process::exit(x); }",
+            "fn main() { std::process::exit(7, 8); }",
+        ] {
+            assert!(
+                lower_rust_process_main(&path(), source, &["main"]).is_err(),
+                "must reject {source}"
+            );
+        }
     }
 
     #[test]

@@ -72,6 +72,27 @@ pub enum IntWidth {
     I32,
 }
 
+/// The result shape declared by a source function.  `Unit` is distinct from
+/// `I32`: a conventional Rust `fn main()` is not silently represented as a
+/// value-returning function merely because its terminating process operation
+/// happens to carry an integer status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FunctionResult {
+    I32,
+    Unit,
+}
+
+/// A deliberately closed set of external operations that the owned IR can
+/// express.  This is not a stringly-typed FFI escape hatch: each variant has
+/// an independently specified source spelling, ABI lowering, and validation
+/// rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalTarget {
+    /// Rust's conventional `std::process::exit(status)` process termination
+    /// surface, lowered on Darwin through the C `exit` symbol in libSystem.
+    ProcessExit,
+}
+
 /// Identifies one `let`-bound local within a single function body. Scoped
 /// per-function (not globally unique), assigned by whichever frontend
 /// lowers that function.
@@ -160,6 +181,15 @@ pub enum Stmt {
         provenance: Provenance,
     },
     Return(Expr, Provenance),
+    /// A terminating call to one of this IR's closed external targets.  The
+    /// argument vector stays explicit so the validator retains authority over
+    /// target-specific arity instead of assuming every manually constructed
+    /// IR is well formed.
+    ExternalCall {
+        target: ExternalTarget,
+        args: Vec<Expr>,
+        provenance: Provenance,
+    },
 }
 
 impl Stmt {
@@ -168,12 +198,13 @@ impl Stmt {
             Stmt::Let { provenance: p, .. } => p,
             Stmt::If { provenance: p, .. } => p,
             Stmt::Return(_, p) => p,
+            Stmt::ExternalCall { provenance: p, .. } => p,
         }
     }
 }
 
 /// One function's semantic facts: its parameters (name kept for
-/// diagnostics/debugging, width for the actual semantics), return width,
+/// diagnostics/debugging, width for the actual semantics), result shape,
 /// body, and where it was declared. Unlike the fixture's `FnFact`, there is
 /// no `has_side_effects: bool` here -- whether a function can have an
 /// observable effect is derived structurally (does its body transitively
@@ -184,7 +215,7 @@ impl Stmt {
 pub struct FnFact {
     pub name: String,
     pub params: Vec<(String, IntWidth)>,
-    pub return_width: IntWidth,
+    pub result: FunctionResult,
     pub body: Stmt,
     pub provenance: Provenance,
 }
@@ -225,6 +256,9 @@ pub fn stmt_contains_call(stmt: &Stmt) -> bool {
             cond, then, els, ..
         } => expr_contains_call(cond) || stmt_contains_call(then) || stmt_contains_call(els),
         Stmt::Return(expr, _) => expr_contains_call(expr),
+        // An external operation is observably effectful even when its status
+        // expression contains no same-program call of its own.
+        Stmt::ExternalCall { .. } => true,
     }
 }
 
@@ -273,6 +307,7 @@ pub fn max_local_id_in_stmt(stmt: &Stmt) -> Option<u32> {
             max_opt(max_local_id_in_stmt(then), max_local_id_in_stmt(els)),
         ),
         Stmt::Return(expr, _) => max_local_id_in_expr(expr),
+        Stmt::ExternalCall { args, .. } => args.iter().filter_map(max_local_id_in_expr).max(),
     }
 }
 

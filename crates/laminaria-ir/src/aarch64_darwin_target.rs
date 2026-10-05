@@ -1,9 +1,9 @@
 //! Owned AArch64/Mach-O code generation.  No external compiler, assembler, or
 //! linker participates in this module.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use crate::types::{Expr, IntWidth, LocalId, Stmt};
+use crate::types::{Expr, ExternalTarget, IntWidth, LocalId, Stmt};
 use crate::validate::ValidatedProgram;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14,6 +14,7 @@ pub enum CodegenError {
     StackFrameTooLarge(usize),
     BranchOutOfRange { from: usize, target: usize },
     UnboundLocal(LocalId),
+    ExternalSymbolCollision(String),
     UnsupportedConstruct(&'static str),
 }
 
@@ -43,6 +44,10 @@ impl std::fmt::Display for CodegenError {
                 f,
                 "aarch64-darwin target: validated lowering exposed unbound local {local:?}"
             ),
+            Self::ExternalSymbolCollision(symbol) => write!(
+                f,
+                "aarch64-darwin target: external symbol {symbol:?} collides with an owned definition"
+            ),
             Self::UnsupportedConstruct(kind) => write!(
                 f,
                 "aarch64-darwin target: native core does not yet lower {kind}"
@@ -52,12 +57,10 @@ impl std::fmt::Display for CodegenError {
 }
 impl std::error::Error for CodegenError {}
 
-/// Produces a reloc-free ARM64 Mach-O object containing every function in the
-/// validated program. The object is the target-code artifact; a later,
-/// explicit Darwin runtime and link contract turns it into a process
-/// executable. Calls among those emitted functions are patched directly by
-/// LAMINARIA, so they neither invoke nor depend on an assembler or linker
-/// relocation for their target.
+/// Produces an ARM64 Mach-O object containing every function in the validated
+/// program. Calls among those emitted functions are patched directly by
+/// LAMINARIA; a closed set of declared Darwin external targets is represented
+/// with real section relocations and undefined symbols for the native linker.
 pub fn generate_object(program: &ValidatedProgram, entry: &str) -> Result<Vec<u8>, CodegenError> {
     if !program.program().functions.contains_key(entry) {
         return Err(CodegenError::MissingEntry(entry.to_owned()));
@@ -70,7 +73,7 @@ pub fn generate_object(program: &ValidatedProgram, entry: &str) -> Result<Vec<u8
 
     let mut text = Vec::new();
     let mut symbols = BTreeMap::new();
-    let mut calls = Vec::new();
+    let mut branches = Vec::new();
     for (name, function) in &program.program().functions {
         if function.params.len() > 8 {
             return Err(CodegenError::TooManyArguments(function.params.len()));
@@ -83,21 +86,48 @@ pub fn generate_object(program: &ValidatedProgram, entry: &str) -> Result<Vec<u8
         // AArch64 receives integer arguments in w0..w7. Every expression
         // result lives in this function's owned frame before a consumer reads
         // it; x19 anchors that frame across nested calls under AAPCS64.
-        emit_stmt(&mut text, &function.body, &mut context, &mut calls)?;
+        emit_stmt(&mut text, &function.body, &mut context, &mut branches)?;
         debug_assert!(context.is_finished());
     }
-    for call in calls {
-        let target = *symbols
-            .get(&call.callee)
-            .expect("validated programs only call functions in this object");
-        patch_bl(&mut text, call.offset, target)?;
+    let mut relocations = Vec::new();
+    for branch in branches {
+        match branch.target {
+            BranchTarget::Internal(callee) => {
+                let target = *symbols
+                    .get(&callee)
+                    .expect("validated programs only call functions in this object");
+                patch_bl(&mut text, branch.offset, target)?;
+            }
+            BranchTarget::External(target) => relocations.push(ExternalRelocation {
+                offset: branch.offset,
+                symbol: darwin_external_symbol(target).to_owned(),
+            }),
+        }
     }
-    Ok(write_mach_o_object(&text, &symbols, entry))
+    write_mach_o_object(&text, &symbols, entry, &relocations)
 }
 
-struct PendingCall {
+struct PendingBranch {
     offset: usize,
-    callee: String,
+    target: BranchTarget,
+}
+
+enum BranchTarget {
+    Internal(String),
+    External(ExternalTarget),
+}
+
+struct ExternalRelocation {
+    offset: usize,
+    symbol: String,
+}
+
+fn darwin_external_symbol(target: ExternalTarget) -> &'static str {
+    match target {
+        // Darwin's object-file spelling applies the leading underscore to
+        // C's `exit`; it does not select POSIX's distinct `_exit` API.
+        ExternalTarget::ProcessExit => "_exit",
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -216,6 +246,7 @@ fn count_stmt_bindings(stmt: &Stmt) -> usize {
             cond, then, els, ..
         } => count_expr_bindings(cond) + count_stmt_bindings(then) + count_stmt_bindings(els),
         Stmt::Return(expr, _) => count_expr_bindings(expr),
+        Stmt::ExternalCall { args, .. } => args.iter().map(count_expr_bindings).sum(),
     }
 }
 
@@ -226,6 +257,7 @@ fn count_stmt_expressions(stmt: &Stmt) -> usize {
             cond, then, els, ..
         } => count_expr_slots(cond) + count_stmt_expressions(then) + count_stmt_expressions(els),
         Stmt::Return(expr, _) => count_expr_slots(expr),
+        Stmt::ExternalCall { args, .. } => args.iter().map(count_expr_slots).sum(),
     }
 }
 
@@ -265,11 +297,11 @@ fn emit_stmt(
     code: &mut Vec<u8>,
     stmt: &Stmt,
     context: &mut EmitContext,
-    calls: &mut Vec<PendingCall>,
+    branches: &mut Vec<PendingBranch>,
 ) -> Result<(), CodegenError> {
     match stmt {
         Stmt::Return(expr, _) => {
-            let result = emit_expr(code, expr, context, calls)?;
+            let result = emit_expr(code, expr, context, branches)?;
             emit_load_slot(code, result, 0);
             emit_epilogue(code, context.layout.frame_bytes);
             Ok(())
@@ -279,10 +311,10 @@ fn emit_stmt(
         } => {
             // Evaluate before binding: the initializer must still observe an
             // outer binding with the same LocalId, just like the interpreter.
-            let value = emit_expr(code, value, context, calls)?;
+            let value = emit_expr(code, value, context, branches)?;
             let slot = context.bind(*local);
             emit_copy_slot(code, value, slot);
-            let result = emit_stmt(code, body, context, calls);
+            let result = emit_stmt(code, body, context, branches);
             context.unbind(*local);
             result
         }
@@ -294,13 +326,29 @@ fn emit_stmt(
             // branch directly on its owned stack slot. Each branch ends in
             // `ret` by construction of `Stmt`, so no compensating jump is
             // needed after the `then` body.
-            let condition = emit_expr(code, cond, context, calls)?;
+            let condition = emit_expr(code, cond, context, branches)?;
             emit_load_slot(code, condition, 17);
             let else_branch = emit_cbz_placeholder(code, 17);
-            emit_stmt(code, then, context, calls)?;
+            emit_stmt(code, then, context, branches)?;
             let else_offset = code.len();
             patch_cbz(code, else_branch, else_offset)?;
-            emit_stmt(code, els, context, calls)
+            emit_stmt(code, els, context, branches)
+        }
+        Stmt::ExternalCall { target, args, .. } => {
+            debug_assert_eq!(args.len(), 1, "validated external call arity");
+            let status = emit_expr(code, &args[0], context, branches)?;
+            emit_load_slot(code, status, 0);
+            let offset = code.len();
+            emit(code, 0x9400_0000); // bl <external target>, relocated by ld
+            branches.push(PendingBranch {
+                offset,
+                target: BranchTarget::External(*target),
+            });
+            // `ProcessExit` is specified not to return.  Make an ABI or
+            // linker contract violation fail closed rather than accidentally
+            // falling through into another emitted function.
+            emit(code, 0xd420_0000); // brk #0
+            Ok(())
         }
     }
 }
@@ -309,7 +357,7 @@ fn emit_expr(
     code: &mut Vec<u8>,
     expr: &Expr,
     context: &mut EmitContext,
-    calls: &mut Vec<PendingCall>,
+    branches: &mut Vec<PendingBranch>,
 ) -> Result<StackSlot, CodegenError> {
     match expr {
         Expr::IntLit(value, IntWidth::I32, _) => {
@@ -325,13 +373,13 @@ fn emit_expr(
             Ok(result)
         }
         Expr::WrappingAdd(left, right, _) => {
-            emit_binary(code, left, right, context, calls, 0x0b00_0000)
+            emit_binary(code, left, right, context, branches, 0x0b00_0000)
         }
         Expr::WrappingSub(left, right, _) => {
-            emit_binary(code, left, right, context, calls, 0x4b00_0000)
+            emit_binary(code, left, right, context, branches, 0x4b00_0000)
         }
         Expr::WrappingMul(left, right, _) => {
-            emit_binary(code, left, right, context, calls, 0x1b00_7c00)
+            emit_binary(code, left, right, context, branches, 0x1b00_7c00)
         }
         Expr::Local(local, _) => {
             let source = context.local(*local)?;
@@ -340,7 +388,7 @@ fn emit_expr(
             Ok(result)
         }
         Expr::NotEqZero(inner, _) => {
-            let inner = emit_expr(code, inner, context, calls)?;
+            let inner = emit_expr(code, inner, context, branches)?;
             let result = context.temp();
             emit_load_slot(code, inner, 17);
             // `cmp w17, #0; cset w17, ne`. The condition code is encoded as
@@ -360,16 +408,16 @@ fn emit_expr(
             // overwrite an earlier value.
             let mut values = Vec::with_capacity(args.len());
             for argument in args {
-                values.push(emit_expr(code, argument, context, calls)?);
+                values.push(emit_expr(code, argument, context, branches)?);
             }
             for (index, value) in values.into_iter().enumerate() {
                 emit_load_slot(code, value, index as u8);
             }
             let offset = code.len();
             emit(code, 0x9400_0000); // bl <same-object target>, patched below
-            calls.push(PendingCall {
+            branches.push(PendingBranch {
                 offset,
-                callee: callee.0.clone(),
+                target: BranchTarget::Internal(callee.0.clone()),
             });
             let result = context.temp();
             emit_store_slot(code, 0, result);
@@ -378,10 +426,10 @@ fn emit_expr(
         Expr::Let {
             local, value, body, ..
         } => {
-            let value = emit_expr(code, value, context, calls)?;
+            let value = emit_expr(code, value, context, branches)?;
             let slot = context.bind(*local);
             emit_copy_slot(code, value, slot);
-            let result = emit_expr(code, body, context, calls);
+            let result = emit_expr(code, body, context, branches);
             context.unbind(*local);
             result
         }
@@ -393,14 +441,14 @@ fn emit_binary(
     left: &Expr,
     right: &Expr,
     context: &mut EmitContext,
-    calls: &mut Vec<PendingCall>,
+    branches: &mut Vec<PendingBranch>,
     opcode: u32,
 ) -> Result<StackSlot, CodegenError> {
     // Evaluate left then right, matching the owned IR's source order even
     // before calls are lowered.  Each value already has a slot, so a deeply
     // nested expression cannot overwrite an outer operand's scratch register.
-    let left = emit_expr(code, left, context, calls)?;
-    let right = emit_expr(code, right, context, calls)?;
+    let left = emit_expr(code, left, context, branches)?;
+    let right = emit_expr(code, right, context, branches)?;
     let result = context.temp();
     emit_load_slot(code, left, 17);
     emit_load_slot(code, right, 18);
@@ -553,15 +601,18 @@ fn name(out: &mut Vec<u8>, value: &str) {
     out.extend_from_slice(&bytes);
 }
 
-fn write_mach_o_object(text: &[u8], symbols: &BTreeMap<String, usize>, entry: &str) -> Vec<u8> {
+fn write_mach_o_object(
+    text: &[u8],
+    symbols: &BTreeMap<String, usize>,
+    entry: &str,
+    relocations: &[ExternalRelocation],
+) -> Result<Vec<u8>, CodegenError> {
     const HEADER_SIZE: usize = 32;
     const SEGMENT_COMMAND_SIZE: usize = 152;
     const SYMTAB_COMMAND_SIZE: usize = 24;
     const NLIST64_SIZE: usize = 16;
     let section_offset = HEADER_SIZE + SEGMENT_COMMAND_SIZE + SYMTAB_COMMAND_SIZE;
-    let symtab_offset = (section_offset + text.len() + 7) & !7;
-    let string_table_offset = symtab_offset + NLIST64_SIZE * symbols.len();
-    let external_symbols: Vec<_> = symbols
+    let defined_symbols: Vec<_> = symbols
         .iter()
         .map(|(name, offset)| {
             (
@@ -574,10 +625,37 @@ fn write_mach_o_object(text: &[u8], symbols: &BTreeMap<String, usize>, entry: &s
             )
         })
         .collect();
-    let string_table_size = 1 + external_symbols
+    let undefined_symbols: Vec<_> = relocations
         .iter()
-        .map(|(symbol, _)| symbol.len() + 1)
-        .sum::<usize>();
+        .map(|relocation| relocation.symbol.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    for symbol in &undefined_symbols {
+        if defined_symbols.iter().any(|(defined, _)| defined == symbol) {
+            return Err(CodegenError::ExternalSymbolCollision(symbol.clone()));
+        }
+    }
+    let relocation_offset = (section_offset + text.len() + 3) & !3;
+    let symtab_offset = (relocation_offset + relocations.len() * 8 + 7) & !7;
+    let string_table_offset =
+        symtab_offset + NLIST64_SIZE * (defined_symbols.len() + undefined_symbols.len());
+    let string_table_size = 1
+        + defined_symbols
+            .iter()
+            .map(|(symbol, _)| symbol.len() + 1)
+            .sum::<usize>()
+        + undefined_symbols
+            .iter()
+            .map(|symbol| symbol.len() + 1)
+            .sum::<usize>();
+    let symbol_indexes: BTreeMap<_, _> = defined_symbols
+        .iter()
+        .map(|(symbol, _)| symbol.clone())
+        .chain(undefined_symbols.iter().cloned())
+        .enumerate()
+        .map(|(index, symbol)| (symbol, index as u32))
+        .collect();
     let mut image = Vec::with_capacity(string_table_offset + string_table_size);
     u32le(&mut image, 0xfeed_facf);
     u32le(&mut image, 0x0100_000c);
@@ -590,7 +668,9 @@ fn write_mach_o_object(text: &[u8], symbols: &BTreeMap<String, usize>, entry: &s
     );
     u32le(&mut image, 0);
     u32le(&mut image, 0);
-    // LC_SEGMENT_64 __TEXT with one regular, reloc-free __text section.
+    // LC_SEGMENT_64 __TEXT with one regular __text section.  Relocations, if
+    // any, stay section-owned in this MH_OBJECT; they do not need a dylib-only
+    // LC_DYSYMTAB table.
     u32le(&mut image, 0x19);
     u32le(&mut image, 152);
     name(&mut image, "__TEXT");
@@ -608,26 +688,50 @@ fn write_mach_o_object(text: &[u8], symbols: &BTreeMap<String, usize>, entry: &s
     u64le(&mut image, text.len() as u64);
     u32le(&mut image, section_offset as u32);
     u32le(&mut image, 2);
-    u32le(&mut image, 0);
-    u32le(&mut image, 0);
+    u32le(
+        &mut image,
+        if relocations.is_empty() {
+            0
+        } else {
+            relocation_offset as u32
+        },
+    );
+    u32le(&mut image, relocations.len() as u32);
     // S_REGULAR | S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS.
     u32le(&mut image, 0x8000_0400);
     u32le(&mut image, 0);
     u32le(&mut image, 0);
     u32le(&mut image, 0);
-    // LC_SYMTAB and one external `N_SECT` symbol per owned function. This is
-    // the native-link interface: the linker sees names and section offsets
-    // emitted by LAMINARIA, not delegated compiler output.
+    // LC_SYMTAB carries owned external definitions followed by undefined
+    // external references. This is the native-link interface: the linker sees
+    // names, section offsets, and relocation targets emitted by LAMINARIA,
+    // not delegated compiler output.
     u32le(&mut image, 0x2);
     u32le(&mut image, SYMTAB_COMMAND_SIZE as u32);
     u32le(&mut image, symtab_offset as u32);
-    u32le(&mut image, external_symbols.len() as u32);
+    u32le(
+        &mut image,
+        (defined_symbols.len() + undefined_symbols.len()) as u32,
+    );
     u32le(&mut image, string_table_offset as u32);
     u32le(&mut image, string_table_size as u32);
     image.extend_from_slice(text);
+    image.resize(relocation_offset, 0);
+    for relocation in relocations {
+        let symbol_index = symbol_indexes[&relocation.symbol];
+        // `relocation_info` from cctools: section-relative `r_address`, then
+        // r_symbolnum:24 | r_pcrel:1 | r_length:2 | r_extern:1 | r_type:4.
+        // ARM64_RELOC_BRANCH26 is enum value 2, and cctools' canonical
+        // `bl _foo` example sets pcrel/external/length to 1/1/2.
+        u32le(&mut image, relocation.offset as u32);
+        u32le(
+            &mut image,
+            symbol_index | (1 << 24) | (2 << 25) | (1 << 27) | (2 << 28),
+        );
+    }
     image.resize(symtab_offset, 0);
     let mut string_index = 1_u32;
-    for (symbol, offset) in &external_symbols {
+    for (symbol, offset) in &defined_symbols {
         u32le(&mut image, string_index);
         image.push(0x0f); // N_SECT | N_EXT
         image.push(1); // __text section
@@ -635,18 +739,30 @@ fn write_mach_o_object(text: &[u8], symbols: &BTreeMap<String, usize>, entry: &s
         u64le(&mut image, *offset as u64); // section offset in MH_OBJECT
         string_index += (symbol.len() + 1) as u32;
     }
+    for symbol in &undefined_symbols {
+        u32le(&mut image, string_index);
+        image.push(0x01); // N_UNDF | N_EXT
+        image.push(0); // NO_SECT
+        image.extend_from_slice(&0_u16.to_le_bytes());
+        u64le(&mut image, 0);
+        string_index += (symbol.len() + 1) as u32;
+    }
     image.push(0); // string-table index zero is the empty name
-    for (symbol, _) in &external_symbols {
+    for (symbol, _) in &defined_symbols {
         image.extend_from_slice(symbol.as_bytes());
         image.push(0);
     }
-    image
+    for symbol in &undefined_symbols {
+        image.extend_from_slice(symbol.as_bytes());
+        image.push(0);
+    }
+    Ok(image)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rust_frontend::lower_rust_source;
+    use crate::rust_frontend::{lower_rust_process_main, lower_rust_source};
     use crate::types::{FnFact, Program, Provenance, SourceLanguage, SourcePosition, SourceSpan};
     use crate::validate::validate_program;
     #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
@@ -699,6 +815,79 @@ mod tests {
         assert!(!image
             .windows(b"_selected_entry\0".len())
             .any(|window| window == b"_selected_entry\0"));
+    }
+
+    #[test]
+    fn process_main_uses_a_real_branch26_relocation_for_libsystem_exit() {
+        let source = r#"
+            fn status() -> i32 { 75 }
+            fn main() { std::process::exit(status()); }
+        "#;
+        let program = lower_rust_process_main(
+            std::path::Path::new("process-main.rs"),
+            source,
+            &["status", "main"],
+        )
+        .unwrap();
+        let image = generate_object(&validate_program(&program).unwrap(), "main").unwrap();
+
+        // Exactly the two object-file commands we emit: __TEXT and SYMTAB.
+        // In particular, an MH_OBJECT owns its relocation from section_64 and
+        // does not need the dylib-oriented LC_DYSYMTAB command.
+        assert_eq!(u32::from_le_bytes(image[16..20].try_into().unwrap()), 2);
+        assert_eq!(u32::from_le_bytes(image[32..36].try_into().unwrap()), 0x19);
+        assert_eq!(u32::from_le_bytes(image[184..188].try_into().unwrap()), 0x2);
+
+        let relocation_offset = u32::from_le_bytes(image[160..164].try_into().unwrap()) as usize;
+        assert_ne!(relocation_offset, 0);
+        assert_eq!(u32::from_le_bytes(image[164..168].try_into().unwrap()), 1);
+        let branch_offset = u32::from_le_bytes(
+            image[relocation_offset..relocation_offset + 4]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        let relocation_word = u32::from_le_bytes(
+            image[relocation_offset + 4..relocation_offset + 8]
+                .try_into()
+                .unwrap(),
+        );
+        assert_eq!(
+            u32::from_le_bytes(
+                image[208 + branch_offset..212 + branch_offset]
+                    .try_into()
+                    .unwrap()
+            ),
+            0x9400_0000
+        );
+        assert_eq!((relocation_word >> 24) & 1, 1); // r_pcrel
+        assert_eq!((relocation_word >> 25) & 3, 2); // r_length = 32-bit instruction
+        assert_eq!((relocation_word >> 27) & 1, 1); // r_extern
+        assert_eq!((relocation_word >> 28) & 0xf, 2); // ARM64_RELOC_BRANCH26
+
+        let symtab_offset = u32::from_le_bytes(image[192..196].try_into().unwrap()) as usize;
+        let symbol_count = u32::from_le_bytes(image[196..200].try_into().unwrap()) as usize;
+        let string_table_offset = u32::from_le_bytes(image[200..204].try_into().unwrap()) as usize;
+        let exit_index = (0..symbol_count)
+            .find(|index| {
+                let nlist = symtab_offset + index * 16;
+                let string_index =
+                    u32::from_le_bytes(image[nlist..nlist + 4].try_into().unwrap()) as usize;
+                let end = image[string_table_offset + string_index..]
+                    .iter()
+                    .position(|byte| *byte == 0)
+                    .unwrap();
+                &image[string_table_offset + string_index..string_table_offset + string_index + end]
+                    == b"_exit"
+            })
+            .expect("an undefined Darwin _exit symbol");
+        let exit_nlist = symtab_offset + exit_index * 16;
+        assert_eq!(image[exit_nlist + 4], 0x01); // N_UNDF | N_EXT
+        assert_eq!(image[exit_nlist + 5], 0); // NO_SECT
+        assert_eq!(
+            u64::from_le_bytes(image[exit_nlist + 8..exit_nlist + 16].try_into().unwrap()),
+            0
+        );
+        assert_eq!(relocation_word & 0x00ff_ffff, exit_index as u32);
     }
 
     #[test]
@@ -792,6 +981,23 @@ mod tests {
 
     #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
     #[test]
+    fn conventional_process_main_links_the_exit_relocation_and_launches() {
+        let source = r#"
+            fn increment(x: i32) -> i32 { x.wrapping_add(1) }
+            fn status() -> i32 { increment(74) }
+            fn main() { std::process::exit(status()); }
+        "#;
+        let program = lower_rust_process_main(
+            std::path::Path::new("process-main.rs"),
+            source,
+            &["increment", "status", "main"],
+        )
+        .unwrap();
+        assert_owned_object_exits(&validate_program(&program).unwrap(), 75);
+    }
+
+    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+    #[test]
     fn expression_let_shadowing_preserves_the_outer_value_until_binding() {
         // `Expr::Let` is introduced by owned transforms rather than directly
         // by this Rust frontend.  Exercise it as production IR, including a
@@ -802,7 +1008,7 @@ mod tests {
         program.insert(FnFact {
             name: "main".to_owned(),
             params: vec![],
-            return_width: IntWidth::I32,
+            result: crate::types::FunctionResult::I32,
             provenance: provenance.clone(),
             body: Stmt::Let {
                 local: LocalId(0),

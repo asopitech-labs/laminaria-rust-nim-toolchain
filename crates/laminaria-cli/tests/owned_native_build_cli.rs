@@ -68,7 +68,11 @@ fn owned_native_build_lowers_links_and_launches_supported_main() {
     let root = temp_dir("success");
     let source = root.join("main.rs");
     let output_dir = root.join("out");
-    std::fs::write(&source, "fn main() -> i32 { 2i32.wrapping_add(5) }\n").unwrap();
+    std::fs::write(
+        &source,
+        "fn status() -> i32 { 2i32.wrapping_add(5) }\nfn main() { std::process::exit(status()); }\n",
+    )
+    .unwrap();
 
     let output = owned_native_command(&source, &output_dir).output().unwrap();
     assert!(
@@ -103,10 +107,11 @@ fn owned_native_build_lowers_links_and_launches_source_conditional() {
     let output_dir = root.join("out");
     std::fs::write(
         &source,
-        r#"fn main() -> i32 {
+        r#"fn status() -> i32 {
             let zero = 3i32.wrapping_sub(3);
             if zero != 0 { 27 } else { 11 }
         }
+        fn main() { std::process::exit(status()); }
         "#,
     )
     .unwrap();
@@ -141,7 +146,7 @@ fn owned_native_build_discovers_lowers_links_and_launches_transitive_calls() {
         fn pack(left: i32, right: i32) -> i32 {
             left.wrapping_mul(10).wrapping_add(right)
         }
-        fn main() -> i32 { pack(combine(3), increment(4)) }
+        fn main() { std::process::exit(pack(combine(3), increment(4))); }
         "#,
     )
     .unwrap();
@@ -202,7 +207,7 @@ fn owned_native_build_reports_unsupported_source_before_linking() {
     let output_dir = root.join("out");
     std::fs::write(
         &source,
-        "fn main() -> i32 { println!(\"not in the owned subset\"); 0i32 }\n",
+        "fn main() { println!(\"not in the owned subset\"); std::process::exit(0); }\n",
     )
     .unwrap();
 
