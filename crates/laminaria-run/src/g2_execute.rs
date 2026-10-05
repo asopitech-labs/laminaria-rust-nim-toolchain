@@ -1133,7 +1133,7 @@ struct ProvenanceStatement<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SeededGap {
     None,
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     Omit(RequiredActionKind),
 }
 
@@ -1141,7 +1141,7 @@ impl SeededGap {
     fn omits(self, _kind: RequiredActionKind) -> bool {
         match self {
             Self::None => false,
-            #[cfg(test)]
+            #[cfg(all(test, target_os = "linux"))]
             Self::Omit(omitted) => omitted == _kind,
         }
     }
@@ -1497,7 +1497,9 @@ mod tests {
     use crate::cross_ecosystem_ingest::{
         ingest_cargo_metadata, ingest_fixture_input, FixtureLayout,
     };
-    use laminaria_plan::dependency_graph::{resolve, ObligationKind, ObligationState};
+    #[cfg(target_os = "linux")]
+    use laminaria_plan::dependency_graph::ObligationKind;
+    use laminaria_plan::dependency_graph::{resolve, ObligationState};
 
     /// Same computation `FixtureLayout::discover` uses for its own
     /// `root`, minus the `fixtures/cross-ecosystem-native-executable`
@@ -1512,6 +1514,7 @@ mod tests {
             .unwrap()
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn fixed_m1_production_entry_point_publishes_only_the_fully_closed_exact_artifact() {
         let out_dir = std::env::temp_dir().join(format!(
@@ -1621,6 +1624,7 @@ mod tests {
         let _ = fs::remove_dir_all(&out_dir);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn fixed_m1_production_entry_point_blocks_a_seeded_missing_provenance_operation() {
         let out_dir = std::env::temp_dir().join(format!(
