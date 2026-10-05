@@ -47,54 +47,71 @@ impl std::fmt::Display for CodegenError {
 }
 impl std::error::Error for CodegenError {}
 
-/// Produces a reloc-free ARM64 Mach-O object containing one owned function.
-/// The object is the target-code artifact; a later, explicit Darwin runtime
-/// and link contract turns it into a process executable.
+/// Produces a reloc-free ARM64 Mach-O object containing every function in the
+/// validated program. The object is the target-code artifact; a later,
+/// explicit Darwin runtime and link contract turns it into a process
+/// executable. Calls among those emitted functions are patched directly by
+/// LAMINARIA, so they neither invoke nor depend on an assembler or linker
+/// relocation for their target.
 pub fn generate_object(program: &ValidatedProgram, entry: &str) -> Result<Vec<u8>, CodegenError> {
-    let function = program
-        .program()
-        .functions
-        .get(entry)
-        .ok_or_else(|| CodegenError::MissingEntry(entry.to_owned()))?;
-    if function.params.len() > 8 {
-        return Err(CodegenError::TooManyArguments(function.params.len()));
+    if !program.program().functions.contains_key(entry) {
+        return Err(CodegenError::MissingEntry(entry.to_owned()));
     }
 
-    let layout = FrameLayout::for_stmt(&function.body)?;
     let mut text = Vec::new();
-    emit_prologue(&mut text, layout.frame_bytes);
-    let mut context = EmitContext::new(layout);
-    // Function receives i32 arguments in w0..w7 by the Darwin AArch64
-    // integer calling convention.  Every expression result is materialized in
-    // our own fixed stack frame before its consumer reads it.  This gives a
-    // source `let` a stable location without using a callee-saved register or
-    // changing the public ABI.
-    emit_stmt(&mut text, &function.body, &mut context)?;
-    debug_assert!(context.is_finished());
-    Ok(write_mach_o_object(&text, entry))
+    let mut symbols = BTreeMap::new();
+    let mut calls = Vec::new();
+    for (name, function) in &program.program().functions {
+        if function.params.len() > 8 {
+            return Err(CodegenError::TooManyArguments(function.params.len()));
+        }
+        symbols.insert(name.clone(), text.len());
+        let layout = FrameLayout::for_function(function.params.len(), &function.body)?;
+        emit_prologue(&mut text, layout.frame_bytes);
+        let mut context = EmitContext::new(layout);
+        emit_parameter_spills(&mut text, function.params.len());
+        // AArch64 receives integer arguments in w0..w7. Every expression
+        // result lives in this function's owned frame before a consumer reads
+        // it; x19 anchors that frame across nested calls under AAPCS64.
+        emit_stmt(&mut text, &function.body, &mut context, &mut calls)?;
+        debug_assert!(context.is_finished());
+    }
+    for call in calls {
+        let target = *symbols
+            .get(&call.callee)
+            .expect("validated programs only call functions in this object");
+        patch_bl(&mut text, call.offset, target)?;
+    }
+    Ok(write_mach_o_object(&text, &symbols))
+}
+
+struct PendingCall {
+    offset: usize,
+    callee: String,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct StackSlot(usize);
 
-/// The first part of a frame is reserved for bindings, one slot per lexical
-/// binding occurrence; the remainder holds materialized expression results.
-/// Binding occurrences, rather than `LocalId` values, receive slots so even a
-/// manually-built IR tree which shadows an identical `LocalId` preserves the
-/// interpreter's save-and-restore semantics.
+/// The first part of a frame owns incoming ABI parameters, followed by one
+/// slot per lexical binding occurrence; the remainder holds materialized
+/// expression results. Binding occurrences, rather than `LocalId` values,
+/// receive slots so even a manually-built IR tree which shadows an identical
+/// `LocalId` preserves the interpreter's save-and-restore semantics.
 #[derive(Debug, Clone, Copy)]
 struct FrameLayout {
+    param_slots: usize,
     local_slots: usize,
     total_slots: usize,
     frame_bytes: u32,
 }
 
 impl FrameLayout {
-    fn for_stmt(stmt: &Stmt) -> Result<Self, CodegenError> {
+    fn for_function(param_slots: usize, stmt: &Stmt) -> Result<Self, CodegenError> {
         let local_slots = count_stmt_bindings(stmt);
-        let total_slots = local_slots + count_stmt_expressions(stmt);
+        let total_slots = param_slots + local_slots + count_stmt_expressions(stmt);
         // A 32-bit LDR/STR with an unsigned immediate can address 4096
-        // four-byte slots from x16.  Do not silently synthesize a different
+        // four-byte slots from x19. Do not silently synthesize a different
         // addressing contract once that small, reloc-free core is exceeded.
         if total_slots > 4096 {
             return Err(CodegenError::StackFrameTooLarge(total_slots));
@@ -107,6 +124,7 @@ impl FrameLayout {
             .map(|bytes| bytes & !15)
             .ok_or(CodegenError::StackFrameTooLarge(total_slots))?;
         Ok(Self {
+            param_slots,
             local_slots,
             total_slots,
             frame_bytes: frame_bytes as u32,
@@ -127,14 +145,14 @@ impl EmitContext {
     fn new(layout: FrameLayout) -> Self {
         Self {
             next_local_slot: 0,
-            next_temp_slot: layout.local_slots,
+            next_temp_slot: layout.param_slots + layout.local_slots,
             layout,
             locals: BTreeMap::new(),
         }
     }
 
     fn bind(&mut self, local: LocalId) -> StackSlot {
-        let slot = StackSlot(self.next_local_slot);
+        let slot = StackSlot(self.layout.param_slots + self.next_local_slot);
         self.next_local_slot += 1;
         self.locals.entry(local).or_default().push(slot);
         slot
@@ -157,6 +175,14 @@ impl EmitContext {
             .and_then(|bindings| bindings.last())
             .copied()
             .ok_or(CodegenError::UnboundLocal(local))
+    }
+
+    fn parameter(&self, index: usize) -> Result<StackSlot, CodegenError> {
+        if index < self.layout.param_slots {
+            Ok(StackSlot(index))
+        } else {
+            Err(CodegenError::TooManyArguments(index + 1))
+        }
     }
 
     fn temp(&mut self) -> StackSlot {
@@ -229,12 +255,13 @@ fn emit_stmt(
     code: &mut Vec<u8>,
     stmt: &Stmt,
     context: &mut EmitContext,
+    calls: &mut Vec<PendingCall>,
 ) -> Result<(), CodegenError> {
     match stmt {
         Stmt::Return(expr, _) => {
-            let result = emit_expr(code, expr, context)?;
+            let result = emit_expr(code, expr, context, calls)?;
             emit_load_slot(code, result, 0);
-            emit_epilogue(code);
+            emit_epilogue(code, context.layout.frame_bytes);
             Ok(())
         }
         Stmt::Let {
@@ -242,10 +269,10 @@ fn emit_stmt(
         } => {
             // Evaluate before binding: the initializer must still observe an
             // outer binding with the same LocalId, just like the interpreter.
-            let value = emit_expr(code, value, context)?;
+            let value = emit_expr(code, value, context, calls)?;
             let slot = context.bind(*local);
             emit_copy_slot(code, value, slot);
-            let result = emit_stmt(code, body, context);
+            let result = emit_stmt(code, body, context, calls);
             context.unbind(*local);
             result
         }
@@ -257,13 +284,13 @@ fn emit_stmt(
             // branch directly on its owned stack slot. Each branch ends in
             // `ret` by construction of `Stmt`, so no compensating jump is
             // needed after the `then` body.
-            let condition = emit_expr(code, cond, context)?;
+            let condition = emit_expr(code, cond, context, calls)?;
             emit_load_slot(code, condition, 17);
             let else_branch = emit_cbz_placeholder(code, 17);
-            emit_stmt(code, then, context)?;
+            emit_stmt(code, then, context, calls)?;
             let else_offset = code.len();
             patch_cbz(code, else_branch, else_offset)?;
-            emit_stmt(code, els, context)
+            emit_stmt(code, els, context, calls)
         }
     }
 }
@@ -272,6 +299,7 @@ fn emit_expr(
     code: &mut Vec<u8>,
     expr: &Expr,
     context: &mut EmitContext,
+    calls: &mut Vec<PendingCall>,
 ) -> Result<StackSlot, CodegenError> {
     match expr {
         Expr::IntLit(value, IntWidth::I32, _) => {
@@ -281,16 +309,20 @@ fn emit_expr(
             Ok(result)
         }
         Expr::Param(index, _) => {
-            if *index >= 8 {
-                return Err(CodegenError::TooManyArguments(*index + 1));
-            }
+            let parameter = context.parameter(*index)?;
             let result = context.temp();
-            emit_store_slot(code, *index as u8, result);
+            emit_copy_slot(code, parameter, result);
             Ok(result)
         }
-        Expr::WrappingAdd(left, right, _) => emit_binary(code, left, right, context, 0x0b00_0000),
-        Expr::WrappingSub(left, right, _) => emit_binary(code, left, right, context, 0x4b00_0000),
-        Expr::WrappingMul(left, right, _) => emit_binary(code, left, right, context, 0x1b00_7c00),
+        Expr::WrappingAdd(left, right, _) => {
+            emit_binary(code, left, right, context, calls, 0x0b00_0000)
+        }
+        Expr::WrappingSub(left, right, _) => {
+            emit_binary(code, left, right, context, calls, 0x4b00_0000)
+        }
+        Expr::WrappingMul(left, right, _) => {
+            emit_binary(code, left, right, context, calls, 0x1b00_7c00)
+        }
         Expr::Local(local, _) => {
             let source = context.local(*local)?;
             let result = context.temp();
@@ -298,7 +330,7 @@ fn emit_expr(
             Ok(result)
         }
         Expr::NotEqZero(inner, _) => {
-            let inner = emit_expr(code, inner, context)?;
+            let inner = emit_expr(code, inner, context, calls)?;
             let result = context.temp();
             emit_load_slot(code, inner, 17);
             // `cmp w17, #0; cset w17, ne`. The condition code is encoded as
@@ -308,14 +340,38 @@ fn emit_expr(
             emit_store_slot(code, 17, result);
             Ok(result)
         }
-        Expr::Call(..) => Err(CodegenError::UnsupportedConstruct("function call")),
+        Expr::Call(callee, args, _) => {
+            if args.len() > 8 {
+                return Err(CodegenError::TooManyArguments(args.len()));
+            }
+            // Source order is semantically observable once nested calls are
+            // available. Materialize every argument first, then load the ABI
+            // registers immediately before BL so a later argument cannot
+            // overwrite an earlier value.
+            let mut values = Vec::with_capacity(args.len());
+            for argument in args {
+                values.push(emit_expr(code, argument, context, calls)?);
+            }
+            for (index, value) in values.into_iter().enumerate() {
+                emit_load_slot(code, value, index as u8);
+            }
+            let offset = code.len();
+            emit(code, 0x9400_0000); // bl <same-object target>, patched below
+            calls.push(PendingCall {
+                offset,
+                callee: callee.0.clone(),
+            });
+            let result = context.temp();
+            emit_store_slot(code, 0, result);
+            Ok(result)
+        }
         Expr::Let {
             local, value, body, ..
         } => {
-            let value = emit_expr(code, value, context)?;
+            let value = emit_expr(code, value, context, calls)?;
             let slot = context.bind(*local);
             emit_copy_slot(code, value, slot);
-            let result = emit_expr(code, body, context);
+            let result = emit_expr(code, body, context, calls);
             context.unbind(*local);
             result
         }
@@ -327,13 +383,14 @@ fn emit_binary(
     left: &Expr,
     right: &Expr,
     context: &mut EmitContext,
+    calls: &mut Vec<PendingCall>,
     opcode: u32,
 ) -> Result<StackSlot, CodegenError> {
     // Evaluate left then right, matching the owned IR's source order even
     // before calls are lowered.  Each value already has a slot, so a deeply
     // nested expression cannot overwrite an outer operand's scratch register.
-    let left = emit_expr(code, left, context)?;
-    let right = emit_expr(code, right, context)?;
+    let left = emit_expr(code, left, context, calls)?;
+    let right = emit_expr(code, right, context, calls)?;
     let result = context.temp();
     emit_load_slot(code, left, 17);
     emit_load_slot(code, right, 18);
@@ -347,9 +404,23 @@ fn emit_prologue(code: &mut Vec<u8>, frame_bytes: u32) {
     emit(code, 0xa9bf_7bfd);
     emit(code, 0x9100_03fd);
     emit_sub_sp(code, frame_bytes);
-    // x16 is caller-saved and no call exists in this lowering subset.  It
-    // anchors every local/result slot while keeping sp 16-byte aligned.
-    emit(code, 0x9100_03f0); // mov x16, sp
+    // `x19` is callee-saved under AAPCS64. Keep the owned frame base there,
+    // rather than in x16/x17, because calls are now a normal lowering
+    // operation. The extra 16-byte decrement preserves the ABI's required
+    // 16-byte SP alignment while giving us an aligned save slot for x19.
+    emit_sub_sp(code, 16);
+    emit_store_u64_sp(code, 19, frame_bytes);
+    emit(code, 0x9100_03f3); // mov x19, sp
+}
+
+/// Preserve every incoming ABI integer argument before any expression can
+/// issue a nested call. A later `BL` is allowed to overwrite w0..w7, while
+/// `Expr::Param` always reads the owned copies in x19's frame.
+fn emit_parameter_spills(code: &mut Vec<u8>, count: usize) {
+    debug_assert!(count <= 8);
+    for register in 0..count {
+        emit_store_slot(code, register as u8, StackSlot(register));
+    }
 }
 
 fn emit_sub_sp(code: &mut Vec<u8>, mut bytes: u32) {
@@ -360,7 +431,8 @@ fn emit_sub_sp(code: &mut Vec<u8>, mut bytes: u32) {
     }
 }
 
-fn emit_epilogue(code: &mut Vec<u8>) {
+fn emit_epilogue(code: &mut Vec<u8>, frame_bytes: u32) {
+    emit_load_u64_sp(code, frame_bytes, 19);
     emit(code, 0x9100_03bf); // mov sp, x29
     emit(code, 0xa8c1_7bfd); // ldp x29, x30, [sp], #16
     emit(code, 0xd65f_03c0); // ret
@@ -370,7 +442,7 @@ fn emit_load_slot(code: &mut Vec<u8>, slot: StackSlot, register: u8) {
     let offset = u32::try_from(slot.0).expect("frame layout bounds stack slots") << 2;
     emit(
         code,
-        0xb940_0000 | (offset << 8) | (16 << 5) | register as u32,
+        0xb940_0000 | (offset << 8) | (19 << 5) | register as u32,
     );
 }
 
@@ -378,13 +450,29 @@ fn emit_store_slot(code: &mut Vec<u8>, register: u8, slot: StackSlot) {
     let offset = u32::try_from(slot.0).expect("frame layout bounds stack slots") << 2;
     emit(
         code,
-        0xb900_0000 | (offset << 8) | (16 << 5) | register as u32,
+        0xb900_0000 | (offset << 8) | (19 << 5) | register as u32,
     );
 }
 
 fn emit_copy_slot(code: &mut Vec<u8>, from: StackSlot, to: StackSlot) {
     emit_load_slot(code, from, 17);
     emit_store_slot(code, 17, to);
+}
+
+fn emit_store_u64_sp(code: &mut Vec<u8>, register: u8, byte_offset: u32) {
+    debug_assert_eq!(byte_offset % 8, 0);
+    emit(
+        code,
+        0xf900_03e0 | ((byte_offset / 8) << 10) | register as u32,
+    );
+}
+
+fn emit_load_u64_sp(code: &mut Vec<u8>, byte_offset: u32, register: u8) {
+    debug_assert_eq!(byte_offset % 8, 0);
+    emit(
+        code,
+        0xf940_03e0 | ((byte_offset / 8) << 10) | register as u32,
+    );
 }
 
 /// Emits `cbz w<register>, <target>` with a later-bound target and returns
@@ -413,6 +501,26 @@ fn patch_cbz(code: &mut [u8], from: usize, target: usize) -> Result<(), CodegenE
     Ok(())
 }
 
+/// Patch a `BL` whose destination is another function in this generated
+/// `__text` section. AArch64 `imm26` is PC-relative in instruction words;
+/// this never becomes a Mach-O relocation because both endpoints are owned
+/// by the same emitted object.
+fn patch_bl(code: &mut [u8], from: usize, target: usize) -> Result<(), CodegenError> {
+    let distance = target as isize - from as isize;
+    let words = distance / 4;
+    if distance % 4 != 0 || !(-(1 << 25)..(1 << 25)).contains(&words) {
+        return Err(CodegenError::BranchOutOfRange { from, target });
+    }
+    let mut instruction = u32::from_le_bytes(
+        code[from..from + 4]
+            .try_into()
+            .expect("branch instruction is fully emitted before patching"),
+    );
+    instruction |= (words as i32 as u32) & 0x03ff_ffff;
+    code[from..from + 4].copy_from_slice(&instruction.to_le_bytes());
+    Ok(())
+}
+
 fn emit(code: &mut Vec<u8>, instruction: u32) {
     code.extend_from_slice(&instruction.to_le_bytes());
 }
@@ -435,16 +543,22 @@ fn name(out: &mut Vec<u8>, value: &str) {
     out.extend_from_slice(&bytes);
 }
 
-fn write_mach_o_object(text: &[u8], symbol: &str) -> Vec<u8> {
+fn write_mach_o_object(text: &[u8], symbols: &BTreeMap<String, usize>) -> Vec<u8> {
     const HEADER_SIZE: usize = 32;
     const SEGMENT_COMMAND_SIZE: usize = 152;
     const SYMTAB_COMMAND_SIZE: usize = 24;
     const NLIST64_SIZE: usize = 16;
     let section_offset = HEADER_SIZE + SEGMENT_COMMAND_SIZE + SYMTAB_COMMAND_SIZE;
     let symtab_offset = (section_offset + text.len() + 7) & !7;
-    let string_table_offset = symtab_offset + NLIST64_SIZE;
-    let external_symbol = format!("_{symbol}");
-    let string_table_size = external_symbol.len() + 2; // leading and trailing NUL
+    let string_table_offset = symtab_offset + NLIST64_SIZE * symbols.len();
+    let external_symbols: Vec<_> = symbols
+        .iter()
+        .map(|(name, offset)| (format!("_{name}"), *offset))
+        .collect();
+    let string_table_size = 1 + external_symbols
+        .iter()
+        .map(|(symbol, _)| symbol.len() + 1)
+        .sum::<usize>();
     let mut image = Vec::with_capacity(string_table_offset + string_table_size);
     u32le(&mut image, 0xfeed_facf);
     u32le(&mut image, 0x0100_000c);
@@ -482,25 +596,34 @@ fn write_mach_o_object(text: &[u8], symbol: &str) -> Vec<u8> {
     u32le(&mut image, 0);
     u32le(&mut image, 0);
     u32le(&mut image, 0);
-    // LC_SYMTAB and a single external `N_SECT` symbol. This is the exact
-    // native-link interface: the linker sees a symbol emitted by LAMINARIA,
-    // not a name inferred from source or delegated compiler output.
+    // LC_SYMTAB and one external `N_SECT` symbol per owned function. This is
+    // the native-link interface: the linker sees names and section offsets
+    // emitted by LAMINARIA, not delegated compiler output.
     u32le(&mut image, 0x2);
     u32le(&mut image, SYMTAB_COMMAND_SIZE as u32);
     u32le(&mut image, symtab_offset as u32);
-    u32le(&mut image, 1);
+    u32le(&mut image, external_symbols.len() as u32);
     u32le(&mut image, string_table_offset as u32);
     u32le(&mut image, string_table_size as u32);
     image.extend_from_slice(text);
     image.resize(symtab_offset, 0);
-    u32le(&mut image, 1); // string-table index of the external symbol
-    image.push(0x0f); // N_SECT | N_EXT
-    image.push(1); // __text section
-    image.extend_from_slice(&0_u16.to_le_bytes());
-    u64le(&mut image, 0); // offset within a relocatable object
-    image.push(0);
-    image.extend_from_slice(external_symbol.as_bytes());
-    image.push(0);
+    let mut string_index = 1_u32;
+    for (symbol, offset) in external_symbols {
+        u32le(&mut image, string_index);
+        image.push(0x0f); // N_SECT | N_EXT
+        image.push(1); // __text section
+        image.extend_from_slice(&0_u16.to_le_bytes());
+        u64le(&mut image, offset as u64); // section offset in MH_OBJECT
+        string_index += (symbol.len() + 1) as u32;
+    }
+    image.push(0); // string-table index zero is the empty name
+    for (symbol, _) in symbols
+        .iter()
+        .map(|(name, offset)| (format!("_{name}"), offset))
+    {
+        image.extend_from_slice(symbol.as_bytes());
+        image.push(0);
+    }
     image
 }
 
@@ -512,17 +635,29 @@ mod tests {
     use crate::validate::validate_program;
     #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
     use std::process::Command;
+    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+    use std::sync::{Mutex, OnceLock};
 
     #[test]
     fn emits_a_mach_o_object_from_real_rust_source() {
-        let source = "fn add(a: i32, b: i32) -> i32 { a.wrapping_add(b) }";
-        let program = lower_rust_source(std::path::Path::new("add.rs"), source, &["add"]).unwrap();
-        let image = generate_object(&validate_program(&program).unwrap(), "add").unwrap();
+        let source = r#"
+            fn add(a: i32, b: i32) -> i32 { a.wrapping_add(b) }
+            fn main() -> i32 { add(2, 3) }
+        "#;
+        let program =
+            lower_rust_source(std::path::Path::new("add.rs"), source, &["add", "main"]).unwrap();
+        let image = generate_object(&validate_program(&program).unwrap(), "main").unwrap();
         assert_eq!(&image[..4], &[0xcf, 0xfa, 0xed, 0xfe]);
         assert_eq!(u32::from_le_bytes(image[12..16].try_into().unwrap()), 1);
+        // `LC_SYMTAB.nsyms`: both owned functions are external `N_SECT`
+        // entries, giving a later native link a complete object interface.
+        assert_eq!(u32::from_le_bytes(image[196..200].try_into().unwrap()), 2);
         assert!(image
             .windows(b"_add\0".len())
             .any(|window| window == b"_add\0"));
+        assert!(image
+            .windows(b"_main\0".len())
+            .any(|window| window == b"_main\0"));
     }
 
     #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
@@ -571,6 +706,31 @@ mod tests {
 
     #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
     #[test]
+    fn source_calls_preserve_parameters_across_nested_calls_and_link_as_one_object() {
+        // `combine` needs its incoming `x` after the nested `increment(x)`
+        // has used w0. `main` also supplies two call-valued arguments to
+        // `pack` in written left-to-right order. This is an end-to-end owned
+        // source -> object -> ld -> executable regression, not a compiler
+        // output comparison.
+        let source = r#"
+            fn increment(x: i32) -> i32 { x.wrapping_add(1) }
+            fn combine(x: i32) -> i32 { x.wrapping_add(increment(x)) }
+            fn pack(left: i32, right: i32) -> i32 {
+                left.wrapping_mul(10).wrapping_add(right)
+            }
+            fn main() -> i32 { pack(combine(3), increment(4)) }
+        "#;
+        let program = lower_rust_source(
+            std::path::Path::new("calls.rs"),
+            source,
+            &["increment", "combine", "pack", "main"],
+        )
+        .unwrap();
+        assert_owned_object_exits(&validate_program(&program).unwrap(), 75);
+    }
+
+    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+    #[test]
     fn expression_let_shadowing_preserves_the_outer_value_until_binding() {
         // `Expr::Let` is introduced by owned transforms rather than directly
         // by this Rust frontend.  Exercise it as production IR, including a
@@ -611,6 +771,11 @@ mod tests {
 
     #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
     fn assert_owned_object_exits(program: &ValidatedProgram, expected: i32) {
+        // Darwin's native linker is an external integration boundary, and
+        // these executable tests launch it against temporary Mach-O paths.
+        // Serialize that boundary so parallel unit tests cannot cross-talk
+        // through the platform linker or process-launch environment.
+        let _linker = native_link_lock().lock().unwrap();
         let root = std::env::temp_dir().join(format!(
             "laminaria-aarch64-let-{}-{}",
             std::process::id(),
@@ -652,6 +817,12 @@ mod tests {
         let exit_status = Command::new(&executable).status().unwrap().code();
         let _ = std::fs::remove_dir_all(root);
         assert_eq!(exit_status, Some(expected));
+    }
+
+    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+    fn native_link_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
     }
 
     #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
