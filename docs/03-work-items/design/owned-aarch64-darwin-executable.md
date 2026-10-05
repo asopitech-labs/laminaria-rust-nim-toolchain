@@ -78,3 +78,34 @@ treated as pre-existing. The script also launches both products after each
 build, checking their independent, manually derived exit values (75 then 86).
 Its emitted samples are evidence for a Pareto comparison, not a fabricated
 single-score declaration that either compiler has won in general.
+
+### Measured result: owned call closure versus the current Cargo+rustc path
+
+On 2026-10-06, the fixed procedure ran five clean and five same-edit rebuild
+repetitions per route from clean commit `f2267ac0ddbd8e25fb432155593c8af8db64ea34`
+on native arm64 macOS (Apple M5 Pro, 18 logical cores, 48 GiB memory). The
+saved raw Run envelopes and Level 1 traces are under
+`/private/tmp/laminaria-owned-native-compare-f2267ac`; every envelope records
+that same clean commit and `dirty=false`. All ten Cargo products and all ten
+LAMINARIA products launched successfully: the unchanged source exited 75 and
+the identical `wrapping_add(1)` → `wrapping_add(2)` edit exited 86.
+
+| Scenario and measured boundary | Cargo+rustc median | LAMINARIA median | Current result for this workload |
+| --- | ---: | ---: | --- |
+| Clean target build wall time | 161.176 ms | 22.298 ms | LAMINARIA is 7.23× shorter |
+| Clean root-process peak RSS | 83.609 MiB | 35.438 MiB | LAMINARIA is 2.36× lower |
+| Clean observed output footprint | 13 files / 865,103 B scanned / 430,976 B executable | 2 files / 17,601 B scanned / 16,912 B executable | LAMINARIA writes less; executable is 25.5× smaller |
+| Rebuild after the same semantic edit, wall time | 96.182 ms | 22.327 ms | LAMINARIA is 4.31× shorter |
+| Rebuild root-process peak RSS | 83.594 MiB | 35.500 MiB | LAMINARIA is 2.35× lower |
+| Rebuild observed output footprint | 7 files / 862,753 B scanned | 2 files / 17,601 B scanned | LAMINARIA writes less |
+
+For this currently implemented, pure-`i32` transitive-call closure, the owned
+route is therefore better than the current Cargo+rustc route on every observed
+dimension above. This is deliberately not a claim that it is a better general
+Rust compiler: Cargo compiles the conventional `main` wrapper and its standard
+Rust runtime contract, while LAMINARIA promotes the selected pure closure to
+Darwin `_main` and joins only the declared `libSystem` runtime. The two routes
+consume the same source, execute the same selected calculation, and have equal
+observable exit status, but their supported language and runtime boundaries
+remain materially different. Future feature work must rerun this procedure
+rather than treating this narrow result as a standing performance exemption.
