@@ -38,6 +38,10 @@ MSG_FILE="$1"
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
+# Keep the test command named by the commit message on the same locked native
+# toolchain as pre-commit and local-ci.
+source "$REPO_ROOT/scripts/activate-pinned-toolchains.sh"
+
 MERGE_HEAD_PATH="$(git rev-parse --git-path MERGE_HEAD 2>/dev/null || true)"
 if [[ -n "$MERGE_HEAD_PATH" && -f "$MERGE_HEAD_PATH" ]]; then
   echo "commit-msg: merge commit detected, skipping Tests-Run enforcement."

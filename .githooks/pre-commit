@@ -17,6 +17,11 @@ set -euo pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
+# The hook is a native-host verification boundary too.  Resolve the locked,
+# host-native tools before probing `cargo`, otherwise an x86 Homebrew shim can
+# make every commit fail on Apple Silicon before the repository is checked.
+source "$REPO_ROOT/scripts/activate-pinned-toolchains.sh"
+
 MERGE_HEAD_PATH="$(git rev-parse --git-path MERGE_HEAD 2>/dev/null || true)"
 if [[ -n "$MERGE_HEAD_PATH" && -f "$MERGE_HEAD_PATH" ]]; then
   echo "pre-commit: merge commit detected, skipping fmt/clippy gate."

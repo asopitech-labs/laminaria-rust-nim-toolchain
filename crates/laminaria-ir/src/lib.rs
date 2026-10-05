@@ -45,6 +45,7 @@
 //! crate does not itself touch `laminaria-plan`, `nim-planner`,
 //! `laminaria-run`, or `laminaria-cli`; that is Task 2's own scope.
 
+pub mod aarch64_darwin_target;
 pub mod c_header_discover;
 pub mod cfg_predicate;
 pub mod diagnostics;
