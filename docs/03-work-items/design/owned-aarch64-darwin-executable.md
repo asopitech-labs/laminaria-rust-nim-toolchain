@@ -30,7 +30,7 @@ caller-declared `ld` action; that action does not compile target source.
 | --- | --- | --- | --- | --- |
 | Native executable model | `ValidatedProgram`, selected entry and `i32` arguments | The existing source provenance, validation boundary, wrapping-i32 semantics and lexical `let` scope | The backend rejects an absent entry or wrong arity before writing bytes | A source-derived program can become an owned native artifact |
 | AArch64 lowering | `Expr`/`Stmt`/`FnFact` | Source-order evaluation, two's-complement wrapping operations, lexical local shadowing, parameter values across nested calls, and the selected conditional arm | Generated machine code executes `let`, both `if` branches, and transitive source calls with the same entry result as the interpreter for the supported subset | Native execution is a semantic consumer, not a hand-written duplicate fixture |
-| Darwin artifact writer | Encoded AArch64 text and closed external targets | A relocatable `MH_OBJECT` with owned `__TEXT,__text`, internal direct branches, and `ARM64_RELOC_BRANCH26` records only where a declared external target needs the linker | The object has an `N_UNDF|N_EXT` `_exit` reference, no `LC_DYSYMTAB`, and the declared linker launches the conventional source `main` | An inspectable owned target artifact and explicit runtime/link contract |
+| Darwin artifact writer | Encoded AArch64 text, the declared macOS deployment target, and closed external targets | A relocatable `MH_OBJECT` with an internally consistent `__TEXT` range, owned `LC_BUILD_VERSION`, internal direct branches, and `ARM64_RELOC_BRANCH26` records only where a declared external target needs the linker | The object has an `N_UNDF|N_EXT` `_exit` reference, `LC_BUILD_VERSION` equals the declared `ld -platform_version` target, no `LC_DYSYMTAB`, and the declared linker launches the conventional source `main` without a platform-metadata warning | An inspectable owned target artifact and explicit runtime/link contract |
 
 ## ABI and current boundary
 
@@ -50,15 +50,20 @@ LAMINARIA-produced `_main` joined to `libSystem` by the declared link action.
 The explicit `--entry NAME` value path remains compatible for a selected owned
 i32 closure, but it is not the regular comparison route.
 
-The target is deliberately host-specific.  `laminaria-run` now owns the
-explicit Darwin link action: it writes the LAMINARIA-produced `_main` object
-and calls the declared `ld` with a caller-supplied SDK root and deployment
-target to provide only `libSystem`. A real source-derived conventional `main`
-has been linked and launched this way without Cargo, rustc, Nim, a C compiler,
-or an assembler. This small process boundary maps to C `exit`; it does not yet
-reproduce Rust standard-library cleanup/handler behavior beyond the pure-i32,
-single-threaded subset. Non-AArch64-Darwin requests are
-diagnosed rather than delegated to a host compiler.  C/C++ foreign components
+The target is deliberately host-specific. `laminaria-run` parses the supplied
+`X.Y`/`X.Y.Z` deployment target once, writes its packed value to the object's
+macOS `LC_BUILD_VERSION` (`minos` and `sdk`), and passes the same supplied
+value to both arguments of the declared `ld -platform_version macos` action.
+The writer also makes the object segment's address and file ranges contain its
+`__text` section, rather than relying on a legacy all-zero segment that modern
+`ld64` rejects once platform metadata is present. It writes the
+LAMINARIA-produced `_main` object and calls the declared `ld` with a
+caller-supplied SDK root to provide only `libSystem`. A real source-derived
+conventional `main` has been linked and launched this way without Cargo,
+rustc, Nim, a C compiler, or an assembler. This small process boundary maps to
+C `exit`; it does not yet reproduce Rust standard-library cleanup/handler
+behavior beyond the pure-i32, single-threaded subset. Non-AArch64-Darwin
+requests are diagnosed rather than delegated to a host compiler. C/C++ foreign components
 remain separate declared actions and do not participate in lowering Rust or
 Nim target source.
 

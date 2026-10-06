@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use laminaria_ir::aarch64_darwin_target::{generate_object, CodegenError};
+use laminaria_ir::aarch64_darwin_target::{generate_object_for_macos, CodegenError, MacosVersion};
 use laminaria_ir::validate::ValidatedProgram;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,7 +19,8 @@ pub struct DarwinLinkToolchain {
     pub linker: PathBuf,
     /// The macOS SDK root that supplies the explicit `libSystem` runtime.
     pub sdk_root: PathBuf,
-    /// The deployment target supplied verbatim to `ld`.
+    /// The macOS deployment target supplied to `ld` and encoded in the
+    /// LAMINARIA-produced object as its `LC_BUILD_VERSION`.
     pub minimum_macos_version: String,
 }
 
@@ -74,7 +75,10 @@ pub fn compile_and_link_entry(
         });
     }
 
-    let object = generate_object(program, entry).map_err(OwnedNativeLinkError::Codegen)?;
+    let deployment_target = MacosVersion::parse(&toolchain.minimum_macos_version)
+        .map_err(OwnedNativeLinkError::Codegen)?;
+    let object = generate_object_for_macos(program, entry, deployment_target)
+        .map_err(OwnedNativeLinkError::Codegen)?;
     std::fs::create_dir_all(output_dir).map_err(|error| OwnedNativeLinkError::Io {
         path: output_dir.to_path_buf(),
         detail: error.to_string(),

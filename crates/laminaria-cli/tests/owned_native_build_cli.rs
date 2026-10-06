@@ -36,10 +36,19 @@ fn macos_sdk_root() -> PathBuf {
 }
 
 fn owned_native_command(source: &Path, output_dir: &Path) -> Command {
-    owned_native_command_for_entry(source, output_dir, "main")
+    owned_native_command_for_entry_and_version(source, output_dir, "main", "11.0")
 }
 
 fn owned_native_command_for_entry(source: &Path, output_dir: &Path, entry: &str) -> Command {
+    owned_native_command_for_entry_and_version(source, output_dir, entry, "11.0")
+}
+
+fn owned_native_command_for_entry_and_version(
+    source: &Path,
+    output_dir: &Path,
+    entry: &str,
+    minimum_macos_version: &str,
+) -> Command {
     let mut command = Command::new(laminaria_bin());
     command
         .args(["owned-native-build", "--source"])
@@ -49,7 +58,7 @@ fn owned_native_command_for_entry(source: &Path, output_dir: &Path, entry: &str)
         .arg(output_dir)
         .args(["--linker", "/usr/bin/ld", "--sdk-root"])
         .arg(macos_sdk_root())
-        .args(["--minimum-macos-version", "11.0", "--json"]);
+        .args(["--minimum-macos-version", minimum_macos_version, "--json"]);
     command
 }
 
@@ -96,6 +105,47 @@ fn owned_native_build_lowers_links_and_launches_supported_main() {
         executable.display()
     );
     assert_eq!(Command::new(executable).status().unwrap().code(), Some(7));
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn owned_native_build_records_its_declared_platform_version_in_the_object() {
+    let root = temp_dir("platform-version");
+    let source = root.join("main.rs");
+    let output_dir = root.join("out");
+    std::fs::write(&source, "fn main() { std::process::exit(7i32); }\n").unwrap();
+
+    let output = owned_native_command_for_entry_and_version(&source, &output_dir, "main", "12.3.4")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "owned-native-build failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json = json_stdout(&output);
+    assert_eq!(
+        json["result"]["toolchain"]["minimum_macos_version"],
+        "12.3.4"
+    );
+    let object = std::fs::read(json["result"]["object_path"].as_str().unwrap()).unwrap();
+    // `LC_BUILD_VERSION` begins after the 32-byte header and 152-byte
+    // `LC_SEGMENT_64`; minos and sdk are both the declared target because
+    // the explicit link action supplies that same value to `ld`.
+    assert_eq!(
+        u32::from_le_bytes(object[184..188].try_into().unwrap()),
+        0x32
+    );
+    assert_eq!(
+        u32::from_le_bytes(object[196..200].try_into().unwrap()),
+        0x000c_0304
+    );
+    assert_eq!(
+        u32::from_le_bytes(object[200..204].try_into().unwrap()),
+        0x000c_0304
+    );
 
     let _ = std::fs::remove_dir_all(root);
 }

@@ -10,6 +10,7 @@ use crate::validate::ValidatedProgram;
 pub enum CodegenError {
     MissingEntry(String),
     EntrySymbolCollision { entry: String },
+    InvalidMacosVersion { version: String },
     TooManyArguments(usize),
     StackFrameTooLarge(usize),
     BranchOutOfRange { from: usize, target: usize },
@@ -27,6 +28,10 @@ impl std::fmt::Display for CodegenError {
             Self::EntrySymbolCollision { entry } => write!(
                 f,
                 "aarch64-darwin target: entry {entry:?} would collide with a separately emitted source `main` symbol"
+            ),
+            Self::InvalidMacosVersion { version } => write!(
+                f,
+                "aarch64-darwin target: deployment target {version:?} must be X.Y or X.Y.Z with a 16-bit major and 8-bit minor/patch components"
             ),
             Self::TooManyArguments(count) => write!(
                 f,
@@ -57,11 +62,68 @@ impl std::fmt::Display for CodegenError {
 }
 impl std::error::Error for CodegenError {}
 
+/// A macOS deployment target in the exact packed form used by Mach-O's
+/// `LC_BUILD_VERSION` and Darwin `ld -platform_version`. Keeping this as a
+/// typed target prevents the object metadata and the declared link action from
+/// independently interpreting one caller-provided version string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MacosVersion(u32);
+
+impl MacosVersion {
+    pub const DEFAULT: Self = Self(11 << 16);
+
+    /// Parses the `X.Y` or `X.Y.Z` grammar accepted by the declared Darwin
+    /// linker. The packed result is `xxxx.yy.zz`, as specified by cctools'
+    /// `build_version_command` and implemented by ld64's
+    /// `parsePackedVersion32`.
+    pub fn parse(version: &str) -> Result<Self, CodegenError> {
+        let invalid = || CodegenError::InvalidMacosVersion {
+            version: version.to_owned(),
+        };
+        let mut components = version.split('.');
+        let major = parse_version_component(components.next().ok_or_else(invalid)?, 0xffff)
+            .ok_or_else(invalid)?;
+        let minor = parse_version_component(components.next().ok_or_else(invalid)?, 0xff)
+            .ok_or_else(invalid)?;
+        let patch = match components.next() {
+            Some(component) => parse_version_component(component, 0xff).ok_or_else(invalid)?,
+            None => 0,
+        };
+        if components.next().is_some() {
+            return Err(invalid());
+        }
+        Ok(Self((major << 16) | (minor << 8) | patch))
+    }
+
+    pub fn packed(self) -> u32 {
+        self.0
+    }
+}
+
+fn parse_version_component(component: &str, maximum: u32) -> Option<u32> {
+    if component.is_empty() || !component.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let value = component.parse().ok()?;
+    (value <= maximum).then_some(value)
+}
+
 /// Produces an ARM64 Mach-O object containing every function in the validated
 /// program. Calls among those emitted functions are patched directly by
 /// LAMINARIA; a closed set of declared Darwin external targets is represented
 /// with real section relocations and undefined symbols for the native linker.
 pub fn generate_object(program: &ValidatedProgram, entry: &str) -> Result<Vec<u8>, CodegenError> {
+    generate_object_for_macos(program, entry, MacosVersion::DEFAULT)
+}
+
+/// Produces an ARM64 Mach-O object for one parsed macOS deployment target.
+/// The emitted `LC_BUILD_VERSION` is a fact about this input object, rather
+/// than a linker-side default inferred later from the host.
+pub fn generate_object_for_macos(
+    program: &ValidatedProgram,
+    entry: &str,
+    deployment_target: MacosVersion,
+) -> Result<Vec<u8>, CodegenError> {
     if !program.program().functions.contains_key(entry) {
         return Err(CodegenError::MissingEntry(entry.to_owned()));
     }
@@ -104,7 +166,7 @@ pub fn generate_object(program: &ValidatedProgram, entry: &str) -> Result<Vec<u8
             }),
         }
     }
-    write_mach_o_object(&text, &symbols, entry, &relocations)
+    write_mach_o_object(&text, &symbols, entry, &relocations, deployment_target)
 }
 
 struct PendingBranch {
@@ -606,12 +668,15 @@ fn write_mach_o_object(
     symbols: &BTreeMap<String, usize>,
     entry: &str,
     relocations: &[ExternalRelocation],
+    deployment_target: MacosVersion,
 ) -> Result<Vec<u8>, CodegenError> {
     const HEADER_SIZE: usize = 32;
     const SEGMENT_COMMAND_SIZE: usize = 152;
+    const BUILD_VERSION_COMMAND_SIZE: usize = 24;
     const SYMTAB_COMMAND_SIZE: usize = 24;
     const NLIST64_SIZE: usize = 16;
-    let section_offset = HEADER_SIZE + SEGMENT_COMMAND_SIZE + SYMTAB_COMMAND_SIZE;
+    let section_offset =
+        HEADER_SIZE + SEGMENT_COMMAND_SIZE + BUILD_VERSION_COMMAND_SIZE + SYMTAB_COMMAND_SIZE;
     let defined_symbols: Vec<_> = symbols
         .iter()
         .map(|(name, offset)| {
@@ -661,10 +726,10 @@ fn write_mach_o_object(
     u32le(&mut image, 0x0100_000c);
     u32le(&mut image, 0);
     u32le(&mut image, 1);
-    u32le(&mut image, 2);
+    u32le(&mut image, 3);
     u32le(
         &mut image,
-        (SEGMENT_COMMAND_SIZE + SYMTAB_COMMAND_SIZE) as u32,
+        (SEGMENT_COMMAND_SIZE + BUILD_VERSION_COMMAND_SIZE + SYMTAB_COMMAND_SIZE) as u32,
     );
     u32le(&mut image, 0);
     u32le(&mut image, 0);
@@ -675,9 +740,14 @@ fn write_mach_o_object(
     u32le(&mut image, 152);
     name(&mut image, "__TEXT");
     u64le(&mut image, 0);
-    u64le(&mut image, 0);
-    u64le(&mut image, 0);
-    u64le(&mut image, 0);
+    // In an MH_OBJECT, cctools lays section addresses relative to zero and
+    // gives the one synthetic segment exactly the text extent. Its file range
+    // begins after the Mach-O header/load commands where __text is written.
+    // The LC_BUILD_VERSION path makes ld64 validate this containment instead
+    // of accepting the former all-zero segment as a legacy object.
+    u64le(&mut image, text.len() as u64);
+    u64le(&mut image, section_offset as u64);
+    u64le(&mut image, text.len() as u64);
     u32le(&mut image, 7);
     u32le(&mut image, 5);
     u32le(&mut image, 1);
@@ -702,6 +772,17 @@ fn write_mach_o_object(
     u32le(&mut image, 0);
     u32le(&mut image, 0);
     u32le(&mut image, 0);
+    // LC_BUILD_VERSION is present in every arm64 object we emit. The
+    // deployment target is parsed once by the explicit link boundary, then
+    // applied both here and to `ld -platform_version`; neither side guesses a
+    // host default.
+    u32le(&mut image, 0x32);
+    u32le(&mut image, BUILD_VERSION_COMMAND_SIZE as u32);
+    u32le(&mut image, 1); // PLATFORM_MACOS
+    u32le(&mut image, deployment_target.packed());
+    u32le(&mut image, deployment_target.packed());
+    u32le(&mut image, 0); // no build-tool records
+
     // LC_SYMTAB carries owned external definitions followed by undefined
     // external references. This is the native-link interface: the linker sees
     // names, section offsets, and relocation targets emitted by LAMINARIA,
@@ -781,9 +862,22 @@ mod tests {
         let image = generate_object(&validate_program(&program).unwrap(), "main").unwrap();
         assert_eq!(&image[..4], &[0xcf, 0xfa, 0xed, 0xfe]);
         assert_eq!(u32::from_le_bytes(image[12..16].try_into().unwrap()), 1);
+        assert_eq!(u32::from_le_bytes(image[16..20].try_into().unwrap()), 3);
+        // The backwards-compatible object API uses the explicit macOS 11.0
+        // default, rather than omitting platform identity for the linker to
+        // infer from its host.
+        assert_eq!(
+            u32::from_le_bytes(image[184..188].try_into().unwrap()),
+            0x32
+        );
+        assert_eq!(u32::from_le_bytes(image[192..196].try_into().unwrap()), 1);
+        assert_eq!(
+            u32::from_le_bytes(image[196..200].try_into().unwrap()),
+            0x000b_0000
+        );
         // `LC_SYMTAB.nsyms`: both owned functions are external `N_SECT`
         // entries, giving a later native link a complete object interface.
-        assert_eq!(u32::from_le_bytes(image[196..200].try_into().unwrap()), 2);
+        assert_eq!(u32::from_le_bytes(image[220..224].try_into().unwrap()), 2);
         assert!(image
             .windows(b"_add\0".len())
             .any(|window| window == b"_add\0"));
@@ -818,6 +912,45 @@ mod tests {
     }
 
     #[test]
+    fn macos_version_matches_ld_platform_version_encoding() {
+        assert_eq!(MacosVersion::parse("11.0").unwrap().packed(), 0x000b_0000);
+        assert_eq!(MacosVersion::parse("12.3.4").unwrap().packed(), 0x000c_0304);
+        for version in ["11", "11.0.0.1", "11.-1", "11.256", "x.0"] {
+            assert_eq!(
+                MacosVersion::parse(version),
+                Err(CodegenError::InvalidMacosVersion {
+                    version: version.to_owned(),
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn requested_macos_version_is_written_to_build_version_command() {
+        let source = "fn main() -> i32 { 0 }";
+        let program =
+            lower_rust_source(std::path::Path::new("main.rs"), source, &["main"]).unwrap();
+        let image = generate_object_for_macos(
+            &validate_program(&program).unwrap(),
+            "main",
+            MacosVersion::parse("12.3.4").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            u32::from_le_bytes(image[184..188].try_into().unwrap()),
+            0x32
+        );
+        assert_eq!(
+            u32::from_le_bytes(image[196..200].try_into().unwrap()),
+            0x000c_0304
+        );
+        assert_eq!(
+            u32::from_le_bytes(image[200..204].try_into().unwrap()),
+            0x000c_0304
+        );
+    }
+
+    #[test]
     fn process_main_uses_a_real_branch26_relocation_for_libsystem_exit() {
         let source = r#"
             fn status() -> i32 { 75 }
@@ -831,12 +964,27 @@ mod tests {
         .unwrap();
         let image = generate_object(&validate_program(&program).unwrap(), "main").unwrap();
 
-        // Exactly the two object-file commands we emit: __TEXT and SYMTAB.
-        // In particular, an MH_OBJECT owns its relocation from section_64 and
-        // does not need the dylib-oriented LC_DYSYMTAB command.
-        assert_eq!(u32::from_le_bytes(image[16..20].try_into().unwrap()), 2);
+        // Exactly the three object-file commands we emit: __TEXT,
+        // LC_BUILD_VERSION, and SYMTAB. In particular, an MH_OBJECT owns its
+        // relocation from section_64 and does not need LC_DYSYMTAB.
+        assert_eq!(u32::from_le_bytes(image[16..20].try_into().unwrap()), 3);
         assert_eq!(u32::from_le_bytes(image[32..36].try_into().unwrap()), 0x19);
-        assert_eq!(u32::from_le_bytes(image[184..188].try_into().unwrap()), 0x2);
+        assert_eq!(
+            u32::from_le_bytes(image[184..188].try_into().unwrap()),
+            0x32
+        );
+        assert_eq!(u32::from_le_bytes(image[188..192].try_into().unwrap()), 24);
+        assert_eq!(u32::from_le_bytes(image[192..196].try_into().unwrap()), 1);
+        assert_eq!(
+            u32::from_le_bytes(image[196..200].try_into().unwrap()),
+            0x000b_0000
+        );
+        assert_eq!(
+            u32::from_le_bytes(image[200..204].try_into().unwrap()),
+            0x000b_0000
+        );
+        assert_eq!(u32::from_le_bytes(image[204..208].try_into().unwrap()), 0);
+        assert_eq!(u32::from_le_bytes(image[208..212].try_into().unwrap()), 0x2);
 
         let relocation_offset = u32::from_le_bytes(image[160..164].try_into().unwrap()) as usize;
         assert_ne!(relocation_offset, 0);
@@ -853,7 +1001,7 @@ mod tests {
         );
         assert_eq!(
             u32::from_le_bytes(
-                image[208 + branch_offset..212 + branch_offset]
+                image[232 + branch_offset..236 + branch_offset]
                     .try_into()
                     .unwrap()
             ),
@@ -864,9 +1012,9 @@ mod tests {
         assert_eq!((relocation_word >> 27) & 1, 1); // r_extern
         assert_eq!((relocation_word >> 28) & 0xf, 2); // ARM64_RELOC_BRANCH26
 
-        let symtab_offset = u32::from_le_bytes(image[192..196].try_into().unwrap()) as usize;
-        let symbol_count = u32::from_le_bytes(image[196..200].try_into().unwrap()) as usize;
-        let string_table_offset = u32::from_le_bytes(image[200..204].try_into().unwrap()) as usize;
+        let symtab_offset = u32::from_le_bytes(image[216..220].try_into().unwrap()) as usize;
+        let symbol_count = u32::from_le_bytes(image[220..224].try_into().unwrap()) as usize;
+        let string_table_offset = u32::from_le_bytes(image[224..228].try_into().unwrap()) as usize;
         let exit_index = (0..symbol_count)
             .find(|index| {
                 let nlist = symtab_offset + index * 16;
@@ -1062,7 +1210,7 @@ mod tests {
             .expect("xcrun must be available on the declared Darwin target");
         assert!(sdk.status.success());
         let sdk = String::from_utf8(sdk.stdout).unwrap();
-        let status = Command::new("/usr/bin/ld")
+        let linked = Command::new("/usr/bin/ld")
             .args([
                 "-dynamic",
                 "-arch",
@@ -1078,9 +1226,18 @@ mod tests {
             .arg(&executable)
             .arg(&object)
             .arg("-lSystem")
-            .status()
+            .output()
             .expect("the declared Darwin linker must launch");
-        assert!(status.success());
+        assert!(
+            linked.status.success(),
+            "Darwin linker failed: {}",
+            String::from_utf8_lossy(&linked.stderr)
+        );
+        assert!(
+            !String::from_utf8_lossy(&linked.stderr).contains("no platform load command"),
+            "owned object must declare LC_BUILD_VERSION: {}",
+            String::from_utf8_lossy(&linked.stderr)
+        );
         let exit_status = Command::new(&executable).status().unwrap().code();
         let _ = std::fs::remove_dir_all(root);
         assert_eq!(exit_status, Some(expected));
