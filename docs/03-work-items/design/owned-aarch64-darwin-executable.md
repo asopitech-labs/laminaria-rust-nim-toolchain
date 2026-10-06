@@ -90,11 +90,12 @@ single-score declaration that either compiler has won in general.
 
 ### Measured result: conventional `main` versus the current Cargo+rustc path
 
-On 2026-10-06, the fixed procedure ran five clean and five same-edit rebuild
-repetitions per route from clean commit `797c03f3b2a2f29e09420fc2cd5c6e2462b12d5a`
-on native arm64 macOS (18 logical cores, 48 GiB memory). The saved raw Run
-envelopes and Level 1 traces are under
-`/private/tmp/laminaria-owned-native-compare-797c03f`; every envelope records
+On 2026-10-07, after the object writer gained `LC_BUILD_VERSION`, the fixed
+procedure ran five clean and five same-edit rebuild repetitions per route from
+clean commit `dfb158321b11ea828615127f4c47801e560b661c` on native arm64 macOS
+(18 logical cores; the harness did not observe memory capacity). The saved raw
+Run envelopes and Level 1 traces are under
+`/private/tmp/laminaria-owned-native-compare-dfb1583`; every envelope records
 that same clean commit and `dirty=false`. Both routes consumed the exact same
 source file, including a conventional `main` whose body is
 `std::process::exit(pack(combine(3), increment(4)));`. All ten Cargo products
@@ -104,12 +105,12 @@ exited 75 and the identical `wrapping_add(1)` → `wrapping_add(2)` edit exited
 
 | Scenario and measured boundary | Cargo+rustc median | LAMINARIA median | Current result for this workload |
 | --- | ---: | ---: | --- |
-| Clean target build wall time | 159.204 ms | 21.408 ms | LAMINARIA is 7.44× shorter |
+| Clean target build wall time | 147.388 ms | 19.490 ms | LAMINARIA is 7.56× shorter |
 | Clean root-process peak RSS | 83.594 MiB | 35.438 MiB | LAMINARIA is 2.36× lower |
-| Clean observed output footprint | 13 files / 865,104 B scanned / 430,976 B executable | 2 files / 50,791 B scanned / 50,080 B executable | LAMINARIA writes less; executable is 8.61× smaller |
-| Rebuild after the same semantic edit, wall time | 94.949 ms | 21.290 ms | LAMINARIA is 4.46× shorter |
-| Rebuild root-process peak RSS | 83.594 MiB | 35.578 MiB | LAMINARIA is 2.35× lower |
-| Rebuild observed output footprint | 7 files / 862,753 B scanned | 2 files / 50,791 B scanned | LAMINARIA writes less |
+| Clean observed output footprint | 13 files / 865,104 B scanned / 430,976 B executable | 2 files / 50,815 B scanned / 50,080 B executable | LAMINARIA writes less; executable is 8.61× smaller |
+| Rebuild after the same semantic edit, wall time | 88.356 ms | 19.627 ms | LAMINARIA is 4.50× shorter |
+| Rebuild root-process peak RSS | 83.609 MiB | 35.406 MiB | LAMINARIA is 2.36× lower |
+| Rebuild observed output footprint | 7 files / 862,753 B scanned | 2 files / 50,815 B scanned | LAMINARIA writes less |
 
 For this currently implemented, pure-i32 transitive-call `main`, LAMINARIA is
 better than the current Cargo+rustc route on every measured dimension above,
