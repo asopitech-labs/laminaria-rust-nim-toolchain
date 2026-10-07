@@ -12,10 +12,11 @@ lexical `let` bindings and `if EXPR != 0 { ... } else { ... }` are lowered
 as owned stack operations and in-function AArch64 control flow. Calls among
 functions discovered from the selected source entry are lowered to direct
 same-object AArch64 branches. A conventional argument-free Rust `fn main()`
-may terminate through the closed `std::process::exit(i32)` surface, either by
-its absolute path or an explicit `use std::process` module binding (including
-an alias). LAMINARIA represents that separately from ordinary value calls and
-writes a real Mach-O external branch relocation to Darwin C `exit` in
+may complete normally (the owned `_main` returns zero), or may choose the
+closed `std::process::exit(i32)` surface for a custom status, either by its
+absolute path or an explicit `use std::process` module binding (including an
+alias). LAMINARIA represents the latter separately from ordinary value calls
+and writes a real Mach-O external branch relocation to Darwin C `exit` in
 `libSystem`. Other external and cross-object calls remain diagnosed; they are
 never delegated.
 
@@ -32,7 +33,7 @@ caller-declared `ld` action; that action does not compile target source.
 | --- | --- | --- | --- | --- |
 | Native executable model | `ValidatedProgram`, selected entry and `i32` arguments | The existing source provenance, validation boundary, wrapping-i32 semantics and lexical `let` scope | The backend rejects an absent entry or wrong arity before writing bytes | A source-derived program can become an owned native artifact |
 | AArch64 lowering | `Expr`/`Stmt`/`FnFact` | Source-order evaluation, two's-complement wrapping operations, lexical local shadowing, parameter values across nested calls, and the selected conditional arm | Generated machine code executes `let`, both `if` branches, and transitive source calls with the same entry result as the interpreter for the supported subset | Native execution is a semantic consumer, not a hand-written duplicate fixture |
-| Darwin artifact writer | Encoded AArch64 text, the declared macOS deployment target, and closed external targets | A relocatable `MH_OBJECT` with an internally consistent `__TEXT` range, owned `LC_BUILD_VERSION`, internal direct branches, and `ARM64_RELOC_BRANCH26` records only where a declared external target needs the linker | The object has an `N_UNDF|N_EXT` `_exit` reference, `LC_BUILD_VERSION` equals the declared `ld -platform_version` target, no `LC_DYSYMTAB`, and the declared linker launches the conventional source `main` without a platform-metadata warning | An inspectable owned target artifact and explicit runtime/link contract |
+| Darwin artifact writer | Encoded AArch64 text, the declared macOS deployment target, and closed external targets | A relocatable `MH_OBJECT` with an internally consistent `__TEXT` range, owned `LC_BUILD_VERSION`, internal direct branches, and `ARM64_RELOC_BRANCH26` records only where a declared external target needs the linker | A normal unit `main` links and exits 0; an explicit process-exit main has an `N_UNDF|N_EXT` `_exit` reference; both retain the declared `LC_BUILD_VERSION` and launch without a platform-metadata warning | An inspectable owned target artifact and explicit runtime/link contract |
 
 ## ABI and current boundary
 
@@ -43,15 +44,19 @@ parameters use compiler-owned stack slots. Generated functions preserve `x19`
 as their frame base, save their link register, and marshal evaluated call
 arguments into `w0` through `w7` immediately before a direct `BL` to another
 symbol in the same LAMINARIA object. The ordinary process boundary accepts a
-zero-argument Rust `fn main()` with unit result and the exact final statement
-`std::process::exit(EXPR);` or `NAME::exit(EXPR);`, where `NAME` is explicitly
-bound by `use std::process` (optionally aliased). It evaluates `EXPR` as owned
-i32 code, puts the result in `w0`, and emits a `BL` with an external
-`ARM64_RELOC_BRANCH26` record to `_exit` (Darwin's object-file spelling for C
-`exit`, not the separate POSIX `_exit` API). The linked process entry is the
-LAMINARIA-produced `_main` joined to `libSystem` by the declared link action.
-The explicit `--entry NAME` value path remains compatible for a selected owned
-i32 closure, but it is not the regular comparison route.
+zero-argument Rust `fn main()` with unit result. An empty body, a `let` prefix
+with no tail, or a final bare `return;` produces `Stmt::ReturnUnit`; the
+Darwin backend emits `w0 = 0` and a normal `ret`, leaving the platform startup
+code to observe successful completion. For a custom status it also accepts the
+exact final statement `std::process::exit(EXPR);` or `NAME::exit(EXPR);`,
+where `NAME` is explicitly bound by `use std::process` (optionally aliased).
+That path evaluates `EXPR` as owned i32 code, puts the result in `w0`, and
+emits a `BL` with an external `ARM64_RELOC_BRANCH26` record to `_exit`
+(Darwin's object-file spelling for C `exit`, not the separate POSIX `_exit`
+API). The linked process entry is the LAMINARIA-produced `_main` joined to
+`libSystem` by the declared link action. The explicit `--entry NAME` value
+path remains compatible for a selected owned i32 closure, but it is not the
+regular comparison route.
 
 The target is deliberately host-specific. `laminaria-run` parses the supplied
 `X.Y`/`X.Y.Z` deployment target once, writes its packed value to the object's
@@ -63,9 +68,10 @@ The writer also makes the object segment's address and file ranges contain its
 LAMINARIA-produced `_main` object and calls the declared `ld` with a
 caller-supplied SDK root to provide only `libSystem`. A real source-derived
 conventional `main` has been linked and launched this way without Cargo,
-rustc, Nim, a C compiler, or an assembler. This small process boundary maps to
-C `exit`; it does not yet reproduce Rust standard-library cleanup/handler
-behavior beyond the pure-i32, single-threaded subset. Non-AArch64-Darwin
+rustc, Nim, a C compiler, or an assembler. Its custom-status branch maps to C
+`exit`; its normal-return branch relies on the platform's ordinary `_main`
+return convention. Neither branch yet reproduces Rust standard-library
+cleanup/handler behavior beyond the pure-i32, single-threaded subset. Non-AArch64-Darwin
 requests are diagnosed rather than delegated to a host compiler. C/C++ foreign components
 remain separate declared actions and do not participate in lowering Rust or
 Nim target source.

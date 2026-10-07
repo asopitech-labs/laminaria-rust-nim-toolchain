@@ -81,6 +81,8 @@ pub enum ProgramValidationError {
     ValueUsedAsCondition { function: String },
     /// A unit-returning source function must not claim to produce an i32.
     ReturnValueFromUnitFunction { function: String },
+    /// A value-returning source function must not take the unit-return path.
+    UnitReturnFromValueFunction { function: String },
     /// An external intrinsic was formed with an arity other than its declared
     /// ABI contract permits.
     ExternalCallArityMismatch {
@@ -148,6 +150,10 @@ impl std::fmt::Display for ProgramValidationError {
             ProgramValidationError::ReturnValueFromUnitFunction { function } => write!(
                 f,
                 "unit-returning function {function:?} contains an i32 Return"
+            ),
+            ProgramValidationError::UnitReturnFromValueFunction { function } => write!(
+                f,
+                "i32-returning function {function:?} contains a unit Return"
             ),
             ProgramValidationError::ExternalCallArityMismatch {
                 function,
@@ -271,6 +277,14 @@ fn validate_stmt(
                 });
             }
             validate_expr(fn_name, expr, param_count, bound, program, false)
+        }
+        Stmt::ReturnUnit(_) => {
+            if function_result != FunctionResult::Unit {
+                return Err(ProgramValidationError::UnitReturnFromValueFunction {
+                    function: fn_name.to_string(),
+                });
+            }
+            Ok(())
         }
         Stmt::ExternalCall { target, args, .. } => {
             let expected = match target {
@@ -472,11 +486,8 @@ mod tests {
             })
         );
 
-        program.functions.get_mut("unit").unwrap().body = Stmt::ExternalCall {
-            target: ExternalTarget::ProcessExit,
-            args: vec![Expr::IntLit(0, IntWidth::I32, prov())],
-            provenance: prov(),
-        };
+        program.functions.get_mut("unit").unwrap().body = Stmt::ReturnUnit(prov());
+        assert!(validate_program(&program).is_ok());
         program.insert(fact(
             "caller",
             0,
@@ -487,6 +498,18 @@ mod tests {
             Err(ProgramValidationError::CallToUnitFunction {
                 function: "caller".to_owned(),
                 callee: "unit".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn i32_function_cannot_take_the_unit_return_path() {
+        let mut program = Program::default();
+        program.insert(fact("value", 0, Stmt::ReturnUnit(prov())));
+        assert_eq!(
+            validate_program(&program),
+            Err(ProgramValidationError::UnitReturnFromValueFunction {
+                function: "value".to_owned(),
             })
         );
     }

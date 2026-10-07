@@ -308,6 +308,7 @@ fn count_stmt_bindings(stmt: &Stmt) -> usize {
             cond, then, els, ..
         } => count_expr_bindings(cond) + count_stmt_bindings(then) + count_stmt_bindings(els),
         Stmt::Return(expr, _) => count_expr_bindings(expr),
+        Stmt::ReturnUnit(_) => 0,
         Stmt::ExternalCall { args, .. } => args.iter().map(count_expr_bindings).sum(),
     }
 }
@@ -319,6 +320,7 @@ fn count_stmt_expressions(stmt: &Stmt) -> usize {
             cond, then, els, ..
         } => count_expr_slots(cond) + count_stmt_expressions(then) + count_stmt_expressions(els),
         Stmt::Return(expr, _) => count_expr_slots(expr),
+        Stmt::ReturnUnit(_) => 0,
         Stmt::ExternalCall { args, .. } => args.iter().map(count_expr_slots).sum(),
     }
 }
@@ -365,6 +367,14 @@ fn emit_stmt(
         Stmt::Return(expr, _) => {
             let result = emit_expr(code, expr, context, branches)?;
             emit_load_slot(code, result, 0);
+            emit_epilogue(code, context.layout.frame_bytes);
+            Ok(())
+        }
+        Stmt::ReturnUnit(_) => {
+            // Darwin's conventional `_main` reports ordinary unit completion
+            // as status zero.  This is a normal ABI return, intentionally not
+            // a call to the separate closed `ProcessExit` operation.
+            emit_i32(code, 0, 0);
             emit_epilogue(code, context.layout.frame_bytes);
             Ok(())
         }
@@ -1142,6 +1152,24 @@ mod tests {
         )
         .unwrap();
         assert_owned_object_exits(&validate_program(&program).unwrap(), 75);
+    }
+
+    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+    #[test]
+    fn conventional_process_main_returns_success_without_an_exit_call() {
+        let source = r#"
+            fn work(x: i32) -> i32 { x.wrapping_add(1) }
+            fn main() {
+                let ignored = work(74);
+            }
+        "#;
+        let program = lower_rust_process_main(
+            std::path::Path::new("normal-process-main.rs"),
+            source,
+            &["work", "main"],
+        )
+        .unwrap();
+        assert_owned_object_exits(&validate_program(&program).unwrap(), 0);
     }
 
     #[cfg(all(target_arch = "aarch64", target_os = "macos"))]

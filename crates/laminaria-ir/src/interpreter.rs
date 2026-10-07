@@ -141,6 +141,11 @@ fn eval_stmt(stmt: &Stmt, state: &mut EvalState) -> Result<i64, EvalError> {
             }
         }
         Stmt::Return(expr, _) => eval_expr(expr, state),
+        // The evaluator represents a normal unit completion as process
+        // success.  This is the same boundary convention as the Darwin
+        // backend (`w0 = 0; ret`), not a claim that unit is an i32 value in
+        // the source language.
+        Stmt::ReturnUnit(_) => Ok(0),
         // The reference evaluator intentionally does not terminate the test
         // process.  It evaluates the status expression first, preserving any
         // same-program calls in source order, then reports that a real

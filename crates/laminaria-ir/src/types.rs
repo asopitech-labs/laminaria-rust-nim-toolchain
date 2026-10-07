@@ -181,6 +181,12 @@ pub enum Stmt {
         provenance: Provenance,
     },
     Return(Expr, Provenance),
+    /// A unit-returning function reaches its ordinary language return.  At
+    /// the Darwin process boundary, this is the conventional successful
+    /// `main` completion: `_main` returns zero in `w0` to the system startup
+    /// code.  It is deliberately distinct from [`Stmt::ExternalCall`], whose
+    /// `ProcessExit` target terminates through libc and does not return.
+    ReturnUnit(Provenance),
     /// A terminating call to one of this IR's closed external targets.  The
     /// argument vector stays explicit so the validator retains authority over
     /// target-specific arity instead of assuming every manually constructed
@@ -198,6 +204,7 @@ impl Stmt {
             Stmt::Let { provenance: p, .. } => p,
             Stmt::If { provenance: p, .. } => p,
             Stmt::Return(_, p) => p,
+            Stmt::ReturnUnit(p) => p,
             Stmt::ExternalCall { provenance: p, .. } => p,
         }
     }
@@ -256,6 +263,7 @@ pub fn stmt_contains_call(stmt: &Stmt) -> bool {
             cond, then, els, ..
         } => expr_contains_call(cond) || stmt_contains_call(then) || stmt_contains_call(els),
         Stmt::Return(expr, _) => expr_contains_call(expr),
+        Stmt::ReturnUnit(_) => false,
         // An external operation is observably effectful even when its status
         // expression contains no same-program call of its own.
         Stmt::ExternalCall { .. } => true,
@@ -307,6 +315,7 @@ pub fn max_local_id_in_stmt(stmt: &Stmt) -> Option<u32> {
             max_opt(max_local_id_in_stmt(then), max_local_id_in_stmt(els)),
         ),
         Stmt::Return(expr, _) => max_local_id_in_expr(expr),
+        Stmt::ReturnUnit(_) => None,
         Stmt::ExternalCall { args, .. } => args.iter().filter_map(max_local_id_in_expr).max(),
     }
 }

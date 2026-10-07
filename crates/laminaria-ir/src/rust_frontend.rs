@@ -140,13 +140,14 @@ pub fn lower_rust_source(
     lower_rust_source_inner(source_file, source_text, requested_functions, false)
 }
 
-/// Lowers a conventional, argument-free Rust `fn main()` which ends through
-/// `std::process::exit(i32)`, or a direct `use std::process` binding (with an
-/// optional alias), together with the same-program i32 closure it calls. This
-/// is deliberately a distinct source contract from [`lower_rust_source`]: it
-/// retains the real unit result of `main` and the terminating external
-/// operation instead of pretending the status expression itself was the
-/// platform entry point.
+/// Lowers a conventional, argument-free Rust `fn main()`, together with the
+/// same-program i32 closure it calls. The accepted process boundary is closed:
+/// an empty/let-only body or `return;` becomes the IR's normal unit return;
+/// `std::process::exit(i32)` (including an explicitly imported process-module
+/// binding) remains the separately modeled custom-status termination path.
+/// This deliberately differs from [`lower_rust_source`]: it retains `main`'s
+/// real unit result instead of pretending a status expression is the platform
+/// entry point.
 pub fn lower_rust_process_main(
     source_file: &Path,
     source_text: &str,
@@ -575,9 +576,11 @@ fn lower_item_fn(
 
 /// Lowers a block whose shape is: zero or more `let NAME = EXPR;`
 /// statements, followed by exactly one tail form (a trailing expression
-/// with no semicolon, an `if` used at the tail, or a `return EXPR;`).
-/// Anything else (extra statements after the tail, a `let` with no
-/// initializer, item/macro statements, ...) is rejected.
+/// with no semicolon, an `if` used at the tail, or a `return EXPR;`). The
+/// process-main profile additionally accepts no tail at all (ordinary unit
+/// completion) and `return;`. Anything else (extra statements after the
+/// tail, a `let` with no initializer, item/macro statements, ...) is
+/// rejected.
 fn lower_block(
     block: &Block,
     ctx: &mut Ctx,
@@ -601,13 +604,6 @@ fn lower_block(
             }
         }
     }
-    let Some(tail_stmt) = tail else {
-        return Err(vec![unsupported_shape(
-            "block has no tail expression/return",
-            block.span(),
-        )]);
-    };
-
     // Lower each let's *value* expression and bind it in forward (source)
     // order first -- a later let's initializer, and the tail itself, must
     // be able to see every earlier let's binding. The nested `Stmt::Let`
@@ -668,7 +664,18 @@ fn lower_block(
         });
     }
 
-    let mut inner = lower_tail_stmt(tail_stmt, ctx, mode)?;
+    let mut inner = match tail {
+        Some(tail_stmt) => lower_tail_stmt(tail_stmt, ctx, mode)?,
+        None if matches!(mode, FunctionLowering::ProcessMain { .. }) => {
+            Stmt::ReturnUnit(to_provenance(ctx.source_file, block.span()))
+        }
+        None => {
+            return Err(vec![unsupported_shape(
+                "block has no tail expression/return",
+                block.span(),
+            )])
+        }
+    };
 
     for p in pending.into_iter().rev() {
         match p.shadowed {
@@ -701,7 +708,7 @@ fn lower_tail_stmt(
         exit_module_bindings,
     } = mode
     {
-        return lower_process_exit_tail(expr, semi, ctx, exit_module_bindings);
+        return lower_process_main_tail(expr, semi, ctx, exit_module_bindings);
     }
     match expr {
         SynExpr::If(expr_if) if semi.is_none() => lower_if(expr_if, ctx),
@@ -728,15 +735,24 @@ fn lower_tail_stmt(
     }
 }
 
-fn lower_process_exit_tail(
+fn lower_process_main_tail(
     expr: &SynExpr,
     semi: &Option<syn::token::Semi>,
     ctx: &mut Ctx,
     exit_module_bindings: &BTreeSet<String>,
 ) -> Result<Stmt, Vec<LoweringError>> {
+    if let SynExpr::Return(ret) = expr {
+        if semi.is_some() && ret.expr.is_none() {
+            return Ok(Stmt::ReturnUnit(to_provenance(ctx.source_file, ret.span())));
+        }
+        return Err(vec![unsupported_shape(
+            "process main accepts only bare return; or std::process::exit(EXPR);",
+            ret.span(),
+        )]);
+    }
     let SynExpr::Call(call) = expr else {
         return Err(vec![unsupported_shape(
-            "process main must end with std::process::exit(EXPR);",
+            "process main tail must be bare return; or std::process::exit(EXPR);",
             expr.span(),
         )]);
     };
@@ -1450,6 +1466,35 @@ mod tests {
                 args,
                 ..
             } if args.len() == 1)
+        ));
+    }
+
+    #[test]
+    fn process_main_lowers_ordinary_unit_completion_without_exit() {
+        let source = r#"
+            fn status(x: i32) -> i32 { x.wrapping_add(1) }
+            fn main() {
+                let ignored = status(74);
+                return;
+            }
+        "#;
+        let program = lower_rust_process_main(&path(), source, &["status", "main"]).unwrap();
+        assert_eq!(program.functions["main"].result, FunctionResult::Unit);
+        assert!(matches!(
+            &program.functions["main"].body,
+            Stmt::Let { body, .. } if matches!(body.as_ref(), Stmt::ReturnUnit(_))
+        ));
+        let outcome = eval_function(&program, "main", &[]).unwrap();
+        assert_eq!(outcome.value, 0);
+        assert_eq!(outcome.effects[0].fn_name, "status");
+    }
+
+    #[test]
+    fn process_main_lowers_an_empty_body_as_ordinary_unit_completion() {
+        let program = lower_rust_process_main(&path(), "fn main() {}", &["main"]).unwrap();
+        assert!(matches!(
+            program.functions["main"].body,
+            Stmt::ReturnUnit(_)
         ));
     }
 

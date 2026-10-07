@@ -445,6 +445,7 @@ fn rewrite_calls_in_stmt(
             rewrite_calls_in_expr(expr, callee_name, replace)?,
             provenance.clone(),
         ),
+        Stmt::ReturnUnit(provenance) => Stmt::ReturnUnit(provenance.clone()),
         Stmt::ExternalCall {
             target,
             args,

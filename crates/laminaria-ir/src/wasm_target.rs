@@ -280,6 +280,14 @@ fn lower_stmt(
             lower_expr(expr, ctx, out)?;
             out.push(OP_RETURN);
         }
+        // `lower_function` rejects unit-result functions before reaching
+        // their body. Keep this arm explicit so a future change cannot make
+        // unit normal-return semantics silently masquerade as wasm i32.
+        Stmt::ReturnUnit(_) => {
+            return Err(CodegenError::UnsupportedFunctionResult(
+                FunctionResult::Unit,
+            ));
+        }
         Stmt::ExternalCall { target, .. } => {
             return Err(CodegenError::UnsupportedExternalTarget(*target));
         }

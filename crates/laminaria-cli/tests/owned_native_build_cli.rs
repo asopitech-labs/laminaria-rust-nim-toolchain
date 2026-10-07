@@ -110,6 +110,32 @@ fn owned_native_build_lowers_links_and_launches_supported_main() {
 }
 
 #[test]
+fn owned_native_build_lowers_links_and_launches_a_normally_returning_main() {
+    let root = temp_dir("normal-unit-main");
+    let source = root.join("main.rs");
+    let output_dir = root.join("out");
+    std::fs::write(&source, "fn main() {}\n").unwrap();
+
+    let output = owned_native_command(&source, &output_dir).output().unwrap();
+    assert!(
+        output.status.success(),
+        "owned-native-build failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json = json_stdout(&output);
+    let executable = PathBuf::from(json["result"]["executable_path"].as_str().unwrap());
+    assert!(
+        executable.is_file(),
+        "missing executable: {}",
+        executable.display()
+    );
+    assert_eq!(Command::new(executable).status().unwrap().code(), Some(0));
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn owned_native_build_records_its_declared_platform_version_in_the_object() {
     let root = temp_dir("platform-version");
     let source = root.join("main.rs");
