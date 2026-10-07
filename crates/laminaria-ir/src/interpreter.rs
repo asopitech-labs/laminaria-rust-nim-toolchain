@@ -140,6 +140,10 @@ fn eval_stmt(stmt: &Stmt, state: &mut EvalState) -> Result<i64, EvalError> {
                 eval_stmt(els, state)
             }
         }
+        Stmt::Eval { expr, body, .. } => {
+            eval_expr(expr, state)?;
+            eval_stmt(body, state)
+        }
         Stmt::Return(expr, _) => eval_expr(expr, state),
         // The evaluator represents a normal unit completion as process
         // success.  This is the same boundary convention as the Darwin

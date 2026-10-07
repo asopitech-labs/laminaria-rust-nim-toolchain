@@ -574,18 +574,98 @@ fn lower_item_fn(
     })
 }
 
-/// Lowers a block whose shape is: zero or more `let NAME = EXPR;`
-/// statements, followed by exactly one tail form (a trailing expression
-/// with no semicolon, an `if` used at the tail, or a `return EXPR;`). The
-/// process-main profile additionally accepts no tail at all (ordinary unit
-/// completion) and `return;`. Anything else (extra statements after the
-/// tail, a `let` with no initializer, item/macro statements, ...) is
-/// rejected.
+/// A lowered `let` prefix kept pending until the rest of its source block is
+/// known. `shadowed` records exactly the binding that must be restored after
+/// lowering the lexical body.
+struct PendingLet {
+    name: String,
+    id: LocalId,
+    value: Expr,
+    span: Span,
+    shadowed: Option<LocalId>,
+}
+
+fn lower_let_prefix(
+    local: &Local,
+    span: Span,
+    ctx: &mut Ctx,
+) -> Result<PendingLet, Vec<LoweringError>> {
+    // `cfg` and other attributes can attach to a `let` statement itself
+    // (`#[cfg(test)] let x = 1;`), not only to a function/parameter --
+    // rustc's `flat_map_stmt` (issue #27's reference table) is exactly
+    // where a real compiler applies `cfg` at this position. This subset
+    // implements no `cfg`, so any non-doc attribute here is diagnosed the
+    // same way a function-level one already is, instead of being silently
+    // accepted because only `ItemFn.attrs` was ever checked.
+    let mut attr_errors = Vec::new();
+    reject_unsupported_attrs(&local.attrs, &mut attr_errors);
+    if !attr_errors.is_empty() {
+        return Err(attr_errors);
+    }
+    let name = match &local.pat {
+        Pat::Ident(pi) if pi.by_ref.is_none() && pi.subpat.is_none() => pi.ident.to_string(),
+        other => {
+            return Err(vec![unsupported(
+                "non-identifier let pattern",
+                other.span(),
+            )])
+        }
+    };
+    let Some(init) = &local.init else {
+        return Err(vec![unsupported_shape(
+            "let binding with no initializer",
+            span,
+        )]);
+    };
+    if init.diverge.is_some() {
+        return Err(vec![unsupported("let-else", span)]);
+    }
+    let value = lower_expr(&init.expr, ctx)?;
+    let id = ctx.fresh_local();
+    let shadowed = ctx.locals.insert(name.clone(), id);
+    Ok(PendingLet {
+        name,
+        id,
+        value,
+        span,
+        shadowed,
+    })
+}
+
+fn wrap_pending_let(pending: PendingLet, inner: Stmt, ctx: &mut Ctx) -> Stmt {
+    match pending.shadowed {
+        Some(previous) => {
+            ctx.locals.insert(pending.name, previous);
+        }
+        None => {
+            ctx.locals.remove(&pending.name);
+        }
+    }
+    Stmt::Let {
+        local: pending.id,
+        value: pending.value,
+        body: Box::new(inner),
+        provenance: to_provenance(ctx.source_file, pending.span),
+    }
+}
+
+/// Lowers an ordinary i32-function block: zero or more `let NAME = EXPR;`
+/// statements followed by one i32 tail form (a trailing expression with no
+/// semicolon, an `if` used at the tail, or a `return EXPR;`). The separate
+/// process-main profile has a richer statement sequence, because Rust unit
+/// functions may discard i32 expression results before returning normally.
 fn lower_block(
     block: &Block,
     ctx: &mut Ctx,
     mode: FunctionLowering<'_>,
 ) -> Result<Stmt, Vec<LoweringError>> {
+    if let FunctionLowering::ProcessMain {
+        exit_module_bindings,
+    } = mode
+    {
+        return lower_process_main_block(block, ctx, exit_module_bindings);
+    }
+
     let mut lets: Vec<(&Local, Span)> = Vec::new();
     let mut tail: Option<&SynStmt> = None;
     for stmt in &block.stmts {
@@ -612,63 +692,13 @@ fn lower_block(
     // follows it, matching `types::Stmt::Let`'s own doc comment) -- name
     // resolution order and tree-construction order are different passes
     // over the same list, not the same loop.
-    struct PendingLet {
-        name: String,
-        id: LocalId,
-        value: Expr,
-        span: Span,
-        shadowed: Option<LocalId>,
-    }
     let mut pending = Vec::with_capacity(lets.len());
     for (local, span) in &lets {
-        // `cfg` and other attributes can attach to a `let` statement itself
-        // (`#[cfg(test)] let x = 1;`), not only to a function/parameter --
-        // rustc's `flat_map_stmt` (issue #27's reference table) is exactly
-        // where a real compiler applies `cfg` at this position. This
-        // subset implements no `cfg`, so any non-doc attribute here is
-        // diagnosed the same way a function-level one already is, instead
-        // of being silently accepted because only `ItemFn.attrs` was ever
-        // checked.
-        let mut attr_errors = Vec::new();
-        reject_unsupported_attrs(&local.attrs, &mut attr_errors);
-        if !attr_errors.is_empty() {
-            return Err(attr_errors);
-        }
-        let name = match &local.pat {
-            Pat::Ident(pi) if pi.by_ref.is_none() && pi.subpat.is_none() => pi.ident.to_string(),
-            other => {
-                return Err(vec![unsupported(
-                    "non-identifier let pattern",
-                    other.span(),
-                )])
-            }
-        };
-        let Some(init) = &local.init else {
-            return Err(vec![unsupported_shape(
-                "let binding with no initializer",
-                *span,
-            )]);
-        };
-        if init.diverge.is_some() {
-            return Err(vec![unsupported("let-else", *span)]);
-        }
-        let value = lower_expr(&init.expr, ctx)?;
-        let id = ctx.fresh_local();
-        let shadowed = ctx.locals.insert(name.clone(), id);
-        pending.push(PendingLet {
-            name,
-            id,
-            value,
-            span: *span,
-            shadowed,
-        });
+        pending.push(lower_let_prefix(local, *span, ctx)?);
     }
 
     let mut inner = match tail {
         Some(tail_stmt) => lower_tail_stmt(tail_stmt, ctx, mode)?,
-        None if matches!(mode, FunctionLowering::ProcessMain { .. }) => {
-            Stmt::ReturnUnit(to_provenance(ctx.source_file, block.span()))
-        }
         None => {
             return Err(vec![unsupported_shape(
                 "block has no tail expression/return",
@@ -678,19 +708,78 @@ fn lower_block(
     };
 
     for p in pending.into_iter().rev() {
-        match p.shadowed {
-            Some(prev) => {
-                ctx.locals.insert(p.name, prev);
-            }
-            None => {
-                ctx.locals.remove(&p.name);
-            }
+        inner = wrap_pending_let(p, inner, ctx);
+    }
+    Ok(inner)
+}
+
+enum ProcessMainPrefix {
+    Let(PendingLet),
+    Eval { expr: Expr, provenance: Provenance },
+}
+
+/// Lowers a conventional unit `main` as an ordered sequence. Unlike an i32
+/// function body, a semicolon-terminated expression statement is not an
+/// error: it must still be evaluated, but its value is discarded before the
+/// following statement or ordinary unit return.
+fn lower_process_main_block(
+    block: &Block,
+    ctx: &mut Ctx,
+    exit_module_bindings: &BTreeSet<String>,
+) -> Result<Stmt, Vec<LoweringError>> {
+    let mut prefixes = Vec::new();
+    let mut tail: Option<&SynStmt> = None;
+    for stmt in &block.stmts {
+        if tail.is_some() {
+            return Err(vec![unsupported_shape(
+                "a statement follows this process-main terminating tail",
+                stmt.span(),
+            )]);
         }
-        inner = Stmt::Let {
-            local: p.id,
-            value: p.value,
-            body: Box::new(inner),
-            provenance: to_provenance(ctx.source_file, p.span),
+        match stmt {
+            SynStmt::Local(local) => {
+                prefixes.push(ProcessMainPrefix::Let(lower_let_prefix(
+                    local,
+                    local.span(),
+                    ctx,
+                )?));
+            }
+            SynStmt::Expr(expr, Some(_))
+                if matches!(expr, SynExpr::Return(_))
+                    || is_process_exit_call(expr, exit_module_bindings, ctx) =>
+            {
+                tail = Some(stmt);
+            }
+            SynStmt::Expr(expr, Some(_)) => {
+                let expr = lower_expr(expr, ctx)?;
+                prefixes.push(ProcessMainPrefix::Eval {
+                    provenance: to_provenance(ctx.source_file, stmt.span()),
+                    expr,
+                });
+            }
+            SynStmt::Expr(_, None) => tail = Some(stmt),
+            other => return Err(vec![unsupported("item/macro statement", other.span())]),
+        }
+    }
+
+    let mut inner = match tail {
+        Some(tail_stmt) => lower_tail_stmt(
+            tail_stmt,
+            ctx,
+            FunctionLowering::ProcessMain {
+                exit_module_bindings,
+            },
+        )?,
+        None => Stmt::ReturnUnit(to_provenance(ctx.source_file, block.span())),
+    };
+    for prefix in prefixes.into_iter().rev() {
+        inner = match prefix {
+            ProcessMainPrefix::Let(pending) => wrap_pending_let(pending, inner, ctx),
+            ProcessMainPrefix::Eval { expr, provenance } => Stmt::Eval {
+                expr,
+                body: Box::new(inner),
+                provenance,
+            },
         };
     }
     Ok(inner)
@@ -733,6 +822,24 @@ fn lower_tail_stmt(
             expr.span(),
         )]),
     }
+}
+
+/// Whether this source expression selects the one closed, non-returning
+/// process-exit surface. This small recognizer is used only to decide that a
+/// semicolon statement is terminal; `lower_process_main_tail` remains the
+/// authority for its semicolon and arity diagnostics.
+fn is_process_exit_call(
+    expr: &SynExpr,
+    exit_module_bindings: &BTreeSet<String>,
+    ctx: &Ctx<'_>,
+) -> bool {
+    let SynExpr::Call(call) = expr else {
+        return false;
+    };
+    let SynExpr::Path(path) = call.func.as_ref() else {
+        return false;
+    };
+    is_process_exit_path(&path.path, exit_module_bindings, ctx)
 }
 
 fn lower_process_main_tail(
@@ -1496,6 +1603,40 @@ mod tests {
             program.functions["main"].body,
             Stmt::ReturnUnit(_)
         ));
+    }
+
+    #[test]
+    fn process_main_evaluates_semicolon_expression_statements_in_source_order() {
+        let source = r#"
+            fn first(x: i32) -> i32 { x.wrapping_add(1) }
+            fn second(x: i32) -> i32 { x.wrapping_add(2) }
+            fn main() {
+                let first_arg = 3;
+                first(first_arg);
+                let second_arg = 4;
+                second(second_arg);
+            }
+        "#;
+        let program =
+            lower_rust_process_main(&path(), source, &["first", "second", "main"]).unwrap();
+        assert!(matches!(
+            &program.functions["main"].body,
+            Stmt::Let { body, .. }
+                if matches!(body.as_ref(), Stmt::Eval { body, .. }
+                    if matches!(body.as_ref(), Stmt::Let { body, .. }
+                        if matches!(body.as_ref(), Stmt::Eval { body, .. }
+                            if matches!(body.as_ref(), Stmt::ReturnUnit(_)))))
+        ));
+        let outcome = eval_function(&program, "main", &[]).unwrap();
+        assert_eq!(outcome.value, 0);
+        assert_eq!(
+            outcome
+                .effects
+                .iter()
+                .map(|event| (event.fn_name.as_str(), event.args.clone()))
+                .collect::<Vec<_>>(),
+            vec![("first", vec![3]), ("second", vec![4])]
+        );
     }
 
     #[test]

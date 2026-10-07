@@ -180,6 +180,16 @@ pub enum Stmt {
         els: Box<Stmt>,
         provenance: Provenance,
     },
+    /// `expr; body` -- evaluate the i32 expression exactly once in source
+    /// order, discard only its resulting value, then continue with `body`.
+    /// This is deliberately a statement form rather than an optimizer hint:
+    /// a call in `expr` remains semantically executed even when its value is
+    /// not used by the source-level unit function.
+    Eval {
+        expr: Expr,
+        body: Box<Stmt>,
+        provenance: Provenance,
+    },
     Return(Expr, Provenance),
     /// A unit-returning function reaches its ordinary language return.  At
     /// the Darwin process boundary, this is the conventional successful
@@ -203,6 +213,7 @@ impl Stmt {
         match self {
             Stmt::Let { provenance: p, .. } => p,
             Stmt::If { provenance: p, .. } => p,
+            Stmt::Eval { provenance: p, .. } => p,
             Stmt::Return(_, p) => p,
             Stmt::ReturnUnit(p) => p,
             Stmt::ExternalCall { provenance: p, .. } => p,
@@ -262,6 +273,7 @@ pub fn stmt_contains_call(stmt: &Stmt) -> bool {
         Stmt::If {
             cond, then, els, ..
         } => expr_contains_call(cond) || stmt_contains_call(then) || stmt_contains_call(els),
+        Stmt::Eval { expr, body, .. } => expr_contains_call(expr) || stmt_contains_call(body),
         Stmt::Return(expr, _) => expr_contains_call(expr),
         Stmt::ReturnUnit(_) => false,
         // An external operation is observably effectful even when its status
@@ -314,6 +326,9 @@ pub fn max_local_id_in_stmt(stmt: &Stmt) -> Option<u32> {
             max_local_id_in_expr(cond),
             max_opt(max_local_id_in_stmt(then), max_local_id_in_stmt(els)),
         ),
+        Stmt::Eval { expr, body, .. } => {
+            max_opt(max_local_id_in_expr(expr), max_local_id_in_stmt(body))
+        }
         Stmt::Return(expr, _) => max_local_id_in_expr(expr),
         Stmt::ReturnUnit(_) => None,
         Stmt::ExternalCall { args, .. } => args.iter().filter_map(max_local_id_in_expr).max(),

@@ -441,6 +441,15 @@ fn rewrite_calls_in_stmt(
             els: Box::new(rewrite_calls_in_stmt(els, callee_name, replace)?),
             provenance: provenance.clone(),
         },
+        Stmt::Eval {
+            expr,
+            body,
+            provenance,
+        } => Stmt::Eval {
+            expr: rewrite_calls_in_expr(expr, callee_name, replace)?,
+            body: Box::new(rewrite_calls_in_stmt(body, callee_name, replace)?),
+            provenance: provenance.clone(),
+        },
         Stmt::Return(expr, provenance) => Stmt::Return(
             rewrite_calls_in_expr(expr, callee_name, replace)?,
             provenance.clone(),
@@ -596,6 +605,33 @@ mod tests {
 
     fn lit(v: i64) -> Expr {
         Expr::IntLit(v, IntWidth::I32, prov())
+    }
+
+    #[test]
+    fn checked_inline_rewrites_a_call_inside_an_expression_statement() {
+        let mut program = Program::default();
+        program.insert(fact(
+            "identity",
+            1,
+            Stmt::Return(Expr::Param(0, prov()), prov()),
+        ));
+        program.insert(fact(
+            "caller",
+            0,
+            Stmt::Eval {
+                expr: call("identity", vec![lit(5)]),
+                body: Box::new(Stmt::Return(lit(7), prov())),
+                provenance: prov(),
+            },
+        ));
+
+        let after = checked_inline(&program, "caller", "identity").unwrap();
+        assert!(matches!(
+            &after.functions["caller"].body,
+            Stmt::Eval { expr: Expr::IntLit(5, ..), body, .. }
+                if matches!(body.as_ref(), Stmt::Return(Expr::IntLit(7, ..), _))
+        ));
+        assert_eq!(eval_function(&after, "caller", &[]).unwrap().value, 7);
     }
 
     /// Delegates to `interpreter::observed_calls` -- the shared

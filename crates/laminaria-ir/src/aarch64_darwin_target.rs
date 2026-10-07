@@ -307,6 +307,7 @@ fn count_stmt_bindings(stmt: &Stmt) -> usize {
         Stmt::If {
             cond, then, els, ..
         } => count_expr_bindings(cond) + count_stmt_bindings(then) + count_stmt_bindings(els),
+        Stmt::Eval { expr, body, .. } => count_expr_bindings(expr) + count_stmt_bindings(body),
         Stmt::Return(expr, _) => count_expr_bindings(expr),
         Stmt::ReturnUnit(_) => 0,
         Stmt::ExternalCall { args, .. } => args.iter().map(count_expr_bindings).sum(),
@@ -319,6 +320,7 @@ fn count_stmt_expressions(stmt: &Stmt) -> usize {
         Stmt::If {
             cond, then, els, ..
         } => count_expr_slots(cond) + count_stmt_expressions(then) + count_stmt_expressions(els),
+        Stmt::Eval { expr, body, .. } => count_expr_slots(expr) + count_stmt_expressions(body),
         Stmt::Return(expr, _) => count_expr_slots(expr),
         Stmt::ReturnUnit(_) => 0,
         Stmt::ExternalCall { args, .. } => args.iter().map(count_expr_slots).sum(),
@@ -377,6 +379,14 @@ fn emit_stmt(
             emit_i32(code, 0, 0);
             emit_epilogue(code, context.layout.frame_bytes);
             Ok(())
+        }
+        Stmt::Eval { expr, body, .. } => {
+            // `emit_expr` owns a result slot for every value expression.
+            // Do not elide it merely because the source discards the value:
+            // evaluating its subtree can issue same-program calls in source
+            // order. The slot simply becomes dead after the next statement.
+            emit_expr(code, expr, context, branches)?;
+            emit_stmt(code, body, context, branches)
         }
         Stmt::Let {
             local, value, body, ..
@@ -1169,6 +1179,25 @@ mod tests {
             &["work", "main"],
         )
         .unwrap();
+        assert_owned_object_exits(&validate_program(&program).unwrap(), 0);
+    }
+
+    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+    #[test]
+    fn conventional_process_main_evaluates_expression_statements_then_returns_success() {
+        let source = r#"
+            fn work(x: i32) -> i32 { x.wrapping_add(1) }
+            fn main() {
+                work(74);
+            }
+        "#;
+        let program = lower_rust_process_main(
+            std::path::Path::new("expression-statement-process-main.rs"),
+            source,
+            &["work", "main"],
+        )
+        .unwrap();
+        assert!(matches!(program.functions["main"].body, Stmt::Eval { .. }));
         assert_owned_object_exits(&validate_program(&program).unwrap(), 0);
     }
 

@@ -270,6 +270,10 @@ fn validate_stmt(
             validate_stmt(fn_name, then, param_count, function_result, bound, program)?;
             validate_stmt(fn_name, els, param_count, function_result, bound, program)
         }
+        Stmt::Eval { expr, body, .. } => {
+            validate_expr(fn_name, expr, param_count, bound, program, false)?;
+            validate_stmt(fn_name, body, param_count, function_result, bound, program)
+        }
         Stmt::Return(expr, _) => {
             if function_result == FunctionResult::Unit {
                 return Err(ProgramValidationError::ReturnValueFromUnitFunction {

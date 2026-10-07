@@ -102,6 +102,7 @@ const OP_ELSE: u8 = 0x05;
 const OP_END: u8 = 0x0B;
 const OP_RETURN: u8 = 0x0F;
 const OP_CALL: u8 = 0x10;
+const OP_DROP: u8 = 0x1A;
 const OP_LOCAL_GET: u8 = 0x20;
 const OP_LOCAL_SET: u8 = 0x21;
 const OP_I32_CONST: u8 = 0x41;
@@ -276,6 +277,15 @@ fn lower_stmt(
             lower_stmt(els, ctx, out)?;
             out.push(OP_END);
         }
+        Stmt::Eval { expr, body, .. } => {
+            lower_expr(expr, ctx, out)?;
+            // An expression statement still evaluates its expression, but
+            // unlike a tail return it contributes no value to the enclosing
+            // WASM stack. `drop` is the ISA-level counterpart of the owned
+            // IR's explicit discarded-value semantics.
+            out.push(OP_DROP);
+            lower_stmt(body, ctx, out)?;
+        }
         Stmt::Return(expr, _) => {
             lower_expr(expr, ctx, out)?;
             out.push(OP_RETURN);
@@ -397,7 +407,9 @@ pub fn generate_wasm_module(program: &ValidatedProgram) -> Result<Vec<u8>, Codeg
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{FnFact, Program, Provenance, SourceLanguage, SourcePosition, SourceSpan};
+    use crate::types::{
+        FnFact, FnId, Program, Provenance, SourceLanguage, SourcePosition, SourceSpan,
+    };
     use crate::validate::validate_program;
     use std::path::PathBuf;
 
@@ -449,6 +461,43 @@ mod tests {
         let bytes = generate_wasm_module(&validated).expect("codegen must succeed for this subset");
         assert_eq!(&bytes[0..4], b"\0asm");
         assert_eq!(&bytes[4..8], &[0x01, 0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn expression_statement_drops_its_value_after_evaluating_the_call() {
+        let mut program = Program::default();
+        program.insert(FnFact {
+            name: "work".to_string(),
+            params: vec![],
+            result: crate::types::FunctionResult::I32,
+            provenance: prov(),
+            body: Stmt::Return(Expr::IntLit(4, IntWidth::I32, prov()), prov()),
+        });
+        program.insert(FnFact {
+            name: "main".to_string(),
+            params: vec![],
+            result: crate::types::FunctionResult::I32,
+            provenance: prov(),
+            body: Stmt::Eval {
+                expr: Expr::Call(FnId("work".to_owned()), vec![], prov()),
+                body: Box::new(Stmt::Return(Expr::IntLit(7, IntWidth::I32, prov()), prov())),
+                provenance: prov(),
+            },
+        });
+        let validated = validate_program(&program).expect("expression statement must validate");
+        let interpreter = crate::interpreter::eval_function(&program, "main", &[]).unwrap();
+        assert_eq!(interpreter.value, 7);
+        assert_eq!(interpreter.effects[0].fn_name, "work");
+
+        let wasm = generate_wasm_module(&validated).expect("codegen must succeed");
+        let engine = wasmtime::Engine::default();
+        let module = wasmtime::Module::new(&engine, &wasm).expect("module must validate");
+        let mut store = wasmtime::Store::new(&engine, ());
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+        let main = instance
+            .get_typed_func::<(), i32>(&mut store, "main")
+            .expect("main must be exported");
+        assert_eq!(main.call(&mut store, ()).unwrap(), 7);
     }
 
     /// T0 doc §8's 3-way agreement: the existing interpreter's tree-walk

@@ -44,11 +44,14 @@ parameters use compiler-owned stack slots. Generated functions preserve `x19`
 as their frame base, save their link register, and marshal evaluated call
 arguments into `w0` through `w7` immediately before a direct `BL` to another
 symbol in the same LAMINARIA object. The ordinary process boundary accepts a
-zero-argument Rust `fn main()` with unit result. An empty body, a `let` prefix
-with no tail, or a final bare `return;` produces `Stmt::ReturnUnit`; the
-Darwin backend emits `w0 = 0` and a normal `ret`, leaving the platform startup
-code to observe successful completion. For a custom status it also accepts the
-exact final statement `std::process::exit(EXPR);` or `NAME::exit(EXPR);`,
+zero-argument Rust `fn main()` with unit result. An empty body, a sequence of
+supported `let` bindings and i32 expression statements such as `work();`, or
+a final bare `return;` produces ordered `Stmt::Let`/`Stmt::Eval` nodes ending
+in `Stmt::ReturnUnit`. The backend evaluates every node in source order,
+discards only expression-statement values, then emits `w0 = 0` and a normal
+`ret`, leaving the platform startup code to observe successful completion. For
+a custom status it also accepts the exact final statement
+`std::process::exit(EXPR);` or `NAME::exit(EXPR);`,
 where `NAME` is explicitly bound by `use std::process` (optionally aliased).
 That path evaluates `EXPR` as owned i32 code, puts the result in `w0`, and
 emits a `BL` with an external `ARM64_RELOC_BRANCH26` record to `_exit`
