@@ -79,7 +79,7 @@ fn owned_native_build_lowers_links_and_launches_supported_main() {
     let output_dir = root.join("out");
     std::fs::write(
         &source,
-        "fn status() -> i32 { 2i32.wrapping_add(5) }\nfn main() { std::process::exit(status()); }\n",
+        "use std::process;\nfn status() -> i32 { 2i32.wrapping_add(5) }\nfn main() { process::exit(status()); }\n",
     )
     .unwrap();
 

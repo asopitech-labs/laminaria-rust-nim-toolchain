@@ -25,6 +25,22 @@ closure).
 | A file-level doc comment (`//!`/`/*! */`) | A | n/a | Same helper, `attr.path().is_ident("doc")` allow-list | `accepts_a_file_level_doc_comment` |
 | A *requested* function declared more than once in the file | R | n/a (Nim's own top-level scan re-parses each `proc` independently and the last one wins via `program.insert`; a genuine duplicate-`proc` check is not implemented on the Nim side -- a named, open asymmetry, not claimed equivalent) | `by_name` grouped by name (`Vec<&ItemFn>` per name, not overwritten via a single `insert`), checked before lowering begins | `rejects_a_duplicate_declaration_of_a_requested_function`, `rejects_a_duplicate_declaration_of_a_function_called_by_another_requested_function` |
 
+## Owned Darwin process-main profile
+
+`lower_rust_process_main` is deliberately narrower than ordinary i32-function
+lowering: it owns the source semantics of the one closed process-termination
+capability that the native Darwin path can link today. The rows below apply
+only when the selected entry is the conventional `main`; they do not open a
+general FFI or name-resolution escape hatch.
+
+| Construct | Rust process-main profile | Implementing code | Test |
+|---|---|---|---|
+| `std::process::exit(EXPR);` as the final statement of argument-free `fn main()` | A | `lower_process_exit_tail` + `is_process_exit_path` | Owned Darwin native E2E |
+| `use std::process;` followed by `process::exit(EXPR);` | A | `collect_process_exit_module_bindings` / `process_module_import_binding` | `process_main_lowers_its_real_unit_result_and_exit_intrinsic`; `owned_native_build_lowers_links_and_launches_supported_main` |
+| `use std::process as NAME;` followed by `NAME::exit(EXPR);` | A | Same closed binding collector and path resolver | `process_main_resolves_an_explicitly_aliased_process_module` |
+| Direct-function imports, glob/group imports, or any import other than the one module binding above | R | `process_module_import_binding` rejection | `process_main_rejects_noncanonical_exit_shape` |
+| Other top-level non-function items, an import binding that collides with a function, or a local/parameter that shadows the accepted module binding | R | `collect_process_exit_module_bindings` / `is_process_exit_path` | `process_main_rejects_an_unresolved_std_shadowing_item` covers the non-function boundary; collision/shadowing are rejected by the same production checks |
+
 ## Function declaration level
 
 | Construct | Rust | Nim | Implementing code | Test |

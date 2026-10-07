@@ -12,10 +12,12 @@ lexical `let` bindings and `if EXPR != 0 { ... } else { ... }` are lowered
 as owned stack operations and in-function AArch64 control flow. Calls among
 functions discovered from the selected source entry are lowered to direct
 same-object AArch64 branches. A conventional argument-free Rust `fn main()`
-may terminate through the closed `std::process::exit(i32)` surface: LAMINARIA
-represents that separately from ordinary value calls and writes a real Mach-O
-external branch relocation to Darwin C `exit` in `libSystem`. Other external
-and cross-object calls remain diagnosed; they are never delegated.
+may terminate through the closed `std::process::exit(i32)` surface, either by
+its absolute path or an explicit `use std::process` module binding (including
+an alias). LAMINARIA represents that separately from ordinary value calls and
+writes a real Mach-O external branch relocation to Darwin C `exit` in
+`libSystem`. Other external and cross-object calls remain diagnosed; they are
+never delegated.
 
 This is a product compiler path, not a comparison experiment: the source
 frontends, validation, lowering, instruction selection, AArch64 encoding, and
@@ -42,8 +44,9 @@ as their frame base, save their link register, and marshal evaluated call
 arguments into `w0` through `w7` immediately before a direct `BL` to another
 symbol in the same LAMINARIA object. The ordinary process boundary accepts a
 zero-argument Rust `fn main()` with unit result and the exact final statement
-`std::process::exit(EXPR);`. It evaluates `EXPR` as owned i32 code, puts the
-result in `w0`, and emits a `BL` with an external
+`std::process::exit(EXPR);` or `NAME::exit(EXPR);`, where `NAME` is explicitly
+bound by `use std::process` (optionally aliased). It evaluates `EXPR` as owned
+i32 code, puts the result in `w0`, and emits a `BL` with an external
 `ARM64_RELOC_BRANCH26` record to `_exit` (Darwin's object-file spelling for C
 `exit`, not the separate POSIX `_exit` API). The linked process entry is the
 LAMINARIA-produced `_main` joined to `libSystem` by the declared link action.
@@ -97,11 +100,13 @@ clean commit `dfb158321b11ea828615127f4c47801e560b661c` on native arm64 macOS
 Run envelopes and Level 1 traces are under
 `/private/tmp/laminaria-owned-native-compare-dfb1583`; every envelope records
 that same clean commit and `dirty=false`. Both routes consumed the exact same
-source file, including a conventional `main` whose body is
-`std::process::exit(pack(combine(3), increment(4)));`. All ten Cargo products
-and all ten LAMINARIA products launched successfully: the unchanged source
-exited 75 and the identical `wrapping_add(1)` → `wrapping_add(2)` edit exited
-86.
+source file, including the then-current absolute-path conventional `main`
+whose body is `std::process::exit(pack(combine(3), increment(4)));`. All ten
+Cargo products and all ten LAMINARIA products launched successfully: the
+unchanged source exited 75 and the identical `wrapping_add(1)` →
+`wrapping_add(2)` edit exited 86. The current fixture uses the equivalent,
+explicitly imported `process::exit` spelling and must be remeasured before its
+numbers replace this historical record.
 
 | Scenario and measured boundary | Cargo+rustc median | LAMINARIA median | Current result for this workload |
 | --- | ---: | ---: | --- |

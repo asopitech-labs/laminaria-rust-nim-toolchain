@@ -18,14 +18,14 @@
 //! real span -- never a panic, never a partial `Program`, never a fallback
 //! to invoking `rustc`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use proc_macro2::{LineColumn, Span};
 use syn::spanned::Spanned;
 use syn::{
-    BinOp, Block, Expr as SynExpr, ExprIf, FnArg, Item, ItemFn, Lit, Local, Pat, ReturnType,
-    Stmt as SynStmt, Type,
+    BinOp, Block, Expr as SynExpr, ExprIf, FnArg, Item, ItemFn, ItemUse, Lit, Local, Pat,
+    ReturnType, Stmt as SynStmt, Type, UseTree,
 };
 
 use crate::diagnostics::{Diagnostic, LoweringError};
@@ -35,9 +35,11 @@ use crate::types::{
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum FunctionLowering {
+enum FunctionLowering<'a> {
     I32Value,
-    ProcessMain,
+    ProcessMain {
+        exit_module_bindings: &'a BTreeSet<String>,
+    },
 }
 
 pub(crate) fn to_source_position(lc: LineColumn) -> SourcePosition {
@@ -139,11 +141,12 @@ pub fn lower_rust_source(
 }
 
 /// Lowers a conventional, argument-free Rust `fn main()` which ends through
-/// `std::process::exit(i32)`, together with the same-program i32 closure it
-/// calls.  This is deliberately a distinct source contract from
-/// [`lower_rust_source`]: it retains the real unit result of `main` and the
-/// terminating external operation instead of pretending the status expression
-/// itself was the platform entry point.
+/// `std::process::exit(i32)`, or a direct `use std::process` binding (with an
+/// optional alias), together with the same-program i32 closure it calls. This
+/// is deliberately a distinct source contract from [`lower_rust_source`]: it
+/// retains the real unit result of `main` and the terminating external
+/// operation instead of pretending the status expression itself was the
+/// platform entry point.
 pub fn lower_rust_process_main(
     source_file: &Path,
     source_text: &str,
@@ -173,27 +176,18 @@ fn lower_rust_source_inner(
 
     let mut diagnostics: Vec<Diagnostic> = Vec::new();
 
-    // The accepted process spelling starts with `std`.  This narrow profile
-    // has no general Rust name resolver, so reject every non-function item
-    // rather than incorrectly assuming `mod std`, `use ... as std`, or an
-    // extern-crate alias could not change that path's meaning.  Ordinary
+    // The process-main profile owns resolution only for the closed process
+    // termination capability. It accepts the absolute `std::process::exit`
+    // spelling and explicit `use std::process` bindings, but does not pretend
+    // to be a general Rust name resolver. Every other top-level item remains
+    // rejected here so a module, extern-crate alias, or unrelated import can
+    // never silently change the meaning of the accepted exit path. Ordinary
     // i32-only lowering intentionally keeps its existing mixed-file policy.
-    if process_main {
-        for item in &file.items {
-            if !matches!(item, Item::Fn(_)) {
-                diagnostics.push(Diagnostic::from_lowering_error(
-                    LoweringError::UnsupportedConstruct {
-                        construct: "non-function item in process-main source".to_owned(),
-                        span: SourceSpan {
-                            start: to_source_position(item.span().start()),
-                            end: to_source_position(item.span().end()),
-                        },
-                    },
-                    SourceLanguage::Rust,
-                ));
-            }
-        }
-    }
+    let process_exit_module_bindings = if process_main {
+        collect_process_exit_module_bindings(&file, &mut diagnostics)
+    } else {
+        BTreeSet::new()
+    };
 
     // A review caught a real gap: this module only ever inspects the
     // *items* it's asked about, but a file-level inner attribute
@@ -223,6 +217,24 @@ fn lower_rust_source_inner(
     for item in &file.items {
         if let Item::Fn(f) = item {
             by_name.entry(f.sig.ident.to_string()).or_default().push(f);
+        }
+    }
+    if process_main {
+        for binding in &process_exit_module_bindings {
+            if by_name.contains_key(binding) {
+                diagnostics.push(Diagnostic::from_lowering_error(
+                    LoweringError::UnsupportedShape {
+                        detail: format!(
+                            "process exit import binding '{binding}' conflicts with a function declaration"
+                        ),
+                        span: SourceSpan {
+                            start: SourcePosition { line: 1, column: 1 },
+                            end: SourcePosition { line: 1, column: 1 },
+                        },
+                    },
+                    SourceLanguage::Rust,
+                ));
+            }
         }
     }
     let declared_functions: std::collections::BTreeSet<String> =
@@ -263,7 +275,9 @@ fn lower_rust_source_inner(
         }
         let item_fn = candidates[0];
         let mode = if process_main && *name == "main" {
-            FunctionLowering::ProcessMain
+            FunctionLowering::ProcessMain {
+                exit_module_bindings: &process_exit_module_bindings,
+            }
         } else {
             FunctionLowering::I32Value
         };
@@ -298,6 +312,86 @@ fn lower_rust_source_inner(
     }
 
     Ok(program)
+}
+
+/// Collects the only import form the process-main profile resolves. A module
+/// import leaves the final `exit` member explicit at its call site, so the
+/// regular call-closure scanner still sees every same-program call nested in
+/// the status argument while correctly skipping this qualified external one.
+fn collect_process_exit_module_bindings(
+    file: &syn::File,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> BTreeSet<String> {
+    let mut bindings = BTreeSet::new();
+    for item in &file.items {
+        let Item::Use(item_use) = item else {
+            if !matches!(item, Item::Fn(_)) {
+                diagnostics.push(Diagnostic::from_lowering_error(
+                    LoweringError::UnsupportedConstruct {
+                        construct: "non-function/non-process-import item in process-main source"
+                            .to_owned(),
+                        span: SourceSpan {
+                            start: to_source_position(item.span().start()),
+                            end: to_source_position(item.span().end()),
+                        },
+                    },
+                    SourceLanguage::Rust,
+                ));
+            }
+            continue;
+        };
+
+        let mut attribute_errors = Vec::new();
+        reject_unsupported_attrs(&item_use.attrs, &mut attribute_errors);
+        diagnostics.extend(
+            attribute_errors
+                .into_iter()
+                .map(|error| Diagnostic::from_lowering_error(error, SourceLanguage::Rust)),
+        );
+
+        let Some(binding) = process_module_import_binding(item_use) else {
+            diagnostics.push(Diagnostic::from_lowering_error(
+                LoweringError::UnsupportedConstruct {
+                    construct: "process-main import other than `use std::process`".to_owned(),
+                    span: SourceSpan {
+                        start: to_source_position(item_use.span().start()),
+                        end: to_source_position(item_use.span().end()),
+                    },
+                },
+                SourceLanguage::Rust,
+            ));
+            continue;
+        };
+        if !bindings.insert(binding) {
+            diagnostics.push(Diagnostic::from_lowering_error(
+                LoweringError::UnsupportedShape {
+                    detail: "duplicate process-main import binding".to_owned(),
+                    span: SourceSpan {
+                        start: to_source_position(item_use.span().start()),
+                        end: to_source_position(item_use.span().end()),
+                    },
+                },
+                SourceLanguage::Rust,
+            ));
+        }
+    }
+    bindings
+}
+
+/// Returns the local module binding introduced by exactly one of:
+/// `use std::process;` or `use std::process as NAME;`.
+fn process_module_import_binding(item_use: &ItemUse) -> Option<String> {
+    let UseTree::Path(std_path) = &item_use.tree else {
+        return None;
+    };
+    if std_path.ident != "std" {
+        return None;
+    }
+    match std_path.tree.as_ref() {
+        UseTree::Name(name) if name.ident == "process" => Some("process".to_owned()),
+        UseTree::Rename(rename) if rename.ident == "process" => Some(rename.rename.to_string()),
+        _ => None,
+    }
 }
 
 fn type_is_i32(ty: &Type) -> bool {
@@ -353,7 +447,7 @@ fn lower_item_fn(
     source_file: &Path,
     item_fn: &ItemFn,
     declared_functions: &std::collections::BTreeSet<String>,
-    mode: FunctionLowering,
+    mode: FunctionLowering<'_>,
 ) -> Result<FnFact, Vec<LoweringError>> {
     let mut errors = Vec::new();
 
@@ -440,8 +534,8 @@ fn lower_item_fn(
             ));
             FunctionResult::I32
         }
-        (FunctionLowering::ProcessMain, ReturnType::Default) => FunctionResult::Unit,
-        (FunctionLowering::ProcessMain, ReturnType::Type(_, ty)) => {
+        (FunctionLowering::ProcessMain { .. }, ReturnType::Default) => FunctionResult::Unit,
+        (FunctionLowering::ProcessMain { .. }, ReturnType::Type(_, ty)) => {
             errors.push(unsupported(
                 "process main with an explicit return type",
                 ty.span(),
@@ -449,7 +543,7 @@ fn lower_item_fn(
             FunctionResult::Unit
         }
     };
-    if mode == FunctionLowering::ProcessMain && !params.is_empty() {
+    if matches!(mode, FunctionLowering::ProcessMain { .. }) && !params.is_empty() {
         errors.push(unsupported(
             "process main with parameters",
             item_fn.sig.inputs.span(),
@@ -487,7 +581,7 @@ fn lower_item_fn(
 fn lower_block(
     block: &Block,
     ctx: &mut Ctx,
-    mode: FunctionLowering,
+    mode: FunctionLowering<'_>,
 ) -> Result<Stmt, Vec<LoweringError>> {
     let mut lets: Vec<(&Local, Span)> = Vec::new();
     let mut tail: Option<&SynStmt> = None;
@@ -598,13 +692,16 @@ fn lower_block(
 fn lower_tail_stmt(
     stmt: &SynStmt,
     ctx: &mut Ctx,
-    mode: FunctionLowering,
+    mode: FunctionLowering<'_>,
 ) -> Result<Stmt, Vec<LoweringError>> {
     let SynStmt::Expr(expr, semi) = stmt else {
         unreachable!("lower_block only ever stores an Expr statement as `tail`")
     };
-    if mode == FunctionLowering::ProcessMain {
-        return lower_process_exit_tail(expr, semi, ctx);
+    if let FunctionLowering::ProcessMain {
+        exit_module_bindings,
+    } = mode
+    {
+        return lower_process_exit_tail(expr, semi, ctx, exit_module_bindings);
     }
     match expr {
         SynExpr::If(expr_if) if semi.is_none() => lower_if(expr_if, ctx),
@@ -635,6 +732,7 @@ fn lower_process_exit_tail(
     expr: &SynExpr,
     semi: &Option<syn::token::Semi>,
     ctx: &mut Ctx,
+    exit_module_bindings: &BTreeSet<String>,
 ) -> Result<Stmt, Vec<LoweringError>> {
     let SynExpr::Call(call) = expr else {
         return Err(vec![unsupported_shape(
@@ -648,15 +746,9 @@ fn lower_process_exit_tail(
             call.func.span(),
         )]);
     };
-    let segments = path
-        .path
-        .segments
-        .iter()
-        .map(|segment| segment.ident.to_string())
-        .collect::<Vec<_>>();
-    if segments != ["std", "process", "exit"] {
+    if !is_process_exit_path(&path.path, exit_module_bindings, ctx) {
         return Err(vec![unsupported_shape(
-            "process main exit callee must be std::process::exit",
+            "process main exit callee must be std::process::exit or an explicit use std::process binding",
             path.span(),
         )]);
     }
@@ -682,6 +774,30 @@ fn lower_process_exit_tail(
         args,
         provenance: to_provenance(ctx.source_file, call.span()),
     })
+}
+
+/// Resolves only the closed process-exit surface admitted by this profile.
+/// An import binding must still be a module-qualified `NAME::exit` call: this
+/// prevents the general same-program `Expr::Call` resolver from being
+/// weakened, and leaves the discovery pass able to distinguish this external
+/// edge from every unqualified owned call.
+fn is_process_exit_path(
+    path: &syn::Path,
+    exit_module_bindings: &BTreeSet<String>,
+    ctx: &Ctx<'_>,
+) -> bool {
+    let segments = path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>();
+    if segments == ["std", "process", "exit"] {
+        return true;
+    }
+    matches!(segments.as_slice(), [binding, exit] if exit == "exit"
+        && exit_module_bindings.contains(binding)
+        && !ctx.locals.contains_key(binding)
+        && !ctx.params.contains_key(binding))
 }
 
 fn lower_if(expr_if: &ExprIf, ctx: &mut Ctx) -> Result<Stmt, Vec<LoweringError>> {
@@ -1314,10 +1430,12 @@ mod tests {
     #[test]
     fn process_main_lowers_its_real_unit_result_and_exit_intrinsic() {
         let source = r#"
+            use std::process;
+
             fn status(x: i32) -> i32 { x.wrapping_add(1) }
             fn main() {
                 let code = status(74);
-                std::process::exit(code);
+                process::exit(code);
             }
         "#;
         let program = lower_rust_process_main(&path(), source, &["status", "main"]).unwrap();
@@ -1336,6 +1454,36 @@ mod tests {
     }
 
     #[test]
+    fn process_main_resolves_an_explicitly_aliased_process_module() {
+        let source = r#"
+            use std::process as host_process;
+
+            fn main() { host_process::exit(7); }
+        "#;
+        let program = lower_rust_process_main(&path(), source, &["main"]).unwrap();
+        assert!(matches!(
+            program.functions["main"].body,
+            Stmt::ExternalCall {
+                target: ExternalTarget::ProcessExit,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn process_main_rejects_a_process_import_binding_that_is_not_unambiguous() {
+        for source in [
+            "use std::process; fn process() -> i32 { 0 } fn main() { process::exit(7); }",
+            "use std::process; fn main() { let process = 7; process::exit(7); }",
+        ] {
+            assert!(
+                lower_rust_process_main(&path(), source, &["main"]).is_err(),
+                "must reject a process binding whose source meaning is not the closed std module: {source}"
+            );
+        }
+    }
+
+    #[test]
     fn process_main_rejects_an_unresolved_std_shadowing_item() {
         let source = r#"
             mod std { pub mod process { pub fn exit(_: i32) {} } }
@@ -1348,6 +1496,7 @@ mod tests {
     fn process_main_rejects_noncanonical_exit_shape() {
         for source in [
             "fn main() { process::exit(7); }",
+            "use std::process::exit; fn main() { exit(7); }",
             "fn main() -> i32 { std::process::exit(7); }",
             "fn main(x: i32) { std::process::exit(x); }",
             "fn main() { std::process::exit(7, 8); }",

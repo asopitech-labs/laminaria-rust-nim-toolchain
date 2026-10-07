@@ -254,18 +254,17 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Compile a supported zero-argument Rust `i32` source function through
-    /// LAMINARIA's owned frontend, validation, ARM64 Mach-O code generator,
-    /// and an explicit Darwin linker/runtime contract. This command never
-    /// invokes Cargo, rustc, Nim, a C compiler, or an assembler for target
-    /// source.
+    /// Compile a supported conventional Rust process `main`, or an explicitly
+    /// selected zero-argument i32 source function, through LAMINARIA's owned
+    /// frontend, validation, ARM64 Mach-O code generator, and an explicit
+    /// Darwin linker/runtime contract. This command never invokes Cargo,
+    /// rustc, Nim, a C compiler, or an assembler for target source.
     OwnedNativeBuild {
         /// A Rust source file containing the selected supported entry function.
         #[arg(long)]
         source: PathBuf,
-        /// Zero-argument `i32` source function emitted as Darwin process
-        /// `_main`. This permits a normal Rust `main` wrapper to remain in
-        /// the same source file for Cargo+rustc comparison.
+        /// Conventional `fn main()` by default; a selected non-main entry
+        /// remains a compatibility path for a zero-argument i32 closure.
         #[arg(long, default_value = "main")]
         entry: String,
         /// Directory receiving LAMINARIA's Mach-O object and linked executable.
