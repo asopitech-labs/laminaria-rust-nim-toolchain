@@ -746,6 +746,7 @@ fn lower_process_main_block(
             }
             SynStmt::Expr(expr, Some(_))
                 if matches!(expr, SynExpr::Return(_))
+                    || matches!(expr, SynExpr::If(_))
                     || is_process_exit_call(expr, exit_module_bindings, ctx) =>
             {
                 tail = Some(stmt);
@@ -848,18 +849,21 @@ fn lower_process_main_tail(
     ctx: &mut Ctx,
     exit_module_bindings: &BTreeSet<String>,
 ) -> Result<Stmt, Vec<LoweringError>> {
+    if let SynExpr::If(expr_if) = expr {
+        return lower_process_main_if(expr_if, ctx, exit_module_bindings);
+    }
     if let SynExpr::Return(ret) = expr {
         if semi.is_some() && ret.expr.is_none() {
             return Ok(Stmt::ReturnUnit(to_provenance(ctx.source_file, ret.span())));
         }
         return Err(vec![unsupported_shape(
-            "process main accepts only bare return; or std::process::exit(EXPR);",
+            "process main accepts only a unit if/else, bare return; or std::process::exit(EXPR);",
             ret.span(),
         )]);
     }
     let SynExpr::Call(call) = expr else {
         return Err(vec![unsupported_shape(
-            "process main tail must be bare return; or std::process::exit(EXPR);",
+            "process main tail must be a unit if/else, bare return; or std::process::exit(EXPR);",
             expr.span(),
         )]);
     };
@@ -896,6 +900,52 @@ fn lower_process_main_tail(
         target: ExternalTarget::ProcessExit,
         args,
         provenance: to_provenance(ctx.source_file, call.span()),
+    })
+}
+
+/// Lowers a terminal unit `if` in the conventional process-main profile.
+/// Each branch is a complete ordered unit sequence: it may finish normally,
+/// return explicitly, or take the closed process-exit edge.  There is no
+/// unit value in this IR, so the source `if` itself is represented directly
+/// by `Stmt::If`, rather than being forced through the i32 value lowering.
+fn lower_process_main_if(
+    expr_if: &ExprIf,
+    ctx: &mut Ctx,
+    exit_module_bindings: &BTreeSet<String>,
+) -> Result<Stmt, Vec<LoweringError>> {
+    let mut attr_errors = Vec::new();
+    reject_unsupported_attrs(&expr_if.attrs, &mut attr_errors);
+    if !attr_errors.is_empty() {
+        return Err(attr_errors);
+    }
+    let (cond, swap) = lower_condition(&expr_if.cond, ctx)?;
+    let then = lower_process_main_block(&expr_if.then_branch, ctx, exit_module_bindings)?;
+    let Some((_, else_expr)) = &expr_if.else_branch else {
+        return Err(vec![unsupported_shape(
+            "if with no else (every process-main path must terminate)",
+            expr_if.span(),
+        )]);
+    };
+    let els = match else_expr.as_ref() {
+        SynExpr::Block(b) => lower_process_main_block(&b.block, ctx, exit_module_bindings)?,
+        SynExpr::If(inner) => lower_process_main_if(inner, ctx, exit_module_bindings)?,
+        other => return Err(vec![unsupported("else-branch shape", other.span())]),
+    };
+    let provenance = to_provenance(ctx.source_file, expr_if.span());
+    Ok(if swap {
+        Stmt::If {
+            cond,
+            then: Box::new(els),
+            els: Box::new(then),
+            provenance,
+        }
+    } else {
+        Stmt::If {
+            cond,
+            then: Box::new(then),
+            els: Box::new(els),
+            provenance,
+        }
     })
 }
 
@@ -1637,6 +1687,73 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![("first", vec![3]), ("second", vec![4])]
         );
+    }
+
+    #[test]
+    fn process_main_if_else_selects_an_ordered_unit_branch() {
+        for (source, expected_effect) in [
+            (
+                r#"
+                    fn first(x: i32) -> i32 { x.wrapping_add(1) }
+                    fn second(x: i32) -> i32 { x.wrapping_add(2) }
+                    fn main() {
+                        let selector = 1;
+                        if selector != 0 { first(3); } else { second(4); }
+                    }
+                "#,
+                ("first", vec![3]),
+            ),
+            (
+                r#"
+                    fn first(x: i32) -> i32 { x.wrapping_add(1) }
+                    fn second(x: i32) -> i32 { x.wrapping_add(2) }
+                    fn main() {
+                        let selector = 0;
+                        if selector != 0 { first(3); } else { second(4); };
+                    }
+                "#,
+                ("second", vec![4]),
+            ),
+        ] {
+            let program =
+                lower_rust_process_main(&path(), source, &["first", "second", "main"]).unwrap();
+            assert!(matches!(
+                program.functions["main"].body,
+                Stmt::Let { ref body, .. } if matches!(body.as_ref(), Stmt::If { .. })
+            ));
+            let outcome = eval_function(&program, "main", &[]).unwrap();
+            assert_eq!(outcome.value, 0);
+            assert_eq!(
+                outcome
+                    .effects
+                    .iter()
+                    .map(|event| (event.fn_name.as_str(), event.args.clone()))
+                    .collect::<Vec<_>>(),
+                vec![expected_effect],
+            );
+        }
+    }
+
+    #[test]
+    fn process_main_if_else_can_close_a_branch_with_process_exit() {
+        let source = r#"
+            fn main() {
+                let selector = 0;
+                if selector != 0 { return; } else { std::process::exit(7); }
+            }
+        "#;
+        let program = lower_rust_process_main(&path(), source, &["main"]).unwrap();
+        assert!(matches!(
+            program.functions["main"].body,
+            Stmt::Let { ref body, .. }
+                if matches!(body.as_ref(), Stmt::If { then, els, .. }
+                    if matches!(then.as_ref(), Stmt::ReturnUnit(_))
+                        && matches!(els.as_ref(), Stmt::ExternalCall {
+                            target: ExternalTarget::ProcessExit,
+                            args,
+                            ..
+                        } if args.len() == 1))
+        ));
     }
 
     #[test]

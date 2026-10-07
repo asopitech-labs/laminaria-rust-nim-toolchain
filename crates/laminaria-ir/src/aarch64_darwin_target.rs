@@ -1203,6 +1203,43 @@ mod tests {
 
     #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
     #[test]
+    fn conventional_process_main_takes_a_normal_unit_if_branch() {
+        let source = r#"
+            fn work(x: i32) -> i32 { x.wrapping_add(1) }
+            fn main() {
+                let selector = 1;
+                if selector != 0 { work(74); } else { std::process::exit(7); }
+            }
+        "#;
+        let program = lower_rust_process_main(
+            std::path::Path::new("unit-if-normal-process-main.rs"),
+            source,
+            &["work", "main"],
+        )
+        .unwrap();
+        assert_owned_object_exits(&validate_program(&program).unwrap(), 0);
+    }
+
+    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+    #[test]
+    fn conventional_process_main_can_exit_from_a_unit_if_branch() {
+        let source = r#"
+            fn main() {
+                let selector = 0;
+                if selector != 0 { return; } else { std::process::exit(7); }
+            }
+        "#;
+        let program = lower_rust_process_main(
+            std::path::Path::new("unit-if-exit-process-main.rs"),
+            source,
+            &["main"],
+        )
+        .unwrap();
+        assert_owned_object_exits(&validate_program(&program).unwrap(), 7);
+    }
+
+    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+    #[test]
     fn expression_let_shadowing_preserves_the_outer_value_until_binding() {
         // `Expr::Let` is introduced by owned transforms rather than directly
         // by this Rust frontend.  Exercise it as production IR, including a

@@ -166,6 +166,36 @@ fn owned_native_build_lowers_links_and_launches_expression_statement_main() {
 }
 
 #[test]
+fn owned_native_build_lowers_links_and_launches_unit_main_conditional() {
+    let root = temp_dir("unit-main-conditional");
+    let source = root.join("main.rs");
+    let output_dir = root.join("out");
+    std::fs::write(
+        &source,
+        "fn work(x: i32) -> i32 { x.wrapping_add(1) }\nfn main() { let selector = 1; if selector != 0 { work(74); } else { std::process::exit(7); } }\n",
+    )
+    .unwrap();
+
+    let output = owned_native_command(&source, &output_dir).output().unwrap();
+    assert!(
+        output.status.success(),
+        "owned-native-build failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json = json_stdout(&output);
+    let executable = PathBuf::from(json["result"]["executable_path"].as_str().unwrap());
+    assert!(
+        executable.is_file(),
+        "missing executable: {}",
+        executable.display()
+    );
+    assert_eq!(Command::new(executable).status().unwrap().code(), Some(0));
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn owned_native_build_records_its_declared_platform_version_in_the_object() {
     let root = temp_dir("platform-version");
     let source = root.join("main.rs");
