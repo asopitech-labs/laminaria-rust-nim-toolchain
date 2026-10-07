@@ -196,6 +196,36 @@ fn owned_native_build_lowers_links_and_launches_unit_main_conditional() {
 }
 
 #[test]
+fn owned_native_build_falls_through_a_unit_main_conditional_without_else() {
+    let root = temp_dir("unit-main-conditional-fallthrough");
+    let source = root.join("main.rs");
+    let output_dir = root.join("out");
+    std::fs::write(
+        &source,
+        "fn main() { let selector = 0; if selector != 0 { std::process::exit(7); } }\n",
+    )
+    .unwrap();
+
+    let output = owned_native_command(&source, &output_dir).output().unwrap();
+    assert!(
+        output.status.success(),
+        "owned-native-build failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json = json_stdout(&output);
+    let executable = PathBuf::from(json["result"]["executable_path"].as_str().unwrap());
+    assert!(
+        executable.is_file(),
+        "missing executable: {}",
+        executable.display()
+    );
+    assert_eq!(Command::new(executable).status().unwrap().code(), Some(0));
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn owned_native_build_records_its_declared_platform_version_in_the_object() {
     let root = temp_dir("platform-version");
     let source = root.join("main.rs");

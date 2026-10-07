@@ -46,13 +46,15 @@ arguments into `w0` through `w7` immediately before a direct `BL` to another
 symbol in the same LAMINARIA object. The ordinary process boundary accepts a
 zero-argument Rust `fn main()` with unit result. An empty body, a sequence of
 supported `let` bindings and i32 expression statements such as `work();`, a
-final bare `return;`, or a terminal unit `if EXPR != 0 { .. } else { .. }`
-produces ordered `Stmt::Let`/`Stmt::Eval` nodes ending in `Stmt::ReturnUnit`
-or a branch-owning `Stmt::If`. Each unit branch independently preserves source
-order and can complete normally, return explicitly, or take the closed exit
-edge. The backend evaluates every selected node in source order, discards only
-expression-statement values, then emits `w0 = 0` and a normal `ret`, leaving
-the platform startup code to observe successful completion. For a custom
+final bare `return;`, or a terminal unit `if EXPR != 0 { .. }` (with an
+optional `else`) produces ordered `Stmt::Let`/`Stmt::Eval` nodes ending in
+`Stmt::ReturnUnit` or a branch-owning `Stmt::If`. Each unit branch
+independently preserves source order and can complete normally, return
+explicitly, or take the closed exit edge; when `else` is omitted, the false
+branch is `Stmt::ReturnUnit`. The backend evaluates every selected node in
+source order, discards only expression-statement values, then emits `w0 = 0`
+and a normal `ret`, leaving the platform startup code to observe successful
+completion. For a custom
 status it also accepts the exact final statement
 `std::process::exit(EXPR);` or `NAME::exit(EXPR);`,
 where `NAME` is explicitly bound by `use std::process` (optionally aliased).

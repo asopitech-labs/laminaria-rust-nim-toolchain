@@ -920,18 +920,19 @@ fn lower_process_main_if(
     }
     let (cond, swap) = lower_condition(&expr_if.cond, ctx)?;
     let then = lower_process_main_block(&expr_if.then_branch, ctx, exit_module_bindings)?;
-    let Some((_, else_expr)) = &expr_if.else_branch else {
-        return Err(vec![unsupported_shape(
-            "if with no else (every process-main path must terminate)",
-            expr_if.span(),
-        )]);
-    };
-    let els = match else_expr.as_ref() {
-        SynExpr::Block(b) => lower_process_main_block(&b.block, ctx, exit_module_bindings)?,
-        SynExpr::If(inner) => lower_process_main_if(inner, ctx, exit_module_bindings)?,
-        other => return Err(vec![unsupported("else-branch shape", other.span())]),
-    };
     let provenance = to_provenance(ctx.source_file, expr_if.span());
+    let els = match &expr_if.else_branch {
+        // A unit `if` with no else produces `()` when its condition is
+        // false.  At process-main tail position that is exactly ordinary
+        // successful completion, represented by the same `ReturnUnit` as an
+        // empty conventional main.
+        None => Stmt::ReturnUnit(provenance.clone()),
+        Some((_, else_expr)) => match else_expr.as_ref() {
+            SynExpr::Block(b) => lower_process_main_block(&b.block, ctx, exit_module_bindings)?,
+            SynExpr::If(inner) => lower_process_main_if(inner, ctx, exit_module_bindings)?,
+            other => return Err(vec![unsupported("else-branch shape", other.span())]),
+        },
+    };
     Ok(if swap {
         Stmt::If {
             cond,
@@ -1754,6 +1755,50 @@ mod tests {
                             ..
                         } if args.len() == 1))
         ));
+    }
+
+    #[test]
+    fn process_main_if_without_else_falls_through_as_unit() {
+        for (source, expected_effects) in [
+            (
+                r#"
+                    fn work(x: i32) -> i32 { x.wrapping_add(1) }
+                    fn main() {
+                        let selector = 1;
+                        if selector != 0 { work(74); }
+                    }
+                "#,
+                vec![("work", vec![74])],
+            ),
+            (
+                r#"
+                    fn work(x: i32) -> i32 { x.wrapping_add(1) }
+                    fn main() {
+                        let selector = 0;
+                        if selector != 0 { work(74); };
+                    }
+                "#,
+                vec![],
+            ),
+        ] {
+            let program = lower_rust_process_main(&path(), source, &["work", "main"]).unwrap();
+            assert!(matches!(
+                program.functions["main"].body,
+                Stmt::Let { ref body, .. }
+                    if matches!(body.as_ref(), Stmt::If { els, .. }
+                        if matches!(els.as_ref(), Stmt::ReturnUnit(_)))
+            ));
+            let outcome = eval_function(&program, "main", &[]).unwrap();
+            assert_eq!(outcome.value, 0);
+            assert_eq!(
+                outcome
+                    .effects
+                    .iter()
+                    .map(|event| (event.fn_name.as_str(), event.args.clone()))
+                    .collect::<Vec<_>>(),
+                expected_effects,
+            );
+        }
     }
 
     #[test]
