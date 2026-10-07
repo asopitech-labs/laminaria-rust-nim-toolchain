@@ -99,26 +99,28 @@ single-score declaration that either compiler has won in general.
 
 ### Measured result: conventional `main` versus the current Cargo+rustc path
 
-On 2026-10-07, after the process-main frontend gained explicit
-`use std::process` binding resolution, the fixed procedure ran five clean and
-five same-edit rebuild repetitions per route from clean commit
-`464863d008935b6a73879de3c4d0f65c455c1799` on native arm64 macOS (Apple M5
-Pro; 18 logical cores; 48 GiB memory). The saved raw Run envelopes and Level 1
-traces are under `/private/tmp/laminaria-owned-native-compare-464863d`; every
-envelope records that same clean commit and `dirty=false`. Both routes consumed
-the exact same source file, including `use std::process;` and the conventional
-`main` body `process::exit(pack(combine(3), increment(4)));`. All ten Cargo
-products and all ten LAMINARIA products launched successfully: the unchanged
-source exited 75 and the identical `wrapping_add(1)` → `wrapping_add(2)` edit
-exited 86.
+On 2026-10-07, after normal unit-returning `main` support was added, the fixed
+procedure ran five clean and five same-edit rebuild repetitions per route from
+clean commit `4b22c069d695fe784409fb8915616b458b5c7059` on native arm64 macOS
+(Apple M5 Pro; 18 logical cores; 48 GiB memory). The saved raw Run envelopes
+and Level 1 traces are under `/private/tmp/laminaria-owned-native-compare-4b22c06`;
+every envelope records that same clean commit and `dirty=false`. Both routes
+consumed the exact same source file, including `use std::process;` and the
+conventional `main` body `process::exit(pack(combine(3), increment(4)));`.
+This nonzero-status workload remains the fixed comparison because it makes the
+shared source semantics independently observable; the newly accepted normal
+unit-returning `fn main() {}` is separately linked and launched with status 0
+by the owned Darwin CLI and backend E2Es. All ten Cargo products and all ten
+LAMINARIA products launched successfully: the unchanged source exited 75 and
+the identical `wrapping_add(1)` → `wrapping_add(2)` edit exited 86.
 
 | Scenario and measured boundary | Cargo+rustc median | LAMINARIA median | Current result for this workload |
 | --- | ---: | ---: | --- |
-| Clean target build wall time | 145.289 ms | 20.789 ms | LAMINARIA is 6.99× shorter |
-| Clean root-process peak RSS | 83.609 MiB | 35.797 MiB | LAMINARIA is 2.34× lower |
+| Clean target build wall time | 139.037 ms | 19.630 ms | LAMINARIA is 7.08× shorter |
+| Clean root-process peak RSS | 83.609 MiB | 35.562 MiB | LAMINARIA is 2.35× lower |
 | Clean observed output footprint | 13 files / 865,105 B scanned / 430,976 B executable | 2 files / 50,815 B scanned / 50,080 B executable | LAMINARIA writes less; executable is 8.61× smaller |
-| Rebuild after the same semantic edit, wall time | 86.413 ms | 20.109 ms | LAMINARIA is 4.30× shorter |
-| Rebuild root-process peak RSS | 83.625 MiB | 35.828 MiB | LAMINARIA is 2.33× lower |
+| Rebuild after the same semantic edit, wall time | 83.203 ms | 19.124 ms | LAMINARIA is 4.35× shorter |
+| Rebuild root-process peak RSS | 83.609 MiB | 35.562 MiB | LAMINARIA is 2.35× lower |
 | Rebuild observed output footprint | 7 files / 862,753 B scanned | 2 files / 50,815 B scanned | LAMINARIA writes less |
 
 For this currently implemented, pure-i32 transitive-call `main`, LAMINARIA is
