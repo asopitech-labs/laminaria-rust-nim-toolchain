@@ -79,6 +79,9 @@ pub enum ActionKind {
     ValidateIr,
     TransformFunction,
     EvaluateEvidence,
+    /// Owned target generation from a validated Program. The current
+    /// implementation emits an AArch64 Mach-O relocatable object.
+    GenerateNativeObject,
     /// Issue #36 T0 §1.8: a shallow, `lower_rust_source`/`lower_nim_source`-
     /// independent call-graph scan (`laminaria_ir::rust_frontend::
     /// discover_called_functions`) that determines which functions a

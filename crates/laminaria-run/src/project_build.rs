@@ -738,6 +738,7 @@ pub fn run_project_generation(
             | ActionKind::ValidateIr
             | ActionKind::TransformFunction
             | ActionKind::EvaluateEvidence
+            | ActionKind::GenerateNativeObject
             | ActionKind::DiscoverSourceDependencies
             | ActionKind::PhysicalWork => {
                 unreachable!(

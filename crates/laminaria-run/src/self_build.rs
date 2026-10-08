@@ -293,6 +293,7 @@ pub fn run_generation(
             | ActionKind::ValidateIr
             | ActionKind::TransformFunction
             | ActionKind::EvaluateEvidence
+            | ActionKind::GenerateNativeObject
             | ActionKind::DiscoverSourceDependencies
             | ActionKind::PhysicalWork => Err(SelfBuildError::ActionFailed {
                 action_id: action.id.clone(),

@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 use crate::types::{Action, ActionKind, ArtifactRef};
 
 pub const COMPILER_WORK_SCHEMA_VERSION: &str = "0.1.0";
+pub const MACHO_AARCH64_SCALAR_TARGET_CONTRACT: &str = "aarch64-apple-darwin-macho-i32-v1";
 
 /// Which of `checked_inline`/`anf_insert` (`laminaria-ir::transform`) a
 /// `TransformFunction` work item runs -- named after those functions
@@ -324,6 +325,20 @@ pub fn validate_ir_artifact_id(
     )
 }
 
+/// Identity of owned native target work. The target contract is part of the
+/// identity so a target or object-format change cannot reuse stale bytes.
+pub fn native_object_artifact_id(
+    operation_version: &str,
+    validated_program_id: &str,
+    target_contract: &str,
+) -> String {
+    compute_artifact_id(
+        "generate_native_object",
+        operation_version,
+        &[validated_program_id, target_contract],
+    )
+}
+
 /// Artifact id for a `TransformFunction` work item.
 pub fn transform_function_artifact_id(
     operation_version: &str,
@@ -568,6 +583,21 @@ fn recompute_work_id(
                 semantic_contract_version,
             ))
         }
+        ActionKind::GenerateNativeObject => {
+            let validated_program_id = descriptor
+                .semantic_input_artifact_ids
+                .first()
+                .ok_or_else(|| missing("semantic_input_artifact_ids[0]"))?;
+            let target_contract = descriptor
+                .contract_version
+                .as_deref()
+                .ok_or_else(|| missing("contract_version"))?;
+            Ok(native_object_artifact_id(
+                &descriptor.operation_version,
+                validated_program_id,
+                target_contract,
+            ))
+        }
         ActionKind::TransformFunction => {
             let validated_program_id = descriptor
                 .semantic_input_artifact_ids
@@ -691,6 +721,7 @@ pub fn validate_compiler_work_action(action: &Action) -> Result<(), CompilerWork
             | ActionKind::ValidateIr
             | ActionKind::TransformFunction
             | ActionKind::EvaluateEvidence
+            | ActionKind::GenerateNativeObject
             | ActionKind::DiscoverSourceDependencies
     );
     let descriptor = match (&action.compiler_work, is_compiler_work_kind) {

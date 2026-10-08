@@ -36,13 +36,16 @@ use std::sync::{Condvar, Mutex};
 
 use laminaria_ir::diagnostics::Diagnostic;
 use laminaria_ir::interpreter::{eval_function, EvalOutcome};
+use laminaria_ir::native_aarch64::{generate_macho_aarch64_object, NativeCodegenError};
 use laminaria_ir::nim_frontend::lower_nim_source;
 use laminaria_ir::rust_frontend::lower_rust_source;
 use laminaria_ir::transform::anf_insert::anf_insert;
 use laminaria_ir::transform::checked_inline::checked_inline;
 use laminaria_ir::types::Program;
 use laminaria_ir::validate::{validate_program, ProgramValidationError, ValidatedProgram};
-use laminaria_plan::compiler_work::{CompilerWorkDescriptor, TransformKind};
+use laminaria_plan::compiler_work::{
+    CompilerWorkDescriptor, TransformKind, MACHO_AARCH64_SCALAR_TARGET_CONTRACT,
+};
 use laminaria_plan::{Action, ActionKind, ArtifactRef, ExecutionPlan};
 
 #[derive(Debug)]
@@ -129,6 +132,14 @@ pub enum CompilerWorkExecutionError {
     EvaluationFailed {
         action_id: String,
         detail: String,
+    },
+    UnsupportedTargetContract {
+        action_id: String,
+        contract: String,
+    },
+    NativeCodegenFailed {
+        action_id: String,
+        detail: NativeCodegenError,
     },
 }
 
@@ -219,6 +230,19 @@ impl std::fmt::Display for CompilerWorkExecutionError {
             ),
             Self::EvaluationFailed { action_id, detail } => {
                 write!(f, "action {action_id:?}'s evaluation failed: {detail}")
+            }
+            Self::UnsupportedTargetContract {
+                action_id,
+                contract,
+            } => write!(
+                f,
+                "action {action_id:?} requests unsupported native target contract {contract:?}"
+            ),
+            Self::NativeCodegenFailed { action_id, detail } => {
+                write!(
+                    f,
+                    "action {action_id:?}'s native generation failed: {detail}"
+                )
             }
         }
     }
@@ -526,6 +550,7 @@ pub struct ArtifactStore {
     candidates: HashMap<String, Program>,
     validated: HashMap<String, ValidatedProgram>,
     evidence: HashMap<String, Vec<EvalOutcome>>,
+    native_objects: HashMap<String, Vec<u8>>,
 }
 
 impl ArtifactStore {
@@ -547,6 +572,10 @@ impl ArtifactStore {
 
     pub fn evidence_ids(&self) -> BTreeSet<String> {
         self.evidence.keys().cloned().collect()
+    }
+
+    pub fn native_object(&self, artifact_id: &str) -> Option<&[u8]> {
+        self.native_objects.get(artifact_id).map(Vec::as_slice)
     }
 }
 
@@ -685,6 +714,14 @@ impl SharedStore {
             .unwrap()
             .evidence
             .insert(artifact_id, outcomes);
+    }
+
+    fn insert_native_object(&self, artifact_id: String, object: Vec<u8>) {
+        self.store
+            .lock()
+            .unwrap()
+            .native_objects
+            .insert(artifact_id, object);
     }
 }
 
@@ -977,6 +1014,7 @@ fn dispatch_action(action: &Action, store: &SharedStore) -> Result<(), CompilerW
             | ActionKind::ValidateIr
             | ActionKind::TransformFunction
             | ActionKind::EvaluateEvidence
+            | ActionKind::GenerateNativeObject
     ) {
         return Err(CompilerWorkExecutionError::UnsupportedActionKind {
             action_id: action.id.clone(),
@@ -995,6 +1033,9 @@ fn dispatch_action(action: &Action, store: &SharedStore) -> Result<(), CompilerW
         ActionKind::ValidateIr => dispatch_validate_ir(action, descriptor, store),
         ActionKind::TransformFunction => dispatch_transform_function(action, descriptor, store),
         ActionKind::EvaluateEvidence => dispatch_evaluate_evidence(action, descriptor, store),
+        ActionKind::GenerateNativeObject => {
+            dispatch_generate_native_object(action, descriptor, store)
+        }
         _ => unreachable!("already checked above"),
     }
 }
@@ -1181,6 +1222,42 @@ fn dispatch_evaluate_evidence(
     Ok(())
 }
 
+fn dispatch_generate_native_object(
+    action: &Action,
+    descriptor: &CompilerWorkDescriptor,
+    store: &SharedStore,
+) -> Result<(), CompilerWorkExecutionError> {
+    let input_id = descriptor
+        .semantic_input_artifact_ids
+        .first()
+        .ok_or_else(|| CompilerWorkExecutionError::MissingSemanticInput {
+            action_id: action.id.clone(),
+        })?;
+    let contract = descriptor.contract_version.as_deref().unwrap_or_default();
+    if contract != MACHO_AARCH64_SCALAR_TARGET_CONTRACT {
+        return Err(CompilerWorkExecutionError::UnsupportedTargetContract {
+            action_id: action.id.clone(),
+            contract: contract.to_string(),
+        });
+    }
+    let validated = store.validated(input_id).ok_or_else(|| {
+        CompilerWorkExecutionError::MissingValidatedInput {
+            action_id: action.id.clone(),
+            artifact_id: input_id.clone(),
+        }
+    })?;
+    let object = {
+        let _compute = store.enter_compute();
+        generate_macho_aarch64_object(&validated)
+    }
+    .map_err(|detail| CompilerWorkExecutionError::NativeCodegenFailed {
+        action_id: action.id.clone(),
+        detail,
+    })?;
+    store.insert_native_object(action.id.clone(), object);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1233,6 +1310,67 @@ mod tests {
     #[cfg(unix)]
     fn real_planner_binary() -> PathBuf {
         crate::test_support::real_planner_binary(&repo_root())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn real_planner_dispatches_owned_native_object_from_validated_ir() {
+        let source_path = repo_root()
+            .join("fixtures/laminaria-semantic-substrate-prototype/rust-src/add_or_double.rs");
+        let source = std::fs::read_to_string(&source_path).unwrap();
+        let (mut actions, _) = independent_chain_actions(
+            "rust",
+            &source_path.to_string_lossy(),
+            &source,
+            "double",
+            &[vec![3]],
+        );
+        actions.pop(); // Replace the interpreter evidence consumer with native target work.
+        let validated_id = actions[1].id.clone();
+        let object_id = laminaria_plan::compiler_work::native_object_artifact_id(
+            "0.1.0",
+            &validated_id,
+            MACHO_AARCH64_SCALAR_TARGET_CONTRACT,
+        );
+        actions.push(Action {
+            id: object_id.clone(),
+            kind: ActionKind::GenerateNativeObject,
+            command_identity: "generate_native_object".to_string(),
+            inputs: vec![ArtifactRef::declared(&validated_id)],
+            outputs: vec![ArtifactRef::declared(&object_id)],
+            compiler_work: Some(CompilerWorkDescriptor {
+                descriptor_schema_version: COMPILER_WORK_SCHEMA_VERSION.to_string(),
+                operation_version: "0.1.0".to_string(),
+                semantic_input_artifact_ids: vec![validated_id],
+                requested_functions: vec![],
+                language: None,
+                contract_version: Some(MACHO_AARCH64_SCALAR_TARGET_CONTRACT.to_string()),
+                transform: None,
+                source_provenance: None,
+                test_inputs: vec![],
+                resource_request: ResourceRequest::minimal(),
+                budget_token: "budget-1".to_string(),
+            }),
+        });
+        let input = PlanningInput::new(vec![object_id.clone()], actions);
+        let outcome = laminaria_plan::call_planner(&real_planner_binary(), &input).unwrap();
+        let plan = match outcome {
+            PlanOutcome::Planned(plan) => plan,
+            PlanOutcome::Rejected(rejection) => panic!("native chain rejected: {rejection:?}"),
+        };
+        validate(&plan, &input).unwrap();
+        let mut store = ArtifactStore::new();
+        let (result, successful) = run_compiler_work_plan_with_dispatch_trace(
+            &plan,
+            &mut store,
+            NonZeroUsize::new(1).unwrap(),
+        );
+        assert!(result.is_ok(), "owned native chain failed: {result:?}");
+        assert_eq!(successful, plan.actions.keys().cloned().collect());
+        let object = store
+            .native_object(&object_id)
+            .expect("native object published");
+        assert_eq!(&object[..4], &0xfeed_facfu32.to_le_bytes());
     }
 
     /// Issue #27 stage C's own first-slice acceptance: the *real*, full

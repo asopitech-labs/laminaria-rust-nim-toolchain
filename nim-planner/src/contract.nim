@@ -68,6 +68,7 @@ type
     akValidateIr = "validate_ir"
     akTransformFunction = "transform_function"
     akEvaluateEvidence = "evaluate_evidence"
+    akGenerateNativeObject = "generate_native_object"
     ## Issue #36 T0 §1.8: a shallow call-graph scan, never
     ## `lower_rust_source`/`lower_nim_source` itself -- see
     ## `crates/laminaria-plan/src/types.rs`'s own doc comment on this
@@ -436,6 +437,7 @@ proc actionFromJson*(node: JsonNode): Action =
     of "validate_ir": akValidateIr
     of "transform_function": akTransformFunction
     of "evaluate_evidence": akEvaluateEvidence
+    of "generate_native_object": akGenerateNativeObject
     of "discover_source_dependencies": akDiscoverSourceDependencies
     else: raise newException(ContractError, "unknown Action kind '" & kindStr & "'")
   let inputsNode = node.expectField("inputs")

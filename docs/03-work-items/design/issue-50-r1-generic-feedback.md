@@ -151,3 +151,12 @@ resource claim follows from it yet.
 - **Enables:** A native target action can consume validated owned IR. R1 still
   needs the fixed fixture's wider Rust semantics, runtime operations, and
   target generation in its R0 environment before `fixture-bin` can be claimed.
+
+The owned compiler-work graph now includes that native target action. The real
+Nim planner orders source lowering, IR validation, and AArch64 object generation
+by declared artifact dependencies; the Rust executor reads only the validated
+Program and publishes object bytes under the target-specific work identity.
+The focused integration test observes all three successful dispatch identities
+and the produced Mach-O object. This connects the scalar producer to the
+planner/executor boundary, but no native final-link action or R0 fixture
+semantics are claimed yet.
