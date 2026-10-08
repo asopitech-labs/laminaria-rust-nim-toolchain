@@ -319,6 +319,29 @@ mod tests {
             return;
         }
 
+        // Managed runners may already be inside a Seatbelt profile that
+        // denies creating a nested sandbox. In that case this host cannot
+        // exercise the OS-level denial check; keep the distinction visible
+        // instead of treating a sandbox_apply failure as a G1 failure.
+        let sandbox_probe = Command::new("sandbox-exec")
+            .args(["-p", "(version 1)(allow default)", "/usr/bin/true"])
+            .output()
+            .expect("sandbox-exec exists but could not be started");
+        if !sandbox_probe.status.success()
+            && String::from_utf8_lossy(&sandbox_probe.stderr)
+                .contains("sandbox_apply: Operation not permitted")
+        {
+            eprintln!(
+                "nested Seatbelt profiles are denied by this runner -- OS denial check unavailable"
+            );
+            return;
+        }
+        assert!(
+            sandbox_probe.status.success(),
+            "sandbox-exec preflight failed: {}",
+            String::from_utf8_lossy(&sandbox_probe.stderr)
+        );
+
         let profile_path = std::env::temp_dir().join(format!(
             "laminaria-g1-checkpoint-d-deny-network-{}.sb",
             std::process::id()

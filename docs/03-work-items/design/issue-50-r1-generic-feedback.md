@@ -85,3 +85,27 @@ requested evidence artifact, and rejects unknown or tampered action identities.
 This consumer accepts both eager and feedback-produced positive evidence; it
 does not rely on the mutable `laminaria-bootstrap` tag or on producer-side
 assertions alone.
+
+## Checkpoint failure report — 2026-10-08
+
+The R0-locked positive subject is the actual `fixture-bin` executable, with
+the four output lines recorded in `issue-50-r0-oracle-lock.md`. The existing
+feedback executor's positive evidence is an interpreted owned-IR result, not
+that executable. Its direct test
+`the_r0_generic_fixture_is_rejected_before_owned_program_publication` confirms
+that the current owned frontend rejects the real `sum_generic` declaration
+before publishing even a candidate program. The locked binary also uses
+`Vec`, iterators, structs, `Option`, and formatting outside the current owned
+IR. `laminaria-ir` has an owned WASM generator but no owned native object
+generator; G2's fixed native fixture currently calls external `rustc` and Nim
+and cannot serve as the owned Rust producer for this R1 subject.
+
+Thus the current action-selection and receipt checkpoints remain valid, but
+they do not enable R1's positive native-artifact checkpoint. Completing that
+checkpoint while preserving the locked R0 subject entails a substantially
+larger source-semantics, runtime, and native-generation path. Narrowing the
+subject would change R0's acceptance contract. Under the goal-driven work
+instruction policy, the instruction author must decide whether to preserve
+the locked subject and add a causal sequence of owned-compiler checkpoints, or
+revise the R1 subject and its oracle explicitly. Neither a delegated Cargo
+binary nor an interpreted evidence artifact is an equivalent completion.

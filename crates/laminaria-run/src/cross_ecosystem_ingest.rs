@@ -1282,13 +1282,17 @@ mod tests {
             .unwrap()
             .canonicalize()
             .expect("canonicalize the declared path dependency");
+        let observed_other_path = typed_requested
+            .dependencies
+            .iter()
+            .find(|dependency| dependency.name == "other")
+            .and_then(|dependency| dependency.path.as_deref())
+            .expect("typed metadata must retain the path dependency");
         assert_eq!(
-            typed_requested
-                .dependencies
-                .iter()
-                .find(|dependency| dependency.name == "other")
-                .and_then(|dependency| dependency.path.as_deref().map(|path| path.as_str())),
-            Some(expected_other_path.to_str().expect("UTF-8 temp path"))
+            Path::new(observed_other_path)
+                .canonicalize()
+                .expect("canonicalize Cargo's path spelling"),
+            expected_other_path
         );
         assert!(typed_requested.features.contains_key("fast"));
         assert!(typed_requested.targets.iter().any(|target| {
