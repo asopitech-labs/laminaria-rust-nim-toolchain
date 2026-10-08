@@ -17,7 +17,7 @@ use laminaria_plan::rust_cross_layer::{
 };
 use laminaria_plan::rust_cross_layer::{plan_rust_cross_layer, RustWorkStage};
 use laminaria_run::rust_generic_semantic_bridge::{
-    lower_selected_generic_folds, GenericProviderSource,
+    generate_selected_generic_fold_objects, lower_selected_generic_folds, GenericProviderSource,
 };
 
 fn repo_root() -> PathBuf {
@@ -237,6 +237,23 @@ fn artifact_feedback_joins_cargo_workspace_packages_to_fixture_generic_demand() 
         .find(|(instance, _)| instance.type_arguments == ["i32"])
         .unwrap();
     assert_eq!(test_only_ir.evaluate_i32(&[1, 2, 3, 4]).unwrap(), 10);
+
+    let eager_objects = generate_selected_generic_fold_objects(&plan, &eager_ir, false)
+        .expect("eager codegen must consume both lowered instances");
+    let feedback_objects = generate_selected_generic_fold_objects(&plan, &feedback_ir, true)
+        .expect("feedback codegen must consume only the requested instance");
+    assert_eq!(eager_objects.len(), 2);
+    assert_eq!(feedback_objects.len(), 1);
+    let (_, requested_object) = feedback_objects.first_key_value().unwrap();
+    assert!(requested_object.symbol_name.ends_with("_i64"));
+    assert_eq!(
+        &requested_object.bytes[..4],
+        &0xfeed_facfu32.to_le_bytes(),
+        "selected native object must be Mach-O"
+    );
+    assert!(feedback_objects
+        .keys()
+        .all(|instance| eager_objects.contains_key(instance)));
 
     let core_package = metadata
         .packages

@@ -11,8 +11,8 @@ is omitted. An artifact feedback plan now composes that specialization demand
 with the package selection from the same artifact request and rejects generic
 providers that are not candidates or are not selected. The selection now
 drives source-derived lowering of the selected generic instances into a narrow
-owned semantic IR. This does not yet produce the fixture's native executable
-or prove that later compiler stages were skipped.
+owned semantic IR and AArch64 Mach-O objects. This does not yet produce the
+fixture's native executable or prove that later compiler stages were skipped.
 
 ## Checkpoint contract
 
@@ -36,8 +36,8 @@ or prove that later compiler stages were skipped.
   executable and core-test request directions. Unsupported generic inference
   and unknown macros are structured discovery errors.
 - **Enables:** The selected specialization work set can drive owned semantic
-  lowering. Native code generation, final linking, and direct execution remain
-  necessary for R1 completion.
+  lowering and native object generation. Final linking and direct execution of
+  the fixed executable remain necessary for R1 completion.
 
 ## Current boundary and remaining R1 result
 
@@ -54,10 +54,11 @@ The planner creates demand-relative semantic-analysis, IR-lowering,
 monomorphization, codegen, and symbol/liveness identities for each selected
 generic instance. The selected IR-lowering identities now invoke an owned
 source-derived semantic recognizer for `&[T]::iter().fold` with scalar addition.
-The other identities remain planning identities, not evidence that those stages
-ran. This narrow recognizer is not a general Rust type checker, is not yet
-lowered to the main Program representation, and is not connected to native
-code generation, final linking, or process/action provenance.
+The selected Codegen identities now produce owned AArch64 Mach-O objects from
+those IR instances. The other identities remain planning identities, not
+evidence that those stages ran. This narrow recognizer is not a general Rust
+type checker, is not yet lowered to the main Program representation, and is not
+connected to final linking of `fixture-bin` or process/action provenance.
 
 The artifact feedback plan exposes a combined eager/feedback/pruned execution
 identity set containing both package-stage and generic-instance work. The
@@ -169,8 +170,8 @@ semantics are claimed yet.
 - **Result:** The fixed fixture's `sum_generic<i64>` provider function lowers
   from its actual Rust source into a narrow owned semantic IR, and that IR
   evaluates the selected scalar fold. The `fixture-bin` artifact feedback plan
-  executes this lowering for `i64`; an eager comparison additionally lowers
-  the test-only `i32` instance.
+  executes this lowering and AArch64 Mach-O object generation for `i64`; an
+  eager comparison additionally processes the test-only `i32` instance.
 - **Consumes:** The checked-in `fixture-core` provider source, the discovered
   concrete generic demand, the artifact feedback plan, and an explicit target
   overflow policy.
@@ -181,9 +182,13 @@ semantics are claimed yet.
 - **Evidence:** Focused integration tests obtain the plan from Cargo workspace
   metadata and fixture source, then execute the same source-derived lowering
   for eager and feedback selections. Eager produces two IR instances;
-  feedback produces only `i64`. The resulting `i64` IR evaluates `[12, 30]`
-  to `42`; the eager-only `i32` IR evaluates `[1, 2, 3, 4]` to `10`.
-  Altering the fold body to subtraction is rejected.
+  feedback produces only `i64` IR and its native object. The resulting `i64`
+  IR evaluates `[12, 30]` to `42`; the eager-only `i32` IR evaluates
+  `[1, 2, 3, 4]` to `10`. Both native objects link with an independent C caller
+  on macOS arm64 and return those values. Altering the fold body to subtraction
+  is rejected.
 - **Enables:** The selected generic IR can be integrated with reachable
-  fixture semantics and a native target producer. No `fixture-bin` executable,
-  final-link result, or complete R1 feedback loop follows from this checkpoint.
+  fixture semantics and the remaining native target producer. No `fixture-bin`
+  executable, final-link result, or complete R1 feedback loop follows from this
+  checkpoint. Checked overflow currently traps in the native subset because
+  the owned runtime has no Rust panic/unwind support.

@@ -9,6 +9,7 @@ use object::{
     SymbolKind, SymbolScope,
 };
 
+use crate::rust_generic_fold::{GenericFoldIr, OverflowPolicy, ScalarType};
 use crate::types::{Expr, FnFact, FnId, IntWidth, LocalId, Stmt};
 use crate::validate::ValidatedProgram;
 
@@ -298,6 +299,80 @@ pub fn generate_macho_aarch64_object(
     object.write().map_err(NativeCodegenError::Object)
 }
 
+/// Emits a concrete scalar slice-fold instance using the platform C ABI:
+/// `(const scalar *items, size_t len) -> scalar`. The source-to-IR step has
+/// already established the fold's Rust semantics; this stage only maps that
+/// operation to machine instructions. In checked mode arithmetic overflow
+/// traps, since the owned native runtime has no Rust panic/unwind machinery.
+pub fn generate_macho_aarch64_generic_fold_object(
+    ir: &GenericFoldIr,
+    symbol_name: &str,
+) -> Result<Vec<u8>, NativeCodegenError> {
+    let mut object = Object::new(
+        BinaryFormat::MachO,
+        Architecture::Aarch64,
+        Endianness::Little,
+    );
+    let text = object.section_id(StandardSection::Text);
+    let checked = ir.overflow == OverflowPolicy::Checked;
+    let mut words = vec![
+        match ir.scalar {
+            ScalarType::I32 => 0x2a1f_03e2, // mov w2, wzr
+            ScalarType::I64 => 0xaa1f_03e2, // mov x2, xzr
+        },
+        0xaa1f_03e3, // mov x3, xzr
+        0xeb01_007f, // cmp x3, x1
+        0,           // b.hs exit
+        match ir.scalar {
+            ScalarType::I32 => 0xb863_7804, // ldr w4, [x0, x3, lsl #2]
+            ScalarType::I64 => 0xf863_7804, // ldr x4, [x0, x3, lsl #3]
+        },
+        match (ir.scalar, checked) {
+            (ScalarType::I32, false) => 0x0b04_0042, // add w2, w2, w4
+            (ScalarType::I32, true) => 0x2b04_0042,  // adds w2, w2, w4
+            (ScalarType::I64, false) => 0x8b04_0042, // add x2, x2, x4
+            (ScalarType::I64, true) => 0xab04_0042,  // adds x2, x2, x4
+        },
+    ];
+    let overflow_branch = if checked {
+        let at = words.len();
+        words.push(0); // b.vs trap
+        Some(at)
+    } else {
+        None
+    };
+    words.push(0x9100_0463); // add x3, x3, #1
+    let loop_branch = words.len();
+    words.push(0); // b loop
+    let exit = words.len();
+    words.push(match ir.scalar {
+        ScalarType::I32 => 0x2a02_03e0, // mov w0, w2
+        ScalarType::I64 => 0xaa02_03e0, // mov x0, x2
+    });
+    words.push(0xd65f_03c0); // ret
+    if let Some(at) = overflow_branch {
+        let trap = words.len();
+        words[at] = 0x5400_0006 | (((trap - at) as u32) << 5); // b.vs trap
+        words.push(0xd420_0000); // brk #0
+    }
+    words[3] = 0x5400_0002 | (((exit - 3) as u32) << 5); // b.hs exit
+    words[loop_branch] = 0x1400_0000 | (((2_i32 - loop_branch as i32) as u32) & 0x03ff_ffff);
+
+    let bytes: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+    let offset = object.append_section_data(text, &bytes, 4);
+    object.add_symbol(Symbol {
+        name: symbol_name.as_bytes().to_vec(),
+        value: offset,
+        size: bytes.len() as u64,
+        kind: SymbolKind::Text,
+        scope: SymbolScope::Linkage,
+        weak: false,
+        section: SymbolSection::Section(text),
+        flags: SymbolFlags::None,
+    });
+    object.write().map_err(NativeCodegenError::Object)
+}
+
 #[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
 mod tests {
     use std::fs;
@@ -305,9 +380,81 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use crate::rust_frontend::lower_rust_source;
+    use crate::rust_generic_demand::{discover_generic_functions, discover_generic_instances};
+    use crate::rust_generic_fold::{lower_generic_fold, OverflowPolicy};
     use crate::validate::validate_program;
 
-    use super::generate_macho_aarch64_object;
+    use super::{generate_macho_aarch64_generic_fold_object, generate_macho_aarch64_object};
+
+    #[test]
+    fn source_derived_generic_folds_link_and_run_as_native_objects() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/rust-heavy-workspace");
+        let core_path = root.join("crates/fixture-core/src/lib.rs");
+        let core = fs::read_to_string(&core_path).unwrap();
+        let binary = fs::read_to_string(root.join("crates/fixture-bin/src/main.rs")).unwrap();
+        let known = discover_generic_functions("fixture-core", &core).unwrap();
+        let i64_instance = discover_generic_instances("fixture-bin", &binary, &known, false)
+            .unwrap()
+            .pop_first()
+            .unwrap();
+        let i32_instance = discover_generic_instances("fixture-core", &core, &known, true)
+            .unwrap()
+            .pop_first()
+            .unwrap();
+        let i64_ir =
+            lower_generic_fold(&core_path, &core, &i64_instance, OverflowPolicy::Checked).unwrap();
+        let i32_ir =
+            lower_generic_fold(&core_path, &core, &i32_instance, OverflowPolicy::Checked).unwrap();
+        let i64_object = generate_macho_aarch64_generic_fold_object(&i64_ir, "sum_generic_i64")
+            .expect("owned i64 fold object");
+        let i32_object = generate_macho_aarch64_generic_fold_object(&i32_ir, "sum_generic_i32")
+            .expect("owned i32 fold object");
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "laminaria-native-fold-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&dir).unwrap();
+        let i64_path = dir.join("fold_i64.o");
+        let i32_path = dir.join("fold_i32.o");
+        let driver_path = dir.join("driver.c");
+        let executable_path = dir.join("driver");
+        fs::write(&i64_path, i64_object).unwrap();
+        fs::write(&i32_path, i32_object).unwrap();
+        fs::write(
+            &driver_path,
+            "#include <stdint.h>\n#include <stddef.h>\n#include <stdio.h>\nextern int64_t sum_generic_i64(const int64_t*, size_t);\nextern int32_t sum_generic_i32(const int32_t*, size_t);\nint main(void) {\n  int64_t a[] = {12, 30};\n  int32_t b[] = {1, 2, 3, 4};\n  printf(\"%lld\\n\", (long long)sum_generic_i64(a, 2));\n  printf(\"%d\\n\", sum_generic_i32(b, 4));\n  return 0;\n}\n",
+        )
+        .unwrap();
+        let link = Command::new("/usr/bin/cc")
+            .args([
+                "-o",
+                executable_path.to_str().unwrap(),
+                driver_path.to_str().unwrap(),
+                i64_path.to_str().unwrap(),
+                i32_path.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            link.status.success(),
+            "link failed: {}",
+            String::from_utf8_lossy(&link.stderr)
+        );
+        let run = Command::new(&executable_path).output().unwrap();
+        assert!(
+            run.status.success(),
+            "native fold failed: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        assert_eq!(String::from_utf8(run.stdout).unwrap(), "42\n10\n");
+        fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn generated_object_links_and_agrees_with_the_existing_rust_oracle() {
