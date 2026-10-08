@@ -518,6 +518,7 @@ dependencies = [
 name = "laminaria-ir"
 version = "0.1.0"
 dependencies = [
+ "object 0.32.2",
  "proc-macro2",
  "quote",
  "serde_json",

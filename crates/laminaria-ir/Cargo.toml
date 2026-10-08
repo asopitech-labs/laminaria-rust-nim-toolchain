@@ -12,6 +12,7 @@ syn = { version = "2", features = ["full", "extra-traits", "visit"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 quote = "1"
 serde_json = "1"
+object = { version = "=0.32.2", default-features = false, features = ["write"] }
 
 [dev-dependencies]
 # Execution-only, per docs/03-work-items/design/issue-5-t0-target-generation-spec.md
