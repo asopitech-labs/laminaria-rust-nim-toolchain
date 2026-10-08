@@ -2,7 +2,7 @@
 //! collector and pure feedback planner. Cargo is used only after that check as
 //! the reference executable oracle; it is never a producer on this path.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use laminaria_ir::rust_dependency_discover::discover_external_crate_references;
@@ -10,11 +10,15 @@ use laminaria_ir::rust_generic_demand::{
     discover_generic_functions, discover_generic_instances,
     RustGenericInstance as DiscoveredGenericInstance,
 };
+use laminaria_ir::rust_generic_fold::{OverflowPolicy, ScalarType};
 use laminaria_plan::rust_cross_layer::{
     plan_rust_artifact_feedback, plan_rust_generic_work, RustArtifactFeedbackInput,
     RustCrossLayerInput, RustGenericInstance as PlannedGenericInstance,
 };
 use laminaria_plan::rust_cross_layer::{plan_rust_cross_layer, RustWorkStage};
+use laminaria_run::rust_generic_semantic_bridge::{
+    lower_selected_generic_folds, GenericProviderSource,
+};
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -208,6 +212,31 @@ fn artifact_feedback_joins_cargo_workspace_packages_to_fixture_generic_demand() 
     assert!(plan.generic_work_plan.feedback_work.iter().all(|work| {
         work.instance.function == "sum_generic" && work.instance.type_arguments == ["i64"]
     }));
+
+    let sources = BTreeMap::from([(
+        "fixture-core".to_string(),
+        GenericProviderSource {
+            path: workspace.join("crates/fixture-core/src/lib.rs"),
+            text: &core,
+        },
+    )]);
+    let eager_ir = lower_selected_generic_folds(&plan, &sources, OverflowPolicy::Checked, false)
+        .expect("both source-derived instances must lower for eager work");
+    let feedback_ir = lower_selected_generic_folds(&plan, &sources, OverflowPolicy::Checked, true)
+        .expect("the requested source-derived instance must lower for feedback work");
+    assert_eq!(eager_ir.len(), 2);
+    assert_eq!(feedback_ir.len(), 1);
+    assert!(feedback_ir
+        .keys()
+        .all(|instance| eager_ir.contains_key(instance)));
+    let (_, requested_ir) = feedback_ir.first_key_value().unwrap();
+    assert_eq!(requested_ir.scalar, ScalarType::I64);
+    assert_eq!(requested_ir.evaluate_i64(&[12, 30]).unwrap(), 42);
+    let (_, test_only_ir) = eager_ir
+        .iter()
+        .find(|(instance, _)| instance.type_arguments == ["i32"])
+        .unwrap();
+    assert_eq!(test_only_ir.evaluate_i32(&[1, 2, 3, 4]).unwrap(), 10);
 
     let core_package = metadata
         .packages
