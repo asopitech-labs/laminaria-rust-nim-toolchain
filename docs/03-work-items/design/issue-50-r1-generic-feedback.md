@@ -11,8 +11,12 @@ is omitted. An artifact feedback plan now composes that specialization demand
 with the package selection from the same artifact request and rejects generic
 providers that are not candidates or are not selected. The selection now
 drives source-derived lowering of the selected generic instances into a narrow
-owned semantic IR and target-specific native objects. This does not yet produce
-the fixture's native executable or prove that later compiler stages were skipped.
+owned semantic IR and target-specific native objects. On macOS arm64, an
+input-free entry specialization now consumes owned semantics for the actual
+three-crate fixture, produces an owned `main` object, links it with the selected
+owned `sum_generic<i64>` object, and directly runs a host-native executable.
+The full planner/executor feedback graph is not yet the producer of that
+executable.
 
 ## Checkpoint contract
 
@@ -35,9 +39,9 @@ the fixture's native executable or prove that later compiler stages were skipped
   monomorphize/codegen work identities. The integration test checks both the
   executable and core-test request directions. Unsupported generic inference
   and unknown macros are structured discovery errors.
-- **Enables:** The selected specialization work set can drive owned semantic
-  lowering and native object generation. Final linking and direct execution of
-  the fixed executable remain necessary for R1 completion.
+- **Enables:** The selected specialization work set drives owned semantic
+  lowering and native object generation. The Mac final link and direct run are
+  now verified; connecting them to the full feedback action graph remains.
 
 ## Current boundary and remaining R1 result
 
@@ -57,9 +61,9 @@ source-derived semantic recognizer for `&[T]::iter().fold` with scalar addition.
 The selected Codegen identities now produce owned AArch64 Mach-O or Linux
 x86_64 ELF objects from those IR instances. The other identities remain
 planning identities, not evidence that those stages ran. This narrow recognizer
-is not a general Rust type checker, is not yet lowered to the main Program
-representation, and is not connected to final linking of `fixture-bin` or
-process/action provenance.
+is not a general Rust type checker or lowered to the main Program
+representation. The Mac entry specialization and final link now consume its
+selected native object, while the final link lacks planner action provenance.
 
 The artifact feedback plan exposes a combined eager/feedback/pruned execution
 identity set containing both package-stage and generic-instance work. The
@@ -71,16 +75,15 @@ therefore proves a real six-action eager run, a three-action feedback run, and
 structured rejection when a producer is omitted.
 
 This still does not establish the full requested-artifact → unit →
-semantic/IR → symbol/liveness → unit feedback loop, a positive compiler
-artifact from the owned path, or raw resource/performance attribution. Cargo
-remains the R0 reference oracle. R2 remains responsible for matched raw
-resource evidence and causal attribution.
+semantic/IR → symbol/liveness → unit feedback loop or raw
+resource/performance attribution. The positive Mac executable now exists on
+the owned path; Cargo remains only the R0 reference oracle. R2 remains
+responsible for matched raw resource evidence and causal attribution.
 
-R1's current result is the first executable package feedback slice: typed
+R1's planner result is the first executable package feedback slice: typed
 artifact demand selects the action set, dependency closure is enforced, and
-dispatch evidence is observable. The remaining R1 work is to connect the same
-selection contract to the real artifact-producing path and its independent
-consumer evidence.
+dispatch evidence is observable. The remaining R1 work is to put the Mac
+entry specialization and final link under the same action/receipt contract.
 
 The executor now publishes a typed `CompilerWorkExecutionReceipt` from the
 actual `ArtifactStore` evidence, including selected actions, successful
@@ -240,3 +243,32 @@ verification gate.
 - **Enables:** The Mac verification loop is complete for this selected generic
   function. The wider fixture semantics and final owned `fixture-bin` link are
   still required before the full R1 executable claim can be made.
+
+## macOS arm64 owned executable verification — 2026-10-08
+
+- **Result:** The unchanged three-crate fixture now lowers its reachable
+  input-free entry operations through owned prime, point, cluster, entry, and
+  generic-fold semantics. The Mac backend directly emits `main.o` and the
+  selected `sum_generic<i64>.o`. The platform linker receives only those two
+  object files and produces a host-native `fixture-bin` executable. Its `main`
+  calls the selected generic object at runtime for `sum_x`.
+- **Consumes:** Actual core, middle, and binary Rust source snapshots; the
+  artifact feedback plan's selected `i64` generic instance; and the explicit
+  checked-overflow policy. The entry has no runtime inputs, so the pure
+  cluster, perimeter, and centroid operations are specialized at build time.
+  Unsupported source shapes reject before native object publication.
+- **Must preserve:** The locked R0 workload and four output lines, the five
+  original fixture unit tests, source provenance, the eager-versus-feedback
+  `i32` pruning relation, and the rule that Cargo/rustc never produce the owned
+  target. The platform C driver is used solely to link object files.
+- **Evidence:** On macOS arm64, the original fixture's 3 core and 2 middle
+  unit tests pass. The integration test runs the original fixture as an
+  independent Cargo oracle, builds and directly executes the owned native
+  executable, and compares its stdout byte-for-byte with the four locked R0
+  lines. Focused tests also exercise source changes and reject unsupported
+  operations before publication.
+- **Enables:** The selected native artifact is now directly observable on the
+  verification host. The remaining R1 result is wiring entry specialization,
+  final link, and executable publication into the compiler-work action graph
+  and validating the resulting receipt against the requested artifact. No R2
+  resource or performance claim follows from this correctness result.

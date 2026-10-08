@@ -64,6 +64,7 @@ pub mod nim_wrapper;
 pub mod project_build;
 pub mod resource_scheduler;
 pub mod reuse;
+pub mod rust_entry_semantic_bridge;
 pub mod rust_generic_semantic_bridge;
 pub mod scenario;
 pub mod self_build;

@@ -16,6 +16,10 @@ use laminaria_plan::rust_cross_layer::{
     RustCrossLayerInput, RustGenericInstance as PlannedGenericInstance,
 };
 use laminaria_plan::rust_cross_layer::{plan_rust_cross_layer, RustWorkStage};
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+use laminaria_run::rust_entry_semantic_bridge::{
+    link_macos_aarch64_entry, specialize_rust_entry, RustSourceSnapshot,
+};
 use laminaria_run::rust_generic_semantic_bridge::{
     generate_selected_generic_fold_objects, lower_selected_generic_folds, GenericProviderSource,
     NativeGenericTarget,
@@ -33,8 +37,9 @@ pub use core_reference::{primes_up_to, sum_generic, Point};
 mod fixture_mid;
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-fn verify_owned_fold_on_locked_macos_fixture(
+fn verify_owned_executable_on_locked_macos_fixture(
     object: &laminaria_run::rust_generic_semantic_bridge::NativeGenericObject,
+    generic_ir: &laminaria_ir::rust_generic_fold::GenericFoldIr,
 ) {
     use std::fs;
     use std::process::Command;
@@ -51,7 +56,7 @@ fn verify_owned_fold_on_locked_macos_fixture(
         String::from_utf8_lossy(&oracle.stderr)
     );
     assert_eq!(
-        String::from_utf8(oracle.stdout).unwrap(),
+        String::from_utf8(oracle.stdout.clone()).unwrap(),
         "points=45\nperimeter=391\ncentroid=Some(Point { x: 89, y: 93 })\nsum_x=4028\n"
     );
 
@@ -74,37 +79,51 @@ fn verify_owned_fold_on_locked_macos_fixture(
         std::process::id()
     ));
     fs::create_dir(&dir).unwrap();
-    let object_path = dir.join("owned.o");
-    let driver_path = dir.join("reference_driver.c");
-    let executable_path = dir.join("reference_driver");
-    fs::write(&object_path, &object.bytes).unwrap();
-    let values = xs.iter().map(i64::to_string).collect::<Vec<_>>().join(", ");
-    let driver = format!(
-        "#include <stdint.h>\n#include <stddef.h>\n#include <stdio.h>\nextern int64_t {}(const int64_t*, size_t);\nint main(void) {{\n  int64_t xs[] = {{{values}}};\n  printf(\"%lld\\n\", (long long){}(xs, sizeof(xs) / sizeof(xs[0])));\n  return 0;\n}}\n",
-        object.symbol_name, object.symbol_name
-    );
-    fs::write(&driver_path, driver).unwrap();
-    let link = Command::new("/usr/bin/cc")
-        .args([
-            "-o",
-            executable_path.to_str().unwrap(),
-            driver_path.to_str().unwrap(),
-            object_path.to_str().unwrap(),
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        link.status.success(),
-        "link failed: {}",
-        String::from_utf8_lossy(&link.stderr)
-    );
-    let run = Command::new(&executable_path).output().unwrap();
+    let workspace = repo_root().join("fixtures/rust-heavy-workspace");
+    let core_path = workspace.join("crates/fixture-core/src/lib.rs");
+    let mid_path = workspace.join("crates/fixture-mid/src/lib.rs");
+    let bin_path = workspace.join("crates/fixture-bin/src/main.rs");
+    let core_source = fs::read_to_string(&core_path).unwrap();
+    let mid_source = fs::read_to_string(&mid_path).unwrap();
+    let bin_source = fs::read_to_string(&bin_path).unwrap();
+    let specialized = specialize_rust_entry(
+        RustSourceSnapshot {
+            path: &core_path,
+            text: &core_source,
+        },
+        RustSourceSnapshot {
+            path: &mid_path,
+            text: &mid_source,
+        },
+        RustSourceSnapshot {
+            path: &bin_path,
+            text: &bin_source,
+        },
+        generic_ir,
+    )
+    .expect("actual three-crate source must lower and specialize without rustc");
+    assert_eq!(specialized.points_len, cluster.points.len());
+    assert_eq!(specialized.perimeter, cluster.total_perimeter());
+    assert_eq!(specialized.centroid_debug, "Some(Point { x: 89, y: 93 })");
+    assert_eq!(specialized.xs, xs);
+    assert_eq!(specialized.expected_sum_x, fixture_core::sum_generic(&xs));
+
+    let executable_path = dir.join("fixture-bin");
+    let artifact = link_macos_aarch64_entry(&specialized, object, &executable_path)
+        .expect("owned entry and generic objects must link as host-native executable");
+    assert_eq!(artifact.executable, executable_path);
+    assert!(artifact.entry_object.is_file());
+    assert!(artifact.generic_object.is_file());
+    let run = Command::new(&artifact.executable).output().unwrap();
     assert!(
         run.status.success(),
-        "native fold failed: {}",
+        "owned executable failed: {}",
         String::from_utf8_lossy(&run.stderr)
     );
-    assert_eq!(String::from_utf8(run.stdout).unwrap(), "4028\n");
+    assert_eq!(
+        run.stdout, oracle.stdout,
+        "owned executable differs from R0 oracle"
+    );
     fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -353,7 +372,7 @@ fn artifact_feedback_joins_cargo_workspace_packages_to_fixture_generic_demand() 
         .keys()
         .all(|instance| eager_objects.contains_key(instance)));
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    verify_owned_fold_on_locked_macos_fixture(requested_object);
+    verify_owned_executable_on_locked_macos_fixture(requested_object, requested_ir);
 
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     {
