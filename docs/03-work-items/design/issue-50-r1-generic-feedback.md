@@ -11,8 +11,8 @@ is omitted. An artifact feedback plan now composes that specialization demand
 with the package selection from the same artifact request and rejects generic
 providers that are not candidates or are not selected. The selection now
 drives source-derived lowering of the selected generic instances into a narrow
-owned semantic IR and AArch64 Mach-O objects. This does not yet produce the
-fixture's native executable or prove that later compiler stages were skipped.
+owned semantic IR and target-specific native objects. This does not yet produce
+the fixture's native executable or prove that later compiler stages were skipped.
 
 ## Checkpoint contract
 
@@ -54,11 +54,12 @@ The planner creates demand-relative semantic-analysis, IR-lowering,
 monomorphization, codegen, and symbol/liveness identities for each selected
 generic instance. The selected IR-lowering identities now invoke an owned
 source-derived semantic recognizer for `&[T]::iter().fold` with scalar addition.
-The selected Codegen identities now produce owned AArch64 Mach-O objects from
-those IR instances. The other identities remain planning identities, not
-evidence that those stages ran. This narrow recognizer is not a general Rust
-type checker, is not yet lowered to the main Program representation, and is not
-connected to final linking of `fixture-bin` or process/action provenance.
+The selected Codegen identities now produce owned AArch64 Mach-O or Linux
+x86_64 ELF objects from those IR instances. The other identities remain
+planning identities, not evidence that those stages ran. This narrow recognizer
+is not a general Rust type checker, is not yet lowered to the main Program
+representation, and is not connected to final linking of `fixture-bin` or
+process/action provenance.
 
 The artifact feedback plan exposes a combined eager/feedback/pruned execution
 identity set containing both package-stage and generic-instance work. The
@@ -192,3 +193,22 @@ semantics are claimed yet.
   executable, final-link result, or complete R1 feedback loop follows from this
   checkpoint. Checked overflow currently traps in the native subset because
   the owned runtime has no Rust panic/unwind support.
+
+## Linux x86_64 generic object checkpoint — 2026-10-08
+
+- **Result:** The same source-derived `sum_generic<i64>` IR now produces an
+  owned Linux x86_64 ELF relocatable object. The `fixture-bin` feedback plan
+  selects only that concrete instance for the fixed Linux target.
+- **Consumes:** The existing generic fold IR, its explicit checked overflow
+  policy, and the target-independent generic Codegen work identity.
+- **Must preserve:** The selected-source semantics, stable symbol identity
+  across targets, fail-closed IR/codegen correspondence, and the distinction
+  between an object file and the complete `fixture-bin` executable.
+- **Evidence:** On macOS, the ELF parser recognizes the output as x86_64 and
+  finds its defined function symbol; the function's instruction bytes agree
+  with an independently assembled x86_64 loop. A Linux x86_64 gated test
+  links the owned object with a C caller and checks a two-element and an empty
+  slice; this host cannot execute that test locally.
+- **Enables:** Later owned code generation for the fixture's other reachable
+  functions can share the fixed target. Final linking and direct execution of
+  the complete `fixture-bin` remain necessary before R1 completion.

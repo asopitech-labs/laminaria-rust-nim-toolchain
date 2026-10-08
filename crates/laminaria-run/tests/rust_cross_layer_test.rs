@@ -18,6 +18,7 @@ use laminaria_plan::rust_cross_layer::{
 use laminaria_plan::rust_cross_layer::{plan_rust_cross_layer, RustWorkStage};
 use laminaria_run::rust_generic_semantic_bridge::{
     generate_selected_generic_fold_objects, lower_selected_generic_folds, GenericProviderSource,
+    NativeGenericTarget,
 };
 
 fn repo_root() -> PathBuf {
@@ -238,10 +239,20 @@ fn artifact_feedback_joins_cargo_workspace_packages_to_fixture_generic_demand() 
         .unwrap();
     assert_eq!(test_only_ir.evaluate_i32(&[1, 2, 3, 4]).unwrap(), 10);
 
-    let eager_objects = generate_selected_generic_fold_objects(&plan, &eager_ir, false)
-        .expect("eager codegen must consume both lowered instances");
-    let feedback_objects = generate_selected_generic_fold_objects(&plan, &feedback_ir, true)
-        .expect("feedback codegen must consume only the requested instance");
+    let eager_objects = generate_selected_generic_fold_objects(
+        &plan,
+        &eager_ir,
+        false,
+        NativeGenericTarget::MacOsAarch64,
+    )
+    .expect("eager codegen must consume both lowered instances");
+    let feedback_objects = generate_selected_generic_fold_objects(
+        &plan,
+        &feedback_ir,
+        true,
+        NativeGenericTarget::MacOsAarch64,
+    )
+    .expect("feedback codegen must consume only the requested instance");
     assert_eq!(eager_objects.len(), 2);
     assert_eq!(feedback_objects.len(), 1);
     let (_, requested_object) = feedback_objects.first_key_value().unwrap();
@@ -254,6 +265,19 @@ fn artifact_feedback_joins_cargo_workspace_packages_to_fixture_generic_demand() 
     assert!(feedback_objects
         .keys()
         .all(|instance| eager_objects.contains_key(instance)));
+
+    let linux_objects = generate_selected_generic_fold_objects(
+        &plan,
+        &feedback_ir,
+        true,
+        NativeGenericTarget::LinuxX86_64,
+    )
+    .expect("the locked Linux target must consume the requested instance");
+    assert_eq!(linux_objects.len(), 1);
+    let (_, linux_object) = linux_objects.first_key_value().unwrap();
+    assert_eq!(linux_object.target, NativeGenericTarget::LinuxX86_64);
+    assert_eq!(&linux_object.bytes[..4], b"\x7fELF");
+    assert_eq!(linux_object.symbol_name, requested_object.symbol_name);
 
     let core_package = metadata
         .packages

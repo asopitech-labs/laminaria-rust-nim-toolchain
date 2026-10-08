@@ -53,6 +53,7 @@ pub mod ffi_reachability;
 pub mod foreign_discover;
 pub mod interpreter;
 pub mod native_aarch64;
+pub mod native_x86_64;
 pub mod nim_export_discover;
 pub mod nim_frontend;
 pub mod nimble_lock_discover;

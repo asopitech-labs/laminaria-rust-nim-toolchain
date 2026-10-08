@@ -5,9 +5,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-use laminaria_ir::native_aarch64::{
-    generate_macho_aarch64_generic_fold_object, NativeCodegenError,
-};
+use laminaria_ir::native_aarch64::generate_macho_aarch64_generic_fold_object;
+use laminaria_ir::native_x86_64::generate_elf_x86_64_generic_fold_object;
 use laminaria_ir::rust_generic_demand::RustGenericInstance as SourceInstance;
 use laminaria_ir::rust_generic_fold::{
     lower_generic_fold, GenericFoldError, GenericFoldIr, OverflowPolicy, ScalarType,
@@ -21,7 +20,14 @@ pub struct GenericProviderSource<'a> {
     pub text: &'a str,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeGenericTarget {
+    MacOsAarch64,
+    LinuxX86_64,
+}
+
 pub struct NativeGenericObject {
+    pub target: NativeGenericTarget,
     pub symbol_name: String,
     pub bytes: Vec<u8>,
 }
@@ -37,7 +43,7 @@ pub enum GenericSemanticExecutionError {
     InconsistentLoweredInstance(RustGenericInstance),
     CodegenFailed {
         instance: RustGenericInstance,
-        detail: NativeCodegenError,
+        detail: String,
     },
 }
 
@@ -110,12 +116,13 @@ pub fn lower_selected_generic_folds(
     Ok(lowered)
 }
 
-/// Generates one owned Mach-O object per selected generic Codegen identity.
+/// Generates one owned target object per selected generic Codegen identity.
 /// The caller must supply IR lowered from the same source snapshot and plan.
 pub fn generate_selected_generic_fold_objects(
     plan: &RustArtifactFeedbackPlan,
     lowered: &BTreeMap<RustGenericInstance, GenericFoldIr>,
     feedback: bool,
+    target: NativeGenericTarget,
 ) -> Result<BTreeMap<RustGenericInstance, NativeGenericObject>, GenericSemanticExecutionError> {
     let work = if feedback {
         &plan.generic_work_plan.feedback_work
@@ -153,14 +160,28 @@ pub fn generate_selected_generic_fold_objects(
             hex_bytes(instance.function.as_bytes()),
             instance.type_arguments[0]
         );
-        let bytes =
-            generate_macho_aarch64_generic_fold_object(ir, &symbol_name).map_err(|detail| {
-                GenericSemanticExecutionError::CodegenFailed {
-                    instance: instance.clone(),
-                    detail,
-                }
-            })?;
-        objects.insert(instance, NativeGenericObject { symbol_name, bytes });
+        let bytes = match target {
+            NativeGenericTarget::MacOsAarch64 => {
+                generate_macho_aarch64_generic_fold_object(ir, &symbol_name)
+                    .map_err(|error| error.to_string())
+            }
+            NativeGenericTarget::LinuxX86_64 => {
+                generate_elf_x86_64_generic_fold_object(ir, &symbol_name)
+                    .map_err(|error| error.to_string())
+            }
+        }
+        .map_err(|detail| GenericSemanticExecutionError::CodegenFailed {
+            instance: instance.clone(),
+            detail,
+        })?;
+        objects.insert(
+            instance,
+            NativeGenericObject {
+                target,
+                symbol_name,
+                bytes,
+            },
+        );
     }
     Ok(objects)
 }
