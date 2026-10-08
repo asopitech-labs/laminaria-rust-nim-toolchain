@@ -21,6 +21,93 @@ use laminaria_run::rust_generic_semantic_bridge::{
     NativeGenericTarget,
 };
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+extern crate self as fixture_core;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[path = "../../../fixtures/rust-heavy-workspace/crates/fixture-core/src/lib.rs"]
+mod core_reference;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub use core_reference::{primes_up_to, sum_generic, Point};
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[path = "../../../fixtures/rust-heavy-workspace/crates/fixture-mid/src/lib.rs"]
+mod fixture_mid;
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn verify_owned_fold_on_locked_macos_fixture(
+    object: &laminaria_run::rust_generic_semantic_bridge::NativeGenericObject,
+) {
+    use std::fs;
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let oracle = Command::new("cargo")
+        .current_dir(repo_root().join("fixtures/rust-heavy-workspace"))
+        .args(["run", "-q", "-p", "fixture-bin", "--offline"])
+        .output()
+        .unwrap();
+    assert!(
+        oracle.status.success(),
+        "reference fixture failed: {}",
+        String::from_utf8_lossy(&oracle.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(oracle.stdout).unwrap(),
+        "points=45\nperimeter=391\ncentroid=Some(Point { x: 89, y: 93 })\nsum_x=4028\n"
+    );
+
+    let cluster = fixture_mid::Cluster::from_prime_grid(200);
+    let xs: Vec<i64> = cluster.points.iter().map(|point| point.x).collect();
+    assert_eq!(cluster.points.len(), 45);
+    assert_eq!(cluster.total_perimeter(), 391);
+    assert_eq!(
+        cluster.centroid(),
+        Some(fixture_core::Point { x: 89, y: 93 })
+    );
+    assert_eq!(fixture_core::sum_generic(&xs), 4028);
+
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "laminaria-locked-macos-fold-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir(&dir).unwrap();
+    let object_path = dir.join("owned.o");
+    let driver_path = dir.join("reference_driver.c");
+    let executable_path = dir.join("reference_driver");
+    fs::write(&object_path, &object.bytes).unwrap();
+    let values = xs.iter().map(i64::to_string).collect::<Vec<_>>().join(", ");
+    let driver = format!(
+        "#include <stdint.h>\n#include <stddef.h>\n#include <stdio.h>\nextern int64_t {}(const int64_t*, size_t);\nint main(void) {{\n  int64_t xs[] = {{{values}}};\n  printf(\"%lld\\n\", (long long){}(xs, sizeof(xs) / sizeof(xs[0])));\n  return 0;\n}}\n",
+        object.symbol_name, object.symbol_name
+    );
+    fs::write(&driver_path, driver).unwrap();
+    let link = Command::new("/usr/bin/cc")
+        .args([
+            "-o",
+            executable_path.to_str().unwrap(),
+            driver_path.to_str().unwrap(),
+            object_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        link.status.success(),
+        "link failed: {}",
+        String::from_utf8_lossy(&link.stderr)
+    );
+    let run = Command::new(&executable_path).output().unwrap();
+    assert!(
+        run.status.success(),
+        "native fold failed: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(String::from_utf8(run.stdout).unwrap(), "4028\n");
+    fs::remove_dir_all(&dir).unwrap();
+}
+
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -265,19 +352,24 @@ fn artifact_feedback_joins_cargo_workspace_packages_to_fixture_generic_demand() 
     assert!(feedback_objects
         .keys()
         .all(|instance| eager_objects.contains_key(instance)));
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    verify_owned_fold_on_locked_macos_fixture(requested_object);
 
-    let linux_objects = generate_selected_generic_fold_objects(
-        &plan,
-        &feedback_ir,
-        true,
-        NativeGenericTarget::LinuxX86_64,
-    )
-    .expect("the locked Linux target must consume the requested instance");
-    assert_eq!(linux_objects.len(), 1);
-    let (_, linux_object) = linux_objects.first_key_value().unwrap();
-    assert_eq!(linux_object.target, NativeGenericTarget::LinuxX86_64);
-    assert_eq!(&linux_object.bytes[..4], b"\x7fELF");
-    assert_eq!(linux_object.symbol_name, requested_object.symbol_name);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        let linux_objects = generate_selected_generic_fold_objects(
+            &plan,
+            &feedback_ir,
+            true,
+            NativeGenericTarget::LinuxX86_64,
+        )
+        .expect("the requested instance must be available for the Linux target");
+        assert_eq!(linux_objects.len(), 1);
+        let (_, linux_object) = linux_objects.first_key_value().unwrap();
+        assert_eq!(linux_object.target, NativeGenericTarget::LinuxX86_64);
+        assert_eq!(&linux_object.bytes[..4], b"\x7fELF");
+        assert_eq!(linux_object.symbol_name, requested_object.symbol_name);
+    }
 
     let core_package = metadata
         .packages

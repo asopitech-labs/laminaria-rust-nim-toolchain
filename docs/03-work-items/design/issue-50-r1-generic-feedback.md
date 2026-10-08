@@ -155,7 +155,7 @@ resource claim follows from it yet.
   workspace verification exercise the new producer.
 - **Enables:** A native target action can consume validated owned IR. R1 still
   needs the fixed fixture's wider Rust semantics, runtime operations, and
-  target generation in its R0 environment before `fixture-bin` can be claimed.
+  target generation on the verification host before `fixture-bin` can be claimed.
 
 The owned compiler-work graph now includes that native target action. The real
 Nim planner orders source lowering, IR validation, and AArch64 object generation
@@ -194,11 +194,11 @@ semantics are claimed yet.
   checkpoint. Checked overflow currently traps in the native subset because
   the owned runtime has no Rust panic/unwind support.
 
-## Linux x86_64 generic object checkpoint — 2026-10-08
+## Linux x86_64 portability checkpoint — 2026-10-08
 
 - **Result:** The same source-derived `sum_generic<i64>` IR now produces an
   owned Linux x86_64 ELF relocatable object. The `fixture-bin` feedback plan
-  selects only that concrete instance for the fixed Linux target.
+  selects only that concrete instance when this optional target is requested.
 - **Consumes:** The existing generic fold IR, its explicit checked overflow
   policy, and the target-independent generic Codegen work identity.
 - **Must preserve:** The selected-source semantics, stable symbol identity
@@ -206,9 +206,37 @@ semantics are claimed yet.
   between an object file and the complete `fixture-bin` executable.
 - **Evidence:** On macOS, the ELF parser recognizes the output as x86_64 and
   finds its defined function symbol; the function's instruction bytes agree
-  with an independently assembled x86_64 loop. A Linux x86_64 gated test
+  with an independently assembled x86_64 loop. A Linux x86_64 target-only test
   links the owned object with a C caller and checks a two-element and an empty
   slice; this host cannot execute that test locally.
 - **Enables:** Later owned code generation for the fixture's other reachable
-  functions can share the fixed target. Final linking and direct execution of
-  the complete `fixture-bin` remain necessary before R1 completion.
+  functions can share this optional target. Linux execution is not a gate for
+  the current macOS verification result.
+
+## macOS arm64 verification checkpoint — 2026-10-08
+
+R0 records the environment of its original Linux reference run; its acceptance
+contract requests a **host-native** executable. The current verification host
+is macOS arm64. GitHub Actions is intentionally `workflow_dispatch` only during
+this research phase, so an automatic Linux CI run cannot serve as the local
+verification gate.
+
+- **Result:** The fixed fixture's actual `Cluster::from_prime_grid(200)`
+  supplies the `xs` slice to the source-derived, feedback-selected owned
+  `sum_generic<i64>` Mach-O object. A directly linked macOS process computes
+  `4028`, matching the fixture's `sum_x` oracle.
+- **Consumes:** The unchanged three-crate fixture source, its Cargo reference
+  executable as a test oracle, the artifact feedback plan, and the selected
+  owned generic object. The independent C caller passes reference data to the
+  owned function; it does not implement the Rust target function.
+- **Must preserve:** The four frozen R0 output lines, the test-only `i32`
+  pruning relation, and the distinction between an owned generic function
+  object and a complete owned `fixture-bin` executable.
+- **Evidence:** The Mac integration test runs the original `fixture-bin` via
+  Cargo and checks all four lines, includes the original core/mid source as
+  reference-only test modules, links the owned generic object with a C caller,
+  and checks its native `4028` result on the real `xs`. The original fixture's
+  five unit tests also pass when run in its own Cargo workspace.
+- **Enables:** The Mac verification loop is complete for this selected generic
+  function. The wider fixture semantics and final owned `fixture-bin` link are
+  still required before the full R1 executable claim can be made.
